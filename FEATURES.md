@@ -51,9 +51,9 @@
 
 | # | 功能 | 文件 | 描述 | 状态 |
 |---|------|------|------|------|
-| 2.1.1 | DataSourceConfig 定义 | `src/datasource/config.py` | dataclass: name/dialect/mode/host/port/database/username/password/engine/schema/description/tags/extra_params | 待开发 |
-| 2.1.2 | DataSourceRegistry | `src/datasource/registry.py` | register_provider() / resolve() / list_all() / _create_engine() | 待开发 |
-| 2.1.3 | DataSourceProvider 抽象基类 | `src/datasource/providers/base.py` | lookup() / extract_schema() / _test_connection() 抽象方法 | 待开发 |
+| 2.1.1 | DataSourceConfig 定义 | `src/datasource/config.py` | dataclass: name/dialect/mode/host/port/database/username/password/engine/schema/description/tags/extra_params | 单测完成 | P0 |
+| 2.1.2 | DataSourceRegistry | `src/datasource/registry.py` | register_provider() / resolve() / list_all() / _create_engine() | 单测完成 | P0 |
+| 2.1.3 | DataSourceProvider 抽象基类 | `src/datasource/providers/base.py` | lookup() / extract_schema() / test_connection() 抽象方法 | 单测完成 | P0 |
 | 2.1.4 | DataSourceConfigStore | `src/datasource/config_store.py` | save() / delete() / list_all() — 外挂模式配置持久化到 PostgreSQL | 待开发 |
 | 2.1.5 | DataSourceCreateRequest | `src/api/schemas.py` | Pydantic model: 外挂模式注册数据源的请求体 | 待开发 |
 
@@ -61,8 +61,8 @@
 
 | # | 功能 | 文件 | 描述 | 状态 |
 |---|------|------|------|------|
-| 2.2.1 | EmbeddedDataSourceProvider 类 | `src/datasource/providers/embedded.py` | 实现 DataSourceProvider 接口 | 待开发 |
-| 2.2.2 | auto_discover() | 同上 | 自动发现项目中的数据库连接 | 待开发 |
+| 2.2.1 | EmbeddedDataSourceProvider 类 | `src/datasource/providers/embedded.py` | 实现 DataSourceProvider 接口 | 单测完成 | P0 |
+| 2.2.2 | _load_from_env() | 同上 | 从环境变量解析数据源配置 (单/多数据源) | 单测完成 | P0 |
 | 2.2.3 | _is_django_project() | 同上 | 检测当前环境是否为 Django 项目 | 待开发 |
 | 2.2.4 | _from_django_config() | 同上 | 从 Django settings.DATABASES 解析数据源配置 | 待开发 |
 | 2.2.5 | _has_sqlalchemy_engine() | 同上 | 检测是否存在 SQLAlchemy engine 实例 | 待开发 |
@@ -90,35 +90,35 @@
 
 | # | 功能 | 文件 | 描述 | 状态 |
 |---|------|------|------|------|
-| 2.4.1 | CredentialManager | `src/datasource/credential_manager.py` | encrypt() / decrypt() — AES-256 加密，密钥来自环境变量或 KMS | 待开发 |
-| 2.4.2 | 环境变量凭证引用 | 同上 | 解析 `${VAR_NAME}` 占位符，从 os.environ 获取真实值 | 待开发 |
+| 2.4.1 | CredentialManager | `src/datasource/credential_manager.py` | encrypt() / decrypt() — AES-256 加密 | 单测完成 | P0 |
+| 2.4.2 | 环境变量凭证引用 | 同上 | resolve_env_ref() — 解析 ${VAR_NAME} 占位符 | 单测完成 | P0 |
 | 2.4.3 | KMS 集成 (远期) | 同上 | 对接 Vault / AWS KMS / Azure Key Vault | 待开发 |
 
 ### 2.5 DB 内省
 
 | # | 功能 | 文件 | 描述 | 状态 |
 |---|------|------|------|------|
-| 2.5.1 | _query_columns() — ClickHouse | `src/datasource/introspection.py` | `SELECT name, type, comment FROM system.columns` | 待开发 |
-| 2.5.2 | _query_columns() — MySQL | 同上 | `SELECT COLUMN_NAME, COLUMN_TYPE, COLUMN_COMMENT FROM INFORMATION_SCHEMA.COLUMNS` | 待开发 |
-| 2.5.3 | _query_columns() — PostgreSQL | 同上 | `SELECT column_name, data_type, col_description(...) FROM INFORMATION_SCHEMA.COLUMNS` | 待开发 |
-| 2.5.4 | _query_foreign_keys() — MySQL | 同上 | INFORMATION_SCHEMA.TABLE_CONSTRAINTS + KEY_COLUMN_USAGE 查询外键 | 待开发 |
-| 2.5.5 | _query_foreign_keys() — PostgreSQL | 同上 | pg_catalog.pg_constraint 查询外键 | 待开发 |
-| 2.5.6 | _query_foreign_keys() — ClickHouse | 同上 | ClickHouse 不支持外键，返回空列表 | 待开发 |
-| 2.5.7 | _estimate_row_count() — ClickHouse | 同上 | `SELECT COUNT(*)` 或 `system.parts` 估算 | 待开发 |
-| 2.5.8 | _estimate_row_count() — MySQL | 同上 | `SELECT TABLE_ROWS FROM INFORMATION_SCHEMA.TABLES` | 待开发 |
-| 2.5.9 | _estimate_row_count() — PostgreSQL | 同上 | `SELECT reltuples FROM pg_class` | 待开发 |
+| 2.5.1 | introspect_columns() — ClickHouse | `src/datasource/introspection.py` | `system.columns` 查询 | 单测完成 | P0 |
+| 2.5.2 | introspect_columns() — MySQL | 同上 | `INFORMATION_SCHEMA.COLUMNS` 查询 | 单测完成 | P0 |
+| 2.5.3 | introspect_columns() — PostgreSQL | 同上 | `INFORMATION_SCHEMA.COLUMNS` + `pg_description` 查询 | 单测完成 | P0 |
+| 2.5.4 | introspect_foreign_keys() — MySQL | 同上 | `KEY_COLUMN_USAGE` 查询外键 | 单测完成 | P0 |
+| 2.5.5 | introspect_foreign_keys() — PostgreSQL | 同上 | `pg_constraint` 查询外键 | 单测完成 | P0 |
+| 2.5.6 | introspect_foreign_keys() — ClickHouse | 同上 | ClickHouse 无外键，返回空列表 | 单测完成 | P0 |
+| 2.5.7 | estimate_row_count() — ClickHouse | 同上 | `SELECT COUNT(*)` | 单测完成 | P0 |
+| 2.5.8 | estimate_row_count() — MySQL | 同上 | `INFORMATION_SCHEMA.TABLES` 行数估算 | 单测完成 | P0 |
+| 2.5.9 | estimate_row_count() — PostgreSQL | 同上 | `pg_class.reltuples` 估算 | 单测完成 | P0 |
 | 2.5.10 | _query_metadata() 权限告警 | 同上 | INFORMATION_SCHEMA 权限不足时写入 SYSTEM_WARNING 类型的 KnowledgeEntry | 待开发 | P1 |
 
 ### 2.6 Schema 数据结构
 
 | # | 功能 | 文件 | 描述 | 状态 |
 |---|------|------|------|------|
-| 2.6.1 | SchemaSnapshot 定义 | `src/datasource/schema_snapshot.py` | dataclass: tables / field_semantics / business_rules / sql_templates | 待开发 |
-| 2.6.2 | SchemaSnapshot.to_prompt_text() | 同上 | 格式化为 LLM Prompt 可用的 Markdown 表格文本 | 待开发 |
-| 2.6.3 | SchemaSnapshot.merge() | 同上 | 合并多个 SchemaSnapshot（ORM + 内省结果） | 待开发 |
-| 2.6.4 | TableSchema 定义 | 同上 | dataclass: name / description / columns / relations / row_count_estimate / partition_key / tags | 待开发 |
-| 2.6.5 | ColumnInfo 定义 | 同上 | dataclass: name / type / comment / is_nullable / is_primary_key / enum_values | 待开发 |
-| 2.6.6 | TableRelation 定义 | 同上 | dataclass: target_table / join_key / relation_type | 待开发 |
+| 2.6.1 | SchemaSnapshot 定义 | `src/datasource/schema_snapshot.py` | dataclass: tables / field_semantics / business_rules / sql_templates | 单测完成 | P0 |
+| 2.6.2 | SchemaSnapshot.to_prompt_text() | 同上 | 格式化为 LLM Prompt 可用的 Markdown 表格文本 | 单测完成 | P0 |
+| 2.6.3 | SchemaSnapshot.merge() | 同上 | 合并多个 SchemaSnapshot（ORM + 内省结果） | 单测完成 | P0 |
+| 2.6.4 | TableSchema 定义 | 同上 | dataclass: name / description / columns / relations / row_count_estimate / partition_key / tags | 单测完成 | P0 |
+| 2.6.5 | ColumnInfo 定义 | 同上 | dataclass: name / type / comment / is_nullable / is_primary_key / enum_values | 单测完成 | P0 |
+| 2.6.6 | TableRelation 定义 | 同上 | dataclass: target_table / join_key / relation_type | 单测完成 | P0 |
 
 ---
 
