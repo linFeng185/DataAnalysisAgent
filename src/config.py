@@ -2,16 +2,28 @@
 
 from __future__ import annotations
 
+import shutil
+from pathlib import Path
 from typing import Literal
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# 项目根目录 (src/config.py → src/ → 项目根)
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+_ENV_FILE = _PROJECT_ROOT / ".env"
+_ENV_EXAMPLE = _PROJECT_ROOT / ".env.example"
+
+# 如果 .env 不存在，从 .env.example 复制
+if not _ENV_FILE.exists() and _ENV_EXAMPLE.exists():
+    shutil.copy(_ENV_EXAMPLE, _ENV_FILE)
+    print(f"[init] 自动创建 .env 从 {_ENV_EXAMPLE}，请编辑 .env 填入真实配置")
 
 
 class Settings(BaseSettings):
     """全局配置，所有字段可从环境变量或 .env 文件覆盖。"""
 
     model_config = SettingsConfigDict(
-        env_file=".env",
+        env_file=str(_ENV_FILE),
         env_file_encoding="utf-8",
         extra="ignore",
     )

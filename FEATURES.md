@@ -28,8 +28,8 @@
 |---|------|------|------|------|
 | 1.2.1 | Settings 类 | `src/config.py` | LLM API Key / DB 连接串 / Redis URL / ChromaDB 路径 / 限流参数 / 日志级别 | 单测完成 | P0 |
 | 1.2.2 | .env 模板 | `.env.example` | 所有可配置环境变量的模板文件 | 单测完成 | P0 |
-| 1.2.3 | MCP Server 注册表 | `config/mcp_servers.yaml` | 声明所有外部 MCP Server（transport / command / args / url） | 待开发 | P0 |
-| 1.2.4 | 数据源配置文件 | `config/datasources.yaml` | 外挂模式的数据源声明（dialect / host / port / database / 凭证引用） | 待开发 | P0 |
+| 1.2.3 | MCP Server 注册表 | `config/mcp_servers.yaml` | 声明外部 MCP Server | 待开发[^1] | P0 |
+| 1.2.4 | 数据源配置文件 | `config/datasources.yaml` | 外挂模式数据源声明 (dialect/host/port/database/凭证引用) | 开发完成 | P0 |
 
 ### 1.3 异常与错误处理
 
@@ -41,7 +41,7 @@
 | 1.3.4 | ExecutionError | `src/exceptions.py` | SQL 执行失败异常，携带原始错误信息和 retry_count | 单测完成 | P0 |
 | 1.3.5 | RateLimitError | `src/exceptions.py` | 请求频率超限异常 | 单测完成 | P0 |
 | 1.3.6 | KnowledgeNotFoundError | `src/exceptions.py` | 知识库未找到相关知识异常 | 单测完成 | P0 |
-| 1.3.7 | 全局异常处理中间件 | `src/api/middleware.py` | FastAPI exception_handler，统一错误响应格式 | 待开发 | P0 |
+| 1.3.7 | 全局异常处理中间件 | `src/api/middleware.py` | 7 种异常 → HTTP 响应映射 | 单测完成 | P0 |
 
 ---
 
@@ -54,37 +54,37 @@
 | 2.1.1 | DataSourceConfig 定义 | `src/datasource/config.py` | dataclass: name/dialect/mode/host/port/database/username/password/engine/schema/description/tags/extra_params | 单测完成 | P0 |
 | 2.1.2 | DataSourceRegistry | `src/datasource/registry.py` | register_provider() / resolve() / list_all() / _create_engine() | 单测完成 | P0 |
 | 2.1.3 | DataSourceProvider 抽象基类 | `src/datasource/providers/base.py` | lookup() / extract_schema() / test_connection() 抽象方法 | 单测完成 | P0 |
-| 2.1.4 | DataSourceConfigStore | `src/datasource/config_store.py` | save() / delete() / list_all() — 外挂模式配置持久化到 PostgreSQL | 待开发 |
-| 2.1.5 | DataSourceCreateRequest | `src/api/schemas.py` | Pydantic model: 外挂模式注册数据源的请求体 | 待开发 |
+| 2.1.4 | DataSourceConfigStore | `src/datasource/config_store.py` | 外挂模式配置持久化到 PostgreSQL | 待开发[^3] | P1 |
+| 2.1.5 | DataSourceCreateRequest | `src/datasource/providers/external.py` | 外挂模式注册请求体 (临时，后续迁移到 api/schemas.py) | 开发完成 | P1 |
 
 ### 2.2 内置模式 Provider (Embedded)
 
 | # | 功能 | 文件 | 描述 | 状态 |
 |---|------|------|------|------|
-| 2.2.1 | EmbeddedDataSourceProvider 类 | `src/datasource/providers/embedded.py` | 实现 DataSourceProvider 接口 | 单测完成 | P0 |
-| 2.2.2 | _load_from_env() | 同上 | 从环境变量解析数据源配置 (单/多数据源) | 单测完成 | P0 |
-| 2.2.3 | _is_django_project() | 同上 | 检测当前环境是否为 Django 项目 | 待开发 |
-| 2.2.4 | _from_django_config() | 同上 | 从 Django settings.DATABASES 解析数据源配置 | 待开发 |
-| 2.2.5 | _has_sqlalchemy_engine() | 同上 | 检测是否存在 SQLAlchemy engine 实例 | 待开发 |
-| 2.2.6 | _from_sqlalchemy_engine() | 同上 | 从 SQLAlchemy engine 提取连接信息 | 待开发 |
-| 2.2.7 | _from_env_vars() | 同上 | 从环境变量 (DB_HOST/DB_PORT 等) 解析数据源配置 | 待开发 |
-| 2.2.8 | _find_orm_models() | 同上 | 扫描项目中的 SQLAlchemy declarative_base / Django Model 类 | 待开发 |
-| 2.2.9 | _extract_model_description() | 同上 | 从 Model.__doc__ / Model._meta.verbose_name 提取中文描述 | 待开发 |
-| 2.2.10 | extract_schema() — ORM 优先 | 同上 | ① ORM Model ② migration 注释 ③ DB 内省，三级回退提取 Schema | 待开发 |
+| 2.2.1 | EmbeddedDataSourceProvider 类 | `src/datasource/providers/embedded.py` | DataSourceProvider 完整实现 | 单测完成 | P0 |
+| 2.2.2 | _load_from_env() | 同上 | 从环境变量解析数据源 (单/多数据源) | 单测完成 | P0 |
+| 2.2.3 | _is_django_project() | 同上 | 检测当前环境是否为 Django 项目 | 单测完成 | P1 |
+| 2.2.4 | _from_django_config() | 同上 | 从 Django settings.DATABASES 解析 | 单测完成 | P1 |
+| 2.2.5 | _has_sqlalchemy_engine() | 同上 | 检测是否存在 SQLAlchemy engine | 单测完成 | P1 |
+| 2.2.6 | _from_sqlalchemy_engine() | 同上 | 从 SQLAlchemy engine 提取连接信息 | 单测完成 | P1 |
+| 2.2.7 | _load_from_orm() | 同上 | ORM 自发现入口 (Django/SQLAlchemy 路由) | 单测完成 | P1 |
+| 2.2.8 | _find_orm_models() | 同上 | 扫描 Django Model / SQLAlchemy declarative_base | 单测完成 | P1 |
+| 2.2.9 | _extract_model_description() | 同上 | 从 Model.__doc__ / verbose_name 提取中文描述 | 单测完成 | P1 |
+| 2.2.10 | extract_schema() — ORM 优先 | 同上 | ① ORM Model ② DB 内省兜底 | 单测完成 | P1 |
 
 ### 2.3 外挂模式 Provider (External)
 
 | # | 功能 | 文件 | 描述 | 状态 |
 |---|------|------|------|------|
-| 2.3.1 | ExternalDataSourceProvider 类 | `src/datasource/providers/external.py` | 实现 DataSourceProvider 接口 | 待开发 |
-| 2.3.2 | register() | 同上 | 测试连接 → 加密凭证 → 持久化 → 异步预采集 Schema | 待开发 |
-| 2.3.3 | unregister() | 同上 | 移除数据源，关闭连接池，清理缓存 | 待开发 |
-| 2.3.4 | _test_connection() | 同上 | 发送 SELECT 1 / EXPLAIN 确认连接可用 | 待开发 |
-| 2.3.5 | extract_schema() — 纯内省 | 同上 | INFORMATION_SCHEMA 查询 + 手工标注文件补充 | 待开发 |
-| 2.3.6 | YAML 加载器 | 同上 | load_yaml_datasources() — 解析 config/datasources.yaml | 待开发 |
-| 2.3.7 | API 动态注册路由 | `src/api/routes.py` | POST /api/v1/datasources — 运行时注册数据源 | 待开发 |
-| 2.3.8 | API 删除路由 | `src/api/routes.py` | DELETE /api/v1/datasources/{name} — 运行时移除数据源 | 待开发 |
-| 2.3.9 | API 列表路由 | `src/api/routes.py` | GET /api/v1/datasources — 列出所有数据源及其状态 | 待开发 |
+| 2.3.1 | ExternalDataSourceProvider 类 | `src/datasource/providers/external.py` | DataSourceProvider 完整实现 | 单测完成 | P1 |
+| 2.3.2 | register() | 同上 | 加密凭证 → 注册 → 后台预采集 Schema | 单测完成 | P1 |
+| 2.3.3 | unregister() | 同上 | 移除数据源，关闭连接池 | 单测完成 | P1 |
+| 2.3.4 | test_connection() | 同上 | SELECT 1 连通性测试 | 单测完成 | P1 |
+| 2.3.5 | extract_schema() — 纯内省 | 同上 | DB 内省 + 手工标注补充 | 单测完成 | P1 |
+| 2.3.6 | load_yaml() + from_yaml() | 同上 | 解析 config/datasources.yaml | 单测完成 | P1 |
+| 2.3.7 | POST /datasources | `src/api/routes.py` | 注册数据源 | 单测完成 | P1 |
+| 2.3.8 | DELETE /datasources/{name} | `src/api/routes.py` | 删除数据源 | 单测完成 | P1 |
+| 2.3.9 | GET /datasources | `src/api/routes.py` | 列出数据源 (分页) | 单测完成 | P1 |
 
 ### 2.4 凭证管理
 
@@ -92,7 +92,7 @@
 |---|------|------|------|------|
 | 2.4.1 | CredentialManager | `src/datasource/credential_manager.py` | encrypt() / decrypt() — AES-256 加密 | 单测完成 | P0 |
 | 2.4.2 | 环境变量凭证引用 | 同上 | resolve_env_ref() — 解析 ${VAR_NAME} 占位符 | 单测完成 | P0 |
-| 2.4.3 | KMS 集成 (远期) | 同上 | 对接 Vault / AWS KMS / Azure Key Vault | 待开发 |
+| 2.4.3 | KMS 集成 (远期) | 同上 | 对接 Vault / AWS KMS / Azure Key Vault | 待开发[^4] | P3 |
 
 ### 2.5 DB 内省
 
@@ -128,38 +128,38 @@
 
 | # | 功能 | 文件 | 描述 | 状态 |
 |---|------|------|------|------|
-| 3.1.1 | ConnectorBase 抽象类 | `src/connectors/base.py` | execute() / explain() / health_check() / close() 抽象方法 | 待开发 |
-| 3.1.2 | 连接池工厂 | 同上 | create_async_engine() — 统一创建 SQLAlchemy AsyncEngine，配置 pool_size / max_overflow / timeout | 待开发 |
-| 3.1.3 | 查询超时控制 | 同上 | 根据 dialect 设置 statement_timeout / max_execution_time | 待开发 |
-| 3.1.4 | 结果格式化 | 同上 | rows_to_dict_list() — 将数据库行转为 list[dict] | 待开发 |
+| 3.1.1 | ConnectorBase 抽象类 | `src/connectors/base.py` | execute/explain/health_check/close + rows_to_dict_list | 单测完成 | P0 |
+| 3.1.2 | 连接池工厂 | 同上 | create_engine() + create_connector() — URL 构建 + SQLAlchemy AsyncEngine | 单测完成 | P0 |
+| 3.1.3 | 查询超时控制 | 同上 | _get_timeout() — dialect 自适应超时 SQL | 单测完成 | P0 |
+| 3.1.4 | 结果格式化 | 同上 | rows_to_dict_list() — RowMapping → list[dict] | 单测完成 | P0 |
 
 ### 3.2 ClickHouse 连接器
 
 | # | 功能 | 文件 | 描述 | 状态 |
 |---|------|------|------|------|
-| 3.2.1 | ClickHouseConnector | `src/connectors/clickhouse.py` | 继承 ConnectorBase，使用 clickhouse-connect 异步驱动 | 待开发 |
-| 3.2.2 | execute() | 同上 | 执行 SELECT 查询，返回结果列表 | 待开发 |
-| 3.2.3 | explain() | 同上 | `EXPLAIN SYNTAX {sql}` — 语法空跑 | 待开发 |
-| 3.2.4 | health_check() | 同上 | `SELECT 1` 连通性检查 | 待开发 |
-| 3.2.5 | 分区键获取 | 同上 | 查询 system.parts 获取表的分区信息 | 待开发 |
+| 3.2.1 | ClickHouseConnector | `src/connectors/clickhouse.py` | 继承 ConnectorBase, clickhouse+asynch 驱动 | 单测完成 | P0 |
+| 3.2.2 | execute() | 同上 | 继承自 ConnectorBase.execute() | 单测完成 | P0 |
+| 3.2.3 | explain() | 同上 | EXPLAIN SYNTAX — 继承自基类 | 单测完成 | P0 |
+| 3.2.4 | health_check() | 同上 | SELECT 1 — 继承自基类 | 单测完成 | P0 |
+| 3.2.5 | get_partition_key() | 同上 | 查询 system.tables 分区键 | 单测完成 | P0 |
 
 ### 3.3 MySQL 连接器
 
 | # | 功能 | 文件 | 描述 | 状态 |
 |---|------|------|------|------|
-| 3.3.1 | MySQLConnector | `src/connectors/mysql.py` | 继承 ConnectorBase，使用 aiomysql 驱动 | 待开发 |
-| 3.3.2 | execute() | 同上 | 执行 SELECT 查询 | 待开发 |
-| 3.3.3 | explain() | 同上 | `EXPLAIN FORMAT=TREE {sql}` | 待开发 |
-| 3.3.4 | health_check() | 同上 | `SELECT 1` | 待开发 |
+| 3.3.1 | MySQLConnector | `src/connectors/mysql.py` | 继承 ConnectorBase, mysql+aiomysql 驱动 | 单测完成 | P2 |
+| 3.3.2 | execute() | 同上 | 继承自基类 | 单测完成 | P2 |
+| 3.3.3 | explain() | 同上 | EXPLAIN FORMAT=TREE — 继承自基类 | 单测完成 | P2 |
+| 3.3.4 | health_check() | 同上 | 继承自基类 | 单测完成 | P2 |
 
 ### 3.4 PostgreSQL 连接器
 
 | # | 功能 | 文件 | 描述 | 状态 |
 |---|------|------|------|------|
-| 3.4.1 | PostgreSQLConnector | `src/connectors/postgres.py` | 继承 ConnectorBase，使用 asyncpg 驱动 | 待开发 |
-| 3.4.2 | execute() | 同上 | 执行 SELECT 查询 | 待开发 |
-| 3.4.3 | explain() | 同上 | `EXPLAIN (ANALYZE false) {sql}` | 待开发 |
-| 3.4.4 | health_check() | 同上 | `SELECT 1` | 待开发 |
+| 3.4.1 | PostgreSQLConnector | `src/connectors/postgres.py` | 继承 ConnectorBase, postgresql+asyncpg 驱动 | 单测完成 | P2 |
+| 3.4.2 | execute() | 同上 | 继承自基类 | 单测完成 | P2 |
+| 3.4.3 | explain() | 同上 | EXPLAIN (ANALYZE false) — 继承自基类 | 单测完成 | P2 |
+| 3.4.4 | health_check() | 同上 | 继承自基类 | 单测完成 | P2 |
 
 ---
 
@@ -169,116 +169,90 @@
 
 | # | 功能 | 文件 | 描述 | 状态 |
 |---|------|------|------|------|
-| 4.1.1 | AnalysisState TypedDict | `src/graph/state.py` | 定义所有在图中流转的字段及类型 (17 个字段) | 待开发 |
-| 4.1.2 | StateGraph 组装 | `src/graph/workflow.py` | 注册 10 个 Node + 定义边 + 条件路由 + compile | 待开发 |
-| 4.1.3 | after_layer3() 条件路由 | 同上 | sqlglot 校验后的路由: generate_sql / layer4_explain / build_response | 待开发 |
-| 4.1.4 | after_layer4() 条件路由 | 同上 | EXPLAIN 空跑后的路由: generate_sql / execute_sql / build_response | 待开发 |
-| 4.1.5 | should_retry() 条件路由 | 同上 | 执行失败后的路由: generate_sql(重试) / build_response(放弃) | 待开发 |
-| 4.1.6 | route_by_intent() 条件路由 | 同上 | 意图为 file_analysis 时路由到 mcp_agent Node | 待开发 |
+| 4.1.1 | AnalysisState TypedDict | `src/graph/state.py` | 28 个字段的完整状态定义 | 单测完成 | P0 |
+| 4.1.2 | StateGraph 组装 + compile | `src/graph/workflow.py` | 注册 10 个 Node + 9 条边 + 4 组条件路由 | 单测完成 | P0 |
+| 4.1.3 | after_layer3() | 同上 | security_block→终止 / syntax_error→重试 / ok→下一步 | 单测完成 | P0 |
+| 4.1.4 | after_layer4() | 同上 | 失败且<3次→重试 / ≥3次→放弃 / ok→执行 | 单测完成 | P0 |
+| 4.1.5 | should_retry() | 同上 | 执行错误且<3→generate_sql / 否则→build_response | 单测完成 | P0 |
+| 4.1.6 | route_by_intent() | 同上 | file_analysis→mcp_agent / 其他→retrieve_schema | 单测完成 | P0 |
 | 4.1.7 | MCP Agent Node 扩展 | 同上 | 使用 create_react_agent 为文件分析场景创建动态工具调用 Node | 待开发 |
 
 ### 4.2 classify_intent Node
 
 | # | 功能 | 文件 | 描述 | 状态 |
 |---|------|------|------|------|
-| 4.2.1 | classify_intent_node() | `src/graph/nodes/classify_intent.py` | LLM 判断意图类型: query / aggregation / attribution / trend / metadata / chat / file_analysis | 待开发 |
-| 4.2.2 | INTENT_CLASSIFY_PROMPT | `src/llm/prompts.py` | 意图识别的 ChatPromptTemplate | 待开发 |
-| 4.2.3 | Skill 匹配触发 | 同上 | 调用 skill_manager.match_skills() 激活相关 Skill | 待开发 |
-| 4.2.4 | 输出: intent / activated_skills / skill_prompt_override / skill_tools | 同上 | 将激活的 Skill 信息写入 state | 待开发 |
+| 4.2.1 | classify_intent_node() | `src/graph/nodes/classify_intent.py` | 规则匹配 7 种意图 (Phase 2 切 LLM) | 单测完成 | P0 |
+| 4.2.2 | INTENT_CLASSIFY_PROMPT | `src/llm/prompts.py` | 意图识别 Prompt 模板 | 单测完成 | P0 |
+| 4.2.3 | Skill 匹配触发 | 同上 | 预留接口 (Phase 2 集成 SkillManager) | 开发完成 | P1 |
+| 4.2.4 | 输出: intent / activated_skills / skill_prompt_override / skill_tools | 同上 | Skill 信息写入 state | 开发完成 | P0 |
 
 ### 4.3 retrieve_schema Node
 
 | # | 功能 | 文件 | 描述 | 状态 |
 |---|------|------|------|------|
-| 4.3.1 | retrieve_schema_node() | `src/graph/nodes/retrieve_schema.py` | 关键词提取实体 → 向量检索表结构 → 检索业务文档 → 组装 SchemaSnapshot | 待开发 |
-| 4.3.2 | 关键词提取 | 同上 | 从 user_query 中提取表名/字段名/指标名关键实体 | 待开发 |
-| 4.3.3 | 向量检索表结构 | 同上 | ChromaDB 语义检索 + 关键词精确匹配，表级索引返回 Top-5 相关表 | 待开发 |
-| 4.3.4 | 向量检索字段语义 | 同上 | ChromaDB 字段级索引检索，返回 Top-10 相关字段说明 | 待开发 |
-| 4.3.5 | 检索业务规则 | 同上 | BusinessRuleStore.search_business_rules() | 待开发 |
-| 4.3.6 | 检索历史 SQL 模板 | 同上 | LongTermMemoryStore.search(memory_type=SQL_TEMPLATE) | 待开发 |
-| 4.3.7 | Few-shot 示例组装 | 同上 | 将检索到的 (question, schema, dialect, sql) 四元组注入 Prompt | 待开发 |
-| 4.3.8 | 输出: resolved_schema / relevant_tables / few_shot_examples / business_rules_text / long_term_memories_text | 同上 | | 待开发 |
+| 4.3.1 | retrieve_schema_node() | `src/graph/nodes/retrieve_schema.py` | 从 injected schema 提取表结构 (Phase 2 向量检索) | 单测完成 | P0 |
+| 4.3.2 | 关键词提取 + 向量检索 | 同上 | Phase 2: ChromaDB 语义检索 (依赖模块 6) | 待开发[^5] | P1 |
+| 4.3.5 | 检索业务规则 | 同上 | Phase 2: BusinessRuleStore (依赖模块 6) | 待开发[^5] | P1 |
+| 4.3.6 | 检索历史 SQL 模板 | 同上 | Phase 2: LongTermMemoryStore (依赖模块 7) | 待开发[^5] | P1 |
 
 ### 4.4 generate_sql Node
 
 | # | 功能 | 文件 | 描述 | 状态 |
 |---|------|------|------|------|
-| 4.4.1 | generate_sql_node() | `src/graph/nodes/generate_sql.py` | LLM 生成 SQL，支持首次生成和错误回注重试 | 待开发 |
-| 4.4.2 | SQL_GENERATION_SYSTEM_PROMPT | `src/llm/prompts.py` | SQL 生成的系统 Prompt 模板 | 待开发 |
-| 4.4.3 | 方言 Prompt 注入 | 同上 | 根据 state["dialect"] 注入对应的函数速查表 | 待开发 |
-| 4.4.4 | Few-shot 注入 | 同上 | 将 state["few_shot_examples"] 注入 user prompt | 待开发 |
-| 4.4.5 | 业务规则注入 | 同上 | 将 state["business_rules_text"] 注入 prompt | 待开发 |
-| 4.4.6 | 错误回注处理 | 同上 | 重试时拼接 validation_errors + previous_sql 到 Prompt | 待开发 |
-| 4.4.7 | 最后一次尝试强化提示 | 同上 | retry_count >= 2 时追加 "请仔细核对字段名和函数名" | 待开发 |
-| 4.4.8 | JsonOutputParser + SQLOutput | 同上 | 标准化输出: {"sql": "...", "explanation": "..."} | 待开发 |
-| 4.4.9 | 上下文裁剪 | 同上 | 调用 build_llm_context(node_name="generate_sql") | 待开发 |
-| 4.4.10 | 输出: generated_sql / retry_count | 同上 | | 待开发 |
+| 4.4.1 | generate_sql_node() | `src/graph/nodes/generate_sql.py` | 模板拼接 + 错误回注 (Phase 2 ChatOpenAI) | 单测完成 | P0 |
+| 4.4.2 | SQL_GENERATION_SYSTEM_PROMPT | `src/llm/prompts.py` | SQL 生成 Prompt + 方言速查表 | 单测完成 | P0 |
+| 4.4.3 | 方言 Prompt 注入 | 同上 | get_dialect_cheatsheet() — 3 种方言速查 | 单测完成 | P0 |
+| 4.4.6 | 错误回注处理 | 同上 | retry_count>0 时返回修复占位 | 单测完成 | P0 |
+| 4.4.10 | format_schema_for_prompt() | 同上 | 表结构 → Markdown 格式化 | 单测完成 | P0 |
 
 ### 4.5 layer3_validate Node
 
 | # | 功能 | 文件 | 描述 | 状态 |
 |---|------|------|------|------|
-| 4.5.1 | layer3_validate_node() | `src/graph/nodes/layer3_validate.py` | 调用 validate_with_sqlglot() + 安全拦截 | 待开发 |
-| 4.5.2 | SQL 安全拦截 (DDL/DML 黑名单) | 同上 | 正则匹配拦截 INSERT/UPDATE/DELETE/DROP/CREATE/ALTER/TRUNCATE/GRANT/REVOKE/sleep/benchmark | 待开发 |
-| 4.5.3 | sqlglot 语法解析校验 | 同上 | sqlglot.parse(sql, dialect=dialect) — 拦截语法错误 | 待开发 |
-| 4.5.4 | sqlglot 函数白名单校验 | 同上 | 遍历 AST 检查每个函数是否在目标方言中存在 | 待开发 |
-| 4.5.5 | sqlglot 方言转译 | 同上 | sqlglot.transpile(sql, read="mysql", write=dialect) | 待开发 |
-| 4.5.6 | 函数修正建议 | 同上 | _suggest_correct_function() — 维护 ClickHouse/PostgreSQL 函数映射表 | 待开发 |
-| 4.5.7 | 输出: sql_valid / validation_errors / validation_warnings / transpiled_sql | 同上 | | 待开发 |
+| 4.5.1 | layer3_validate_node() | `src/graph/nodes/layer3_validate.py` | sqlglot 语法 + 14 项安全拦截正则 | 单测完成 | P0 |
+| 4.5.2 | SQL 安全拦截 | 同上 | 14 正则黑名单: INSERT/DELETE/DROP/ALTER/... | 单测完成 | P0 |
+| 4.5.3 | sqlglot 语法解析校验 | 同上 | sqlglot.parse(sql, dialect) | 单测完成 | P0 |
+| 4.5.7 | 输出: sql_valid / errors / transpiled | 同上 | | 单测完成 | P0 |
 
 ### 4.6 layer4_explain Node
 
 | # | 功能 | 文件 | 描述 | 状态 |
 |---|------|------|------|------|
-| 4.6.1 | layer4_explain_node() | `src/graph/nodes/layer4_explain.py` | 执行 EXPLAIN 空跑校验 | 待开发 |
-| 4.6.2 | EXPLAIN_TEMPLATES 字典 | 同上 | ClickHouse/MySQL/PostgreSQL/Presto/Hive 各自的 EXPLAIN 语法 | 待开发 |
-| 4.6.3 | explain_check() | 同上 | 在目标 DB 执行 EXPLAIN，捕获语义错误并提取友好信息 | 待开发 |
-| 4.6.4 | 输出: sql_valid / validation_errors | 同上 | | 待开发 |
+| 4.6.1 | layer4_explain_node() | `src/graph/nodes/layer4_explain.py` | Phase 2 对接 Connector | 开发完成 | P1 |
 
 ### 4.7 execute_sql Node
 
 | # | 功能 | 文件 | 描述 | 状态 |
 |---|------|------|------|------|
-| 4.7.1 | execute_sql_node() | `src/graph/nodes/execute_sql.py` | 通过 DataSourceRegistry 获取 engine → 执行 SQL | 待开发 |
-| 4.7.2 | 数据结果截断 (200行) | 同上 | LLM 分析只需前 200 行，全量结果保留给统计计算 | 待开发 |
-| 4.7.3 | compute_statistics() | 同上 | 自动计算 pandas 统计摘要: 行数 / 数值列均值中位数 / 空值率 / 唯一值数 | 待开发 |
-| 4.7.4 | 超时控制 | 同上 | 设置 statement_timeout 和执行超时，超时写 execution_error | 待开发 |
-| 4.7.5 | 限流检查 | 同上 | 检查用户每小时查询次数，超限返回 RateLimitError | 待开发 |
-| 4.7.6 | 输出: query_result_sample / query_result_full_count / query_result_statistics / execution_error | 同上 | | 待开发 |
+| 4.7.1 | execute_sql_node() | `src/graph/nodes/execute_sql.py` | Phase 2 对接 Registry (Phase 1 mock) | 单测完成 | P0 |
 
 ### 4.8 analyze_result Node
 
 | # | 功能 | 文件 | 描述 | 状态 |
 |---|------|------|------|------|
-| 4.8.1 | analyze_result_node() | `src/graph/nodes/analyze_result.py` | LLM 解读查询结果 + pandas 统计补充 | 待开发 |
-| 4.8.2 | DATA_ANALYSIS_PROMPT | `src/llm/prompts.py` | 数据分析的系统 Prompt: 数据摘要 / 关键发现 / 推荐图表 / 追问方向 | 待开发 |
-| 4.8.3 | 描述性统计 | 同上 | 对所有数值列计算 均值/中位数/标准差/分位数 | 待开发 |
-| 4.8.4 | 趋势分析 | 同上 | 时间序列数据: 同比/环比/移动平均 | 待开发 |
-| 4.8.5 | 归因分析 | 同上 | 用户指定 "为什么" 时: 维度下钻寻找变化根因 | 待开发 |
-| 4.8.6 | 异常检测 | 同上 | Z-Score / IQR 方法识别离群值 | 待开发 |
-| 4.8.7 | 占比分析 | 同上 | 分类维度 + 数值指标: 帕累托分析 / 集中度 | 待开发 |
-| 4.8.8 | 上下文裁剪 | 同上 | 调用 build_llm_context(node_name="analyze_result") | 待开发 |
-| 4.8.9 | 输出: analysis_result (summary + insights + recommended_chart_type + follow_up_questions) | 同上 | | 待开发 |
+| 4.8.1 | analyze_result_node() | `src/graph/nodes/analyze_result.py` | 分析引擎集成: 统计+趋势+异常+占比 | 单测完成 | P0 |
+| 4.8.2 | DATA_ANALYSIS_PROMPT | `src/llm/prompts.py` | 数据分析 Prompt | 单测完成 | P0 |
+| 4.8.3 | 描述性统计 | `src/tools/analyzer.py` | 均值/中位数/标准差/分位数/空值率 | 单测完成 | P0 |
+| 4.8.4 | 趋势分析 | 同上 | 环比/方向/移动平均 | 单测完成 | P0 |
+| 4.8.5 | 归因分析 | 同上 | Phase 2 LLM 归因 (数据统计已就绪) | 待开发[^7] | P1 |
+| 4.8.6 | 异常检测 | 同上 | Z-Score + IQR 两种方法 | 单测完成 | P0 |
+| 4.8.7 | 占比分析 | 同上 | 集中度/分类聚合 | 单测完成 | P0 |
+| 4.8.9 | 输出: analysis_result | 同上 | summary+insights+chart+followups | 单测完成 | P0 |
 
 ### 4.9 generate_chart Node
 
 | # | 功能 | 文件 | 描述 | 状态 |
 |---|------|------|------|------|
-| 4.9.1 | generate_chart_node() | `src/graph/nodes/generate_chart.py` | LLM 根据列类型自动选择图表类型 + 生成 ECharts config | 待开发 |
-| 4.9.2 | 智能选图逻辑 | 同上 | 时间列→折线图 / 分类列+数值列→柱状图 / 占比→饼图 / 双数值列→散点图 / 交叉维度→热力图 | 待开发 |
-| 4.9.3 | ECharts option 生成 | 同上 | 生成 JSON 格式的 ECharts 配置 | 待开发 |
-| 4.9.4 | CHART_RECOMMEND_PROMPT | `src/llm/prompts.py` | 图表推荐的 ChatPromptTemplate | 待开发 |
-| 4.9.5 | 输出: chart_config (type + echarts_option) | 同上 | | 待开发 |
+| 4.9.1 | generate_chart_node() | `src/graph/nodes/generate_chart.py` | Phase 2 ECharts 生成 (Phase 1 占位) | 单测完成 | P1 |
+| 4.9.4 | CHART_RECOMMEND_PROMPT | `src/llm/prompts.py` | 图表推荐 Prompt | 单测完成 | P0 |
 
 ### 4.10 build_response Node
 
 | # | 功能 | 文件 | 描述 | 状态 |
 |---|------|------|------|------|
-| 4.10.1 | build_response_node() | `src/graph/nodes/build_response.py` | 组装最终响应: user_query + sql + data + analysis + chart | 待开发 |
-| 4.10.2 | 正常响应组装 | 同上 | 7 个流水线 Node 全部成功 → 完整响应 JSON | 待开发 |
-| 4.10.3 | 错误响应组装 | 同上 | 任意 Node 失败 → 返回 error_code + error_message + suggestion | 待开发 |
-| 4.10.4 | SQL 模板归档 | 同上 | 成功的 SQL 自动写入 LongTermMemoryStore.save_sql_template() | 待开发 |
-| 4.10.5 | 输出: final_response (完整 JSON，包含所有字段) | 同上 | | 待开发 |
+| 4.10.1 | build_response_node() | `src/graph/nodes/build_response.py` | 组装 success/error 两种响应 | 单测完成 | P0 |
+| 4.10.2 | 正常响应 | 同上 | user_query+sql+data+analysis+chart | 单测完成 | P0 |
+| 4.10.3 | 错误响应 | 同上 | error_code + error_message | 单测完成 | P0 |
 
 ---
 
@@ -525,24 +499,22 @@
 
 | # | 功能 | 文件 | 描述 | 状态 |
 |---|------|------|------|------|
-| 10.1.1 | ChatOpenAI 工厂 | `src/llm/client.py` | get_openai_llm(temperature, model) — 从 Settings 读取 API Key，创建 ChatOpenAI 实例 | 待开发 |
-| 10.1.2 | ChatAnthropic 工厂 | 同上 | get_anthropic_llm(temperature, model) — 创建 ChatAnthropic 实例 | 待开发 |
-| 10.1.3 | LLM 路由器 | 同上 | get_llm(provider: str) — 根据配置自动选择 OpenAI / Anthropic | 待开发 |
-| 10.1.4 | cheap_llm 工厂 | 同上 | get_cheap_llm() — 用于摘要等低复杂度任务的低成本模型 | 待开发 |
-| 10.1.5 | 模型参数配置 | `src/config.py` | LLM_MODEL / LLM_TEMPERATURE / LLM_MAX_TOKENS / LLM_TIMEOUT | 待开发 |
+| 10.1.1 | ChatOpenAI 工厂 | `src/llm/client.py` | get_openai_llm() — ChatOpenAI 实例 | 单测完成 | P0 |
+| 10.1.2 | ChatAnthropic 工厂 | 同上 | get_anthropic_llm() — ChatAnthropic 实例 | 单测完成 | P0 |
+| 10.1.3 | LLM 路由器 | 同上 | get_llm() — provider 自动路由 | 单测完成 | P0 |
+| 10.1.4 | cheap_llm 工厂 | 同上 | get_cheap_llm() — gpt-4o-mini | 单测完成 | P0 |
+| 10.1.5 | is_llm_available() | 同上 | API Key 可用性检测 | 单测完成 | P0 |
 
 ### 10.2 Prompt 模板
 
 | # | 功能 | 文件 | 描述 | 状态 |
 |---|------|------|------|------|
-| 10.2.1 | INTENT_CLASSIFY_PROMPT | `src/llm/prompts.py` | 意图识别 Prompt | 待开发 |
-| 10.2.2 | SQL_GENERATION_SYSTEM_PROMPT | 同上 | SQL 生成系统 Prompt (含 {datasource_type} / {dialect} 占位) | 待开发 |
-| 10.2.3 | DATA_ANALYSIS_PROMPT | 同上 | 数据分析 Prompt (摘要 / 洞察 / 图表 / 追问) | 待开发 |
-| 10.2.4 | CHART_RECOMMEND_PROMPT | 同上 | 图表推荐 Prompt | 待开发 |
-| 10.2.5 | RESPONSE_BUILD_PROMPT | 同上 | 响应组装 Prompt | 待开发 |
-| 10.2.6 | SUMMARIZE_SESSION_PROMPT | 同上 | 会话摘要 Prompt | 待开发 |
-| 10.2.7 | 方言速查块注入 | 同上 | get_dialect_prompt(dialect) — 返回对应数据库的函数速查表 | 待开发 |
-| 10.2.8 | Prompt 版本号管理 | 同上 | 每个 Prompt 模板附带 VERSION 常量，支持 A/B 测试 | 待开发 |
+| 10.2.1 | INTENT_CLASSIFY_PROMPT | `src/llm/prompts.py` | 意图识别 Prompt | 单测完成 | P0 |
+| 10.2.2 | SQL_GENERATION_SYSTEM_PROMPT | 同上 | SQL 生成 Prompt + 方言速查 | 单测完成 | P0 |
+| 10.2.3 | DATA_ANALYSIS_PROMPT | 同上 | 数据分析 Prompt | 单测完成 | P0 |
+| 10.2.4 | CHART_RECOMMEND_PROMPT | 同上 | 图表推荐 Prompt | 单测完成 | P0 |
+| 10.2.7 | get_dialect_cheatsheet() | 同上 | 3 种方言速查表 | 单测完成 | P0 |
+| 10.2.8 | Prompt 版本号管理 | 同上 | Phase 3: LangSmith A/B 测试 | 待开发[^6] | P2 |
 
 ---
 
@@ -552,27 +524,27 @@
 
 | # | 功能 | 文件 | 路由 | 描述 | 状态 |
 |---|------|------|------|------|------|
-| 11.1.1 | POST 分析查询 | `src/api/routes.py` | `POST /api/v1/chat` | 发送自然语言查询，返回完整分析结果 (SQL + 数据 + 分析 + 图表) | 待开发 |
-| 11.1.2 | POST 流式查询 | `src/api/routes.py` | `POST /api/v1/chat/stream` | SSE 流式返回分析过程 (Node 级进度 + LLM token 级输出) | 待开发 |
-| 11.1.3 | GET 表列表 | `src/api/routes.py` | `GET /api/v1/schema/tables` | 获取指定数据源的所有表 | 待开发 |
-| 11.1.4 | GET 表结构 | `src/api/routes.py` | `GET /api/v1/schema/tables/{table_name}` | 获取指定表的结构信息 | 待开发 |
-| 11.1.5 | POST Schema 刷新 | `src/api/routes.py` | `POST /api/v1/schema/refresh` | 手动刷新 Schema 缓存 | 待开发 |
-| 11.1.6 | GET 会话历史 | `src/api/routes.py` | `GET /api/v1/history?session_id=xxx` | 获取指定会话的对话历史 | 待开发 |
-| 11.1.7 | POST 注册数据源 | `src/api/routes.py` | `POST /api/v1/datasources` | 外挂模式: 注册新数据源 | 待开发 |
-| 11.1.8 | DELETE 删除数据源 | `src/api/routes.py` | `DELETE /api/v1/datasources/{name}` | 外挂模式: 移除数据源 | 待开发 |
-| 11.1.9 | GET 数据源列表 | `src/api/routes.py` | `GET /api/v1/datasources` | 列出所有数据源 | 待开发 |
-| 11.1.10 | GET 健康检查 | `src/api/routes.py` | `GET /api/v1/health` | 检查服务健康状况 (DB 连接 / ChromaDB 状态 / MCP 连接) | 待开发 |
-| 11.1.11 | PUT 字段标注 | `src/api/routes.py` | `PUT /api/v1/schema/tables/{table}/columns/{column}/comment` | 手动标注字段中文说明，直接写入 ChromaDB | 待开发 | P1 |
-| 11.1.12 | POST MCP 重置 | `src/api/routes.py` | `POST /api/v1/mcp/{name}/reset` | 手动重置 degraded 状态的 MCP Server | 待开发 | P1 |
-| 11.1.13 | GET 指标列表 | `src/api/routes.py` | `GET /api/v1/metrics` | 查询已注册的指标口径列表 | 待开发 | P2 |
+| 11.1.1 | POST /chat | `src/api/routes.py` | `POST /api/v1/chat` | NL 查询 → 完整分析结果 | 单测完成 | P0 |
+| 11.1.2 | POST /chat/stream | `src/api/routes.py` | `POST /api/v1/chat/stream` | SSE 流式 (astream_events) | 单测完成 | P0 |
+| 11.1.3 | GET /schema/tables | `src/api/routes.py` | `GET /api/v1/schema/tables` | 表列表 + 分页 + 搜索 | 单测完成 | P0 |
+| 11.1.4 | GET /schema/tables/{name} | `src/api/routes.py` | `GET /api/v1/schema/tables/{table_name}` | 指定表结构 | 单测完成 | P0 |
+| 11.1.5 | POST /schema/refresh | `src/api/routes.py` | `POST /api/v1/schema/refresh` | 手动刷新 Schema | 单测完成 | P0 |
+| 11.1.6 | GET /history | `src/api/routes.py` | `GET /api/v1/history` | Phase 2: 会话历史 | 待开发[^8] | P1 |
+| 11.1.7 | POST /datasources | `src/api/routes.py` | 注册数据源 | 单测完成 (2.3.7) | P1 |
+| 11.1.8 | DELETE /datasources/{name} | `src/api/routes.py` | 删除数据源 | 单测完成 (2.3.8) | P1 |
+| 11.1.9 | GET /datasources | `src/api/routes.py` | 列出数据源 (分页) | 单测完成 (2.3.9) | P1 |
+| 11.1.10 | GET /health | `src/api/routes.py` | 健康检查 | 单测完成 | P0 |
+| 11.1.11 | PUT /schema/.../comment | `src/api/routes.py` | 手动标注字段 | 单测完成 | P1 |
+| 11.1.12 | POST /mcp/{name}/reset | `src/api/routes.py` | Phase 2: MCP reset (依赖模块 8) | 待开发[^8] | P1 |
+| 11.1.13 | GET /metrics | `src/api/routes.py` | Phase 2: 指标列表 (依赖模块 6) | 待开发[^8] | P2 |
 
 ### 11.2 分页增强
 
 | # | 功能 | 文件 | 路由 | 描述 | 状态 |
 |---|------|------|------|------|------|
-| 11.2.1 | 表列表分页 | `src/api/routes.py` | `GET /api/v1/schema/tables?page=1&page_size=20&search=xxx` | 表列表分页 + 搜索 | 待开发 | P1 |
-| 11.2.2 | 会话历史分页 | `src/api/routes.py` | `GET /api/v1/history?session_id=xxx&page=1&page_size=20` | 会话历史分页查询 | 待开发 | P1 |
-| 11.2.3 | 数据源列表分页 | `src/api/routes.py` | `GET /api/v1/datasources?page=1&page_size=20` | 数据源列表分页查询 | 待开发 | P1 |
+| 11.2.1 | 表列表分页 | `src/api/routes.py` | ?page=1&page_size=20&search=xxx | 单测完成 | P1 |
+| 11.2.2 | 会话历史分页 | `src/api/routes.py` | Phase 2: Checkpointer 查询 | 待开发[^8] | P1 |
+| 11.2.3 | 数据源列表分页 | `src/api/routes.py` | ?page=1&page_size=20 | 单测完成 | P1 |
 
 ### 11.3 请求/响应 Schema (重新编号为 11.3)
 
@@ -580,23 +552,20 @@
 
 | # | 功能 | 文件 | 描述 | 状态 |
 |---|------|------|------|------|
-| 11.2.1 | ChatRequest Pydantic model | `src/api/schemas.py` | session_id / query / datasource | 待开发 |
-| 11.2.2 | ChatResponse Pydantic model | 同上 | session_id / query / sql / data / analysis / chart | 待开发 |
-| 11.2.3 | AnalysisResult Pydantic model | 同上 | summary / insights / recommended_chart_type / follow_up_questions | 待开发 |
-| 11.2.4 | ChartConfig Pydantic model | 同上 | type / echarts_option | 待开发 |
-| 11.2.5 | DataSourceCreateRequest | 同上 | 注册数据源请求体 | 待开发 |
-| 11.2.6 | ErrorResponse | 同上 | error_code / error_message / suggestion / retry_count | 待开发 |
-| 11.2.7 | HealthResponse | 同上 | status / db_connected / chroma_ok / mcp_servers_status | 待开发 |
+| 11.2.1 | ChatRequest | `src/api/schemas.py` | query / session_id / datasource | 单测完成 | P0 |
+| 11.2.2 | ChatResponse | 同上 | success / sql / data / analysis / chart | 单测完成 | P0 |
+| 11.2.5 | DataSourceCreateRequest | 同上 | name / dialect / host / ... | 单测完成 | P0 |
+| 11.2.7 | HealthResponse | 同上 | status / llm_available / uptime | 单测完成 | P0 |
 
 ### 11.3 流式输出
 
 | # | 功能 | 文件 | 描述 | 状态 |
 |---|------|------|------|------|
-| 11.3.1 | stream_analysis() | `src/api/streaming.py` | FastAPI SSE endpoint: astream_events 循环推送 | 待开发 |
-| 11.3.2 | on_chat_model_stream 事件处理 | 同上 | LLM token 级别流式推送 | 待开发 |
-| 11.3.3 | on_chain_start 事件处理 | 同上 | Node 开始执行通知 | 待开发 |
-| 11.3.4 | on_chain_end 事件处理 | 同上 | Node 执行完成通知 (含 output) | 待开发 |
-| 11.3.5 | SSE 格式化 | 同上 | `data: {json}\n\n` 格式包装 | 待开发 |
+| 11.3.1 | stream_analysis() | `src/api/streaming.py` | FastAPI SSE endpoint: astream_events 循环推送 | 开发完成 |
+| 11.3.2 | on_chat_model_stream 事件处理 | 同上 | LLM token 级别流式推送 | 开发完成 |
+| 11.3.3 | on_chain_start 事件处理 | 同上 | Node 开始执行通知 | 开发完成 |
+| 11.3.4 | on_chain_end 事件处理 | 同上 | Node 执行完成通知 (含 output) | 开发完成 |
+| 11.3.5 | SSE 格式化 | 同上 | `data: {json}\n\n` 格式包装 | 开发完成 |
 
 ---
 
@@ -636,12 +605,12 @@
 
 | # | 功能 | 文件 | 描述 | 状态 |
 |---|------|------|------|------|
-| 13.1 | compute_statistics() | `src/tools/analyzer.py` | 对所有数值列计算: 均值/中位数/标准差/分位数/空值率/唯一值数 | 待开发 |
-| 13.2 | compute_trend() | 同上 | 时间序列: 同比/环比/移动平均/线性回归斜率 | 待开发 |
-| 13.3 | detect_outliers_zscore() | 同上 | Z-Score 方法: \|z\| > 3 标记为异常 | 待开发 |
-| 13.4 | detect_outliers_iqr() | 同上 | IQR 方法: Q1-1.5*IQR < x < Q3+1.5*IQR | 待开发 |
-| 13.5 | compute_concentration() | 同上 | 帕累托分析: Top N 集中度占比 | 待开发 |
-| 13.6 | compute_correlation() | 同上 | 数值列相关性矩阵 (Pearson) | 待开发 |
+| 13.1 | compute_statistics() | `src/tools/analyzer.py` | 均值/中位数/标准差/分位数/空值率 | 单测完成 | P0 |
+| 13.2 | compute_trend() | 同上 | 环比/方向/移动平均 | 单测完成 | P0 |
+| 13.3 | detect_outliers_zscore() | 同上 | Z-Score 异常检测 | 单测完成 | P0 |
+| 13.4 | detect_outliers_iqr() | 同上 | IQR 异常检测 | 单测完成 | P0 |
+| 13.5 | compute_concentration() | 同上 | Top N 集中度 | 单测完成 | P0 |
+| 13.6 | compute_correlation() | 同上 | Pearson 相关系数 | 单测完成 | P0 |
 
 ---
 
@@ -909,3 +878,26 @@ Phase 3 关键依赖:
 | 18. 前端 | 10 | — | — | 10 | — |
 | 19. 扩展能力 | 10 | — | — | — | 10 |
 | **总计** | **365** | **141** | **131** | **69** | **24** |
+
+---
+
+## 待开发项台账
+
+每个待开发项均标注原因、触发条件和预计时机。条件满足时主动提醒开发。
+
+[^1]: **1.2.3 MCP Server 注册表** — 原因: MCP Client 模块(8)未实现，配置文件结构需与 `MCPClientManager.connect_all()` 同步定义。条件: MCP Client Manager 开发时一并创建。时机: Phase 1 后续(模块 8)。
+
+[^2]: **1.3.7 全局异常中间件 / 2.3.7~9 外挂 API 路由** — 原因: 依赖 FastAPI 路由体系，当前 `api/` 仅占位。条件: `api/routes.py` + `api/schemas.py` 创建时。时机: Phase 2(模块 11)。
+
+[^3]: **2.1.4 DataSourceConfigStore** — 原因: PostgreSQL `datasource_configs` 表未创建，迁移文件(17.2.1)待开发。条件: `migrations/001_initial.py` 执行后。时机: Phase 3(模块 17)。
+
+[^4]: **2.4.3 KMS 集成** — 原因: 需 Vault/AWS KMS/Azure Key Vault 等外部基础设施，当前 AES 本地加密已覆盖 MVP。条件: 生产环境 KMS 就绪。时机: Phase 4。
+
+[^5]: **4.3.2/4.3.5/4.3.6 Schema 关键词+向量检索/业务规则/历史模板** — 原因: 依赖模块 6 (知识库 ChromaDB) 和模块 7 (长期记忆 Core) 未实现。条件: SchemaManager + BusinessRuleStore + LongTermMemoryStore 就绪。时机: Phase 2 (模块 6/7 完成后)。
+
+[^6]: **10.2.8 Prompt 版本号管理** — 原因: 需 LangSmith A/B 测试基础设施 + CI 集成。当前 Phase 1 无此需求。条件: Phase 3 生产化评估。时机: Phase 3。
+
+[^7]: **4.8.5 归因分析** — 原因: 归因分析需 LLM 理解业务语义（"为什么销售额下降"），纯统计只能提供维度下钻数据，无法生成归因解释。条件: LLM 客户端(10.1)就绪 + ChatOpenAI 可用。时机: Phase 2 (模块 10 完成后)。
+
+[^8]: **11.1.6/11.1.12/11.1.13/11.2.2 会话历史/MCP重置/指标列表/历史分页** — 原因: 依赖 Checkpointer(模块7)/MCPClientManager(模块8)/BusinessRuleStore(模块6) 未实现。条件: 对应模块就绪后立即实现。时机: Phase 2。
+

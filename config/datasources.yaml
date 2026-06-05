@@ -1,0 +1,24 @@
+# 外挂模式数据源配置文件
+# 密码使用 ${ENV_VAR} 占位符，运行时从环境变量获取真实值
+
+datasources:
+  clickhouse_prod:
+    dialect: clickhouse
+    host: 10.0.1.100
+    port: 9000
+    database: analytics
+    username: reader
+    password: ${CK_PROD_PASSWORD}
+    description: 生产环境 ClickHouse 订单库
+    tags:
+      - 生产
+      - 只读
+
+  # postgres_analytics:
+  #   dialect: postgres
+  #   host: 10.0.2.50
+  #   port: 5432
+  #   database: ecommerce
+  #   username: readonly
+  #   password: ${PG_ANALYTICS_PASSWORD}
+  #   description: PostgreSQL 电商分析库

@@ -34,6 +34,7 @@ dev = [
     "langsmith>=0.3.0",
 ]
 clickhouse = ["clickhouse-connect>=0.8.0"]
+sqlite = ["aiosqlite>=0.20.0"]
 mysql = ["aiomysql>=0.2.0"]
 postgres = ["asyncpg>=0.30.0"]
 

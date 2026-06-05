@@ -13,6 +13,16 @@ from src.logging_config import get_logger
 
 logger = get_logger(__name__)
 
+# 模块级单例 — 启动时填充，请求时复用
+_registry: DataSourceRegistry | None = None
+
+
+def get_registry() -> "DataSourceRegistry":
+    global _registry
+    if _registry is None:
+        _registry = DataSourceRegistry()
+    return _registry
+
 
 class DataSourceRegistry:
     """统一入口。内置模式启动时自动填充，外挂模式由 API 动态填充。"""
