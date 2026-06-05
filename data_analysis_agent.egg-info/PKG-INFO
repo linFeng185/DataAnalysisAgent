@@ -1,0 +1,35 @@
+Metadata-Version: 2.4
+Name: data-analysis-agent
+Version: 0.1.0
+Summary: LLM 驱动的数据分析智能体
+Author: dev
+Requires-Python: >=3.12
+Requires-Dist: fastapi>=0.115.0
+Requires-Dist: uvicorn[standard]>=0.34.0
+Requires-Dist: pydantic>=2.0
+Requires-Dist: pydantic-settings>=2.0
+Requires-Dist: langchain>=0.3.0
+Requires-Dist: langchain-openai>=0.3.0
+Requires-Dist: langchain-anthropic>=0.3.0
+Requires-Dist: langgraph>=0.2.0
+Requires-Dist: sqlalchemy[asyncio]>=2.0
+Requires-Dist: sqlglot>=25.0
+Requires-Dist: chromadb>=0.5.0
+Requires-Dist: pandas>=2.0
+Requires-Dist: numpy>=2.0
+Requires-Dist: structlog>=24.0
+Requires-Dist: httpx>=0.28.0
+Requires-Dist: pyyaml>=6.0
+Requires-Dist: mcp>=1.0.0
+Requires-Dist: redis>=5.0
+Requires-Dist: sse-starlette>=2.0
+Provides-Extra: dev
+Requires-Dist: pytest>=8.0; extra == "dev"
+Requires-Dist: pytest-asyncio>=0.25.0; extra == "dev"
+Requires-Dist: langsmith>=0.3.0; extra == "dev"
+Provides-Extra: clickhouse
+Requires-Dist: clickhouse-connect>=0.8.0; extra == "clickhouse"
+Provides-Extra: mysql
+Requires-Dist: aiomysql>=0.2.0; extra == "mysql"
+Provides-Extra: postgres
+Requires-Dist: asyncpg>=0.30.0; extra == "postgres"

@@ -1,0 +1,49 @@
+[project]
+name = "data-analysis-agent"
+version = "0.1.0"
+description = "LLM 驱动的数据分析智能体"
+requires-python = ">=3.12"
+authors = [{name = "dev"}]
+
+dependencies = [
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.34.0",
+    "pydantic>=2.0",
+    "pydantic-settings>=2.0",
+    "langchain>=0.3.0",
+    "langchain-openai>=0.3.0",
+    "langchain-anthropic>=0.3.0",
+    "langgraph>=0.2.0",
+    "sqlalchemy[asyncio]>=2.0",
+    "sqlglot>=25.0",
+    "chromadb>=0.5.0",
+    "pandas>=2.0",
+    "numpy>=2.0",
+    "structlog>=24.0",
+    "httpx>=0.28.0",
+    "pyyaml>=6.0",
+    "mcp>=1.0.0",
+    "redis>=5.0",
+    "sse-starlette>=2.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.25.0",
+    "langsmith>=0.3.0",
+]
+clickhouse = ["clickhouse-connect>=0.8.0"]
+mysql = ["aiomysql>=0.2.0"]
+postgres = ["asyncpg>=0.30.0"]
+
+[build-system]
+requires = ["setuptools>=75.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["src*"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
