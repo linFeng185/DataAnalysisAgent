@@ -45,9 +45,12 @@ class SchemaManager:
 
     # ── 公开接口 ──────────────────────────────────────
 
-    async def get_or_fetch_schema(self, datasource_name: str):
+    async def get_or_fetch_schema(self, datasource_name: str, user_query: str = ""):
         """
         获取 Schema 的主入口 — 三级回退。
+
+        当 user_query 提供且表数量超过阈值时，自动启用语义搜索 + FK 扩张，
+        避免将数千张表全部塞入 LLM prompt。
 
         返回: SchemaSnapshot（永远不为 None，最差返回空快照）
         """
@@ -57,7 +60,10 @@ class SchemaManager:
         cached = self._query_cache(datasource_name)
         if cached and not self._any_expired(cached):
             logger.info("Schema 缓存命中", datasource=datasource_name, entries=len(cached))
-            return self._build_snapshot(cached)
+            snapshot = self._build_snapshot(cached)
+            if user_query:
+                snapshot = self._filter_relevant_tables(snapshot, user_query, datasource_name)
+            return snapshot
 
         if cached:
             logger.info("Schema 缓存部分过期，触发内省刷新", datasource=datasource_name)
@@ -75,7 +81,10 @@ class SchemaManager:
             self._upsert_to_cache(merged)
 
         result = merged or cached or []
-        return self._build_snapshot(result)
+        snapshot = self._build_snapshot(result)
+        if user_query:
+            snapshot = self._filter_relevant_tables(snapshot, user_query, datasource_name)
+        return snapshot
 
     # ── 私有：缓存查询 ─────────────────────────────────
 
@@ -219,6 +228,12 @@ class SchemaManager:
                 metadata={
                     "row_count_estimate": table.row_count_estimate or 0,
                     "description": table.description or "",
+                    "datasource": datasource_name,
+                    "foreign_keys": [
+                        {"target_table": r.target_table, "join_key": r.join_key,
+                         "relation_type": r.relation_type}
+                        for r in (table.relations or [])
+                    ],
                 },
             ))
 
@@ -290,6 +305,7 @@ class SchemaManager:
         from src.datasource.schema_snapshot import (
             ColumnInfo,
             SchemaSnapshot,
+            TableRelation,
             TableSchema,
         )
 
@@ -316,15 +332,130 @@ class SchemaManager:
                 )
                 for c in cols
             ]
+            # 从缓存恢复 FK 关系（兼容旧缓存无 foreign_keys 字段）
+            relations = []
+            for fk in t_entry.metadata.get("foreign_keys", []) or []:
+                relations.append(TableRelation(
+                    target_table=fk.get("target_table", ""),
+                    join_key=fk.get("join_key", ""),
+                    relation_type=fk.get("relation_type", "many_to_one"),
+                ))
             tables.append(TableSchema(
                 name=t_name,
                 description=t_entry.content.split(" - ", 1)[-1] if " - " in t_entry.content else "",
                 columns=columns,
-                relations=[],
+                relations=relations,
                 row_count_estimate=int(t_entry.metadata.get("row_count_estimate", 0)),
             ))
 
         return SchemaSnapshot(tables=tables)
+
+    # ── 语义搜索 + FK 扩张 ─────────────────────────────
+
+    # 表数量超过此阈值时触发语义筛选
+    _FILTER_THRESHOLD: int = 30
+    # 语义搜索返回的候选表数量
+    _SEMANTIC_TOP_K: int = 20
+
+    def _filter_relevant_tables(
+        self, snapshot, user_query: str, datasource_name: str
+    ):
+        """语义搜索 + FK 图扩张，从大量表中筛选与查询相关的子集。"""
+        tables = snapshot.tables if snapshot else []
+        if len(tables) <= self._FILTER_THRESHOLD:
+            logger.info("表数量未超阈值，跳过筛选", table_count=len(tables),
+                        threshold=self._FILTER_THRESHOLD)
+            return snapshot
+
+        # ① 构建 FK 图（用于后续扩张）
+        fk_graph = self._build_fk_graph(tables)
+
+        # ② 语义搜索相关表
+        matched_names = self._semantic_search_tables(user_query, datasource_name, tables)
+        logger.info("语义搜索完成", matched=len(matched_names),
+                    tables=sorted(matched_names))
+
+        # ③ FK 图扩张：包含与匹配表有 FK 关系的表（1-hop）
+        expanded = self._expand_fk_neighbors(matched_names, fk_graph)
+        added = expanded - matched_names
+        if added:
+            logger.info("FK 扩张", added_tables=sorted(added),
+                        added_count=len(added))
+
+        # ④ 构建筛选后的快照
+        all_selected = {t.lower() for t in expanded}
+        filtered_tables = [t for t in tables if t.name.lower() in all_selected]
+        from src.datasource.schema_snapshot import SchemaSnapshot
+        logger.info("表筛选完成", total=len(tables), selected=len(filtered_tables),
+                    filtered_out=len(tables) - len(filtered_tables))
+        return SchemaSnapshot(tables=filtered_tables)
+
+    @staticmethod
+    def _build_fk_graph(tables: list) -> dict[str, set[str]]:
+        """构建 FK 双向邻接表 {table_name: {related_table_names}}。
+
+        同时建立出边（我引用谁）和入边（谁引用我），
+        确保 JOIN 查询的上下游表都被覆盖。
+        """
+        graph: dict[str, set[str]] = {}
+        for t in tables:
+            graph.setdefault(t.name.lower(), set())
+            for r in (t.relations or []):
+                src = t.name.lower()
+                dst = r.target_table.lower()
+                graph.setdefault(src, set()).add(dst)
+                graph.setdefault(dst, set()).add(src)
+        return graph
+
+    @staticmethod
+    def _expand_fk_neighbors(
+        seed_tables: set[str], fk_graph: dict[str, set[str]]
+    ) -> set[str]:
+        """将种子表集合按 FK 图扩张 1-hop。"""
+        result = set(seed_tables)
+        for t in seed_tables:
+            neighbors = fk_graph.get(t.lower(), set())
+            result.update(neighbors)
+        return result
+
+    def _semantic_search_tables(
+        self, user_query: str, datasource_name: str, tables: list
+    ) -> set[str]:
+        """通过 ChromaDB 语义搜索找到与用户查询最相关的表。
+
+        使用 ChromaDB 的 query 做 embedding 相似度匹配，
+        然后通过 ID 前缀过滤到目标数据源。
+        """
+        try:
+            # 获取足够多的候选结果（跨数据源），再后过滤
+            n_fetch = max(self._SEMANTIC_TOP_K * 5, 100)
+            results = self._collection.query(
+                query_texts=[user_query],
+                where={"category": "table"},
+                n_results=min(n_fetch, self._collection.count()),
+            )
+            ids_list = results.get("ids", [[]])
+            distances = results.get("distances", [[]])
+            if not ids_list or not ids_list[0]:
+                logger.warning("语义搜索无结果，回退到全部表")
+                return {t.name.lower() for t in tables}
+
+            prefix = f"table:{datasource_name}."
+            matched: list[tuple[str, float]] = []
+            for entry_id, dist in zip(ids_list[0], distances[0] if distances else []):
+                if entry_id.startswith(prefix):
+                    table_name = entry_id[len(prefix):]
+                    matched.append((table_name, dist))
+
+            # 按相似度排序，取 top-K
+            matched.sort(key=lambda x: x[1])
+            selected = {name for name, _ in matched[:self._SEMANTIC_TOP_K]}
+            logger.info("语义搜索匹配", query=user_query[:60],
+                        candidates=len(matched), selected=len(selected))
+            return selected
+        except Exception as e:
+            logger.warning("语义搜索失败，回退到全部表", error=str(e))
+            return {t.name.lower() for t in tables}
 
     # ── 格式化辅助 ─────────────────────────────────────
 

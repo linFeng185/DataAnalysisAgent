@@ -16,7 +16,10 @@ async def retrieve_schema_node(state: AnalysisState) -> dict:
         try:
             from src.knowledge.schema_manager import get_schema_manager
             manager = get_schema_manager()
-            schema = await manager.get_or_fetch_schema(datasource_name)
+            schema = await manager.get_or_fetch_schema(
+                datasource_name,
+                user_query=state.get("user_query", ""),
+            )
             tables_count = len(schema.tables) if schema else 0
             logger.info("Schema 检索成功", tables=tables_count)
             if tables_count == 0:
