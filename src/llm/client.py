@@ -26,14 +26,14 @@ def get_openai_llm(model: str | None = None, temperature: float | None = None, m
     logger.info("LLM 初始化", model=model_name, base_url=base, has_key=bool(s.openai_api_key),
                 reasoning=sf.reasoning and reasoning, streaming=sf.streaming)
 
-    from langchain_openai import ChatOpenAI
+    from src.llm.reasoning_chat_openai import ReasoningChatOpenAI
     adapter_kwargs = adapter.get_chat_openai_kwargs()
 
     if not reasoning:
         adapter_kwargs.pop("reasoning_effort", None)
         adapter_kwargs.pop("extra_body", None)
 
-    return ChatOpenAI(
+    return ReasoningChatOpenAI(
         model=model_name,
         temperature=temperature if temperature is not None else s.llm_temperature,
         max_tokens=max_tokens or s.llm_max_tokens,

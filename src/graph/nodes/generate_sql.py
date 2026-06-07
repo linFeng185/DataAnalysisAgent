@@ -70,16 +70,17 @@ async def generate_sql_node(state: AnalysisState, config: RunnableConfig) -> dic
     # ── 主路径：LLM 流式生成 ──
     if is_llm_available():
         logger.info("SQL 生成: 调用 LLM", query=query[:80], dialect=dialect, retry=retry)
-        sql = await _llm_generate(
+        sql, reasoning = await _llm_generate(
             schema_text, dialect_hint, query, error_context, skill_prompt, config,
         )
     else:
-        # 回退路径：无 API Key 时用模板拼一个简单的 SELECT
-        logger.warning("SQL 生成: LLM 不可用, 使用模板回退", tables_count=len(tables))
-        sql = _template_generate(tables, retry, state)
+        sql, reasoning = _template_generate(tables, retry, state), ""
 
-    logger.info("SQL 生成完成", sql=sql[:200])
-    return {"generated_sql": sql, "retry_count": retry}
+    logger.info("SQL 生成完成", sql=sql[:200], reasoning_chars=len(reasoning))
+    result = {"generated_sql": sql, "retry_count": retry}
+    if reasoning:
+        result["sql_reasoning_content"] = reasoning
+    return result
 
 
 async def _llm_generate(
@@ -89,9 +90,9 @@ async def _llm_generate(
     error_ctx: str,
     skill_prompt: str,
     config: RunnableConfig,
-) -> str:
+) -> tuple[str, str]:
     """
-    调用 LLM 流式生成 SQL 的核心逻辑。
+    调用 LLM 流式生成 SQL 的核心逻辑，返回 (sql, reasoning_content)。
 
     使用 astream + config 实现真流式：
     - DeepSeek 的 reasoning_content 逐 chunk 推送 → 前端实时看到推理过程
@@ -132,10 +133,12 @@ async def _llm_generate(
         content_parts: list[str] = []
         reasoning_parts: list[str] = []
         async for chunk in llm.astream(messages, config=config):
-            # 提取 content
+            # 提取 content（兼容 AIMessageChunk.content 和 ChatGenerationChunk.text）
             chunk_content = ""
             if hasattr(chunk, "content") and chunk.content:
                 chunk_content = chunk.content if isinstance(chunk.content, str) else str(chunk.content)
+            elif hasattr(chunk, "text") and chunk.text:
+                chunk_content = chunk.text if isinstance(chunk.text, str) else str(chunk.text)
             if chunk_content:
                 content_parts.append(chunk_content)
 
@@ -145,14 +148,16 @@ async def _llm_generate(
                 reasoning_parts.append(reasoning)
 
         raw = "".join(content_parts)
+        reasoning_text = "".join(reasoning_parts)
         if reasoning_parts:
-            logger.info("LLM 推理链", reasoning="".join(reasoning_parts)[:500])
-        logger.info("LLM 原始响应", raw=raw[:500])
+            logger.info("LLM 推理链", reasoning_chunks=len(reasoning_parts),
+                        reasoning=reasoning_text[:500])
+        logger.info("LLM 原始响应", raw=raw[:500], content_chunks=len(content_parts))
 
         # ── 响应内容为空时的回退 ──
         if not raw or raw.strip() == "":
             logger.error("LLM 返回空内容")
-            return "-- LLM 返回空内容"
+            return "-- LLM 返回空内容", reasoning_text
 
         text = raw.strip()
 
@@ -160,45 +165,52 @@ async def _llm_generate(
         if "```json" in text:
             text = text.split("```json")[1].split("```")[0]
         elif "```sql" in text:
-            return text.split("```sql")[1].split("```")[0].strip()
+            return text.split("```sql")[1].split("```")[0].strip(), reasoning_text
         elif "```" in text:
             text = text.split("```")[1].split("```")[0]
 
         try:
             data = json.loads(text)
-            return data.get("sql", text)
+            return data.get("sql", text), reasoning_text
         except json.JSONDecodeError:
             pass
 
         if "SELECT" in text.upper():
             match = re.search(r"SELECT[\s\S]*?(?:;|$)", text, re.IGNORECASE)
             if match:
-                return match.group(0).strip().rstrip(";")
+                return match.group(0).strip().rstrip(";"), reasoning_text
 
-        return text.strip()
+        return text.strip(), reasoning_text
 
     except Exception as e:
         logger.error("LLM 调用失败", error=str(e))
-        return "-- LLM 调用失败，请检查 API Key 配置"
+        return "-- LLM 调用失败，请检查 API Key 配置", ""
 
 
 def _extract_chunk_reasoning(chunk) -> str:
-    """从流式 chunk 中提取 reasoning_content，兼容多种 LangChain 版本。"""
-    if hasattr(chunk, "additional_kwargs") and isinstance(chunk.additional_kwargs, dict):
-        r = chunk.additional_kwargs.get("reasoning_content", "")
+    """从流式 chunk 中提取 reasoning_content，兼容多种 LangChain 版本。
+
+    支持 AIMessageChunk 和 ChatGenerationChunk（通过 .message 解包）。
+    """
+    target = chunk
+    if hasattr(chunk, "message") and not hasattr(chunk, "additional_kwargs"):
+        target = chunk.message
+
+    if hasattr(target, "additional_kwargs") and isinstance(target.additional_kwargs, dict):
+        r = target.additional_kwargs.get("reasoning_content", "")
         if r:
             return r if isinstance(r, str) else str(r)
 
-    if hasattr(chunk, "response_metadata") and isinstance(chunk.response_metadata, dict):
-        choices = chunk.response_metadata.get("choices", [])
+    if hasattr(target, "response_metadata") and isinstance(target.response_metadata, dict):
+        choices = target.response_metadata.get("choices", [])
         if choices and isinstance(choices, list):
             delta = choices[0].get("delta", {}) if isinstance(choices[0], dict) else {}
             r = delta.get("reasoning_content", "") if isinstance(delta, dict) else ""
             if r:
                 return r if isinstance(r, str) else str(r)
 
-    if hasattr(chunk, "reasoning_content") and chunk.reasoning_content:
-        rc = chunk.reasoning_content
+    if hasattr(target, "reasoning_content") and target.reasoning_content:
+        rc = target.reasoning_content
         return rc if isinstance(rc, str) else str(rc)
 
     return ""

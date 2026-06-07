@@ -63,6 +63,9 @@ class AnalysisState(TypedDict, total=False):
     generated_sql: str
     """LLM 生成的 SQL 语句。—— generate_sql 写，layer3_validate / execute_sql 读"""
 
+    sql_reasoning_content: str
+    """SQL 生成时的模型推理链（DeepSeek thinking）。—— generate_sql 写，build_response 读"""
+
     retry_count: int
     """当前重试次数（0-3）。—— generate_sql 递增写，条件路由读"""
 

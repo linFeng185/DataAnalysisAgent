@@ -74,27 +74,42 @@ class ModelAdapter(ABC):
         return ParsedResponse(content=content, reasoning_content=reasoning, tool_calls=tool_calls)
 
     def parse_stream_chunk(self, chunk) -> StreamChunk:
-        """从流式 chunk 中提取内容和推理链。"""
+        """从流式 chunk 中提取内容和推理链。
+
+        支持 AIMessageChunk 和 ChatGenerationChunk 两种输入。
+        """
         reasoning = self._extract_reasoning(chunk)
         content = ""
         if hasattr(chunk, "content") and chunk.content:
             content = chunk.content if isinstance(chunk.content, str) else str(chunk.content)
+        elif hasattr(chunk, "text") and chunk.text:
+            # ChatGenerationChunk 通过 .text 属性暴露内容
+            content = chunk.text if isinstance(chunk.text, str) else str(chunk.text)
         return StreamChunk(reasoning_content=reasoning, content=content)
 
     def _extract_reasoning(self, obj) -> str:
-        """从 LangChain message/chunk 中提取 reasoning_content，兼容多版本。"""
-        if hasattr(obj, "additional_kwargs") and isinstance(obj.additional_kwargs, dict):
-            r = obj.additional_kwargs.get("reasoning_content", "")
+        """从 LangChain message/chunk 中提取 reasoning_content，兼容多版本。
+
+        支持两种输入：
+        - AIMessageChunk（直接含 additional_kwargs / reasoning_content 属性）
+        - ChatGenerationChunk（reasoning_content 在 .message 子对象上）
+        """
+        target = obj
+        if hasattr(obj, "message") and not hasattr(obj, "additional_kwargs"):
+            target = obj.message
+
+        if hasattr(target, "additional_kwargs") and isinstance(target.additional_kwargs, dict):
+            r = target.additional_kwargs.get("reasoning_content", "")
             if r:
                 return r if isinstance(r, str) else str(r)
 
-        if hasattr(obj, "response_metadata") and isinstance(obj.response_metadata, dict):
-            r = obj.response_metadata.get("reasoning_content", "")
+        if hasattr(target, "response_metadata") and isinstance(target.response_metadata, dict):
+            r = target.response_metadata.get("reasoning_content", "")
             if r:
                 return r if isinstance(r, str) else str(r)
 
-        if hasattr(obj, "reasoning_content") and obj.reasoning_content:
-            rc = obj.reasoning_content
+        if hasattr(target, "reasoning_content") and target.reasoning_content:
+            rc = target.reasoning_content
             return rc if isinstance(rc, str) else str(rc)
 
         return ""

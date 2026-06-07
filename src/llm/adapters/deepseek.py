@@ -26,8 +26,11 @@ class DeepSeekV4ProAdapter(ModelAdapter):
         result = super().parse_stream_chunk(chunk)
         if not result.reasoning_content:
             try:
-                if hasattr(chunk, "response_metadata") and isinstance(chunk.response_metadata, dict):
-                    choices = chunk.response_metadata.get("choices", [])
+                target = chunk
+                if hasattr(chunk, "message") and not hasattr(chunk, "additional_kwargs"):
+                    target = chunk.message
+                if hasattr(target, "response_metadata") and isinstance(target.response_metadata, dict):
+                    choices = target.response_metadata.get("choices", [])
                     if choices and isinstance(choices, list) and len(choices) > 0:
                         delta = choices[0].get("delta", {}) if isinstance(choices[0], dict) else getattr(choices[0], "delta", {})
                         rc = delta.get("reasoning_content", "") if isinstance(delta, dict) else getattr(delta, "reasoning_content", "")

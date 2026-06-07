@@ -102,15 +102,22 @@ async def _llm_analyze(rows, sql, stats, trend, outlier, conc) -> dict:
 
     try:
         from langchain_core.messages import HumanMessage, SystemMessage
+        from src.llm.adapters.registry import get_adapter
+        from src.config import get_settings
         llm = get_llm(temperature=0.3)
         resp = await llm.ainvoke([SystemMessage(content=DATA_ANALYSIS_SYSTEM), HumanMessage(content=user_msg)])
+        adapter = get_adapter(get_settings().llm_model)
+        parsed = adapter.parse_response(resp)
         data = json.loads(resp.content.strip().removeprefix("```json").removesuffix("```").strip())
-        return {
+        result = {
             "summary": data.get("summary", ""),
             "insights": data.get("insights", []),
             "recommended_chart_type": data.get("recommended_chart_type", "table"),
             "follow_up_questions": data.get("follow_up_questions", []),
         }
+        if parsed.reasoning_content:
+            result["analysis_reasoning_content"] = parsed.reasoning_content
+        return result
     except Exception as e:
         logger.error("LLM 分析失败", error=str(e))
         return _rule_analyze(rows, stats, trend, outlier, conc, "table", "query")

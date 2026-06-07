@@ -39,7 +39,8 @@ async def stream_analysis(user_query: str, datasource: str):
     """SSE: 逐 Node 推送进度 + LLM token + 关键结果。"""
     from src.graph.workflow import app
 
-    stats = {"chain_start": 0, "chain_end": 0, "chat_model_stream": 0, "chat_model_start": 0}
+    stats = {"chain_start": 0, "chain_end": 0, "chat_model_stream": 0, "chat_model_start": 0,
+             "thinking_events": 0, "token_events": 0}
     llm_content_parts: list[str] = []
     current_llm_node: str | None = None
 
@@ -90,13 +91,23 @@ async def stream_analysis(user_query: str, datasource: str):
                 stats["chat_model_stream"] += 1
                 chunk = event.get("data", {}).get("chunk")
                 if chunk:
+                    # ChatGenerationChunk 包裹了 AIMessageChunk，需解包
+                    # (LangGraph 某些版本传递原始 ChatGenerationChunk 而非内部 message)
+                    if hasattr(chunk, "message") and not hasattr(chunk, "additional_kwargs"):
+                        if stats["chat_model_stream"] == 1:
+                            logger.info("LLM 流式 chunk 类型: ChatGenerationChunk, 自动解包")
+                        chunk = chunk.message
+                    elif stats["chat_model_stream"] == 1:
+                        logger.info("LLM 流式 chunk 类型", type=type(chunk).__name__)
                     from src.llm.adapters.registry import get_adapter
                     from src.config import get_settings
                     adapter = get_adapter(get_settings().llm_model)
                     sc = adapter.parse_stream_chunk(chunk)
                     if sc.reasoning_content:
-                        yield _sse("thinking", {"content": sc.reasoning_content})
+                        stats["thinking_events"] += 1
+                        yield _sse("thinking", {"reasoning_content": sc.reasoning_content})
                     if sc.content:
+                        stats["token_events"] += 1
                         llm_content_parts.append(sc.content)
                         yield _sse("token", {"content": sc.content})
 
@@ -109,7 +120,8 @@ async def stream_analysis(user_query: str, datasource: str):
         logger.error("流式错误", error=str(e))
         yield _sse("error", {"message": str(e)})
 
-    logger.info("流式完成", stats=stats, had_stream_tokens=stats["chat_model_stream"] > 0)
+    logger.info("流式完成", stats=stats, had_stream_tokens=stats["chat_model_stream"] > 0,
+                thinking=stats["thinking_events"], tokens=stats["token_events"])
     yield _sse("done", {"status": "complete"})
 
 
