@@ -29,6 +29,18 @@ async def lifespan(app: FastAPI):
     from src.datasource.setup import ensure_demo_datasource
     await ensure_demo_datasource()
 
+    # 加载外部数据源（config/datasources.yaml）
+    try:
+        from src.datasource.providers.external import ExternalDataSourceProvider
+        from src.datasource.registry import get_registry
+        provider = ExternalDataSourceProvider.from_yaml("config/datasources.yaml")
+        get_registry().register_provider("external", provider)
+        registered = await provider.list_all()
+        logger.info("外部数据源加载完成", count=len(registered),
+                     names=[r.name for r in registered])
+    except Exception as e:
+        logger.warning("外部数据源加载失败", error=str(e))
+
     yield
     logger.info("智能体已关闭")
 

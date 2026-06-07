@@ -6,6 +6,7 @@ import shutil
 from pathlib import Path
 from typing import Literal
 
+from dotenv import load_dotenv
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # 项目根目录 (src/config.py → src/ → 项目根)
@@ -17,6 +18,9 @@ _ENV_EXAMPLE = _PROJECT_ROOT / ".env.example"
 if not _ENV_FILE.exists() and _ENV_EXAMPLE.exists():
     shutil.copy(_ENV_EXAMPLE, _ENV_FILE)
     print(f"[init] 自动创建 .env 从 {_ENV_EXAMPLE}，请编辑 .env 填入真实配置")
+
+# 将 .env 中所有键值注入 os.environ，确保 CredentialManager.resolve_env_ref 能解析 ${VAR} 占位符
+load_dotenv(_ENV_FILE)
 
 
 class Settings(BaseSettings):
@@ -51,6 +55,7 @@ class Settings(BaseSettings):
     # ---- ChromaDB ----
     chroma_persist_dir: str = "./chroma_data"
     chroma_collection_name: str = "data_agent_knowledge"
+    embedding_model_path: str = ""  # all-MiniLM-L6-v2 模型目录路径，必须配置
 
     # ---- Redis ----
     redis_url: str = "redis://localhost:6379/0"

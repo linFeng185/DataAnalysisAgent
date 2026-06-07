@@ -3,11 +3,22 @@
 from __future__ import annotations
 
 import json
+from datetime import date, datetime
+from decimal import Decimal
 
 from src.graph.state import AnalysisState
 from src.llm.client import get_llm, is_llm_available
 from src.llm.prompts import DATA_ANALYSIS_SYSTEM
 from src.logging_config import get_logger
+
+
+def _json_default(obj):
+    """处理 date/datetime/Decimal，供 json.dumps 使用。"""
+    if isinstance(obj, (datetime, date)):
+        return obj.isoformat()
+    if isinstance(obj, Decimal):
+        return float(obj)
+    raise TypeError(f"Type {type(obj)} not serializable")
 from src.tools.analyzer import (
     compute_concentration,
     compute_statistics,
@@ -70,8 +81,8 @@ async def analyze_result_node(state: AnalysisState) -> dict:
 
 async def _llm_analyze(rows, sql, stats, trend, outlier, conc) -> dict:
     """LLM 生成分析报告。"""
-    sample = json.dumps(rows[:20], ensure_ascii=False, indent=2)
-    stat_text = json.dumps(stats.get("columns", {}), ensure_ascii=False)
+    sample = json.dumps(rows[:20], ensure_ascii=False, indent=2, default=_json_default)
+    stat_text = json.dumps(stats.get("columns", {}), ensure_ascii=False, default=_json_default)
 
     user_msg = f"""## 执行的 SQL
 ```sql

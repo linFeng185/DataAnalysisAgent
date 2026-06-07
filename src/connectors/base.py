@@ -122,4 +122,10 @@ def create_connector(ds: DataSourceConfig) -> ConnectorBase:
     if ds.dialect == "sqlite":
         from src.connectors.sqlite import SQLiteConnector
         return SQLiteConnector(ds)
+    if ds.dialect == "oracle":
+        from src.connectors.oracle import OracleConnector
+        return OracleConnector(ds)
+    if ds.dialect == "mssql":
+        from src.connectors.mssql import SQLServerConnector
+        return SQLServerConnector(ds)
     raise ValueError(f"不支持的方言: {ds.dialect}")

@@ -11,8 +11,12 @@ from src.logging_config import get_logger
 logger = get_logger(__name__)
 
 
-def get_openai_llm(model: str | None = None, temperature: float | None = None, max_tokens: int | None = None) -> BaseChatModel:
-    """10.1.1 ChatOpenAI 工厂 — 通过适配器注入模型特有参数。"""
+def get_openai_llm(model: str | None = None, temperature: float | None = None, max_tokens: int | None = None, reasoning: bool = True) -> BaseChatModel:
+    """10.1.1 ChatOpenAI 工厂 — 通过适配器注入模型特有参数。
+
+    reasoning=False 时剥离 reasoning_effort/extra_body 参数，
+    用于 SQL 生成等结构化任务，可显著降低首 token 延迟。
+    """
     s = get_settings()
     model_name = model or s.llm_model
     adapter = get_adapter(model_name)
@@ -20,10 +24,15 @@ def get_openai_llm(model: str | None = None, temperature: float | None = None, m
     sf = adapter.supported_features
 
     logger.info("LLM 初始化", model=model_name, base_url=base, has_key=bool(s.openai_api_key),
-                reasoning=sf.reasoning, streaming=sf.streaming)
+                reasoning=sf.reasoning and reasoning, streaming=sf.streaming)
 
     from langchain_openai import ChatOpenAI
     adapter_kwargs = adapter.get_chat_openai_kwargs()
+
+    if not reasoning:
+        adapter_kwargs.pop("reasoning_effort", None)
+        adapter_kwargs.pop("extra_body", None)
+
     return ChatOpenAI(
         model=model_name,
         temperature=temperature if temperature is not None else s.llm_temperature,
@@ -50,13 +59,13 @@ def get_anthropic_llm(model: str | None = None, temperature: float | None = None
     )
 
 
-def get_llm(provider: str | None = None, model: str | None = None, temperature: float | None = None) -> BaseChatModel:
+def get_llm(provider: str | None = None, model: str | None = None, temperature: float | None = None, reasoning: bool = True) -> BaseChatModel:
     """10.1.3 路由器。"""
     s = get_settings()
     provider = provider or s.llm_provider
     if provider == "anthropic":
         return get_anthropic_llm(model=model, temperature=temperature)
-    return get_openai_llm(model=model, temperature=temperature)
+    return get_openai_llm(model=model, temperature=temperature, reasoning=reasoning)
 
 
 def get_cheap_llm() -> BaseChatModel:

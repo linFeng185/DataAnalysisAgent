@@ -55,7 +55,11 @@ def setup_logging() -> None:
 
     logging.getLogger("httpx").setLevel(logging.WARNING)
     logging.getLogger("chromadb").setLevel(logging.WARNING)
-    logging.getLogger("sqlalchemy.engine").setLevel(logging.WARNING)
+    sqlalchemy_log_level = logging.INFO if settings.env == "dev" else logging.WARNING
+    logging.getLogger("sqlalchemy.engine").setLevel(sqlalchemy_log_level)
+    # 移除 SQLAlchemy 自带的 handler，防止与 structlog handler 重复输出
+    logging.getLogger("sqlalchemy.engine").handlers.clear()
+    logging.getLogger("sqlalchemy.engine").propagate = True
 
 
 def get_logger(name: str) -> structlog.stdlib.BoundLogger:

@@ -3,10 +3,23 @@
 from __future__ import annotations
 
 import json
+from datetime import date, datetime
+from decimal import Decimal
 
 from src.logging_config import get_logger
 
 logger = get_logger(__name__)
+
+
+def _json_serialize(obj):
+    """JSON 序列化器，处理 date/datetime/Decimal 等非原生类型。"""
+    if isinstance(obj, (datetime, date)):
+        return obj.isoformat()
+    if isinstance(obj, Decimal):
+        return float(obj)
+    if isinstance(obj, bytes):
+        return obj.decode("utf-8", errors="replace")
+    raise TypeError(f"Type {type(obj)} not serializable")
 
 # 需要推送 progress 事件的关键节点及其描述
 _PROGRESS_MAP: dict[str, str] = {
@@ -101,7 +114,7 @@ async def stream_analysis(user_query: str, datasource: str):
 
 
 def _sse(event: str, data: dict) -> str:
-    return f"data: {json.dumps({'type': event, **data}, ensure_ascii=False)}\n\n"
+    return f"data: {json.dumps({'type': event, **data}, ensure_ascii=False, default=_json_serialize)}\n\n"
 
 
 def _find_parent_node(event: dict) -> str | None:

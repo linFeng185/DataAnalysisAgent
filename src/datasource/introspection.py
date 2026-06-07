@@ -44,6 +44,26 @@ COLUMNS_QUERY = {
         ) pk ON c.column_name = pk.column_name
         WHERE c.table_name = :table
     """,
+    "oracle": """
+        SELECT COLUMN_NAME AS name, DATA_TYPE AS type,
+               NULL AS comment, NULLABLE AS is_nullable,
+               NULL AS column_key
+        FROM ALL_TAB_COLUMNS
+        WHERE TABLE_NAME = UPPER(:table) AND OWNER = UPPER(:database)
+    """,
+    "mssql": """
+        SELECT COLUMN_NAME AS name, DATA_TYPE AS type,
+               ISNULL(CAST(ep.value AS VARCHAR(200)), chr(39)+chr(39)) AS comment,
+               IS_NULLABLE AS is_nullable,
+               CASE WHEN pk.COLUMN_NAME IS NOT NULL THEN chr(39)+PRI+chr(39) ELSE NULL END AS column_key
+        FROM INFORMATION_SCHEMA.COLUMNS c
+        LEFT JOIN sys.extended_properties ep ON ep.major_id = OBJECT_ID(c.TABLE_NAME) AND ep.minor_id = c.ORDINAL_POSITION AND ep.name = chr(39)+MS_Description+chr(39)
+        LEFT JOIN (
+            SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.KEY_COLUMN_USAGE
+            WHERE OBJECTPROPERTY(OBJECT_ID(CONSTRAINT_NAME), chr(39)+IsPrimaryKey+chr(39)) = 1 AND TABLE_NAME = :table
+        ) pk ON c.COLUMN_NAME = pk.COLUMN_NAME
+        WHERE c.TABLE_NAME = :table
+    """,
 }
 
 FK_QUERY = {
@@ -61,12 +81,29 @@ FK_QUERY = {
         WHERE tc.constraint_type = 'FOREIGN KEY' AND tc.table_name = :table
     """,
     "clickhouse": None,
+    "oracle": """
+        SELECT a.COLUMN_NAME AS column_name, c_pk.TABLE_NAME AS target_table,
+               a.COLUMN_NAME AS target_column
+        FROM ALL_CONS_COLUMNS a
+        JOIN ALL_CONSTRAINTS c ON a.CONSTRAINT_NAME = c.CONSTRAINT_NAME
+        JOIN ALL_CONSTRAINTS c_pk ON c.R_CONSTRAINT_NAME = c_pk.CONSTRAINT_NAME
+        WHERE c.CONSTRAINT_TYPE = chr(39)+R+chr(39) AND a.TABLE_NAME = UPPER(:table)
+    """,
+    "mssql": """
+        SELECT COL_NAME(fkc.parent_object_id, fkc.parent_column_id) AS column_name,
+               OBJECT_NAME(fkc.referenced_object_id) AS target_table,
+               COL_NAME(fkc.referenced_object_id, fkc.referenced_column_id) AS target_column
+        FROM sys.foreign_key_columns fkc
+        WHERE OBJECT_NAME(fkc.parent_object_id) = :table
+    """,
 }
 
 ROW_COUNT_QUERY = {
     "clickhouse": "SELECT COUNT(*) AS count FROM {table}",
     "mysql": "SELECT TABLE_ROWS AS table_rows FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = :database AND TABLE_NAME = :table",
     "postgres": "SELECT reltuples::bigint AS count FROM pg_class WHERE relname = :table",
+    "oracle": "SELECT NUM_ROWS AS count FROM ALL_TABLES WHERE TABLE_NAME = UPPER(:table)",
+    "mssql": "SELECT SUM(row_count) AS count FROM sys.dm_db_partition_stats WHERE OBJECT_ID = OBJECT_ID(:table) AND index_id IN (0,1)",
 }
 
 

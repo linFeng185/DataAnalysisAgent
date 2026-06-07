@@ -50,7 +50,7 @@ class DataSourceRegistry:
             config.engine = await self._create_engine(config)
 
             if not await provider.test_connection(config):
-                raise DataSourceNotFoundError(f"数据源 '{name}' 连接失败")
+                raise ConnectionError(f"数据源 '{name}' 连接失败")
 
             try:
                 config.schema = await provider.extract_schema(config)
@@ -65,21 +65,39 @@ class DataSourceRegistry:
         raise DataSourceNotFoundError(name)
 
     async def _create_engine(self, ds: DataSourceConfig) -> AsyncEngine:
+        from urllib.parse import quote_plus
         settings = get_settings()
+        pwd = quote_plus(ds.password) if ds.password else ""
+        sync_dialects = {"oracle", "mssql"}
+        if ds.dialect in sync_dialects:
+            from sqlalchemy import create_engine
+            url_map = {
+                "oracle": f"oracle+oracledb://{ds.username}:{pwd}@{ds.host}:{ds.port}/?service_name={ds.database}",
+                "mssql": f"mssql+pymssql://{ds.username}:{pwd}@{ds.host}:{ds.port}/{ds.database}",
+            }
+            url = url_map.get(ds.dialect, "")
+            return create_engine(
+                url,
+                pool_size=2, max_overflow=5,
+                pool_pre_ping=True, pool_recycle=1800,
+                echo=False,  # SQL 日志统一走 structlog，避免 echo=True 导致双份输出
+            )
         scheme_map = {
             "clickhouse": "clickhouse+asynch",
             "mysql": "mysql+aiomysql",
             "postgres": "postgresql+asyncpg",
         }
         scheme = scheme_map.get(ds.dialect, "postgresql+asyncpg")
-        url = f"{scheme}://{ds.username}:{ds.password}@{ds.host}:{ds.port}/{ds.database}"
+        # MySQL 需要 charset=utf8mb4 参数
+        extra = "?charset=utf8mb4" if ds.dialect == "mysql" else ""
+        url = f"{scheme}://{ds.username}:{pwd}@{ds.host}:{ds.port}/{ds.database}{extra}"
         pool_size = ds.extra_params.get("pool_size", 5)
         return create_async_engine(
             url,
             pool_size=pool_size,
             max_overflow=ds.extra_params.get("max_overflow", 10),
             pool_pre_ping=True,
-            echo=settings.env == "dev",
+            echo=False,  # SQL 日志统一走 structlog，避免 echo=True 导致双份输出
         )
 
     async def list_all(self) -> list[dict]:

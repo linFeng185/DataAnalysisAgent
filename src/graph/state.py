@@ -40,6 +40,10 @@ class AnalysisState(TypedDict, total=False):
     skill_tools: list[Any]
 
     # ── Schema 层 ──────────────────────────────────
+    dialect: str
+    """数据源方言（clickhouse/mysql/postgres/oracle/mssql）。
+    —— retrieve_schema 从 Registry 获取并写入，generate_sql 读"""
+
     resolved_schema: Any
     """数据源 Registry 返回的 Schema 对象。—— retrieve_schema 写"""
 

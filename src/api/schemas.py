@@ -33,7 +33,7 @@ class ErrorResponse(BaseModel):
 
 class DataSourceCreateRequest(BaseModel):
     name: str = Field(..., min_length=1, max_length=64)
-    dialect: str = Field(..., pattern="^(clickhouse|mysql|postgres|presto|hive)$")
+    dialect: str = Field(..., pattern="^(clickhouse|mysql|postgres|presto|hive|oracle|mssql)$")
     host: str = "localhost"
     port: int = 0
     database: str = ""

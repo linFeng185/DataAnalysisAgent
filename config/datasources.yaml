@@ -14,11 +14,50 @@ datasources:
       - 生产
       - 只读
 
-  # postgres_analytics:
-  #   dialect: postgres
-  #   host: 10.0.2.50
-  #   port: 5432
-  #   database: ecommerce
-  #   username: readonly
-  #   password: ${PG_ANALYTICS_PASSWORD}
-  #   description: PostgreSQL 电商分析库
+  mysql_test:
+    dialect: mysql
+    host: 192.168.195.133
+    port: 3306
+    database: test
+    username: root
+    password: ${MYSQL_PASSWORD}
+    description: MySQL 8.0 测试库
+    tags:
+      - 测试
+      - mysql
+
+  postgres_main:
+    dialect: postgres
+    host: 192.168.195.133
+    port: 5432
+    database: postgres
+    username: postgres
+    password: ${PG_PASSWORD}
+    description: PostgreSQL 16 主库
+    tags:
+      - 测试
+      - postgres
+
+  oracle_xe:
+    dialect: oracle
+    host: 192.168.195.133
+    port: 1521
+    database: XEPDB1
+    username: TEST_USER
+    password: ${ORACLE_PASSWORD}
+    description: Oracle XE 21c 测试库
+    tags:
+      - 测试
+      - oracle
+
+  mssql_express:
+    dialect: mssql
+    host: 192.168.195.133
+    port: 1433
+    database: master
+    username: sa
+    password: ${MSSQL_PASSWORD}
+    description: SQL Server 2019 Express
+    tags:
+      - 测试
+      - mssql
