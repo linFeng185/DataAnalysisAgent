@@ -262,23 +262,23 @@
 
 | # | 功能 | 文件 | 描述 | 状态 |
 |---|------|------|------|------|
-| 5.1.1 | SchemaExplorerTool | `src/tools/schema_explorer.py` | 继承 BaseTool，封装 SchemaManager.get_or_fetch_schema() | 待开发 |
-| 5.1.2 | SQLGeneratorTool | `src/tools/sql_generator.py` | 继承 BaseTool，封装 SQL 生成逻辑 | 待开发 |
-| 5.1.3 | SQLglotValidatorTool | `src/tools/sqlglot_validator.py` | 继承 BaseTool，封装 validate_with_sqlglot() | 待开发 |
-| 5.1.4 | DBExecutorTool | `src/tools/db_executor.py` | 继承 BaseTool，封装 SQL 执行逻辑 | 待开发 |
-| 5.1.5 | DBExplainTool | `src/tools/db_explain.py` | 继承 BaseTool，封装 EXPLAIN 空跑逻辑 | 待开发 |
-| 5.1.6 | DataAnalyzerTool | `src/tools/analyzer.py` | 继承 BaseTool，封装数据分析逻辑 | 待开发 |
-| 5.1.7 | ChartGeneratorTool | `src/tools/chart_generator.py` | 继承 BaseTool，封装图表生成逻辑 | 待开发 |
+| 5.1.1 | SchemaExplorerTool | `src/tools/schema_explorer.py` | 继承 BaseTool，封装 SchemaManager.get_or_fetch_schema() | 开发完成 |
+| 5.1.2 | SQLGeneratorTool | `src/tools/sql_generator.py` | 继承 BaseTool，封装 SQL 生成逻辑 | 开发完成 |
+| 5.1.3 | SQLglotValidatorTool | `src/tools/sqlglot_validator.py` | 继承 BaseTool，封装 validate_with_sqlglot() | 开发完成 |
+| 5.1.4 | DBExecutorTool | `src/tools/db_executor.py` | 继承 BaseTool，封装 SQL 执行逻辑 | 开发完成 |
+| 5.1.5 | DBExplainTool | `src/tools/db_executor.py` | 继承 BaseTool，封装 EXPLAIN 空跑逻辑 | 开发完成 |
+| 5.1.6 | DataAnalyzerTool | `src/tools/data_analyzer.py` | 继承 BaseTool，封装数据分析逻辑 | 开发完成 |
+| 5.1.7 | ChartGeneratorTool | `src/tools/chart_generator.py` | 继承 BaseTool，封装图表生成逻辑 | 开发完成 |
 
 ### 5.2 sqlglot 校验工具
 
 | # | 功能 | 文件 | 描述 | 状态 |
 |---|------|------|------|------|
-| 5.2.1 | validate_with_sqlglot() | `src/tools/sqlglot_validator.py` | 核心校验函数: 语法解析 + 函数白名单 + 方言转译 | 待开发 |
-| 5.2.2 | SUPPORTED_DIALECTS 常量 | 同上 | 20+ 种 sqlglot 支持的方言集合 | 待开发 |
-| 5.2.3 | _get_dialect_functions() | 同上 | 获取指定方言的内置函数白名单 | 待开发 |
-| 5.2.4 | _is_universal_func() | 同上 | 跨数据库通用函数集合 (COUNT/SUM/AVG/COALESCE...) | 待开发 |
-| 5.2.5 | _suggest_correct_function() | 同上 | ClickHouse/PostgreSQL 函数映射建议表 | 待开发 |
+| 5.2.1 | validate_with_sqlglot() | `src/tools/sqlglot_validator.py` | 核心校验函数: 语法解析 + 函数白名单 + 方言转译 | 开发完成 |
+| 5.2.2 | SUPPORTED_DIALECTS 常量 | 同上 | 20+ 种 sqlglot 支持的方言集合 | 开发完成 |
+| 5.2.3 | _get_dialect_functions() | 同上 | 获取指定方言的内置函数白名单 | 开发完成 |
+| 5.2.4 | _is_universal_func() | 同上 | 跨数据库通用函数集合 (COUNT/SUM/AVG/COALESCE...) | 开发完成 |
+| 5.2.5 | _suggest_correct_function() | 同上 | ClickHouse/PostgreSQL 函数映射建议表 | 开发完成 |
 
 ---
 
@@ -619,13 +619,13 @@
 
 | # | 功能 | 文件 | 描述 | 状态 |
 |---|------|------|------|------|
-| 14.1 | 智能选图 classify_chart_type() | `src/tools/chart_generator.py` | 时间+数值→line / 分类+数值→bar / 占比→pie / 双数值→scatter / 高维→heatmap / 通用→table | 待开发 |
-| 14.2 | ECharts 折线图生成 | 同上 | 生成 line chart 的 ECharts option JSON | 待开发 |
-| 14.3 | ECharts 柱状图生成 | 同上 | 生成 bar chart 的 ECharts option JSON | 待开发 |
-| 14.4 | ECharts 饼图生成 | 同上 | 生成 pie chart 的 ECharts option JSON | 待开发 |
-| 14.5 | ECharts 散点图生成 | 同上 | 生成 scatter chart 的 ECharts option JSON | 待开发 |
+| 14.1 | 智能选图 classify_chart_type() | `src/tools/chart_generator.py` | 时间+数值→line / 分类+数值→bar / 占比→pie / 双数值→scatter / 通用→table | 开发完成 |
+| 14.2 | ECharts 折线图生成 | 同上 | 生成 line chart 的 ECharts option JSON | 开发完成 |
+| 14.3 | ECharts 柱状图生成 | 同上 | 生成 bar chart 的 ECharts option JSON | 开发完成 |
+| 14.4 | ECharts 饼图生成 | 同上 | 生成 pie chart 的 ECharts option JSON | 开发完成 |
+| 14.5 | ECharts 散点图生成 | 同上 | 生成 scatter chart 的 ECharts option JSON | 开发完成 |
 | 14.6 | ECharts 热力图生成 | 同上 | 生成 heatmap chart 的 ECharts option JSON | 待开发 |
-| 14.7 | 表格渲染 | 同上 | 生成 Markdown 表格或 HTML table | 待开发 |
+| 14.7 | 表格渲染 | 同上 | 生成 Markdown 表格或 HTML table | 开发完成 |
 | 14.8 | 用户调整图表 | 同上 | 自然语言指令 "用饼图展示" → 重新生成图表 | 待开发 |
 
 ---
