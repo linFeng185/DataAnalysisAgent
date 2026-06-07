@@ -1,8 +1,15 @@
-"""11.3 SSE 流式输出 — astream_events 逐 Node 推送。"""
+"""11.3 SSE 流式输出 — astream_events 逐 Node 推送。
+
+并行 LLM 调用支持：
+  - thinking / token 事件均携带 node 字段标识来源节点
+  - llm_content_parts 按节点分区，互不污染
+  - on_chat_model_stream 独立查找父节点，不依赖全局状态
+"""
 
 from __future__ import annotations
 
 import json
+from collections import defaultdict
 from datetime import date, datetime
 from decimal import Decimal
 
@@ -36,13 +43,19 @@ _PROGRESS_MAP: dict[str, str] = {
 
 
 async def stream_analysis(user_query: str, datasource: str):
-    """SSE: 逐 Node 推送进度 + LLM token + 关键结果。"""
+    """SSE: 逐 Node 推送进度 + LLM token + 关键结果。
+
+    每个 thinking / token 事件均携带 node 字段，
+    前端可按 node 分组渲染并行 LLM 调用的输出。
+    """
     from src.graph.workflow import app
 
     stats = {"chain_start": 0, "chain_end": 0, "chat_model_stream": 0, "chat_model_start": 0,
              "thinking_events": 0, "token_events": 0}
-    llm_content_parts: list[str] = []
-    current_llm_node: str | None = None
+    # 按节点分区存储 LLM 流式内容，并行 LLM 调用互不污染
+    llm_content_parts: dict[str, list[str]] = defaultdict(list)
+    # 当前活跃的 LLM 调用集合（支持并行时有多个）
+    active_llm_nodes: set[str] = set()
 
     try:
         async for event in app.astream_events(
@@ -75,16 +88,18 @@ async def stream_analysis(user_query: str, datasource: str):
                         yield _sse("result", output.get("final_response", {}))
                     elif name == "analyze_result" and isinstance(output, dict):
                         yield _sse("analysis", output.get("analysis_result", {}))
-                    # 回退：LLM 流式 token 没到时，从 chain_end 输出提取
-                    if name == current_llm_node and stats["chat_model_stream"] == 0 and llm_content_parts:
-                        yield _sse("token", {"content": "".join(llm_content_parts)})
+                    # 回退：该节点 LLM 流式 token 没到时，输出累积内容
+                    if name in active_llm_nodes and llm_content_parts.get(name):
+                        yield _sse("token", {"node": name, "content": "".join(llm_content_parts[name])})
 
             # ---- LLM 流式开始 ----
             elif kind == "on_chat_model_start":
                 stats["chat_model_start"] += 1
-                current_llm_node = _find_parent_node(event)
-                llm_content_parts.clear()
-                yield _sse("llm_start", {"node": current_llm_node or "unknown"})
+                node = _find_parent_node(event)
+                if node:
+                    active_llm_nodes.add(node)
+                    llm_content_parts[node].clear()
+                yield _sse("llm_start", {"node": node or "unknown"})
 
             # ---- LLM 流式 token ----
             elif kind == "on_chat_model_stream":
@@ -92,29 +107,35 @@ async def stream_analysis(user_query: str, datasource: str):
                 chunk = event.get("data", {}).get("chunk")
                 if chunk:
                     # ChatGenerationChunk 包裹了 AIMessageChunk，需解包
-                    # (LangGraph 某些版本传递原始 ChatGenerationChunk 而非内部 message)
                     if hasattr(chunk, "message") and not hasattr(chunk, "additional_kwargs"):
                         if stats["chat_model_stream"] == 1:
                             logger.info("LLM 流式 chunk 类型: ChatGenerationChunk, 自动解包")
                         chunk = chunk.message
                     elif stats["chat_model_stream"] == 1:
                         logger.info("LLM 流式 chunk 类型", type=type(chunk).__name__)
+
+                    # 从事件 metadata 独立查找父节点（并行 LLM 时各自归因）
+                    node = _find_parent_node(event)
+
                     from src.llm.adapters.registry import get_adapter
                     from src.config import get_settings
                     adapter = get_adapter(get_settings().llm_model)
                     sc = adapter.parse_stream_chunk(chunk)
                     if sc.reasoning_content:
                         stats["thinking_events"] += 1
-                        yield _sse("thinking", {"reasoning_content": sc.reasoning_content})
+                        yield _sse("thinking", {"node": node, "reasoning_content": sc.reasoning_content})
                     if sc.content:
                         stats["token_events"] += 1
-                        llm_content_parts.append(sc.content)
-                        yield _sse("token", {"content": sc.content})
+                        if node:
+                            llm_content_parts[node].append(sc.content)
+                        yield _sse("token", {"node": node, "content": sc.content})
 
             # ---- LLM 流式结束 ----
             elif kind == "on_chat_model_end":
-                current_llm_node = None
-                yield _sse("llm_end", {})
+                node = _find_parent_node(event)
+                if node:
+                    active_llm_nodes.discard(node)
+                yield _sse("llm_end", {"node": node})
 
     except Exception as e:
         logger.error("流式错误", error=str(e))
