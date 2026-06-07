@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import time
 from datetime import date, datetime
 from decimal import Decimal
 
@@ -33,11 +34,15 @@ logger = get_logger(__name__)
 
 async def analyze_result_node(state: AnalysisState) -> dict:
     """描述统计 + 趋势 + 异常 + 占比 → LLM 解读 (有 API Key) 或规则摘要。"""
+    _start = time.monotonic()
+    logger.info("节点开始", node="analyze_result")
     rows: list[dict] = state.get("query_result_sample", [])
     intent = state.get("intent", "query")
     sql = state.get("generated_sql", "")
 
     if not rows:
+        logger.info("节点完成", node="analyze_result", elapsed_ms=round((time.monotonic() - _start) * 1000))
+        return {"analysis_result": {"summary": "无数据可供分析", "insights": [], "recommended_chart_type": "table", "follow_up_questions": []}}
         return {"analysis_result": {"summary": "无数据可供分析", "insights": [], "recommended_chart_type": "table", "follow_up_questions": []}}
 
     stats = compute_statistics(rows)
@@ -77,6 +82,7 @@ async def analyze_result_node(state: AnalysisState) -> dict:
         result = _rule_analyze(rows, stats, trend_info, outlier_info, conc_info, chart_type, intent)
 
     result["statistics"] = stats
+    logger.info("节点完成", node="analyze_result", elapsed_ms=round((time.monotonic() - _start) * 1000))
     return {"analysis_result": result}
 
 

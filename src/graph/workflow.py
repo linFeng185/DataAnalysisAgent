@@ -83,7 +83,8 @@ def after_layer4(state: AnalysisState) -> str:
       - 无错误 → 进入实际执行
     """
     if state.get("explain_errors"):
-        return "generate_sql" if state.get("retry_count", 0) < 3 else "build_response"
+        from src.config import get_settings
+        return "generate_sql" if state.get("retry_count", 0) < get_settings().max_retry_count else "build_response"
     return "execute_sql"
 
 
@@ -103,7 +104,8 @@ def should_retry(state: AnalysisState) -> str:
     # 配置/资源缺失错误是永久性的，重试无意义
     if "未配置" in err or "未找到" in err or "not found" in err.lower():
         return "build_response"
-    if retry < 3:
+    from src.config import get_settings
+    if retry < get_settings().max_retry_count:
         return "generate_sql"
     return "build_response"
 

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import time
+
 from src.graph.state import AnalysisState
 from src.logging_config import get_logger
 
@@ -9,6 +11,8 @@ logger = get_logger(__name__)
 
 
 async def retrieve_schema_node(state: AnalysisState) -> dict:
+    _start = time.monotonic()
+    logger.info("节点开始", node="retrieve_schema")
     datasource_name = state.get("datasource", "")
     schema = state.get("resolved_schema")
 
@@ -55,6 +59,7 @@ async def retrieve_schema_node(state: AnalysisState) -> dict:
                 table_names=[t.name for t in tables] if tables else [],
                 dialect=dialect)
 
+    logger.info("节点完成", node="retrieve_schema", elapsed_ms=round((time.monotonic() - _start) * 1000))
     return {
         "dialect": dialect,
         "resolved_schema": schema,

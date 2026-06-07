@@ -3,8 +3,12 @@
 from __future__ import annotations
 
 import re
+import time
 
 from src.graph.state import AnalysisState
+from src.logging_config import get_logger
+
+logger = get_logger(__name__)
 
 _DANGEROUS = [
     (r"\bINSERT\b", "INSERT"), (r"\bUPDATE\b", "UPDATE"), (r"\bDELETE\b", "DELETE"),
@@ -18,11 +22,14 @@ _DANGEROUS = [
 
 async def layer3_validate_node(state: AnalysisState) -> dict:
     """安全拦截 + sqlglot 语法校验。"""
+    _start = time.monotonic()
+    logger.info("节点开始", node="layer3_validate")
     sql = state.get("generated_sql", "").strip()
 
     # 安全拦截
     for pattern, label in _DANGEROUS:
         if re.search(pattern, sql, re.IGNORECASE):
+            logger.info("节点完成", node="layer3_validate", elapsed_ms=round((time.monotonic() - _start) * 1000))
             return {
                 "sql_valid": False,
                 "validation_errors": [{"type": "security_block", "message": f"禁止: {label}"}],
@@ -38,6 +45,7 @@ async def layer3_validate_node(state: AnalysisState) -> dict:
     except Exception as e:
         errors.append({"type": "syntax_error", "message": str(e)[:500]})
 
+    logger.info("节点完成", node="layer3_validate", elapsed_ms=round((time.monotonic() - _start) * 1000))
     return {
         "sql_valid": len(errors) == 0,
         "validation_errors": errors,

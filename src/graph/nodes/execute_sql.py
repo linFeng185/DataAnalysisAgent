@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import time
+
 from src.config import get_settings
 from src.graph.state import AnalysisState
 from src.logging_config import get_logger
@@ -11,6 +13,8 @@ logger = get_logger(__name__)
 
 async def execute_sql_node(state: AnalysisState) -> dict:
     """Phase 2: registry → connector.execute()。Phase 1: 返回空数据 + 提示。"""
+    _start = time.monotonic()
+    logger.info("节点开始", node="execute_sql")
     sql = state.get("generated_sql", "")
     ds_name = state.get("datasource", "")
 
@@ -37,6 +41,7 @@ async def execute_sql_node(state: AnalysisState) -> dict:
 
                 result = await conn.execute(sa.text(sql))
                 rows = [dict(row._mapping) for row in result]
+            logger.info("节点完成", node="execute_sql", elapsed_ms=round((time.monotonic() - _start) * 1000))
             return {
                 "query_result_sample": rows[:200],
                 "query_result_full_count": len(rows),
@@ -48,6 +53,7 @@ async def execute_sql_node(state: AnalysisState) -> dict:
 
     # 无数据源时返回空
     logger.info("无可用数据源，返回空结果", datasource=ds_name, sql=sql[:100])
+    logger.info("节点完成", node="execute_sql", elapsed_ms=round((time.monotonic() - _start) * 1000))
     return {
         "query_result_sample": [],
         "query_result_full_count": 0,

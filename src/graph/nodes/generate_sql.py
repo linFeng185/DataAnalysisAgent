@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import json
 import re
+import time
 
 from langchain_core.runnables import RunnableConfig
 
@@ -43,6 +44,8 @@ async def generate_sql_node(state: AnalysisState, config: RunnableConfig) -> dic
 
     返回: {"generated_sql": str, "retry_count": int}
     """
+    _start = time.monotonic()
+    logger.info("节点开始", node="generate_sql")
     tables = state.get("relevant_tables", [])
     dialect = state.get("dialect", "clickhouse")
     query = state.get("user_query", "")
@@ -79,6 +82,7 @@ async def generate_sql_node(state: AnalysisState, config: RunnableConfig) -> dic
         sql, reasoning = _template_generate(tables, retry, state), ""
 
     logger.info("SQL 生成完成", sql=sql[:200], reasoning_chars=len(reasoning))
+    logger.info("节点完成", node="generate_sql", elapsed_ms=round((time.monotonic() - _start) * 1000))
     result = {"generated_sql": sql, "retry_count": retry}
     if reasoning:
         result["sql_reasoning_content"] = reasoning

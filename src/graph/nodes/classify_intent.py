@@ -2,11 +2,18 @@
 
 from __future__ import annotations
 
+import time
+
 from src.graph.state import AnalysisState
+from src.logging_config import get_logger
+
+logger = get_logger(__name__)
 
 
 async def classify_intent_node(state: AnalysisState) -> dict:
     """Phase 1 规则匹配; Phase 2 切换 LLM。"""
+    _start = time.monotonic()
+    logger.info("节点开始", node="classify_intent")
     q = state["user_query"].lower()
 
     if any(w in q for w in ("为什么", "原因", "归因")):
@@ -24,6 +31,7 @@ async def classify_intent_node(state: AnalysisState) -> dict:
     else:
         intent = "chat"
 
+    logger.info("节点完成", node="classify_intent", elapsed_ms=round((time.monotonic() - _start) * 1000))
     return {
         "intent": intent,
         "activated_skills": [],

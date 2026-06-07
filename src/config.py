@@ -60,6 +60,9 @@ class Settings(BaseSettings):
     # ---- Redis ----
     redis_url: str = "redis://localhost:6379/0"
 
+    # ---- 重试 ----
+    max_retry_count: int = 3
+
     # ---- 限流 ----
     max_queries_per_hour: int = 100
     max_scan_rows: int = 10_000_000
