@@ -1,4 +1,36 @@
-"""4.1.2-7 LangGraph 工作流组装 + 5 个条件路由函数。"""
+"""
+LangGraph 工作流组装 — 将 9 个节点按 DAG 结构编排成完整的分析流水线。
+
+这是整个智能体的「主控制器」。它定义了：
+  1. 哪些节点参与执行（add_node × 9）
+  2. 节点间的单向边（add_edge）— 固定顺序推进
+  3. 节点间的条件边（add_conditional_edges）— 根据运行状态动态决定去向
+  4. 5 个条件路由函数 — 每个函数读取 AnalysisState 并返回下一个节点名
+
+图的拓扑结构：
+
+    classify_intent (入口)
+         │
+         ├── mcp_agent → END       [意图为 file_analysis 时]
+         │
+         └── retrieve_schema       [主路径开始]
+               │
+              generate_sql  ←──────────────────────────────────┐
+               │          ←── 语法错误 / EXPLAIN失败 / 执行错误  │
+              layer3_validate                                    │
+               │                                                │
+               ├── security_block → build_response (终止)        │
+               │                                                │
+              layer4_explain                                     │
+               │                                                │
+              execute_sql ──────────────────────────────────────┘
+               │
+            analyze_result
+               │
+           generate_chart
+               │
+           build_response (终点)
+"""
 
 from __future__ import annotations
 
@@ -20,33 +52,55 @@ logger = get_logger(__name__)
 
 
 # ================================================================
-# 条件路由 (4.1.3-6)
+# 条件路由函数 — 读取 state，返回下一个节点名的字符串
 # ================================================================
 
+
 def after_layer3(state: AnalysisState) -> str:
-    """4.1.3 sqlglot 校验后路由: security_block→终止 / syntax_error→重试 / ok→下一步。"""
+    """
+    SQL 层3校验后的条件路由。
+
+    三种可能去向：
+      - security_block（DDL/DML/危险函数）→ 直接终止，不进入数据库
+      - syntax_error（语法错误）→ 回到 generate_sql 重试
+      - 校验通过 → 继续 layer4_explain
+    """
     for e in state.get("validation_errors", []):
         if e.get("type") == "security_block":
-            return "build_response"
+            return "build_response"  # 安全拦截是终局的，不重试
     if state.get("validation_errors"):
-        return "generate_sql"
+        return "generate_sql"  # 语法错误可重试
     return "layer4_explain"
 
 
 def after_layer4(state: AnalysisState) -> str:
-    """4.1.4 EXPLAIN 后路由。"""
+    """
+    EXPLAIN（模拟执行）后的条件路由。
+
+    去向：
+      - 有 EXPLAIN 错误且重试次数 < 3 → generate_sql 重写 SQL
+      - 有错误但次数耗尽 → build_response 终止
+      - 无错误 → 进入实际执行
+    """
     if state.get("explain_errors"):
         return "generate_sql" if state.get("retry_count", 0) < 3 else "build_response"
     return "execute_sql"
 
 
 def should_retry(state: AnalysisState) -> str:
-    """4.1.5 执行失败后路由: 瞬态错误重试(最多3次)，配置错误直接终止。"""
+    """
+    数据库执行后的条件路由。
+
+    三类错误处理策略：
+      1. 无错误 → build_response（正常路径）
+      2. 配置类错误（"未配置"、"未找到"）→ build_response（不重试）
+      3. 瞬态错误（超时、连接等）→ generate_sql 重试（最多 3 次）
+    """
     err = state.get("execution_error", "")
     retry = state.get("retry_count", 0)
     if not err:
         return "build_response"
-    # 数据源缺失/配置错误 → 不重试，直接返回
+    # 配置/资源缺失错误是永久性的，重试无意义
     if "未配置" in err or "未找到" in err or "not found" in err.lower():
         return "build_response"
     if retry < 3:
@@ -55,19 +109,30 @@ def should_retry(state: AnalysisState) -> str:
 
 
 def route_by_intent(state: AnalysisState) -> str:
-    """4.1.6 意图路由: file_analysis→mcp_agent (Phase 2), 其他→标准流水线。"""
+    """
+    意图分类后的第一层路由。
+
+    去向：
+      - file_analysis → 走 mcp_agent 路径（目前直接 END，Phase 2 将接入 MCP 子图）
+      - 其他所有意图 → 走标准 SQL 分析流水线（从 retrieve_schema 开始）
+    """
     if state.get("intent") == "file_analysis":
-        return "mcp_agent"
+        return "mcp_agent"  # Phase 2 将替换为 mcp_agent → ... → build_response
     return "retrieve_schema"
 
 
 # ================================================================
-# 4.1.2 StateGraph 组装
+# StateGraph 组装 — 注册所有节点 + 连线 + 编译
 # ================================================================
 
+
 def build_workflow() -> StateGraph:
+    """创建并编译完整的分析流水线图。"""
+
+    # Step 1: 创建图，指定状态类型
     workflow = StateGraph(AnalysisState)
 
+    # Step 2: 注册 9 个执行节点（每个节点是一个 async 函数，返回 dict 合并回 state）
     workflow.add_node("classify_intent", classify_intent_node)
     workflow.add_node("retrieve_schema", retrieve_schema_node)
     workflow.add_node("generate_sql", generate_sql_node)
@@ -78,31 +143,48 @@ def build_workflow() -> StateGraph:
     workflow.add_node("generate_chart", generate_chart_node)
     workflow.add_node("build_response", build_response_node)
 
+    # Step 3: 设置入口节点（用户请求从这里开始）
     workflow.set_entry_point("classify_intent")
+
+    # Step 4: 连线 — 固定边（add_edge）+ 条件边（add_conditional_edges）
+
+    # 意图路由：按意图分叉 → 主路径或 MCP 文件分析路径
     workflow.add_conditional_edges(
         "classify_intent", route_by_intent,
         {"retrieve_schema": "retrieve_schema", "mcp_agent": END}
     )
+
+    # 固定边：Schema 检索 → SQL 生成
     workflow.add_edge("retrieve_schema", "generate_sql")
     workflow.add_edge("generate_sql", "layer3_validate")
+
+    # 安全校验路由：通过 → EXPLAIN / 安全拦截 → 终止 / 语法错 → 重试
     workflow.add_conditional_edges(
         "layer3_validate", after_layer3,
         {"generate_sql": "generate_sql", "layer4_explain": "layer4_explain", "build_response": "build_response"}
     )
+
+    # EXPLAIN 路由：通过 → 执行 / 错误 → 重试或终止
     workflow.add_conditional_edges(
         "layer4_explain", after_layer4,
         {"generate_sql": "generate_sql", "execute_sql": "execute_sql", "build_response": "build_response"}
     )
+
+    # 执行路由：成功 → 分析 / 瞬态错误 → 重试 / 配置错误 → 终止
     workflow.add_conditional_edges(
         "execute_sql", should_retry,
         {"generate_sql": "generate_sql", "build_response": "build_response"}
     )
+
+    # 固定边：执行成功后按序推进至终点
     workflow.add_edge("execute_sql", "analyze_result")
     workflow.add_edge("analyze_result", "generate_chart")
     workflow.add_edge("generate_chart", "build_response")
-    workflow.add_edge("build_response", END)
+    workflow.add_edge("build_response", END)  # 终点
 
+    # Step 5: 编译成可执行的 Runnable（astream_events / ainvoke 的入口）
     return workflow.compile()
 
 
+# 模块级单例 — 所有 API 请求共用同一个编译后的图，避免重复编译
 app = build_workflow()
