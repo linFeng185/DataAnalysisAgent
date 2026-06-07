@@ -67,11 +67,13 @@ async def generate_sql_node(state: AnalysisState, config: RunnableConfig) -> dic
         if retry >= 2:
             error_context += "\n注意: 这是最后一次尝试，请仔细核对字段名和函数名"
 
+    # ── 对话上下文（短期记忆） ──
+    history = state.get("conversation_history", [])
     # ── 主路径：LLM 流式生成 ──
     if is_llm_available():
         logger.info("SQL 生成: 调用 LLM", query=query[:80], dialect=dialect, retry=retry)
         sql, reasoning = await _llm_generate(
-            schema_text, dialect_hint, query, error_context, skill_prompt, config,
+            schema_text, dialect_hint, query, error_context, skill_prompt, config, history,
         )
     else:
         sql, reasoning = _template_generate(tables, retry, state), ""
@@ -90,6 +92,7 @@ async def _llm_generate(
     error_ctx: str,
     skill_prompt: str,
     config: RunnableConfig,
+    conversation_history: list | None = None,
 ) -> tuple[str, str]:
     """
     调用 LLM 流式生成 SQL 的核心逻辑，返回 (sql, reasoning_content)。
@@ -105,12 +108,20 @@ async def _llm_generate(
       - `SELECT ...;` → 正则提取第一个 SELECT 语句
       - 纯文本 → 直接返回
     """
-    llm = get_llm(temperature=0)  # reasoning 默认开启，由适配器控制
+    llm = get_llm(temperature=0)
 
     system = SQL_GENERATION_SYSTEM.format(
         dialect="ClickHouse/MySQL/PostgreSQL",
         skill_instructions=skill_prompt,
     )
+
+    # 7.5.3 注入对话上下文（热/温/冷三层裁剪）
+    context_text = ""
+    if conversation_history:
+        from src.memory.context_builder import build_llm_context
+        context_text = await build_llm_context(
+            conversation_history, query, node_name="generate_sql",
+        )
 
     user_msg = f"""## 数据库表结构
 {schema_text}
@@ -121,7 +132,7 @@ async def _llm_generate(
 
 ## 用户问题
 {query}
-
+{f"## 对话历史\n{context_text}" if context_text else ""}
 请生成 SQL:"""
 
     try:

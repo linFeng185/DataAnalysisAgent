@@ -71,7 +71,8 @@ async def analyze_result_node(state: AnalysisState) -> dict:
 
     # LLM 分析 (如有 API Key)
     if is_llm_available():
-        result = await _llm_analyze(rows, sql, stats, trend_info, outlier_info, conc_info)
+        history = state.get("conversation_history", [])
+        result = await _llm_analyze(rows, sql, stats, trend_info, outlier_info, conc_info, history)
     else:
         result = _rule_analyze(rows, stats, trend_info, outlier_info, conc_info, chart_type, intent)
 
@@ -79,10 +80,16 @@ async def analyze_result_node(state: AnalysisState) -> dict:
     return {"analysis_result": result}
 
 
-async def _llm_analyze(rows, sql, stats, trend, outlier, conc) -> dict:
+async def _llm_analyze(rows, sql, stats, trend, outlier, conc, history=None) -> dict:
     """LLM 生成分析报告。"""
     sample = json.dumps(rows[:20], ensure_ascii=False, indent=2, default=_json_default)
     stat_text = json.dumps(stats.get("columns", {}), ensure_ascii=False, default=_json_default)
+
+    # 7.5.3 注入对话上下文
+    context_text = ""
+    if history:
+        from src.memory.context_builder import build_llm_context
+        context_text = await build_llm_context(history, node_name="analyze_result")
 
     user_msg = f"""## 执行的 SQL
 ```sql
@@ -97,7 +104,7 @@ async def _llm_analyze(rows, sql, stats, trend, outlier, conc) -> dict:
 
 ## 发现
 {trend} | {outlier} | {conc}
-
+{f"## 对话历史\n{context_text}" if context_text else ""}
 请给出分析报告。"""
 
     try:
