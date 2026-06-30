@@ -20,7 +20,13 @@ class CredentialManager:
         return self._fernet.encrypt(plain.encode()).decode()
 
     def decrypt(self, token: str) -> str:
-        return self._fernet.decrypt(token.encode()).decode() if token else ""
+        """解密凭证，失败时回退返回原文（兼容明文密码和环境变量占位符）。"""
+        if not token:
+            return ""
+        try:
+            return self._fernet.decrypt(token.encode()).decode()
+        except Exception:
+            return token
 
     @staticmethod
     def resolve_env_ref(value: str) -> str:

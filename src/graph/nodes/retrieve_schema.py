@@ -59,6 +59,24 @@ async def retrieve_schema_node(state: AnalysisState) -> dict:
                 table_names=[t.name for t in tables] if tables else [],
                 dialect=dialect)
 
+    # 多轮对话：优先从 messages 复原（保证持久化），回退到 conversation_history
+    history = list(state.get("conversation_history", []) or [])
+    if not history:
+        msgs = state.get("messages", []) or []
+        for msg in msgs:
+            if hasattr(msg, 'content') and msg.content:
+                role = 'user' if msg.__class__.__name__ == 'HumanMessage' else 'assistant'
+                history.append({
+                    "turn_id": len(history) + 1,
+                    "user_query": msg.content if role == 'user' else '',
+                    "generated_sql": '',
+                    "execution_success": True,
+                    "chart_type": '',
+                    "analysis_summary": msg.content if role == 'assistant' else '',
+                })
+        if history:
+            logger.info("对话历史从 messages 复原", turns=len(history))
+
     logger.info("节点完成", node="retrieve_schema", elapsed_ms=round((time.monotonic() - _start) * 1000))
     return {
         "dialect": dialect,
@@ -70,5 +88,25 @@ async def retrieve_schema_node(state: AnalysisState) -> dict:
         ],
         "few_shot_examples": [],
         "business_rules_text": "",
-        "long_term_memories_text": "",
+        "long_term_memories_text": await _load_knowledge_context(datasource_name, state.get("user_query", "")),
+        "conversation_history": history,
     }
+
+
+async def _load_knowledge_context(datasource: str, query: str) -> str:
+    """检索相关知识库条目文本（用于前端展示）。"""
+    try:
+        from src.knowledge.schema_manager import SchemaManager
+        from src.knowledge.schema_manager import get_schema_manager
+        sm = get_schema_manager()
+        sm._ensure_initialized()  # noqa: SLF001
+        results = sm._collection.get(  # noqa: SLF001
+            where={"datasource": datasource} if datasource else None,
+        )
+        if results and results.get("documents"):
+            # 只要前 3 条的简短摘要
+            summaries = [d[:80] for d in results["documents"][:3] if d]
+            return "; ".join(summaries) if summaries else ""
+        return ""
+    except Exception:
+        return ""

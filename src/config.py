@@ -82,6 +82,9 @@ class Settings(BaseSettings):
 
     # ---- Skills ----
     skills_dir: str = "skills"
+    """内置 Skills 目录（始终加载，不会被环境变量覆盖）。"""
+    extra_skills_dirs: str = ""
+    """额外的 Skills 搜索目录，多个路径以分号分隔。上传时优先写入第一个额外目录。"""
 
     # ---- 业务文档 ----
     metrics_docs_dir: str = "docs/metrics"

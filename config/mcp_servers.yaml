@@ -1,0 +1,16 @@
+# 1.2.3 MCP Server 配置 — 启动时自动连接
+# 详情: SPEC §3.9.1
+mcp_servers:
+  # filesystem:
+  #   transport: stdio
+  #   command: "npx"
+  #   args: ["-y", "@anthropic-ai/mcp-filesystem", "/data/uploads"]
+  # confluence:
+  #   transport: sse
+  #   url: "http://confluence-mcp.internal:3000/sse"
+  # metrics_store:
+  #   transport: stdio
+  #   command: "python"
+  #   args: ["-m", "metrics_store_mcp"]
+  #   env:
+  #     METRICS_API_KEY: "${METRICS_API_KEY}"

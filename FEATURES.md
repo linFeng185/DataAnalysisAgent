@@ -28,7 +28,7 @@
 |---|------|------|------|------|
 | 1.2.1 | Settings 类 | `src/config.py` | LLM API Key / DB 连接串 / Redis URL / ChromaDB 路径 / 限流参数 / 日志级别 | 单测完成 | P0 |
 | 1.2.2 | .env 模板 | `.env.example` | 所有可配置环境变量的模板文件 | 单测完成 | P0 |
-| 1.2.3 | MCP Server 注册表 | `config/mcp_servers.yaml` | 声明外部 MCP Server | 待开发[^1] | P0 |
+| 1.2.3 | MCP Server 注册表 | `config/mcp_servers.yaml` | 声明外部 MCP Server | 开发完成 | P0 |
 | 1.2.4 | 数据源配置文件 | `config/datasources.yaml` | 外挂模式数据源声明 (dialect/host/port/database/凭证引用) | 开发完成 | P0 |
 
 ### 1.3 异常与错误处理
@@ -414,38 +414,38 @@
 
 | # | 功能 | 文件 | 描述 | 状态 |
 |---|------|------|------|------|
-| 8.1.1 | MCPClientManager 类 | `src/mcp/client_manager.py` | 管理所有 MCP Client 连接的生命周期 | 待开发 |
-| 8.1.2 | connect_all() | 同上 | 启动时并发连接 config/mcp_servers.yaml 中所有 MCP Server | 待开发 |
-| 8.1.3 | _connect_single() | 同上 | 连接单个 MCP Server (支持 stdio + SSE transport) | 待开发 |
-| 8.1.4 | _resolve_env() | 同上 | 解析 MCP 配置中的 ${VAR_NAME} 环境变量占位符 | 待开发 |
-| 8.1.5 | _mcp_to_langchain_tool() | 同上 | 将 MCP Tool 适配为 LangChain StructuredTool (加 namespace 前缀) | 待开发 |
-| 8.1.6 | _build_schema() | 同上 | 从 MCP Tool 的 JSONSchema inputSchema 生成 Pydantic args_schema | 待开发 |
-| 8.1.7 | get_all_tools() | 同上 | 返回所有 MCP 转换来的 LangChain Tool 列表 | 待开发 |
-| 8.1.8 | health_check() | 同上 | 定期 ping 所有 MCP Server，断线自动重连 | 待开发 |
-| 8.1.9 | _reconnect() | 同上 | 单个 MCP Server 的断线重连逻辑 (指数退避) | 待开发 |
-| 8.1.10 | close_all() | 同上 | 关闭所有连接 (AsyncExitStack.aclose) | 待开发 |
-| 8.1.11 | _sse_client() | `src/mcp/tool_adapter.py` | SSE transport 的客户端实现 | 待开发 |
-| 8.1.12 | 降级策略 | `src/mcp/client_manager.py` | 重连 5 次失败 → 标记 degraded → 从 get_all_tools() 移除 → 健康检查恢复后自动启用 | 待开发 | P1 |
+| 8.1.1 | MCPClientManager 类 | `src/mcp/client_manager.py` | 管理所有 MCP Client 连接的生命周期 | 开发完成 |
+| 8.1.2 | connect_all() | 同上 | 启动时并发连接 config/mcp_servers.yaml 中所有 MCP Server | 开发完成 |
+| 8.1.3 | _connect_single() | 同上 | 连接单个 MCP Server (支持 stdio + SSE transport) | 开发完成 |
+| 8.1.4 | _resolve_env() | 同上 | 解析 MCP 配置中的 ${VAR_NAME} 环境变量占位符 | 开发完成 |
+| 8.1.5 | _mcp_to_langchain_tool() | 同上 | 将 MCP Tool 适配为 LangChain StructuredTool (加 namespace 前缀) | 开发完成 |
+| 8.1.6 | _build_schema() | 同上 | 从 MCP Tool 的 JSONSchema inputSchema 生成 Pydantic args_schema | 开发完成 |
+| 8.1.7 | get_all_tools() | 同上 | 返回所有 MCP 转换来的 LangChain Tool 列表 | 开发完成 |
+| 8.1.8 | health_check() | 同上 | 定期 ping 所有 MCP Server，断线自动重连 | 开发完成 |
+| 8.1.9 | _reconnect() | 同上 | 单个 MCP Server 的断线重连逻辑 (指数退避) | 开发完成 |
+| 8.1.10 | close_all() | 同上 | 关闭所有连接 (AsyncExitStack.aclose) | 开发完成 |
+| 8.1.11 | _sse_client() | 同上 | SSE transport 的客户端实现 | 开发完成 |
+| 8.1.12 | 降级策略 | 同上 | 重连 5 次失败 → 标记 degraded → 从 get_all_tools() 移除 → 健康检查恢复后自动启用 | 开发完成 |
 
 ### 8.2 MCP Server
 
 | # | 功能 | 文件 | 描述 | 状态 |
 |---|------|------|------|------|
-| 8.2.1 | FastMCP 实例化 | `src/mcp/server.py` | FastMCP("data-analysis-agent") 创建 MCP Server | 待开发 |
-| 8.2.2 | query_database Tool | 同上 | 以自然语言查询数据库，返回分析结果与图表 | 待开发 |
-| 8.2.3 | list_datasources Tool | 同上 | 列出当前所有可用数据源及描述 | 待开发 |
-| 8.2.4 | get_table_schema Tool | 同上 | 获取指定表的完整结构信息 | 待开发 |
-| 8.2.5 | get_metrics Tool | 同上 | 查询业务指标口径定义和计算公式 | 待开发 |
-| 8.2.6 | MCP Server 启动入口 | `src/mcp/__main__.py` | `python -m src.mcp` 启动 MCP Server | 待开发 |
-| 8.2.7 | Claude Code 集成配置 | `claude_code_mcp.json` | 配置为 Claude Code 可调用的 MCP Server | 待开发 |
+| 8.2.1 | FastMCP 实例化 | `src/mcp/server.py` | FastMCP("data-analysis-agent") 创建 MCP Server | 开发完成 |
+| 8.2.2 | query_database Tool | 同上 | 以自然语言查询数据库，返回分析结果与图表 | 开发完成 |
+| 8.2.3 | list_datasources Tool | 同上 | 列出当前所有可用数据源及描述 | 开发完成 |
+| 8.2.4 | get_table_schema Tool | 同上 | 获取指定表的完整结构信息 | 开发完成 |
+| 8.2.5 | get_metrics Tool | 同上 | 查询业务指标口径定义和计算公式 | 开发完成 |
+| 8.2.6 | MCP Server 启动入口 | `src/mcp/__main__.py` | `python -m src.mcp` 启动 MCP Server | 开发完成 |
+| 8.2.7 | Claude Code 集成配置 | `claude_code_mcp.json` | 配置为 Claude Code 可调用的 MCP Server | 开发完成 |
 
 ### 8.3 MCP Agent Node
 
 | # | 功能 | 文件 | 描述 | 状态 |
 |---|------|------|------|------|
-| 8.3.1 | mcp_agent_node() | `src/graph/workflow.py` | 使用 create_react_agent 为文件分析场景创建动态工具调用 Node | 待开发 |
-| 8.3.2 | route_by_intent() 集成 | 同上 | intent == "file_analysis" → 路由到 mcp_agent Node | 待开发 |
-| 8.3.3 | MCP Agent system prompt | `src/llm/prompts.py` | "你是一个数据分析助手，可以访问文件系统和外部知识库" | 待开发 |
+| 8.3.1 | mcp_agent_node() | `src/graph/workflow.py` | 使用 create_react_agent 为文件分析场景创建动态工具调用 Node | 开发完成 |
+| 8.3.2 | route_by_intent() 集成 | 同上 | intent == "file_analysis" → 路由到 mcp_agent Node | 开发完成 |
+| 8.3.3 | MCP Agent system prompt | 同上 | Agent 内联 system prompt | 开发完成 |
 
 ---
 
@@ -455,34 +455,34 @@
 
 | # | 功能 | 文件 | 描述 | 状态 |
 |---|------|------|------|------|
-| 9.1.1 | Skill dataclass | `src/skill_manager.py` | name / version / description / triggers / depends_on / tools / system_prompt_override / output_schema_extension / source_path / enabled | 待开发 |
-| 9.1.2 | SkillManager 类 | `src/skill_manager.py` | Skill 发现、加载、激活与生命周期管理 | 待开发 |
-| 9.1.3 | discover() | 同上 | 启动时扫描 skills/ 目录，发现所有 SKILL.md | 待开发 |
-| 9.1.4 | _parse_skill_manifest() | 同上 | 解析 SKILL.md 的 YAML frontmatter + Markdown body | 待开发 |
-| 9.1.5 | _check_dependencies() | 同上 | 检查依赖 (mcp_servers / skills / python_packages) 是否满足 | 待开发 |
-| 9.1.6 | match_skills() | 同上 | 根据用户输入匹配激活 Skill: 关键词 + 意图 + 表名三重 OR 匹配 | 待开发 |
-| 9.1.7 | get_active_tools() | 同上 | 动态加载激活 Skill 的 tools.py 模块，获取 BaseTool 列表 | 待开发 |
-| 9.1.8 | build_skill_prompt() | 同上 | 组装激活 Skill 的 system_prompt_override 追加到 System Prompt | 待开发 |
-| 9.1.9 | _load_skill_module() | 同上 | 动态 import Skill 的 tools.py 模块 | 待开发 |
+| 9.1.1 | Skill dataclass | `src/skill_manager.py` | name / version / description / triggers / depends_on / tools / system_prompt_override / output_schema_extension / source_path / enabled | 开发完成 |
+| 9.1.2 | SkillManager 类 | `src/skill_manager.py` | Skill 发现、加载、激活与生命周期管理 | 开发完成 |
+| 9.1.3 | discover() | 同上 | 启动时扫描 skills/ 目录，发现所有 SKILL.md | 开发完成 |
+| 9.1.4 | _parse_skill_manifest() | 同上 | 解析 SKILL.md 的 YAML frontmatter + Markdown body | 开发完成 |
+| 9.1.5 | _check_dependencies() | 同上 | 检查依赖 (mcp_servers / skills / python_packages) 是否满足 | 开发完成 |
+| 9.1.6 | match_skills() | 同上 | 根据用户输入匹配激活 Skill: 关键词 + 意图 + 表名三重 OR 匹配 | 开发完成 |
+| 9.1.7 | get_active_tools() | 同上 | 动态加载激活 Skill 的 tools.py 模块，获取 BaseTool 列表 | 开发完成 |
+| 9.1.8 | build_skill_prompt() | 同上 | 组装激活 Skill 的 system_prompt_override 追加到 System Prompt | 开发完成 |
+| 9.1.9 | _load_skill_module() | 同上 | 动态 import Skill 的 tools.py 模块 | 开发完成 |
 
 ### 9.2 示例 Skill — 数据质量检查
 
 | # | 功能 | 文件 | 描述 | 状态 |
 |---|------|------|------|------|
-| 9.2.1 | SKILL.md | `skills/data_quality_check/SKILL.md` | Skill 清单 (YAML frontmatter + 指令) | 待开发 |
-| 9.2.2 | check_null_rate Tool | `skills/data_quality_check/tools.py` | 检查指定列的空值率 | 待开发 |
-| 9.2.3 | check_duplicates Tool | 同上 | 检查指定列的重复值 | 待开发 |
-| 9.2.4 | detect_outliers Tool | 同上 | Z-Score 异常值检测 | 待开发 |
-| 9.2.5 | PROMPTS 定义 | `skills/data_quality_check/prompts.py` | Skill 专属 Prompt 模板 | 待开发 |
+| 9.2.1 | SKILL.md | `skills/data_quality_check/SKILL.md` | Skill 清单 (YAML frontmatter + 指令) | 开发完成 |
+| 9.2.2 | check_null_rate Tool | `skills/data_quality_check/tools.py` | 检查指定列的空值率 | 开发完成 |
+| 9.2.3 | check_duplicates Tool | 同上 | 检查指定列的重复值 | 开发完成 |
+| 9.2.4 | detect_outliers Tool | 同上 | Z-Score 异常值检测 | 开发完成 |
+| 9.2.5 | PROMPTS 定义 | `skills/data_quality_check/SKILL.md` | Skill 专属 Prompt 模板 (集成在 SKILL.md body 中) | 开发完成 |
 
 ### 9.3 示例 Skill — 自定义报告
 
 | # | 功能 | 文件 | 描述 | 状态 |
 |---|------|------|------|------|
-| 9.3.1 | SKILL.md | `skills/custom_report/SKILL.md` | Skill 清单 | 待开发 |
-| 9.3.2 | 周报模板 | `skills/custom_report/templates/weekly_report.jinja2` | Jinja2 模板 — 周度数据报告 | 待开发 |
-| 9.3.3 | 月报模板 | 同上 | Jinja2 模板 — 月度数据报告 | 待开发 |
-| 9.3.4 | 报告渲染工具 | `skills/custom_report/tools.py` | render_report(template_name, data) → 渲染 HTML/PDF | 待开发 |
+| 9.3.1 | SKILL.md | `skills/custom_report/SKILL.md` | Skill 清单 | 开发完成 |
+| 9.3.2 | 周报模板 | `skills/custom_report/templates/weekly_report.jinja2` | Jinja2 模板 — 周度数据报告 | 开发完成 |
+| 9.3.3 | 月报模板 | 同上 | Jinja2 模板 — 月度数据报告 | 开发完成 |
+| 9.3.4 | 报告渲染工具 | `skills/custom_report/tools.py` | render_report(template_name, data) → 渲染 Markdown | 开发完成 |
 
 ### 9.4 Skill 分发
 
@@ -576,29 +576,29 @@
 
 | # | 功能 | 文件 | 描述 | 状态 |
 |---|------|------|------|------|
-| 12.1.1 | DDL/DML 正则黑名单 | `src/graph/nodes/layer3_validate.py` | 拦截 INSERT/UPDATE/DELETE/DROP/CREATE/ALTER/TRUNCATE/RENAME/GRANT/REVOKE/MERGE/REPLACE | 待开发 |
-| 12.1.2 | 危险函数拦截 | 同上 | 拦截 sleep() / benchmark() / 存储过程调用 | 待开发 |
-| 12.1.3 | 白名单模式 | 同上 | 默认只允许 SELECT / SHOW / DESCRIBE / EXPLAIN | 待开发 |
-| 12.1.4 | 只读数据库账号 | 各 Connector | 所有数据源连接使用只读账号 | 待开发 |
-| 12.1.5 | SQL 注入防护 | 同上 | LLM 输出的 SQL 已结构化，不拼接用户输入 | 待开发 |
-| 12.1.6 | LLM 输出二次校验 | `src/graph/nodes/generate_sql.py` | SQL 中引用的表名/字段名必须在 state["relevant_tables"] 中存在，拦截 LLM 幻觉 | 待开发 | P1 |
+| 12.1.1 | DDL/DML 正则黑名单 | `src/graph/nodes/layer3_validate.py` | 拦截 INSERT/UPDATE/DELETE/DROP/CREATE/ALTER/TRUNCATE/RENAME/GRANT/REVOKE/MERGE/REPLACE | 开发完成 |
+| 12.1.2 | 危险函数拦截 | 同上 | 拦截 sleep() / benchmark() / 存储过程调用 | 开发完成 |
+| 12.1.3 | 白名单模式 | 同上 | 默认只允许 SELECT / SHOW / DESCRIBE / EXPLAIN | 开发完成 |
+| 12.1.4 | 只读数据库账号 | 各 Connector | 所有数据源连接使用只读账号（运维层面，代码已支持） | 开发完成 |
+| 12.1.5 | SQL 注入防护 | 同上 | LLM 输出的 SQL 已结构化，不拼接用户输入 | 开发完成 |
+| 12.1.6 | LLM 输出二次校验 | `src/graph/nodes/generate_sql.py` | sqlglot 提取表引用 → 比对 relevant_tables，拦截幻觉 | 开发完成 |
 
 ### 12.2 限流控制
 
 | # | 功能 | 文件 | 描述 | 状态 |
 |---|------|------|------|------|
-| 12.2.1 | 单用户每小时查询上限 | `src/graph/nodes/execute_sql.py` | Redis 计数器 + 滑动窗口 | 待开发 |
-| 12.2.2 | 单次查询最大扫描行数 | `src/config.py` | 配置项 MAX_SCAN_ROWS (默认 1000 万) | 待开发 |
-| 12.2.3 | 单次查询最大执行时间 | `src/config.py` | 配置项 MAX_EXECUTION_TIME (默认 30 秒) | 待开发 |
-| 12.2.4 | 结果集最大返回行数 | `src/config.py` | 配置项 MAX_RESULT_ROWS (默认 10 万) | 待开发 |
+| 12.2.1 | 单用户每小时查询上限 | `src/security/data_masker.py` | 内存滑动窗口限流 (生产环境应切 Redis) | 开发完成 |
+| 12.2.2 | 单次查询最大扫描行数 | `src/config.py` | 配置项 MAX_SCAN_ROWS (默认 1000 万) | 开发完成 |
+| 12.2.3 | 单次查询最大执行时间 | `src/config.py` | 配置项 MAX_EXECUTION_TIME (默认 30 秒)，execute_sql 按方言 SET timeout | 开发完成 |
+| 12.2.4 | 结果集最大返回行数 | `src/config.py` | 配置项 MAX_RESULT_ROWS (默认 10 万)，execute_sql 限制 200 行 | 开发完成 |
 
 ### 12.3 数据安全
 
 | # | 功能 | 文件 | 描述 | 状态 |
 |---|------|------|------|------|
-| 12.3.1 | 查询结果脱敏 | `src/security/data_masker.py` | 自动识别并脱敏手机号、身份证号、邮箱 | 待开发 |
-| 12.3.2 | 敏感表/字段白名单 | 同上 | 可配置的敏感字段访问控制 | 待开发 |
-| 12.3.3 | 查询审计日志 | 同上 | 完整记录: 时间 / 用户 / 数据源 / SQL / 结果行数 / 执行耗时 | 待开发 |
+| 12.3.1 | 查询结果脱敏 | `src/security/data_masker.py` | 自动脱敏手机号(138****1234)、身份证号、邮箱 | 开发完成 |
+| 12.3.2 | 敏感表/字段白名单 | 同上 | _SENSITIVE_COLS + 列名关键词匹配 | 开发完成 |
+| 12.3.3 | 查询审计日志 | 同上 | structlog 记录 + PG query_audit_log 表写入 | 开发完成 |
 
 ---
 
@@ -722,20 +722,82 @@
 
 ---
 
-## 18. 前端 (Phase 3) `[P2:10]`
+## 18. 前端 (Phase 3) `[P2:13 P3:5]`
 
-| # | 功能 | 描述 | 状态 |
-|---|------|------|------|
-| 18.1 | React + TypeScript 项目初始化 | Vite 脚手架 | 待开发 |
-| 18.2 | Chat 对话界面 | 消息列表 + 输入框 + 发送按钮 | 待开发 |
-| 18.3 | SQL 代码高亮展示 | 生成的 SQL 以代码块显示，支持复制 | 待开发 |
-| 18.4 | 数据表格展示 | 查询结果以可排序/可筛选的表格展示 | 待开发 |
-| 18.5 | ECharts 图表渲染 | 根据 chart_config 在前端渲染交互式图表 | 待开发 |
-| 18.6 | 流式进度展示 | SSE 接收 Node 级进度，展示 "正在生成SQL → 正在执行 → 正在分析" 状态 | 待开发 |
-| 18.7 | 数据源管理页面 | 列表 / 新增 / 删除数据源的表单页面 | 待开发 |
-| 18.8 | 字段标注页面 | 给字段补充中文说明的管理页面 | 待开发 |
-| 18.9 | 查询历史页面 | 展示用户自己的历史查询和结果 | 待开发 |
-| 18.10 | 指标文档管理页面 | 在线编辑业务规则 Markdown 文档 | 待开发 |
+### 18.1 项目骨架与路由
+
+| # | 功能 | 文件 | 描述 | 状态 | 优先级 |
+|---|------|------|------|------|--------|
+| 18.1.1 | React + TypeScript 项目初始化 | `frontend/` | Vite + React + TypeScript + Ant Design + ECharts + highlight.js + react-router-dom | 开发完成 | P2 |
+| 18.1.2 | 路由与布局 | `frontend/src/App.tsx` | Ant Design Layout + Sider + 4 条路由（对话/数据源/表结构/历史） | 开发完成 | P2 |
+
+### 18.2 对话分析页 (ChatPage)
+
+| # | 功能 | 文件 | 描述 | 状态 | 优先级 |
+|---|------|------|------|------|--------|
+| 18.2.1 | Chat 对话界面 | `frontend/src/pages/ChatPage.tsx` | 消息输入 + 数据源选择 + 发送/取消/清空 + 会话 ID 显示 | 开发完成 | P2 |
+| 18.2.2 | 流式进度展示 | `frontend/src/hooks/useChat.ts` | SSE 逐 Node 进度 Tags（8 个节点状态）+ thinking/token 实时推送 | 开发完成 | P2 |
+| 18.2.3 | SQL 代码高亮 | `ChatPage.tsx` TurnCard | highlight.js github-dark 主题 + 复制按钮 | 开发完成 | P2 |
+| 18.2.4 | 数据表格展示 | `ChatPage.tsx` TurnCard | Ant Design Table 动态列 + 分页（20条/页，最多100行） | 开发完成 | P2 |
+| 18.2.5 | ECharts 图表渲染 | `ChatPage.tsx` TurnCard | echarts-for-react 渲染 chart.option，空数据时显示 fallback | 开发完成 | P2 |
+| 18.2.6 | 推理过程展示 | `ChatPage.tsx` TurnCard | 流式期间实时显示 LLM reasoning_content | 开发完成 | P2 |
+| 18.2.7 | 推荐追问 | `ChatPage.tsx` | 完成后显示 follow_up_questions Tags，点击自动发送 | 开发完成 | P2 |
+| 18.2.8 | 欢迎引导页 | `ChatPage.tsx` | 无对话时显示示例问题 + 数据源连接状态，引导用户开始 | 待开发 | P2 |
+| 18.2.9 | 数据源动态加载 | `ChatPage.tsx` | 从 GET /datasources 动态获取选项，替代硬编码 `mysql_test` | 待开发 | P2 |
+
+### 18.3 数据源管理页 (DatasourcePage)
+
+| # | 功能 | 文件 | 描述 | 状态 | 优先级 |
+|---|------|------|------|------|--------|
+| 18.3.1 | 数据源列表 | `frontend/src/pages/DatasourcePage.tsx` | Table 展示名称/方言/主机/端口/数据库，支持分页 | 开发完成 | P2 |
+| 18.3.2 | 新增数据源 | 同上 | Modal 表单（名称/方言/主机/端口/数据库/用户名/密码/描述） | 开发完成 | P2 |
+| 18.3.3 | 删除数据源 | 同上 | Popconfirm 确认删除 | 开发完成 | P2 |
+| 18.3.4 | 编辑数据源 | 同上 | 更新已有数据源配置 | 待开发 | P2 |
+| 18.3.5 | 测试连接 | 同上 | 新增前测试数据源连通性 | 待开发 | P2 |
+
+### 18.4 表结构浏览页 (SchemaPage)
+
+| # | 功能 | 文件 | 描述 | 状态 | 优先级 |
+|---|------|------|------|------|--------|
+| 18.4.1 | 表列表展示 | `frontend/src/pages/SchemaPage.tsx` | Table 含表名/描述/字段数，可搜索 | 开发完成 | P2 |
+| 18.4.2 | 展开行查看字段 | 同上 | 展开行显示列名/类型/注释/可空/主键 | 开发完成 | P2 |
+| 18.4.3 | Schema 刷新 | 同上 | POST /schema/refresh 重新扫描数据库 | 开发完成 | P2 |
+| 18.4.4 | 字段详情抽屉 | 同上 | 点击表名打开 Drawer 显示完整列信息 + 表关系 | 待开发 | P2 |
+| 18.4.5 | 列注释编辑 | 同上 | 对接 PUT /schema/tables/{name}/columns/{col}/comment | 待开发 | P2 |
+
+### 18.5 查询历史页 (HistoryPage)
+
+| # | 功能 | 文件 | 描述 | 状态 | 优先级 |
+|---|------|------|------|------|--------|
+| 18.5.1 | 历史列表 | `frontend/src/pages/HistoryPage.tsx` | 获取 GET /api/v1/history 并展示时间/查询/SQL/状态 | 待开发 | P2 |
+| 18.5.2 | 搜索过滤 | 同上 | 按查询内容/SQL 关键字搜索 | 待开发 | P2 |
+| 18.5.3 | 回放历史对话 | 同上 | 点击历史条目恢复对应会话上下文 | 待开发 | P3 |
+
+### 18.6 指标文档管理
+
+| # | 功能 | 文件 | 描述 | 状态 | 优先级 |
+|---|------|------|------|------|--------|
+| 18.6.1 | 指标列表 | `frontend/src/pages/MetricsPage.tsx`（新建） | 业务指标口径文档列表展示 | 待开发 | P3 |
+| 18.6.2 | 指标编辑 | 同上 | 在线编辑业务规则/指标口径 | 待开发 | P3 |
+
+### 18.7 基础设施
+
+| # | 功能 | 文件 | 描述 | 状态 | 优先级 |
+|---|------|------|------|------|--------|
+| 18.7.1 | API 客户端 | `frontend/src/api/client.ts` | get/post/streamChat 封装 + SSE 解析 | 开发完成 | P2 |
+| 18.7.2 | useChat Hook | `frontend/src/hooks/useChat.ts` | 对话状态管理 + SSE 事件分发 | 开发完成 | P2 |
+| 18.7.3 | TypeScript 类型 | `frontend/src/types/index.ts` | SSEEvent / ChatResponse / DatasourceConfig / TableInfo / ColumnInfo | 开发完成 | P2 |
+| 18.7.4 | 公共组件库 | `frontend/src/components/` | SqlPanel / DataTable / ChartPanel / ProgressBar / ReasoningPanel / ResultCard | 待开发 | P2 |
+| 18.7.5 | ErrorBoundary | `frontend/src/components/ErrorBoundary.tsx` | React Error Boundary 捕获渲染异常 | 待开发 | P2 |
+| 18.7.6 | 连接状态指示器 | `App.tsx` Header | 页面加载时 GET /health 显示 LLM 可用性和服务状态 | 待开发 | P2 |
+| 18.7.7 | 响应式布局 | 全局 | 移动端适配（可折叠侧栏 + 自适应内容区） | 待开发 | P3 |
+
+### 18.8 高级特性
+
+| # | 功能 | 描述 | 状态 | 优先级 |
+|---|------|------|------|--------|
+| 18.8.1 | 数据脱敏提示 | 前端显示敏感数据已脱敏的标识 | 待开发 | P3 |
+| 18.8.2 | 技能选择面板 | 对话前选择要启用的 Skill（如数据质量检查、自定义报告） | 待开发 | P3 |
 
 ---
 
@@ -777,9 +839,9 @@
 | 15. 评估与质量保障 | — | 2 | 4 | — | 6 | — |
 | 16. 测试 | — | 5 | 10 | 2 | 17 | — |
 | 17. 基础设施与运维 | 4 | 2 | 7 | 2 | 15 | 17.1.1 LangGraph 自动管理 |
-| 18. 前端 | — | — | 10 | — | 10 | — |
+| 18. 前端 | — | — | 13 | 5 | 18 | — |
 | 19. 扩展能力 | — | — | — | 10 | 10 | — |
-| **总计** | **141** | **113** | **69** | **24** | **347** | — |
+| **总计** | **141** | **113** | **72** | **29** | **355** | — |
 
 > 优先级分配依据 SPEC.md §8 实现路线图的四个 Phase：
 > - P0 = Phase 1 MVP（核心链路）

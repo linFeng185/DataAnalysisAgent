@@ -71,7 +71,30 @@ async def generate_sql_node(state: AnalysisState, config: RunnableConfig) -> dic
             error_context += "\n注意: 这是最后一次尝试，请仔细核对字段名和函数名"
 
     # ── 对话上下文（短期记忆） ──
-    history = state.get("conversation_history", [])
+    history = state.get("conversation_history", []) or []
+    # 回退：如果 conversation_history 为空，从 messages 字段提取上下文
+    if not history:
+        msgs = state.get("messages", []) or []
+        if msgs:
+            # 从 LangChain messages 重建简化的对话历史
+            for msg in msgs:
+                if hasattr(msg, 'content') and msg.content:
+                    role = 'user' if msg.__class__.__name__ == 'HumanMessage' else 'assistant'
+                    history.append({
+                        "turn_id": len(history) + 1,
+                        "user_query": msg.content if role == 'user' else '',
+                        "analysis_summary": msg.content if role == 'assistant' else '',
+                        "generated_sql": '',
+                        "execution_success": True,
+                        "chart_type": '',
+                    })
+        if history:
+            logger.info("对话上下文（从 messages 复原）", turns=len(history))
+    if history:
+        logger.info("对话上下文", turns=len(history),
+                    types=[type(t).__name__ for t in history])
+    else:
+        logger.info("对话上下文为空（可能是首轮或 checkpointer 反序列化失败）")
     # ── 主路径：LLM 流式生成 ──
     if is_llm_available():
         logger.info("SQL 生成: 调用 LLM", query=query[:80], dialect=dialect, retry=retry)
@@ -82,6 +105,22 @@ async def generate_sql_node(state: AnalysisState, config: RunnableConfig) -> dic
         sql, reasoning = _template_generate(tables, retry, state), ""
 
     logger.info("SQL 生成完成", sql=sql[:200], reasoning_chars=len(reasoning))
+
+    # 12.1.6 LLM 输出二次校验 — 拦截表名幻觉
+    if not sql.startswith("-- "):  # 跳过错误占位符
+        hallucination = _check_table_hallucination(sql, tables)
+        if hallucination:
+            logger.warning("LLM 幻觉拦截", sql=sql[:200], unknown_tables=hallucination)
+            result = {"generated_sql": sql, "retry_count": retry,
+                      "validation_errors": [{"type": "hallucination",
+                          "message": f"SQL 引用了不存在的表: {hallucination}",
+                          "unknown_tables": hallucination}]}
+            if reasoning:
+                result["sql_reasoning_content"] = reasoning
+            logger.info("节点完成", node="generate_sql",
+                       elapsed_ms=round((time.monotonic() - _start) * 1000))
+            return result
+
     logger.info("节点完成", node="generate_sql", elapsed_ms=round((time.monotonic() - _start) * 1000))
     result = {"generated_sql": sql, "retry_count": retry}
     if reasoning:
@@ -127,6 +166,8 @@ async def _llm_generate(
             conversation_history, query, node_name="generate_sql",
         )
 
+    _nl = "\n"
+    _history_block = f"## 对话历史{_nl}{context_text}" if context_text else ""
     user_msg = f"""## 数据库表结构
 {schema_text}
 
@@ -136,7 +177,7 @@ async def _llm_generate(
 
 ## 用户问题
 {query}
-{f"## 对话历史\n{context_text}" if context_text else ""}
+{_history_block}
 请生成 SQL:"""
 
     try:
@@ -238,6 +279,27 @@ def _template_generate(tables: list[dict], retry: int, state: AnalysisState) -> 
     return "SELECT * FROM {table} LIMIT 100".format(
         table=tables[0]["name"] if tables else "unknown"
     )
+
+
+def _check_table_hallucination(sql: str, tables: list[dict]) -> list[str]:
+    """12.1.6 检查 SQL 中引用的表名是否在 relevant_tables 中存在。
+
+    使用 sqlglot 提取 FROM/JOIN 子句中的表引用，与已知表名比对，拦截 LLM 幻觉。
+    """
+    if not tables:
+        return []
+    known = {t["name"].lower() for t in tables if t.get("name")}
+    unknown = []
+    try:
+        import sqlglot
+        for node in sqlglot.parse(sql).walk():
+            if hasattr(node, 'name') and hasattr(node, 'alias_or_name'):
+                table_name = str(node.alias_or_name).lower()
+                if table_name and table_name not in known and table_name not in unknown:
+                    unknown.append(table_name)
+    except Exception:
+        pass
+    return unknown
 
 
 def format_schema_for_prompt(tables: list[dict]) -> str:

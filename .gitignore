@@ -1,0 +1,35 @@
+# 环境变量（含密钥）
+.env
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+*.egg-info/
+dist/
+build/
+
+# ChromaDB 向量数据
+chroma_data/
+
+# IDE
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# 本地 MCP 配置
+claude_code_mcp.json
+
+# 前端依赖和构建产物
+frontend/node_modules/
+frontend/dist/
+
+# 用户上传的额外 Skills（非内置）
+extra_skills/
+

@@ -51,6 +51,40 @@ from src.logging_config import get_logger
 logger = get_logger(__name__)
 
 
+# 8.3 MCP Agent Node
+async def mcp_agent_node(state: AnalysisState) -> dict:
+    """8.3.1 文件分析等场景的动态工具调用 Node。"""
+    try:
+        from src.mcp.client_manager import get_mcp_client_manager
+        mcp_tools = get_mcp_client_manager().get_all_tools()
+        skill_tools = state.get("skill_tools", [])
+        all_tools = list(skill_tools) + list(mcp_tools)
+
+        system_prompt = state.get("skill_prompt_override", "") or \
+            "你是数据分析助手，可访问文件系统和外部知识库。"
+
+        from langchain_core.messages import HumanMessage, SystemMessage
+        from src.llm.client import get_llm, is_llm_available
+        if not is_llm_available():
+            return {"final_response": {"success": False, "error_code": "LLM_UNAVAILABLE"}}
+
+        llm = get_llm(temperature=0)
+        messages = [SystemMessage(content=system_prompt),
+                    HumanMessage(content=state.get("user_query", ""))]
+
+        if all_tools:
+            from langgraph.prebuilt import create_react_agent
+            agent = create_react_agent(llm, all_tools)
+            result = await agent.ainvoke({"messages": messages})
+            final = result["messages"][-1] if result.get("messages") else None
+            return {"final_response": {"success": True, "agent_response": getattr(final, 'content', '') or ''}}
+        resp = await llm.ainvoke(messages)
+        return {"final_response": {"success": True, "agent_response": resp.content or ''}}
+    except Exception as e:
+        logger.error("MCP Agent 失败", error=str(e))
+        return {"final_response": {"success": False, "error_message": str(e)}}
+
+
 # ================================================================
 # 条件路由函数 — 读取 state，返回下一个节点名的字符串
 # ================================================================
@@ -100,7 +134,7 @@ def should_retry(state: AnalysisState) -> str:
     err = state.get("execution_error", "")
     retry = state.get("retry_count", 0)
     if not err:
-        return "build_response"
+        return "analyze_result"
     # 配置/资源缺失错误是永久性的，重试无意义
     if "未配置" in err or "未找到" in err or "not found" in err.lower():
         return "build_response"
@@ -144,6 +178,7 @@ def build_workflow() -> StateGraph:
     workflow.add_node("analyze_result", analyze_result_node)
     workflow.add_node("generate_chart", generate_chart_node)
     workflow.add_node("build_response", build_response_node)
+    workflow.add_node("mcp_agent", mcp_agent_node)
 
     # Step 3: 设置入口节点（用户请求从这里开始）
     workflow.set_entry_point("classify_intent")
@@ -172,21 +207,20 @@ def build_workflow() -> StateGraph:
         {"generate_sql": "generate_sql", "execute_sql": "execute_sql", "build_response": "build_response"}
     )
 
-    # 执行路由：成功 → 分析 / 瞬态错误 → 重试 / 配置错误 → 终止
+    # 执行路由：成功 → analyze_result / 瞬态错误 → 重试 / 配置错误 → 终止
     workflow.add_conditional_edges(
         "execute_sql", should_retry,
-        {"generate_sql": "generate_sql", "build_response": "build_response"}
+        {"analyze_result": "analyze_result", "generate_sql": "generate_sql", "build_response": "build_response"}
     )
-
-    # 固定边：执行成功后按序推进至终点
-    workflow.add_edge("execute_sql", "analyze_result")
     workflow.add_edge("analyze_result", "generate_chart")
     workflow.add_edge("generate_chart", "build_response")
-    workflow.add_edge("build_response", END)  # 终点
+    workflow.add_edge("build_response", END)
+    workflow.add_edge("mcp_agent", END)      # MCP Agent 路径终点
 
-    # Step 5: 编译成可执行的 Runnable（astream_events / ainvoke 的入口）
-    return workflow.compile()
+    # Step 5: 编译 — 注入 Checkpointer 实现多轮对话状态持久化
+    from src.memory.checkpointer import get_checkpointer
+    return workflow.compile(checkpointer=get_checkpointer())
 
 
-# 模块级单例 — 所有 API 请求共用同一个编译后的图，避免重复编译
+# 模块级单例 — 所有 API 请求共用同一个编译后的图
 app = build_workflow()

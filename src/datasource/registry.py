@@ -46,18 +46,19 @@ class DataSourceRegistry:
                 continue
 
             if config.password:
+                config.password = self._credential.resolve_env_ref(config.password)
                 config.password = self._credential.decrypt(config.password)
-            config.engine = await self._create_engine(config)
-
-            if not await provider.test_connection(config):
-                raise ConnectionError(f"数据源 '{name}' 连接失败")
 
             try:
+                config.engine = await self._create_engine(config)
+
+                if not await provider.test_connection(config):
+                    raise ConnectionError(f"数据源 '{name}' 连接失败")
+
                 config.schema = await provider.extract_schema(config)
-            except Exception as e:
-                logger.warning("Schema 提取失败", error=str(e))
-                from src.datasource.schema_snapshot import SchemaSnapshot
-                config.schema = SchemaSnapshot()
+            except (ConnectionError, Exception) as e:
+                logger.warning("数据源不可用，跳过", datasource=name, error=str(e)[:120])
+                continue
 
             self._cache[name] = config
             return config
@@ -69,6 +70,12 @@ class DataSourceRegistry:
         settings = get_settings()
         pwd = quote_plus(ds.password) if ds.password else ""
         sync_dialects = {"oracle", "mssql"}
+        try:
+            return self._build_engine(ds, pwd, sync_dialects)
+        except Exception as e:
+            raise ConnectionError(f"数据源 '{ds.name}' 方言驱动不可用: {ds.dialect} — {e}")
+
+    def _build_engine(self, ds, pwd, sync_dialects):
         if ds.dialect in sync_dialects:
             from sqlalchemy import create_engine
             url_map = {
@@ -102,18 +109,29 @@ class DataSourceRegistry:
 
     async def list_all(self) -> list[dict]:
         result = []
+        seen: set[str] = set()
         for provider in self._providers.values():
             for ds in await provider.list_all():
+                seen.add(ds.name)
                 result.append({
                     "name": ds.name, "dialect": ds.dialect,
                     "mode": ds.mode, "host": ds.host,
                     "description": ds.description,
                     "connected": ds.name in self._cache,
                 })
+        # 包含直接注入缓存的 demo 数据源（不通过 Provider 注册）
+        for name, config in self._cache.items():
+            if name not in seen:
+                result.append({
+                    "name": config.name, "dialect": config.dialect,
+                    "mode": config.mode, "host": config.host or "localhost",
+                    "description": config.description or "",
+                    "connected": True,
+                })
         return result
 
     async def resolve_or_none(self, name: str) -> DataSourceConfig | None:
         try:
             return await self.resolve(name)
-        except DataSourceNotFoundError:
+        except Exception:
             return None

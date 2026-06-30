@@ -1,0 +1,30 @@
+# {{ title | default('周度数据报告') }}
+
+> 报告周期: {{ period | default('本周') }}
+> 生成时间: {{ generated_at | default('') }}
+
+## 摘要
+{{ summary }}
+
+{% if metrics %}
+## 关键指标
+| 指标 | 数值 |
+|------|------|
+{% for name, value in metrics.items() %}
+| {{ name }} | {{ value }} |
+{% endfor %}
+{% endif %}
+
+{% if insights %}
+## 洞察
+{% for item in insights %}
+- {{ item }}
+{% endfor %}
+{% endif %}
+
+{% if recommendations %}
+## 建议
+{% for item in recommendations %}
+{{ loop.index }}. {{ item }}
+{% endfor %}
+{% endif %}
