@@ -30,6 +30,16 @@ from src.logging_config import get_logger
 logger = get_logger(__name__)
 
 
+_schema_singleton = None
+
+
+def get_schema_manager():
+    global _schema_singleton
+    if _schema_singleton is None:
+        _schema_singleton = SchemaManager()
+    return _schema_singleton
+
+
 class SchemaManager:
     """
     Schema 缓存管理器。

@@ -42,7 +42,7 @@ _PROGRESS_MAP: dict[str, str] = {
 }
 
 
-async def stream_analysis(user_query: str, datasource: str):
+async def stream_analysis(user_query: str, datasource: str, session_id: str = ""):
     """SSE: 逐 Node 推送进度 + LLM token + 关键结果。
 
     每个 thinking / token 事件均携带 node 字段，
@@ -50,16 +50,22 @@ async def stream_analysis(user_query: str, datasource: str):
     """
     from src.graph.workflow import app
 
+    import uuid
+    effective_id = session_id or str(uuid.uuid4())
+    config = {"configurable": {"thread_id": effective_id}}
+    if session_id:
+        logger.info("会话续用", session_id=session_id[:20])
+    else:
+        logger.info("新会话", session_id=effective_id[:20])
+
     stats = {"chain_start": 0, "chain_end": 0, "chat_model_stream": 0, "chat_model_start": 0,
              "thinking_events": 0, "token_events": 0}
-    # 按节点分区存储 LLM 流式内容，并行 LLM 调用互不污染
     llm_content_parts: dict[str, list[str]] = defaultdict(list)
-    # 当前活跃的 LLM 调用集合（支持并行时有多个）
     active_llm_nodes: set[str] = set()
 
     try:
         async for event in app.astream_events(
-            {"user_query": user_query, "datasource": datasource}, version="v2"
+            {"user_query": user_query, "datasource": datasource}, config, version="v2"
         ):
             kind = event["event"]
 

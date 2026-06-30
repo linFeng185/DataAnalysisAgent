@@ -20,10 +20,12 @@ pyyaml>=6.0
 mcp>=1.0.0
 redis>=5.0
 sse-starlette>=2.0
+python-docx>=1.0
+PyPDF2>=3.0
+jinja2>=3.0
+django>=4.2,<5.1
 
 # 可选依赖 — 按需取消注释
 # clickhouse-connect>=0.8.0
 # aiomysql>=0.2.0
 # asyncpg>=0.30.0
-
-django

@@ -158,7 +158,7 @@ class TestE2E:
         r = asyncio.run(app.ainvoke({
             "user_query": "查昨天订单",
             "datasource": "clickhouse_prod",
-        }))
+        }, {"configurable": {"thread_id": "test-simple-query"}}))
         assert "final_response" in r
 
     def test_dangerous_sql_blocked_at_node_level(self):
@@ -174,5 +174,5 @@ class TestE2E:
             "user_query": "查",
             "generated_sql": "SELECT bad",
             "retry_count": 0,
-        }))
+        }, {"configurable": {"thread_id": "test-retry-path"}}))
         assert "final_response" in r

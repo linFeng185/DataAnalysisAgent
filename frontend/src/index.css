@@ -1,0 +1,9 @@
+body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+.node-progress { display: flex; align-items: center; gap: 8px; padding: 6px 12px; border-radius: 6px; margin: 4px 0; font-size: 13px; }
+.node-progress.running { background: #e6f4ff; color: #1677ff; }
+.node-progress.done { background: #f6ffed; color: #52c41a; }
+.node-progress.error { background: #fff2f0; color: #ff4d4f; }
+.thinking-block { background: #fafafa; border-left: 3px solid #1677ff; padding: 8px 12px; margin: 8px 0; border-radius: 4px; font-size: 13px; color: #666; max-height: 200px; overflow-y: auto; }
+.sql-block { background: #0d1117; padding: 12px; border-radius: 6px; overflow-x: auto; font-size: 13px; }
+.sql-block .hljs { background: transparent; padding: 0; }
+.chart-container { width: 100%; height: 400px; margin: 12px 0; }

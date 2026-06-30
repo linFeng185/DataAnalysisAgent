@@ -15,6 +15,13 @@ _WARM_WINDOW = 10
 _MAX_PROMPT_TOKENS = 7000
 
 
+def _g(turn, key: str):
+    """兼容 ConversationTurn 对象和 checkpointer 反序列化的 dict。"""
+    if hasattr(turn, 'get'):
+        return turn.get(key, '') or ''
+    return getattr(turn, key, '') or ''
+
+
 async def build_llm_context(
     conversation_history: list[ConversationTurn],
     user_query: str = "",
@@ -32,11 +39,11 @@ async def build_llm_context(
     # 热: 最近 3 轮完整
     hot = conversation_history[-_HOT_WINDOW:] if conversation_history else []
     for turn in hot:
-        parts.append(f"用户: {turn.user_query}")
-        if turn.generated_sql:
-            parts.append(f"执行的SQL: {turn.generated_sql}")
-        if turn.analysis_summary:
-            parts.append(f"分析结论: {turn.analysis_summary}")
+        parts.append(f"用户: {_g(turn, 'user_query')}")
+        if _g(turn, 'generated_sql'):
+            parts.append(f"执行的SQL: {_g(turn, 'generated_sql')}")
+        if _g(turn, 'analysis_summary'):
+            parts.append(f"分析结论: {_g(turn, 'analysis_summary')}")
 
     # 温: 4~10 轮摘要 (LLM 优先，规则回退)
     warm = conversation_history[-_WARM_WINDOW:-_HOT_WINDOW]
@@ -62,9 +69,9 @@ async def build_llm_context(
         parts = []
         if hot:
             t = hot[-1]
-            parts.append(f"用户: {t.user_query}")
-            if t.generated_sql:
-                parts.append(f"执行的SQL: {t.generated_sql}")
+            parts.append(f"用户: {_g(t, 'user_query')}")
+            if _g(t, 'generated_sql'):
+                parts.append(f"执行的SQL: {_g(t, 'generated_sql')}")
         if warm:
             parts.append(f"[前序对话摘要] {await _summarize_turns(warm)}")
         context = "\n---\n".join(parts)
@@ -87,9 +94,9 @@ async def _summarize_turns_llm(turns: list[ConversationTurn]) -> str:
         return ""
 
     turns_text = "\n".join(
-        f"Q{i+1}: {t.user_query}"
-        + (f"\nSQL: {t.generated_sql[:200]}" if t.generated_sql else "")
-        + (f"\n结论: {t.analysis_summary}" if t.analysis_summary else "")
+        f"Q{i+1}: {_g(t, 'user_query')}"
+        + (f"\nSQL: {_g(t, 'generated_sql')[:200]}" if _g(t, 'generated_sql') else "")
+        + (f"\n结论: {_g(t, 'analysis_summary')}" if _g(t, 'analysis_summary') else "")
         for i, t in enumerate(turns)
     )
 
@@ -112,8 +119,8 @@ async def _summarize_turns_llm(turns: list[ConversationTurn]) -> str:
 
 def _summarize_turns_rule(turns: list[ConversationTurn]) -> str:
     """7.5.2 规则拼接摘要 — 无 LLM 或 LLM 失败时的回退方案。"""
-    queries = [t.user_query[:60] for t in turns if t.user_query]
-    errors = sum(1 for t in turns if not t.execution_success and t.generated_sql)
+    queries = [_g(t, 'user_query')[:60] for t in turns if _g(t, 'user_query')]
+    errors = sum(1 for t in turns if not _g(t, 'execution_success') and _g(t, 'generated_sql'))
     return (
         f"前 {len(turns)} 轮对话涵盖: {'; '.join(queries)}。"
         f"其中 {errors} 次查询需要重试或纠正。"

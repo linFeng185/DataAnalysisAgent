@@ -1,0 +1,37 @@
+# {{ title | default('月度数据报告') }}
+
+> 报告周期: {{ period | default('本月') }}
+> 生成时间: {{ generated_at | default('') }}
+
+## 摘要
+{{ summary }}
+
+{% if metrics %}
+## 关键指标
+| 指标 | 数值 | 环比 |
+|------|------|------|
+{% for name, value in metrics.items() %}
+| {{ name }} | {{ value }} | {{ changes.get(name, '-') if changes else '-' }} |
+{% endfor %}
+{% endif %}
+
+{% if insights %}
+## 洞察
+{% for item in insights %}
+- {{ item }}
+{% endfor %}
+{% endif %}
+
+{% if recommendations %}
+## 行动建议
+{% for item in recommendations %}
+{{ loop.index }}. {{ item }}
+{% endfor %}
+{% endif %}
+
+{% if next_steps %}
+## 下月关注
+{% for item in next_steps %}
+- {{ item }}
+{% endfor %}
+{% endif %}

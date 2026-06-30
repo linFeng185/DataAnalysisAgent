@@ -10,7 +10,7 @@ from pydantic import BaseModel, Field
 class ChatRequest(BaseModel):
     query: str = Field(..., examples=["过去7天各品类销售额"])
     session_id: str = ""
-    datasource: str = "clickhouse_prod"
+    datasource: str = "demo"
     stream: bool = False
 
 

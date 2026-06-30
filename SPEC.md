@@ -2493,6 +2493,154 @@ async def chat(request: ChatRequest):
 | 租户模型 | 单项目单 Agent | 多租户共享 Agent 实例 |
 | 典型场景 | 给 Django 项目加一个智能查数机器人 | 公司级分析平台：市场、运营、财务都用 |
 
+### 3.12 前端设计
+
+前端采用 React + TypeScript SPA 架构，通过 Vite 构建，使用 Ant Design 组件库和 ECharts 图表库。前后端通过 REST API + SSE 流式事件通信。
+
+---
+
+#### 3.12.1 技术栈
+
+| 层次 | 技术 | 版本 |
+|------|------|------|
+| 框架 | React | 18 |
+| 语言 | TypeScript | 5 |
+| 构建 | Vite | 6 |
+| UI 组件库 | Ant Design | 5 |
+| 图表 | ECharts (echarts-for-react) | 5 |
+| 路由 | react-router-dom | 6 |
+| SQL 高亮 | highlight.js | 11 |
+| 日期 | dayjs | 1 |
+
+---
+
+#### 3.12.2 路由设计
+
+| 路由 | 页面组件 | 对应后端 API | 说明 |
+|------|---------|-------------|------|
+| `/` | ChatPage | POST /api/v1/chat | 主对话分析页，多轮对话 + SSE 流式 |
+| `/datasource` | DatasourcePage | GET/POST/DELETE /api/v1/datasources | 数据源管理（列表/新增/删除） |
+| `/schema` | SchemaPage | GET/POST /api/v1/schema/* | 表结构浏览 + 字段详情 + 列注释编辑 |
+| `/history` | HistoryPage | GET /api/v1/history | 查询历史记录 |
+
+**开发代理**：Vite 开发服务器将 `/api` 代理至 `http://localhost:8000`。
+
+---
+
+#### 3.12.3 组件树
+
+```
+App (ConfigProvider + BrowserRouter)
+└── AppLayout (Layout + Sider + Header)
+    ├── Header (应用名称 + 连接状态指示器)
+    ├── SideMenu (NavLink 导航)
+    │   ├── 对话分析 (/)
+    │   ├── 数据源 (/datasource)
+    │   ├── 表结构 (/schema)
+    │   └── 历史 (/history)
+    └── Content
+        ├── ChatPage
+        │   ├── WelcomePanel (空状态：示例问题列表 + 数据源状态)
+        │   ├── ChatToolbar (Input + 数据源 Select + 发送/取消/清空)
+        │   ├── TurnList → TurnCard
+        │   │   ├── UserBubble (用户消息)
+        │   │   ├── ProgressBar (8 个 Node 进度 Tags)
+        │   │   ├── ReasoningPanel (思考过程)
+        │   │   ├── TokenStream (生成内容流)
+        │   │   ├── ResultCard
+        │   │   │   ├── SqlPanel (SQL 高亮 + 复制)
+        │   │   │   ├── DataTable (Ant Table 分页)
+        │   │   │   ├── ChartPanel (ECharts 图表)
+        │   │   │   └── RawResponse (原始响应)
+        │   │   └── ErrorCard (错误信息)
+        │   └── SuggestedQuestions (推荐追问 Tags)
+        ├── DatasourcePage
+        │   ├── DatasourceTable
+        │   └── DatasourceFormModal
+        ├── SchemaPage
+        │   ├── SchemaToolbar (搜索 + 刷新)
+        │   ├── SchemaTable (可展开行)
+        │   └── ColumnDetailDrawer (字段详情 + 注释编辑)
+        └── HistoryPage
+            ├── HistorySearch
+            └── HistoryTable
+```
+
+---
+
+#### 3.12.4 SSE 事件协议
+
+后端通过 POST `/api/v1/chat?stream=true` 返回 SSE 流，事件定义：
+
+| 事件类型 | 触发时机 | payload 字段 | 说明 |
+|---------|---------|-------------|------|
+| `node_start` | 任意 Node 进入时 | `node: string` | 标识当前执行节点 |
+| `progress` | 关键 Node 内 | `node, message` | 带中文消息的进度更新 |
+| `node_end` | 任意 Node 完成时 | `node: string` | 节点执行完成 |
+| `llm_start` | LLM 调用开始时 | `node: string` | LLM 开始生成 |
+| `thinking` | LLM 流式期间 | `reasoning_content: string` | 推理/思维链 token |
+| `token` | LLM 流式期间 | `content: string, node?: string` | 内容 token |
+| `llm_end` | LLM 调用结束时 | `node: string` | LLM 生成完成 |
+| `sql` | generate_sql 完成后 | `sql: string` | 生成的 SQL 语句 |
+| `validation` | layer3_validate 完成后 | `valid, errors, warnings` | SQL 校验结果 |
+| `result` | build_response 完成后 | `success, sql, data, analysis, chart` | 最终分析结果 |
+| `analysis` | analyze_result 完成后 | `analysis: object` | 分析结果数据 |
+| `error` | 异常时 | `message: string` | 错误消息 |
+| `done` | 流正常结束时 | — | 流结束标记 |
+
+**前端处理**：`ReadableStream → TextDecoder → 按 \n 分割 → 解析 `data:` 前缀 → JSON.parse → switch(type)`。
+
+---
+
+#### 3.12.5 多轮对话流程
+
+1. 页面加载 → 自动生成 `session_id = sess_${Date.now()}`
+2. 用户输入问题 + 选择数据源 → `send(query, datasource)`
+3. POST `/api/v1/chat` `{ query, datasource, stream: true, session_id }`
+4. 后端 LangGraph 使用 `thread_id = session_id` 做 checkpointer 持久化
+5. SSE 流返回分析结果
+6. 用户点击推荐追问 → 携带相同 `session_id` 再次 `send`
+7. 后端自动加载历史对话上下文
+8. "清空会话" → 重置 `session_id` → 下次对话创建新会话
+
+**状态管理**：
+
+```typescript
+// useChat hook 核心状态
+interface ChatTurn {
+  id: number;
+  userQuery: string;
+  assistant: AssistantContent;   // 流式内容累积
+  finalResult: ChatResponse | null;
+  status: 'streaming' | 'done' | 'error';
+  errorMessage: string;
+}
+
+interface AssistantContent {
+  reasoning: string;             // thinking 事件累积
+  tokens: string;                // token 事件累积
+  sql: string;                   // 生成的 SQL
+  progressNodes: Record<string, { status: 'pending'|'running'|'done'|'error'; message: string }>;
+}
+```
+
+---
+
+#### 3.12.6 节点名称映射
+
+| 后端 node_id | 前端显示 | 状态颜色 |
+|-------------|---------|---------|
+| `classify_intent` | 意图识别 | processing |
+| `retrieve_schema` | 检索表结构 | success |
+| `generate_sql` | 生成 SQL | processing |
+| `layer3_validate` | SQL 校验 | success / error |
+| `execute_sql` | 执行查询 | processing |
+| `analyze_result` | 分析结果 | success |
+| `generate_chart` | 生成图表 | success |
+| `build_response` | 组装响应 | success |
+
+---
+
 ## 4. 技术栈选型
 
 | 层次 | 技术 | 说明 |

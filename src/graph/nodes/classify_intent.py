@@ -14,6 +14,8 @@ async def classify_intent_node(state: AnalysisState) -> dict:
     """Phase 1 规则匹配; Phase 2 切换 LLM。"""
     _start = time.monotonic()
     logger.info("节点开始", node="classify_intent")
+    ch = state.get("conversation_history", []) or []
+    logger.info("对话历史检查", has_history=len(ch) > 0, turns=len(ch))
     q = state["user_query"].lower()
 
     if any(w in q for w in ("为什么", "原因", "归因")):
@@ -31,10 +33,25 @@ async def classify_intent_node(state: AnalysisState) -> dict:
     else:
         intent = "chat"
 
+    # Skill 匹配 (9.1.6 关键词+意图+表名三重匹配)
+    activated_skills = []
+    skill_prompt = ""
+    skill_tools = []
+    try:
+        from src.skill_manager import get_skill_manager
+        mgr = get_skill_manager()
+        tables = [t.get("name", "") for t in state.get("relevant_tables", [])]
+        activated_skills = mgr.match_skills(state["user_query"], intent, tables)
+        if activated_skills:
+            skill_prompt = mgr.build_skill_prompt(activated_skills)
+            skill_tools = mgr.get_active_tools(activated_skills)
+    except Exception as e:
+        logger.warning("Skill 匹配失败", error=str(e))
+
     logger.info("节点完成", node="classify_intent", elapsed_ms=round((time.monotonic() - _start) * 1000))
     return {
         "intent": intent,
-        "activated_skills": [],
-        "skill_prompt_override": "",
-        "skill_tools": [],
+        "activated_skills": [s.name for s in activated_skills],
+        "skill_prompt_override": skill_prompt,
+        "skill_tools": skill_tools,
     }

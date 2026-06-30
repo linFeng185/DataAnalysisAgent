@@ -25,9 +25,49 @@ async def lifespan(app: FastAPI):
                  api_key_set=bool(s.openai_api_key))
     logger.info("=" * 50)
 
-    # 初始化演示数据源
+    # 初始化演示数据源（SQLite 内存库）
     from src.datasource.setup import ensure_demo_datasource
     await ensure_demo_datasource()
+
+    # 预热 Checkpointer（避免首次请求时 PostgresSaver 连接超时）
+    try:
+        from src.memory.checkpointer import get_checkpointer
+        get_checkpointer()
+        logger.info("Checkpointer 预热完成")
+    except Exception as e:
+        logger.warning("Checkpointer 预热失败", error=str(e))
+
+    # 预热 SchemaManager（提前加载嵌入模型 + ChromaDB，避免首次检索时等待）
+    try:
+        from src.knowledge.schema_manager import get_schema_manager
+        sm = get_schema_manager()
+        sm._ensure_initialized()  # noqa: SLF001
+        logger.info("SchemaManager 预热完成（嵌入模型 + ChromaDB）")
+    except Exception as e:
+        logger.warning("SchemaManager 预热失败", error=str(e))
+
+    # 预热 LLM 客户端（验证 API Key + 网络连通性）
+    try:
+        from src.llm.client import is_llm_available, get_llm
+        if is_llm_available():
+            get_llm(temperature=0, reasoning=False)
+            logger.info("LLM 客户端预热完成", model=s.llm_model)
+    except Exception as e:
+        logger.warning("LLM 预热失败", error=str(e))
+
+    # 9.1.3 加载 Skills
+    try:
+        from src.skill_manager import get_skill_manager
+        await get_skill_manager(s.skills_dir, s.extra_skills_dirs).discover()
+    except Exception as e:
+        logger.warning("Skill 加载失败", error=str(e))
+
+    # 8.1.2 连接外部 MCP Server
+    try:
+        from src.mcp.client_manager import get_mcp_client_manager
+        await get_mcp_client_manager().connect_all()
+    except Exception as e:
+        logger.warning("MCP 连接失败", error=str(e))
 
     # 加载外部数据源（config/datasources.yaml）
     try:

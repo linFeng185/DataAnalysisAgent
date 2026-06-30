@@ -15,8 +15,21 @@ async def execute_sql_node(state: AnalysisState) -> dict:
     """Phase 2: registry → connector.execute()。Phase 1: 返回空数据 + 提示。"""
     _start = time.monotonic()
     logger.info("节点开始", node="execute_sql")
-    sql = state.get("generated_sql", "")
+    sql = (state.get("generated_sql", "") or "").strip()
     ds_name = state.get("datasource", "")
+
+    # LLM 返回空 SQL（如问题无法用现有数据回答）时直接跳过执行
+    if not sql:
+        logger.info("SQL 为空，跳过数据库执行", datasource=ds_name)
+        return {"query_result_sample": [], "query_result_full_count": 0,
+                "query_result_statistics": {"row_count": 0}}
+
+    # 12.2.1 频率限制检查
+    from src.security.data_masker import check_rate_limit
+    if not check_rate_limit():
+        return {"execution_error": "请求频率超限",
+                "query_result_sample": [], "query_result_full_count": 0,
+                "query_result_statistics": {"row_count": 0}}
 
     # 尝试连接数据源
     try:
@@ -41,7 +54,12 @@ async def execute_sql_node(state: AnalysisState) -> dict:
 
                 result = await conn.execute(sa.text(sql))
                 rows = [dict(row._mapping) for row in result]
-            logger.info("节点完成", node="execute_sql", elapsed_ms=round((time.monotonic() - _start) * 1000))
+            elapsed = round((time.monotonic() - _start) * 1000)
+            # 12.3.3 审计日志
+            import asyncio
+            from src.security.data_masker import log_audit
+            asyncio.create_task(log_audit("anonymous", ds_name, sql, len(rows), elapsed, True))
+            logger.info("节点完成", node="execute_sql", elapsed_ms=elapsed)
             return {
                 "query_result_sample": rows[:200],
                 "query_result_full_count": len(rows),
