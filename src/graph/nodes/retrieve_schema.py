@@ -41,18 +41,18 @@ async def retrieve_schema_node(state: AnalysisState) -> dict:
             except Exception:
                 pass
 
-    # 从 Registry 获取数据源方言
-    dialect = state.get("dialect", "")
+    # 从 Registry 获取当前数据源的方言
+    # 注意：不信任 state 中缓存的旧 dialect（切换数据源时可能过时）
+    dialect = ""
+    try:
+        from src.datasource.registry import get_registry
+        ds = await get_registry().resolve_or_none(datasource_name)
+        if ds:
+            dialect = ds.dialect
+    except Exception:
+        pass
     if not dialect:
-        try:
-            from src.datasource.registry import get_registry
-            ds = await get_registry().resolve_or_none(datasource_name)
-            if ds:
-                dialect = ds.dialect
-        except Exception:
-            pass
-    if not dialect:
-        dialect = "clickhouse"  # 最终兜底
+        dialect = state.get("dialect", "") or "clickhouse"
 
     tables = schema.tables if schema else []
     logger.info("Schema 检索完成", table_count=len(tables),

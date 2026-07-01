@@ -522,34 +522,31 @@ class SchemaManager:
 
     @staticmethod
     def _create_embedding_function(settings):
-        """基于配置创建嵌入函数，EMBEDDING_MODEL_PATH 未配置则直接报错。"""
+        """创建嵌入函数。
+
+        优先 EMBEDDING_MODEL_PATH 本地路径，未配置则从 HuggingFace 自动下载（首次 ~80MB）。
+        """
         from pathlib import Path
 
         model_dir = settings.embedding_model_path
-        if not model_dir:
-            raise ValueError(
-                "EMBEDDING_MODEL_PATH 未配置，请在 .env 中设置 "
-                "all-MiniLM-L6-v2 模型目录路径（如 EMBEDDING_MODEL_PATH=D:/work/all-MiniLM-L6-v2）"
-            )
+        if model_dir:
+            model_path = Path(model_dir)
+            if not model_path.exists():
+                raise FileNotFoundError(f"嵌入模型路径不存在: {model_dir}")
+            onnx_dir = model_path / "onnx"
+            search_dir = onnx_dir if onnx_dir.exists() else model_path
+            required = ["config.json", "model.onnx", "special_tokens_map.json",
+                        "tokenizer_config.json", "tokenizer.json", "vocab.txt"]
+            missing = [f for f in required if not (search_dir / f).exists()]
+            if missing:
+                raise FileNotFoundError(f"嵌入模型目录缺少文件: {missing}")
+            from chromadb.utils.embedding_functions import ONNXMiniLM_L6_V2
+            return ONNXMiniLM_L6_V2(preferred_providers=["CPUExecutionProvider"])
 
-        model_path = Path(model_dir)
-        if not model_path.exists():
-            raise FileNotFoundError(f"嵌入模型路径不存在: {model_dir}")
-
-        # 校验 ONNX 模型所需的 6 个文件
-        onnx_dir = model_path / "onnx"
-        required_files = [
-            "config.json", "model.onnx", "special_tokens_map.json",
-            "tokenizer_config.json", "tokenizer.json", "vocab.txt",
-        ]
-        # 优先检查 onnx 子目录，不存在则检查模型根目录
-        search_dir = onnx_dir if onnx_dir.exists() else model_path
-        missing = [f for f in required_files if not (search_dir / f).exists()]
-        if missing:
-            raise FileNotFoundError(
-                f"嵌入模型目录缺少文件: {missing}\n"
-                f"请确保 {model_dir} 包含完整的 all-MiniLM-L6-v2 ONNX 模型"
-            )
+        # 未配置 → HuggingFace 自动下载
+        logger.info("EMBEDDING_MODEL_PATH 未配置，从 HuggingFace 自动下载 all-MiniLM-L6-v2")
+        from chromadb.utils.embedding_functions import ONNXMiniLM_L6_V2
+        return ONNXMiniLM_L6_V2(preferred_providers=["CPUExecutionProvider"])
 
         from chromadb.utils.embedding_functions.onnx_mini_lm_l6_v2 import ONNXMiniLM_L6_V2
 

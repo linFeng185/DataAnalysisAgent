@@ -288,6 +288,7 @@ async def list_knowledge(
         results = sm._collection.get(  # noqa: SLF001
             where={"category": category} if category else None,
         )
+        logger.info("知识库查询", total_ids=len(results.get("ids", []) or []))
         entries = []
         if results and results.get("metadatas"):
             for i, meta in enumerate(results["metadatas"]):
@@ -349,16 +350,12 @@ async def upload_knowledge_docs(
             continue
         try:
             content = await f.read()
-            # 保存原文件到 docs/metrics/
-            dest_dir = os.path.join(os.path.dirname(__file__), "..", "..", "docs", "metrics")
-            os.makedirs(dest_dir, exist_ok=True)
-            dest = os.path.join(dest_dir, os.path.basename(f.filename))
-            with open(dest, "wb") as fp:
-                fp.write(content)
+            # 保存原始文件到 PostgreSQL
+            from src.knowledge.file_store import get_file_store
+            file_id = await get_file_store().save(f.filename, content)
 
             task = mgr.create(f.filename)
-            tasks_result.append({"task_id": task.id, "file_name": f.filename})
-            # 后台异步处理（不阻塞响应）
+            tasks_result.append({"task_id": task.id, "file_name": f.filename, "file_id": file_id})
             _asyncio.create_task(mgr.process(task, content, config, category))
         except Exception as e:
             errors.append({"file": f.filename, "error": str(e)})
@@ -385,89 +382,60 @@ async def upload_status(task_id: str = Query(default="")):
 
 @router.get("/knowledge/docs")
 async def list_knowledge_docs():
-    """列出已索引的文档。"""
-    import os
-    docs_dir = os.path.join(os.path.dirname(__file__), "..", "..", "docs", "metrics")
-    docs = []
-    if os.path.isdir(docs_dir):
-        for f in sorted(os.listdir(docs_dir)):
-            if any(f.endswith(ext) for ext in (".md", ".txt", ".pdf", ".docx", ".doc", ".markdown")):
-                fpath = os.path.join(docs_dir, f)
-                # 检查是否用户上传（通过 ChromaDB metadata）
-                is_user = False
-                try:
-                    from src.knowledge.schema_manager import SchemaManager
-                    sm2 = get_schema_manager()
-                    sm2._ensure_initialized()  # noqa: SLF001
-                    r = sm2._collection.get(where={"source_file": f})  # noqa: SLF001
-                    if r and r.get("metadatas"):
-                        is_user = any(m and m.get("source") == "user_upload" for m in r["metadatas"])
-                except Exception:
-                    pass
-                docs.append({
-                    "name": f, "size": os.path.getsize(fpath),
-                    "modified": os.path.getmtime(fpath),
-                    "is_builtin": not is_user,
-                })
+    """列出已索引的文档（优先 PG，回退磁盘）。"""
+    from src.knowledge.file_store import get_file_store
+    docs = await get_file_store().list_files()
     return {"docs": docs, "total": len(docs)}
 
 
 @router.get("/knowledge/docs/{doc_name}/content")
 async def get_doc_content(doc_name: str):
-    """获取已索引文档的内容（用于前端详情展示）。
-
-    PDF 返回原始文件 URL（前端用 iframe 渲染），
-    Word 转换为 HTML，TXT/MD 返回纯文本。
-    """
-    doc_path = os.path.join(os.path.dirname(__file__), "..", "..", "docs", "metrics", doc_name)
-    real = os.path.realpath(os.path.normpath(doc_path))
-    allowed = os.path.realpath(os.path.normpath(
-        os.path.join(os.path.dirname(__file__), "..", "..", "docs", "metrics")))
-    if not real.startswith(allowed):
-        raise HTTPException(403, "路径非法")
-    if not os.path.isfile(doc_path):
-        raise HTTPException(404, f"文档 '{doc_name}' 未找到")
-
-    ext = os.path.splitext(doc_name)[1].lower()
-    result = {"name": doc_name, "size": os.path.getsize(doc_path), "ext": ext, "type": "text", "content": "", "raw_url": ""}
-
-    try:
+    """获取已索引文档的内容（从 PG 读取，回退磁盘）。"""
+    from src.knowledge.file_store import get_file_store
+    store = get_file_store()
+    doc = await store.get_by_name(doc_name)
+    if doc:
+        raw = doc["file_data"]
+        size = doc["size"]
+    else:
+        # 磁盘回退
+        doc_path = os.path.join(os.path.dirname(__file__), "..", "..", "docs", "metrics", doc_name)
+        if not os.path.isfile(doc_path):
+            raise HTTPException(404, f"文档 '{doc_name}' 未找到")
         with open(doc_path, "rb") as fp:
             raw = fp.read()
+        size = os.path.getsize(doc_path)
 
-        if ext == ".pdf":
-            result["type"] = "pdf"
-            result["raw_url"] = f"/api/v1/knowledge/docs/{doc_name}/raw"
-            # 仍然提取文本作为 fallback
-            from src.knowledge.doc_parser import extract_text
-            result["content"] = extract_text(doc_name, raw)
-        elif ext in (".docx", ".doc"):
-            result["type"] = "word"
-            result["content"] = _docx_to_html(raw)
-        else:
-            result["type"] = "text"
-            result["content"] = raw.decode("utf-8", errors="replace")
-
-        return result
-    except Exception as e:
-        raise HTTPException(500, f"读取文档失败: {e}")
+    ext = os.path.splitext(doc_name)[1].lower()
+    result = {"name": doc_name, "size": size, "ext": ext, "type": "text", "content": "", "raw_url": ""}
+    if ext == ".pdf":
+        result["type"] = "pdf"
+        result["raw_url"] = f"/api/v1/knowledge/docs/{doc_name}/raw"
+        from src.knowledge.doc_parser import extract_text
+        result["content"] = extract_text(doc_name, raw)
+    elif ext in (".docx", ".doc"):
+        result["type"] = "word"
+        result["content"] = _docx_to_html(raw)
+    else:
+        result["content"] = raw.decode("utf-8", errors="replace")
+    return result
 
 
 @router.get("/knowledge/docs/{doc_name}/raw")
 async def get_doc_raw(doc_name: str):
-    """返回原始文件（用于 PDF iframe 渲染）。"""
+    """返回原始文件（从 PG 读取，回退磁盘，用于 PDF iframe 渲染）。"""
+    from fastapi.responses import Response
+    from src.knowledge.file_store import get_file_store
+    doc = await get_file_store().get_by_name(doc_name)
+    if doc:
+        return Response(content=bytes(doc["file_data"]), media_type=doc["content_type"])
+    # 磁盘回退
     from fastapi.responses import FileResponse
     doc_path = os.path.join(os.path.dirname(__file__), "..", "..", "docs", "metrics", doc_name)
-    real = os.path.realpath(os.path.normpath(doc_path))
-    allowed = os.path.realpath(os.path.normpath(
-        os.path.join(os.path.dirname(__file__), "..", "..", "docs", "metrics")))
-    if not real.startswith(allowed):
-        raise HTTPException(403, "路径非法")
     if not os.path.isfile(doc_path):
         raise HTTPException(404, f"文档 '{doc_name}' 未找到")
     ext = os.path.splitext(doc_name)[1].lower()
-    media_map = {".pdf": "application/pdf", ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                 ".doc": "application/msword", ".txt": "text/plain", ".md": "text/markdown"}
+    media_map = {".pdf": "application/pdf", ".txt": "text/plain", ".md": "text/markdown"}
     return FileResponse(doc_path, media_type=media_map.get(ext, "application/octet-stream"))
 
 
@@ -529,9 +497,7 @@ async def delete_knowledge_entry(entry_id: str):
 @router.delete("/knowledge/docs/{doc_name}")
 async def delete_knowledge_doc(doc_name: str):
     """删除已索引文档（仅限用户上传的）。"""
-    import shutil as _shutil
-    # 检查是否是内置文档（从 docs/metrics/ 目录下排除 .example 和非用户上传的）
-    from src.knowledge.schema_manager import SchemaManager
+    # 检查是否是内置文档
     from src.knowledge.schema_manager import get_schema_manager
     sm = get_schema_manager()
     sm._ensure_initialized()  # noqa: SLF001
@@ -540,23 +506,16 @@ async def delete_knowledge_doc(doc_name: str):
         for meta in results["metadatas"]:
             if meta and meta.get("source") != "user_upload":
                 raise HTTPException(403, f"内置文档 '{doc_name}' 不可删除")
+    # 从 PG 删除
+    from src.knowledge.file_store import get_file_store
+    await get_file_store().delete(doc_name)
+    # 磁盘回退清理
     doc_path = os.path.join(os.path.dirname(__file__), "..", "..", "docs", "metrics", doc_name)
-    real = os.path.realpath(os.path.normpath(doc_path))
-    allowed = os.path.realpath(os.path.normpath(
-        os.path.join(os.path.dirname(__file__), "..", "..", "docs", "metrics")))
-    if not real.startswith(allowed):
-        raise HTTPException(403, "路径非法")
     if os.path.isfile(doc_path):
         os.remove(doc_path)
-    try:
-        from src.knowledge.schema_manager import get_schema_manager
-        sm = get_schema_manager()
-        sm._ensure_initialized()  # noqa: SLF001
-        results = sm._collection.get(where={"source_file": doc_name})  # noqa: SLF001
-        if results and results.get("ids"):
-            sm._collection.delete(ids=results["ids"])  # noqa: SLF001
-    except Exception:
-        pass
+    # 从 ChromaDB 删除关联条目
+    if results and results.get("ids"):
+        sm._collection.delete(ids=results["ids"])  # noqa: SLF001
     return {"status": "ok", "doc": doc_name}
 
 

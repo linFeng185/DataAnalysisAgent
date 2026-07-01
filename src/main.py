@@ -25,17 +25,20 @@ async def lifespan(app: FastAPI):
                  api_key_set=bool(s.openai_api_key))
     logger.info("=" * 50)
 
+    # 初始化 LangGraph 工作流（含 Checkpointer）
+    from src.graph.workflow import init_app
+    await init_app()
+
+    # 初始化知识库文件存储表（PG）
+    try:
+        from src.knowledge.file_store import get_file_store
+        await get_file_store()._ensure()  # noqa: SLF001
+    except Exception:
+        pass
+
     # 初始化演示数据源（SQLite 内存库）
     from src.datasource.setup import ensure_demo_datasource
     await ensure_demo_datasource()
-
-    # 预热 Checkpointer（避免首次请求时 PostgresSaver 连接超时）
-    try:
-        from src.memory.checkpointer import get_checkpointer
-        get_checkpointer()
-        logger.info("Checkpointer 预热完成")
-    except Exception as e:
-        logger.warning("Checkpointer 预热失败", error=str(e))
 
     # 预热 SchemaManager（提前加载嵌入模型 + ChromaDB，避免首次检索时等待）
     try:

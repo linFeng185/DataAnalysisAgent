@@ -122,7 +122,13 @@ export default function KnowledgePage() {
       const params = new URLSearchParams({ strategy: uploadCfg.strategy,
         chunk_size: String(uploadCfg.chunkSize), chunk_overlap: String(uploadCfg.chunkOverlap) });
       if (uploadCfg.category) params.set('category', uploadCfg.category);
-      await fetch(`/api/v1/knowledge/docs/upload?${params.toString()}`, { method: 'POST', body: form });
+      const res = await fetch(`/api/v1/knowledge/docs/upload?${params.toString()}`, { method: 'POST', body: form });
+      const data = await res.json();
+      if (data.tasks?.length > 0) {
+        setTaskIds(data.tasks.map((t: { task_id: string }) => t.task_id));
+        message.info(`已接收 ${data.tasks.length} 个文件，后台处理中`);
+      }
+      data.errors?.forEach((e: { file: string; error: string }) => message.error(`${e.file}: ${e.error}`));
       setPendingFiles([]);
     } catch { message.error('上传失败'); }
     setUploading(false);
