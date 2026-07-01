@@ -31,6 +31,18 @@ async def execute_sql_node(state: AnalysisState) -> dict:
                 "query_result_sample": [], "query_result_full_count": 0,
                 "query_result_statistics": {"row_count": 0}}
 
+    # ===== Layer 2: 执行前列名验证 =====
+    # 解析 SQL 中的列引用，检查是否都存在于表结构中
+    col_err = _validate_column_references(sql, state.get("relevant_tables", []))
+    if col_err:
+        logger.warning("列名验证失败，触发重试", datasource=ds_name, error=col_err)
+        return {
+            "query_result_sample": [],
+            "query_result_full_count": 0,
+            "query_result_statistics": {"row_count": 0},
+            "execution_error": col_err,
+        }
+
     # 尝试连接数据源
     try:
         from src.datasource.registry import get_registry
@@ -68,13 +80,91 @@ async def execute_sql_node(state: AnalysisState) -> dict:
             }
     except Exception as e:
         logger.warning("数据源执行失败", datasource=ds_name, error=str(e))
+        err_msg = str(e)
+        # 提取简洁错误信息
+        if len(err_msg) > 300:
+            # 截取 pymysql/mysql 错误的关键部分
+            import re
+            match = re.search(r'\((\d+), "([^"]+)"\)', err_msg)
+            if match:
+                err_msg = f"SQL 执行错误 [{match.group(1)}]: {match.group(2)}"
+            else:
+                err_msg = err_msg[:300]
+        logger.info("节点完成", node="execute_sql", elapsed_ms=round((time.monotonic() - _start) * 1000))
+        return {
+            "query_result_sample": [],
+            "query_result_full_count": 0,
+            "query_result_statistics": {"row_count": 0},
+            "execution_error": err_msg,
+        }
 
-    # 无数据源时返回空
-    logger.info("无可用数据源，返回空结果", datasource=ds_name, sql=sql[:100])
-    logger.info("节点完成", node="execute_sql", elapsed_ms=round((time.monotonic() - _start) * 1000))
-    return {
-        "query_result_sample": [],
-        "query_result_full_count": 0,
-        "query_result_statistics": {"row_count": 0},
-        "execution_error": f"数据源 '{ds_name}' 未配置或不可用。请先通过 POST /api/v1/datasources 注册数据源，或配置 DATASOURCE_NAME 环境变量。",
-    }
+
+def _validate_column_references(sql: str, tables: list[dict]) -> str | None:
+    """执行前验证 SQL 中的列引用是否都存在于表结构中。
+
+    与 should_retry 配合：验证失败 → execution_error → retry → LLM 修正。
+    跳过 SELECT 中 AS 定义的别名（如 SUM(x) AS total_sales），这些不是表列。
+
+    Args:
+        sql - 待验证的 SQL
+        tables - relevant_tables 列表
+
+    Returns: 错误消息字符串，None 表示通过
+    """
+    if not tables:
+        return None
+    try:
+        import sqlglot
+        from sqlglot import exp
+
+        valid_cols: set[str] = set()
+        valid_tables: set[str] = set()
+        for t in tables:
+            tname = t.get("name", "")
+            if tname:
+                valid_tables.add(tname.lower())
+                valid_tables.add(tname)
+            for c in t.get("columns", []):
+                cname = c.get("name", "")
+                if cname:
+                    valid_cols.add(cname.lower())
+                    valid_cols.add(cname)
+                    if tname:
+                        valid_cols.add(f"{tname.lower()}.{cname.lower()}")
+
+        if not valid_cols:
+            return None
+
+        tree = sqlglot.parse_one(sql, read="mysql")
+        if not tree:
+            return None
+
+        # 收集 SELECT 中 AS 定义的别名，这些不是表列，不校验
+        aliases: set[str] = set()
+        for sel in tree.find_all(exp.Select):
+            for col in sel.expressions:
+                alias = col.alias_or_name if hasattr(col, 'alias_or_name') else col.alias
+                if alias and alias != col.name:
+                    aliases.add(alias.lower())
+
+        errors: list[str] = []
+        for node in tree.find_all(exp.Column):
+            col_name = node.name
+            if col_name == "*" or col_name == "1":
+                continue
+            # 跳过 SELECT 中定义的别名
+            if col_name.lower() in aliases:
+                continue
+            if col_name.lower() not in valid_cols:
+                table_name = node.table
+                full_ref = f"{table_name}.{col_name}" if table_name else col_name
+                if full_ref.lower() not in valid_cols:
+                    err = f"列 '{full_ref}' 不在可用列中（可用: {sorted(valid_cols)[:15]}）"
+                    if err not in errors:
+                        errors.append(err)
+
+        if errors:
+            return "列名校验失败: " + "; ".join(errors[:3])
+        return None
+    except Exception:
+        return None

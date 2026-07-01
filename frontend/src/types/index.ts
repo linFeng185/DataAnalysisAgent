@@ -117,3 +117,42 @@ export interface KnowledgeDoc {
   modified: number;
   is_builtin: boolean;
 }
+
+export interface SessionInfo {
+  session_id: string;
+  title: string;
+  datasource: string;
+  turn_count: number;
+  created_at: string;
+  last_active_at: string;
+}
+
+export interface ChatTurnData {
+  turn_id: number;
+  user_query: string;
+  assistant_summary: string;
+  sql: string;
+  timestamp: string;
+}
+
+export interface SessionListResponse {
+  sessions: SessionInfo[];
+  next_cursor: string | null;
+  has_more: boolean;
+}
+
+/** 会话最新一轮的富数据，用于恢复完整 UI */
+export interface SessionLatestState {
+  sql: string;
+  analysis: Record<string, unknown>;
+  chart: Record<string, unknown>;
+  data: Record<string, unknown>[];
+  success: boolean;
+  error_message: string;
+}
+
+export interface SessionDetailResponse {
+  session: SessionInfo;
+  turns: ChatTurnData[];
+  latest_state: SessionLatestState | null;
+}

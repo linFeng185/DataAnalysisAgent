@@ -11,7 +11,10 @@ export default function ResultCard({ sql, reasoning, tokens, finalResult, valida
 }) {
   const [expanded, setExpanded] = useState(true);
   const analysis = finalResult?.analysis as Record<string, unknown> | undefined;
-  const summary = analysis?.summary as string || tokens?.slice(0, 200) || '分析完成';
+  const errorMessage = finalResult?.error_message as string || '';
+  const isError = !finalResult?.success && !!errorMessage;
+  const summary = isError ? errorMessage
+    : (analysis?.summary as string || tokens?.slice(0, 200) || '分析完成');
   const insights = (analysis?.insights as string[]) || [];
   const chartConfig = finalResult?.chart as { type: string; option?: Record<string, unknown> } | undefined;
   const data = finalResult?.data as Record<string, unknown>[] | undefined;
@@ -26,8 +29,14 @@ export default function ResultCard({ sql, reasoning, tokens, finalResult, valida
 
   return (
     <Card size="small"
-      title={<Space><span>分析完成</span><Tag icon={<CheckCircleOutlined />} color="success">成功</Tag>
-        {validationErrors.length > 0 && <Tag color="warning">{validationErrors.length} 个警告</Tag>}</Space>}
+      title={<Space>
+        {isError ? (
+          <><span>执行出错</span><Tag color="error">失败</Tag></>
+        ) : (
+          <><span>分析完成</span><Tag icon={<CheckCircleOutlined />} color="success">成功</Tag></>
+        )}
+        {validationErrors.length > 0 && <Tag color="warning">{validationErrors.length} 个警告</Tag>}
+      </Space>}
       extra={<Button type="text" size="small" icon={expanded ? <DownOutlined /> : <RightOutlined />}
         onClick={() => setExpanded(!expanded)}>{expanded ? '收起' : '展开'}</Button>}>
       <Typography.Paragraph style={{ marginBottom: expanded ? 12 : 0 }} ellipsis={!expanded ? { rows: 2 } : false}>

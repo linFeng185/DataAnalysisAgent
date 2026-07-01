@@ -30,6 +30,34 @@ export function del(path: string): Promise<void> {
   return request<void>('DELETE', path);
 }
 
+// 会话列表 API
+import type { SessionListResponse, SessionDetailResponse, ChatTurnData } from '../types';
+
+export async function fetchSessions(cursor?: string | null, limit = 20): Promise<SessionListResponse> {
+  const params = new URLSearchParams();
+  if (cursor) params.set('cursor', cursor);
+  params.set('limit', String(limit));
+  const qs = params.toString();
+  return get<SessionListResponse>(`/sessions${qs ? '?' + qs : ''}`);
+}
+
+export async function fetchSession(id: string): Promise<SessionDetailResponse> {
+  return get<SessionDetailResponse>(`/sessions/${id}`);
+}
+
+export async function fetchSessionTurns(
+  id: string, before?: number, limit = 20,
+): Promise<{ turns: ChatTurnData[]; has_more: boolean }> {
+  const params = new URLSearchParams();
+  if (before) params.set('before', String(before));
+  params.set('limit', String(limit));
+  return get(`/sessions/${id}/turns?${params.toString()}`);
+}
+
+export async function deleteSession(id: string): Promise<void> {
+  return del(`/sessions/${id}`);
+}
+
 // SSE 流式聊天
 export function streamChat(
   query: string,

@@ -53,10 +53,22 @@ async def stream_analysis(user_query: str, datasource: str, session_id: str = ""
     import uuid
     effective_id = session_id or str(uuid.uuid4())
     config = {"configurable": {"thread_id": effective_id}}
-    if session_id:
-        logger.info("会话续用", session_id=session_id[:20])
-    else:
+    is_new = not session_id
+    if is_new:
         logger.info("新会话", session_id=effective_id[:20])
+        # 异步写入会话元数据（不影响主流程）
+        import asyncio as _asyncio
+        try:
+            _asyncio.create_task(_save_session_meta(effective_id, datasource, user_query))
+        except Exception:
+            pass
+    else:
+        logger.info("会话续用", session_id=session_id[:20])
+        import asyncio as _asyncio
+        try:
+            _asyncio.create_task(_touch_session_meta(effective_id, datasource, user_query))
+        except Exception:
+            pass
 
     stats = {"chain_start": 0, "chain_end": 0, "chat_model_stream": 0, "chat_model_start": 0,
              "thinking_events": 0, "token_events": 0}
@@ -170,3 +182,21 @@ def _find_parent_node(event: dict) -> str | None:
             if isinstance(tag, str) and not tag.startswith("Runnable") and tag != "LangGraph":
                 return tag
     return None
+
+
+async def _save_session_meta(session_id: str, datasource: str, first_query: str) -> None:
+    """保存新会话元数据到 PG（fire-and-forget）。"""
+    try:
+        from src.memory.session_store import get_session_store
+        await get_session_store().create(session_id, datasource, first_query)
+    except Exception as e:
+        logger.debug("会话元数据保存失败（非致命）", error=str(e))
+
+
+async def _touch_session_meta(session_id: str, datasource: str = "", first_query: str = "") -> None:
+    """更新会话活跃时间（UPSERT，不存在自动创建）。"""
+    try:
+        from src.memory.session_store import get_session_store
+        await get_session_store().touch(session_id, datasource, first_query)
+    except Exception as e:
+        logger.debug("会话元数据更新失败（非致命）", error=str(e))
