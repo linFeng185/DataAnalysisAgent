@@ -166,6 +166,9 @@ async def _llm_generate(
             conversation_history, query, node_name="generate_sql",
         )
 
+    from datetime import datetime, timezone
+    _utc = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+    _now_info = f"UTC: {_utc}。处理相对时间时用 CURDATE()/NOW()；用户指定具体日期时直接用具体值。"
     _nl = "\n"
     _history_block = f"## 对话历史{_nl}{context_text}" if context_text else ""
     user_msg = f"""## 数据库表结构
@@ -174,6 +177,9 @@ async def _llm_generate(
 ## 方言参考
 {dialect_hint}
 {error_ctx}
+
+## 当前时间
+{_now_info}
 
 ## 用户问题
 {query}

@@ -162,7 +162,7 @@ def route_by_intent(state: AnalysisState) -> str:
 # ================================================================
 
 
-def build_workflow() -> StateGraph:
+async def build_workflow() -> StateGraph:
     """创建并编译完整的分析流水线图。"""
 
     # Step 1: 创建图，指定状态类型
@@ -219,8 +219,13 @@ def build_workflow() -> StateGraph:
 
     # Step 5: 编译 — 注入 Checkpointer 实现多轮对话状态持久化
     from src.memory.checkpointer import get_checkpointer
-    return workflow.compile(checkpointer=get_checkpointer())
+    return workflow.compile(checkpointer=await get_checkpointer())
 
 
-# 模块级单例 — 所有 API 请求共用同一个编译后的图
-app = build_workflow()
+# 模块级变量 — 由 main.py 的 lifespan 初始化
+app = None
+
+
+async def init_app():
+    global app
+    app = await build_workflow()

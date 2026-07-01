@@ -13,17 +13,42 @@ from src.memory.models import ConversationTurn, SessionContext
 
 logger = get_logger(__name__)
 
+# 保持 ctx 引用防 GC 关闭连接池
+_pg_ctx = None
 
-def get_checkpointer():
+
+async def get_checkpointer():
     """7.1.3 Checkpointer 工厂 — 自动选择 PostgresSaver 或 MemorySaver。"""
     settings = get_settings()
 
     try:
-        from langgraph.checkpoint.postgres import PostgresSaver
         url = settings.database_url
         if url and "postgres" in url:
-            checkpointer = PostgresSaver.from_conn_string(url)
-            checkpointer.setup()
+            import asyncpg
+            from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
+            from urllib.parse import urlparse, urlunparse, parse_qs
+            # SQLAlchemy 格式 → asyncpg 格式
+            pg_url = url.replace("postgresql+asyncpg://", "postgresql://")
+            # 自动创建目标数据库（如不存在）
+            parsed = urlparse(pg_url)
+            db_name = parsed.path.lstrip("/")
+            if db_name and db_name != "postgres":
+                base_url = urlunparse(parsed._replace(path="/postgres"))
+                try:
+                    sys_conn = await asyncpg.connect(base_url)
+                    exists = await sys_conn.fetchval(
+                        "SELECT 1 FROM pg_database WHERE datname = $1", db_name)
+                    if not exists:
+                        await sys_conn.execute(f"CREATE DATABASE {db_name} ENCODING 'UTF8'")
+                        logger.info("数据库已自动创建", database=db_name)
+                    await sys_conn.close()
+                except Exception:
+                    pass  # 无权限或无 postgres 库
+            global _pg_ctx
+            # from_conn_string 返回 async context manager，存到模块级防 GC
+            _pg_ctx = AsyncPostgresSaver.from_conn_string(pg_url)
+            checkpointer = await _pg_ctx.__aenter__()
+            await checkpointer.setup()
             logger.info("Checkpointer 初始化", type="PostgresSaver")
             return checkpointer
     except Exception as e:
