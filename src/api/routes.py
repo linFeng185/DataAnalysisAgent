@@ -45,11 +45,23 @@ async def chat(req: ChatRequest):
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
-    cfg = {"configurable": {"thread_id": req.session_id or str(uuid.uuid4())}}
+    import uuid as _uuid
+    sid = req.session_id or str(_uuid.uuid4())
+    # 非流式也保存会话元数据
+    import asyncio as _asyncio
+    try:
+        from src.memory.session_store import get_session_store
+        if req.session_id:
+            _asyncio.create_task(get_session_store().touch(sid, req.datasource, req.query))
+        else:
+            _asyncio.create_task(get_session_store().create(sid, req.datasource, req.query))
+    except Exception:
+        pass
+    cfg = {"configurable": {"thread_id": sid}}
     result = await _app().ainvoke({"user_query": req.query, "datasource": req.datasource}, cfg)
     f = result.get("final_response", {})
     return ChatResponse(
-        success=f.get("success", True), session_id=req.session_id or str(uuid.uuid4())[:8],
+        success=f.get("success", True), session_id=sid[:8],
         user_query=req.query, sql=result.get("generated_sql", ""),
         data=result.get("query_result_sample", []),
         analysis=result.get("analysis_result", {}), chart=result.get("chart_config", {}),
@@ -152,10 +164,174 @@ async def list_datasources(page: int = Query(default=1, ge=1), page_size: int = 
 async def list_history(
     datasource: str | None = Query(default=None),
     search: str | None = Query(default=None),
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=50, ge=1, le=200),
 ):
+    """分页列出查询历史，PG 持久化、重启不丢失。"""
     from src.memory.history_store import get_history_store
-    items = get_history_store().list(datasource=datasource, search=search)
-    return {"history": items, "total": len(items)}
+    return await get_history_store().list(
+        datasource=datasource, search=search, page=page, page_size=page_size)
+
+
+# ---- 会话管理 ----
+
+
+@router.get("/sessions")
+async def list_sessions(
+    cursor: str | None = Query(default=None),
+    limit: int = Query(default=20, ge=1, le=100),
+):
+    """游标分页列出历史会话，按最近活跃时间倒序。
+
+    cursor 为上一页最后一条的 last_active_at ISO 字符串，首次传空。
+    """
+    from src.memory.session_store import get_session_store
+    items = await get_session_store().list(cursor=cursor, limit=limit)
+    next_cursor = items[-1]["last_active_at"] if items else None
+    return {"sessions": items, "next_cursor": next_cursor, "has_more": len(items) >= limit}
+
+
+@router.get("/sessions/{session_id}")
+async def get_session(session_id: str):
+    """获取会话详情，包含最近 20 轮对话 + 最新一轮的富数据。
+
+    从 PG 读取会话元数据 + 从 LangGraph Checkpointer 读取对话内容。
+    额外返回 latest_state 用于还原最后一轮的完整 UI（图表、数据表、分析结论等）。
+    """
+    from src.memory.session_store import get_session_store
+    session = await get_session_store().get(session_id)
+    if not session:
+        raise HTTPException(404, f"会话 '{session_id}' 未找到")
+
+    turns = await _load_session_turns(session_id, limit=20)
+    # 提取最新一轮的富数据用于前端还原完整 UI
+    latest_state = await _load_latest_state(session_id)
+    return {"session": session, "turns": turns, "latest_state": latest_state}
+
+
+@router.get("/sessions/{session_id}/turns")
+async def list_session_turns(
+    session_id: str,
+    before: int | None = Query(default=None),
+    limit: int = Query(default=20, ge=1, le=100),
+):
+    """瀑布流加载会话的对话轮次。
+
+    before 为轮次序号，只返回该序号之前的更早轮次。
+    不传 before 返回最新的 limit 条。
+    """
+    turns = await _load_session_turns(session_id, before=before, limit=limit)
+    return {"turns": turns, "has_more": len(turns) >= limit}
+
+
+@router.delete("/sessions/{session_id}")
+async def delete_session(session_id: str):
+    """删除会话记录（不删除 Checkpointer 中的 state）。"""
+    from src.memory.session_store import get_session_store
+    ok = await get_session_store().delete(session_id)
+    if not ok:
+        raise HTTPException(500, "删除失败")
+    return {"status": "ok", "session_id": session_id}
+
+
+async def _load_latest_state(session_id: str) -> dict | None:
+    """从 Checkpointer 加载最新一轮的富数据（分析结论、图表、数据样本）。
+
+    用于前端恢复历史会话时还原完整的分析结果 UI。
+    """
+    try:
+        from src.memory.checkpointer import get_checkpointer
+        cp = await get_checkpointer()
+        config = {"configurable": {"thread_id": session_id}}
+        tup = await cp.aget_tuple(config)
+        if not tup:
+            return None
+        cv = tup.checkpoint.get("channel_values", {}) or {}
+        # 只提取前端需要的富数据字段
+        data_sample = cv.get("query_result_sample", []) or []
+        return {
+            "sql": cv.get("generated_sql", "") or "",
+            "analysis": cv.get("analysis_result", {}) or {},
+            "chart": cv.get("chart_config", {}) or {},
+            "data": data_sample[:20] if isinstance(data_sample, list) else [],
+            "success": not cv.get("execution_error", ""),
+            "error_message": cv.get("execution_error", "") or "",
+        }
+    except Exception as e:
+        logger.warning("最新状态加载失败", session_id=session_id[:20], error=str(e))
+        return None
+
+
+async def _load_session_turns(session_id: str, before: int | None = None, limit: int = 20) -> list[dict]:
+    """从 LangGraph Checkpointer 加载会话的对话轮次。
+
+    Args:
+        session_id - 会话 ID（即 thread_id）
+        before - 轮次序号游标，只返回此序号之前的轮次
+        limit - 返回条数上限
+
+    Returns: 对话轮次列表
+    """
+    try:
+        from src.memory.checkpointer import get_checkpointer
+        cp = await get_checkpointer()
+        config = {"configurable": {"thread_id": session_id}}
+        # 使用 aget_tuple 获取完整 checkpoint（含 channel_values 中的 messages）
+        tup = await cp.aget_tuple(config)
+        if not tup:
+            logger.info("Checkpointer 无状态", session_id=session_id[:20])
+            return []
+
+        channel_values = tup.checkpoint.get("channel_values", {}) or {}
+        messages = channel_values.get("messages", []) or []
+        logger.info("会话轮次加载", session_id=session_id[:20], msg_count=len(messages))
+
+        turns: list[dict] = []
+        i = 0
+        while i < len(messages):
+            msg = messages[i]
+            msg_type = type(msg).__name__
+
+            if msg_type == "HumanMessage":
+                user_query = msg.content if isinstance(msg.content, str) else str(msg.content)
+                sql = ""
+                summary = ""
+                j = i + 1
+                while j < len(messages) and j < i + 4:
+                    nxt = messages[j]
+                    nxt_type = type(nxt).__name__
+                    if nxt_type == "AIMessage":
+                        content = nxt.content if isinstance(nxt.content, str) else str(nxt.content)
+                        # AIMessage 格式: "SQL: <sql>\n结论: <summary>"
+                        if content.startswith("SQL: "):
+                            parts = content.split("\n结论: ", 1)
+                            sql = parts[0][5:] if len(parts) > 0 else ""
+                            summary = parts[1][:200] if len(parts) > 1 else content[5:200]
+                        else:
+                            summary = content[:200]
+                        i = j
+                        break
+                    j += 1
+
+                turns.append({
+                    "turn_id": len(turns) + 1,
+                    "user_query": user_query,
+                    "assistant_summary": summary,
+                    "sql": sql,
+                    "timestamp": "",
+                })
+            i += 1
+
+        turns = list(reversed(turns))
+
+        if before is not None:
+            turns = [t for t in turns if t["turn_id"] < before]
+
+        logger.info("会话轮次解析完成", session_id=session_id[:20], turns=len(turns))
+        return turns[:limit]
+    except Exception as e:
+        logger.warning("会话轮次加载失败", session_id=session_id[:20], error=str(e))
+        return []
 
 
 # ---- Skills 管理 ----

@@ -58,6 +58,18 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning("LLM 预热失败", error=str(e))
 
+    # 预热 SessionStore 和 HistoryStore（提前建 PG 表，避免首次请求时卡顿）
+    try:
+        from src.memory.session_store import get_session_store
+        await get_session_store().list(limit=1)
+    except Exception as e:
+        logger.warning("SessionStore 预热失败", error=str(e))
+    try:
+        from src.memory.history_store import get_history_store
+        await get_history_store().list(page=1, page_size=1)
+    except Exception as e:
+        logger.warning("HistoryStore 预热失败", error=str(e))
+
     # 9.1.3 加载 Skills
     try:
         from src.skill_manager import get_skill_manager

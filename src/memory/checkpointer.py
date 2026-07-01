@@ -13,20 +13,33 @@ from src.memory.models import ConversationTurn, SessionContext
 
 logger = get_logger(__name__)
 
-# 保持 ctx 引用防 GC 关闭连接池
+# 保持 ctx 和 checkpointer 引用防 GC 关闭连接池
 _pg_ctx = None
+_pg_checkpointer = None
+_mem_checkpointer = None
 
 
 async def get_checkpointer():
-    """7.1.3 Checkpointer 工厂 — 自动选择 PostgresSaver 或 MemorySaver。"""
+    """7.1.3 Checkpointer 工厂 — 自动选择 PostgresSaver 或 MemorySaver。
+
+    连接池只创建一次，后续调用复用已有实例。
+    ctx 引用必须保持在模块级防止 GC 关闭连接池。
+    """
+    global _pg_ctx, _pg_checkpointer, _mem_checkpointer
     settings = get_settings()
+
+    # 已初始化则复用
+    if _pg_checkpointer is not None:
+        return _pg_checkpointer
+    if _mem_checkpointer is not None:
+        return _mem_checkpointer
 
     try:
         url = settings.database_url
         if url and "postgres" in url:
             import asyncpg
             from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
-            from urllib.parse import urlparse, urlunparse, parse_qs
+            from urllib.parse import urlparse, urlunparse
             # SQLAlchemy 格式 → asyncpg 格式
             pg_url = url.replace("postgresql+asyncpg://", "postgresql://")
             # 自动创建目标数据库（如不存在）
@@ -43,20 +56,20 @@ async def get_checkpointer():
                         logger.info("数据库已自动创建", database=db_name)
                     await sys_conn.close()
                 except Exception:
-                    pass  # 无权限或无 postgres 库
-            global _pg_ctx
-            # from_conn_string 返回 async context manager，存到模块级防 GC
+                    pass
+            # ctx 必须保持在模块级防 GC 关闭连接池
             _pg_ctx = AsyncPostgresSaver.from_conn_string(pg_url)
-            checkpointer = await _pg_ctx.__aenter__()
-            await checkpointer.setup()
+            _pg_checkpointer = await _pg_ctx.__aenter__()
+            await _pg_checkpointer.setup()
             logger.info("Checkpointer 初始化", type="PostgresSaver")
-            return checkpointer
+            return _pg_checkpointer
     except Exception as e:
         logger.warning("PostgresSaver 不可用，降级到 MemorySaver", error=str(e))
 
     from langgraph.checkpoint.memory import MemorySaver
+    _mem_checkpointer = MemorySaver()
     logger.info("Checkpointer 初始化", type="MemorySaver")
-    return MemorySaver()
+    return _mem_checkpointer
 
 
 def new_session_context(

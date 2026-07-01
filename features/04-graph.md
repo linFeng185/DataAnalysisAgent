@@ -13,6 +13,9 @@
 | 4.1.5 | should_retry() | 同上 | 执行错误且<3→generate_sql / 否则→build_response | 单测完成 | P0 |
 | 4.1.6 | route_by_intent() | 同上 | file_analysis→mcp_agent / 其他→retrieve_schema | 单测完成 | P0 |
 | 4.1.7 | MCP Agent Node 扩展 | 同上 | 使用 create_react_agent 为文件分析场景创建动态工具调用 Node | 待开发 |
+| 4.1.8 | route_by_intent 扩展 `[P2]` | 同上 | metadata→retrieve_knowledge / chat→llm_direct / web→web_agent | 待开发 |
+| 4.1.9 | multi_source 路由 `[P2]` | 同上 | 多数据源时用 Send API 并行触发 worker 子图 (§15.4) | 待开发 |
+| 4.1.10 | llm_direct_answer Node `[P2]` | `src/graph/nodes/llm_answer.py`（新） | 跳过 SQL 流水线，知识库+对话直接回答 (§15.9) | 待开发 |
 
 ### 4.2 classify_intent Node
 
@@ -41,6 +44,8 @@
 | 4.4.3 | 方言 Prompt 注入 | 同上 | get_dialect_cheatsheet() — 3 种方言速查 | 单测完成 | P0 |
 | 4.4.6 | 错误回注处理 | 同上 | retry_count>0 时返回修复占位 | 单测完成 | P0 |
 | 4.4.10 | format_schema_for_prompt() | 同上 | 表结构 → Markdown 格式化 | 单测完成 | P0 |
+| 4.4.11 | Schema 增强格式 | 同上 | 列名白名单 + 样本值 + "禁止编造"约束 (Layer 1) | 开发完成 | P0 |
+| 4.4.12 | 重试错误上下文增强 | 同上 | 含执行错误 + 列名提示 + 第N次警告 (Layer 3) | 开发完成 | P0 |
 
 ### 4.5 layer3_validate Node
 
@@ -62,6 +67,8 @@
 | # | 功能 | 文件 | 描述 | 状态 |
 |---|------|------|------|------|
 | 4.7.1 | execute_sql_node() | `src/graph/nodes/execute_sql.py` | Phase 2 对接 Registry (Phase 1 mock) | 单测完成 | P0 |
+| 4.7.2 | 错误信息简洁化 | `src/graph/nodes/execute_sql.py:82-91` | 从 DB 原始错误提取错误码和消息 | 开发完成 | P1 |
+| 4.7.3 | 列名预检验证 (Layer 2) | `src/graph/nodes/execute_sql.py:_validate_column_references()` | sqlglot 解析列引用 → 对照 schema → 触发 retry | 开发完成 | P0 |
 
 ### 4.8 analyze_result Node
 

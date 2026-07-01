@@ -52,7 +52,7 @@ async def generate_sql_node(state: AnalysisState, config: RunnableConfig) -> dic
     retry = state.get("retry_count", 0)
 
     # 表结构 → Markdown 格式（用于 Prompt）
-    schema_text = format_schema_for_prompt(tables)
+    schema_text = format_schema_for_prompt(tables, dialect)
     # 获取该方言的 SQL 语法速查表
     dialect_hint = get_dialect_cheatsheet(dialect)
     # 技能系统注入的额外 Prompt（Phase 2）
@@ -62,13 +62,19 @@ async def generate_sql_node(state: AnalysisState, config: RunnableConfig) -> dic
     error_context = ""
     if retry > 0:
         prev_sql = state.get("generated_sql", "")
-        errors = state.get("validation_errors", [])
+        exec_err = state.get("execution_error", "")
+        val_errors = state.get("validation_errors", [])
+        all_errors: list[str] = list(val_errors)
+        if exec_err:
+            all_errors.append(exec_err)
         error_context = (
-            "\n## 上一轮 SQL 失败，请修正\n"
-            f"错误SQL: {prev_sql}\n错误: {json.dumps(errors)}"
+            f"\n## 第 {retry} 次重试 — 上一轮 SQL 执行失败，请修正\n"
+            f"失败的 SQL: {prev_sql}\n"
+            f"错误原因: {json.dumps(all_errors, ensure_ascii=False)}\n"
+            "请严格检查：1) 列名是否来自 Schema 2) 函数是否存在 3) 数据类型是否匹配\n"
         )
         if retry >= 2:
-            error_context += "\n注意: 这是最后一次尝试，请仔细核对字段名和函数名"
+            error_context += "⛔ 这是最后一次尝试，必须使用 Schema 中明确列出的列名！\n"
 
     # ── 对话上下文（短期记忆） ──
     history = state.get("conversation_history", []) or []
@@ -111,7 +117,7 @@ async def generate_sql_node(state: AnalysisState, config: RunnableConfig) -> dic
         hallucination = _check_table_hallucination(sql, tables)
         if hallucination:
             logger.warning("LLM 幻觉拦截", sql=sql[:200], unknown_tables=hallucination)
-            result = {"generated_sql": sql, "retry_count": retry,
+            result = {"generated_sql": sql, "retry_count": retry + 1,
                       "validation_errors": [{"type": "hallucination",
                           "message": f"SQL 引用了不存在的表: {hallucination}",
                           "unknown_tables": hallucination}]}
@@ -122,7 +128,7 @@ async def generate_sql_node(state: AnalysisState, config: RunnableConfig) -> dic
             return result
 
     logger.info("节点完成", node="generate_sql", elapsed_ms=round((time.monotonic() - _start) * 1000))
-    result = {"generated_sql": sql, "retry_count": retry}
+    result = {"generated_sql": sql, "retry_count": retry + 1}
     if reasoning:
         result["sql_reasoning_content"] = reasoning
     return result
@@ -308,16 +314,44 @@ def _check_table_hallucination(sql: str, tables: list[dict]) -> list[str]:
     return unknown
 
 
-def format_schema_for_prompt(tables: list[dict]) -> str:
-    """将表结构列表格式化为 Markdown 表格，用于拼入 LLM Prompt。"""
+def format_schema_for_prompt(tables: list[dict], dialect: str = "") -> str:
+    """将表结构列表格式化为 Markdown 表格，含精确列名、样本值、方言约束。
+
+    Args:
+        tables - relevant_tables 列表
+        dialect - 数据源方言，用于追加引用约束
+    """
     if not tables:
         return "(无可用表结构)"
     lines = []
+    # 追加列名列白名单，方便 LLM 精确引用
+    all_columns: list[str] = []
     for t in tables:
-        lines.append(f"### {t['name']} — {t.get('description', '')}")
+        for c in t.get("columns", []):
+            name = c.get("name", "")
+            if name and name not in all_columns:
+                all_columns.append(name)
+
+    lines.append("## 重要约束")
+    lines.append(f"- 本数据源方言: {dialect or 'SQL'}")
+    lines.append(f"- 所有可用列名（白名单）: {', '.join(all_columns)}")
+    lines.append("- **必须使用上述列名，禁止编造或猜测任何列名**")
+    lines.append("- **禁止使用不存在的函数，参考下方方言参考**")
+    lines.append("")
+
+    for t in tables:
+        lines.append(f"### 表: {t['name']} — {t.get('description', '')}")
         lines.append("| 字段 | 类型 | 说明 |")
         lines.append("|------|------|------|")
         for c in t.get("columns", []):
-            lines.append(f"| {c['name']} | {c['type']} | {c.get('comment', '')} |")
+            sample = c.get("sample", "")
+            comment = c.get("comment", "") or ""
+            if sample:
+                comment = f"{comment}（示例: {sample}）" if comment else f"示例: {sample}"
+            lines.append(f"| {c['name']} | {c['type']} | {comment} |")
+        # 追加行数提示
+        row_est = t.get("row_estimate")
+        if row_est:
+            lines.append(f"\n（约 {row_est} 行）")
         lines.append("")
     return "\n".join(lines)

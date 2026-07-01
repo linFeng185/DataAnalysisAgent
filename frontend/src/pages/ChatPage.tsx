@@ -1,16 +1,19 @@
-import { useState, useRef, useEffect } from 'react';
-import { Input, Select, Tag, Typography, Space, Tooltip, message, Card, Button } from 'antd';
+import { useState, useRef, useEffect, useCallback } from 'react';
+import { Input, Select, Tag, Typography, Space, Tooltip, message, Card, Button, Spin } from 'antd';
 import {
   SendOutlined, RobotOutlined, ClearOutlined,
   LoadingOutlined, ThunderboltOutlined, ReadOutlined,
   BulbOutlined, BarChartOutlined, RiseOutlined,
+  HistoryOutlined,
 } from '@ant-design/icons';
 import { useChat, ChatTurn } from '../hooks/useChat';
-import { get } from '../api/client';
-import type { DatasourceConfig } from '../types';
+import { get, fetchSession } from '../api/client';
+import type { DatasourceConfig, SessionInfo } from '../types';
 import ProgressBar from '../components/ProgressBar';
 import ReasoningPanel from '../components/ReasoningPanel';
 import ResultCard from '../components/ResultCard';
+import SqlPanel from '../components/SqlPanel';
+import SessionDrawer from '../components/SessionDrawer';
 
 const SUGGESTIONS = [
   { icon: <BarChartOutlined />, text: '本月各产品的销售额排名是怎样的？', color: '#1677ff' },
@@ -18,38 +21,87 @@ const SUGGESTIONS = [
   { icon: <BulbOutlined />, text: '上个月订单量和金额对比去年同期？', color: '#722ed1' },
 ];
 
+const DS_STORAGE_KEY = 'selected_datasource';
+
+function loadDs(): string {
+  try { return sessionStorage.getItem(DS_STORAGE_KEY) || ''; } catch { return ''; }
+}
+function saveDs(name: string) {
+  try { sessionStorage.setItem(DS_STORAGE_KEY, name); } catch { /* */ }
+}
+
 export default function ChatPage() {
   const [query, setQuery] = useState('');
-  const [ds, setDs] = useState('');
+  const [ds, setDs] = useState(loadDs);
   const [datasources, setDatasources] = useState<DatasourceConfig[]>([]);
-  const { turns, loading, sessionId, send, cancel, clearSession } = useChat();
+  const [drawerOpen, setDrawerOpen] = useState(false);
+  const {
+    turns, loading, sessionId, send, cancel, clearSession,
+    restoreTurns, loadMoreTurns, hasMore, loadingMore,
+  } = useChat();
   const bottomRef = useRef<HTMLDivElement>(null);
   const msgAreaRef = useRef<HTMLDivElement>(null);
+  const prevTurnsLen = useRef(turns.length);
 
   useEffect(() => {
     get<{ datasources: DatasourceConfig[] }>('/datasources')
       .then(data => {
         const list = data.datasources || [];
         setDatasources(list);
-        if (list.length > 0 && !ds) setDs(list[0].name);
+        if (list.length > 0 && !ds) { setDs(list[0].name); saveDs(list[0].name); }
       })
       .catch(() => message.warning('无法加载数据源列表'));
   }, []);
 
-  useEffect(() => { bottomRef.current?.scrollIntoView({ behavior: 'smooth' }); }, [turns]);
-
-  // 有新消息时自动滚动到底部
+  // 新消息时自动滚到底部
   useEffect(() => {
-    if (msgAreaRef.current) {
+    if (turns.length > prevTurnsLen.current) {
+      bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
+    }
+    prevTurnsLen.current = turns.length;
+  }, [turns]);
+
+  // 恢复历史会话后滚到底部
+  useEffect(() => {
+    if (msgAreaRef.current && turns.length > 0) {
       msgAreaRef.current.scrollTop = msgAreaRef.current.scrollHeight;
     }
-  }, [turns]);
+  }, [sessionId]);
 
   const handleSend = () => {
     if (!query.trim() || loading) return;
     if (!ds) { message.warning('请选择数据源'); return; }
     send(query, ds);
     setQuery('');
+  };
+
+  // 滚动到顶部时加载更多历史轮次
+  const handleMsgScroll = useCallback(() => {
+    const el = msgAreaRef.current;
+    if (!el || loadingMore || !hasMore) return;
+    if (el.scrollTop <= 20) {
+      const prevHeight = el.scrollHeight;
+      loadMoreTurns(sessionId, ds).then(() => {
+        requestAnimationFrame(() => {
+          if (msgAreaRef.current) {
+            msgAreaRef.current.scrollTop = msgAreaRef.current.scrollHeight - prevHeight;
+          }
+        });
+      });
+    }
+  }, [loadingMore, hasMore, sessionId, ds, loadMoreTurns]);
+
+  // 选择历史会话
+  const handleSelectSession = async (session: SessionInfo) => {
+    setDrawerOpen(false);
+    try {
+      const detail = await fetchSession(session.session_id);
+      restoreTurns(detail.turns, session.session_id, session.datasource, detail.latest_state);
+      setDs(session.datasource);
+      message.success('已恢复会话');
+    } catch {
+      message.error('恢复会话失败');
+    }
   };
 
   const dsOptions = datasources.map(d => ({ value: d.name, label: `${d.name} (${d.dialect})` }));
@@ -61,7 +113,18 @@ export default function ChatPage() {
   return (
     <div style={{ height: 'calc(100vh - 64px)', display: 'flex', flexDirection: 'column', maxWidth: 960, margin: '0 auto' }}>
       {/* 消息区 */}
-      <div ref={msgAreaRef} style={{ flex: 1, overflow: 'auto', padding: isEmpty ? 0 : '16px 20px 0' }}>
+      <div ref={msgAreaRef} onScroll={handleMsgScroll}
+        style={{ flex: 1, overflow: 'auto', padding: isEmpty ? 0 : '16px 20px 0' }}>
+        {/* 加载更多指示器 */}
+        {loadingMore && (
+          <div style={{ textAlign: 'center', padding: '8px 0' }}>
+            <Spin size="small" />
+            <Typography.Text type="secondary" style={{ marginLeft: 8, fontSize: 12 }}>
+              加载更早的对话...
+            </Typography.Text>
+          </div>
+        )}
+
         {isEmpty ? (
           /* 欢迎页 */
           <div style={{
@@ -89,7 +152,7 @@ export default function ChatPage() {
                   key={i} hoverable size="small"
                   onClick={() => setQuery(s.text)}
                   style={{ cursor: 'pointer', borderRadius: 12, border: '1px solid #f0f0f0' }}
-                  bodyStyle={{ padding: '14px 16px' }}>
+                  styles={{ body: { padding: '14px 16px' } }}>
                   <Space>
                     <span style={{ color: s.color, fontSize: 18 }}>{s.icon}</span>
                     <Typography.Text style={{ fontSize: 13, lineHeight: 1.5 }}>{s.text}</Typography.Text>
@@ -114,7 +177,6 @@ export default function ChatPage() {
         padding: '12px 20px 16px', borderTop: '1px solid #ececec',
         background: 'linear-gradient(180deg, rgba(255,255,255,0) 0%, #fff 20%)',
       }}>
-        {/* 推荐追问 */}
         {lastAnalysis && (
           <div style={{ marginBottom: 8, display: 'flex', flexWrap: 'wrap', gap: 4 }}>
             {(lastAnalysis.follow_up_questions as string[])?.slice(0, 4).map((q, i) => (
@@ -142,7 +204,7 @@ export default function ChatPage() {
             }}
           />
           <Select
-            value={ds || undefined} onChange={v => setDs(v)}
+            value={ds || undefined} onChange={v => { setDs(v); saveDs(v); }}
             options={dsOptions} disabled={loading}
             size="small" style={{ minWidth: 130, flexShrink: 0 }}
             dropdownMatchSelectWidth={false}
@@ -168,13 +230,27 @@ export default function ChatPage() {
               </Typography.Text>
             )}
           </Space>
-          <Tooltip title="清空会话，开始新对话">
-            <Button size="small" type="text" icon={<ClearOutlined />}
-              onClick={clearSession} disabled={loading}
-              style={{ fontSize: 12, color: '#999' }}>清空</Button>
-          </Tooltip>
+          <Space size={4}>
+            <Tooltip title="历史会话列表">
+              <Button size="small" icon={<HistoryOutlined />}
+                onClick={() => setDrawerOpen(true)}
+                style={{ fontSize: 12 }}>历史会话</Button>
+            </Tooltip>
+            <Tooltip title="清空会话，开始新对话">
+              <Button size="small" type="text" icon={<ClearOutlined />}
+                onClick={clearSession} disabled={loading}
+                style={{ fontSize: 12, color: '#999' }}>清空</Button>
+            </Tooltip>
+          </Space>
         </div>
       </div>
+
+      <SessionDrawer
+        open={drawerOpen}
+        onClose={() => setDrawerOpen(false)}
+        activeSessionId={sessionId}
+        onSelect={handleSelectSession}
+      />
     </div>
   );
 }
@@ -185,6 +261,7 @@ function TurnBubble({ turn }: { turn: ChatTurn }) {
   const hasResult = status === 'done' && !!finalResult;
   const hasError = status === 'error';
   const isStreaming = status === 'streaming';
+  const isRestored = status === 'done' && !finalResult;
   const activeSkills = (finalResult?.activated_skills as string[]) || [];
   const activeKnowledge = (finalResult?.activated_knowledge as string) || '';
 
@@ -213,16 +290,19 @@ function TurnBubble({ turn }: { turn: ChatTurn }) {
           <RobotOutlined style={{ color: '#fff', fontSize: 16 }} />
         </div>
         <div style={{ flex: 1, minWidth: 0 }}>
-          {/* Skills / Knowledge 信息条 */}
           {(activeSkills.length > 0 || activeKnowledge) && hasResult && (
             <div style={{
-              marginBottom: 6, padding: '4px 10px', background: 'linear-gradient(135deg, #f6ffed 0%, #f9f0ff 100%)',
-              borderRadius: 8, display: 'flex', gap: 12, alignItems: 'center', border: '1px solid #e8f5e9',
+              marginBottom: 6, padding: '4px 10px',
+              background: 'linear-gradient(135deg, #f6ffed 0%, #f9f0ff 100%)',
+              borderRadius: 8, display: 'flex', gap: 12, alignItems: 'center',
+              border: '1px solid #e8f5e9',
             }}>
               {activeSkills.length > 0 && (
                 <span style={{ fontSize: 11 }}>
                   <ThunderboltOutlined style={{ color: '#1677ff', marginRight: 3 }} />
-                  {activeSkills.map((s, i) => <Tag key={i} color="blue" style={{ marginLeft: 2, fontSize: 10, lineHeight: '18px' }}>{s}</Tag>)}
+                  {activeSkills.map((s, i) => (
+                    <Tag key={i} color="blue" style={{ marginLeft: 2, fontSize: 10, lineHeight: '18px' }}>{s}</Tag>
+                  ))}
                 </span>
               )}
               {activeKnowledge && (
@@ -236,13 +316,10 @@ function TurnBubble({ turn }: { turn: ChatTurn }) {
             </div>
           )}
 
-          {/* 进度条 */}
           <ProgressBar nodes={assistant.progressNodes} />
 
-          {/* 推理过程 */}
           {isStreaming && <ReasoningPanel reasoning={assistant.reasoning} />}
 
-          {/* 流式文本 */}
           {isStreaming && assistant.tokens && (
             <div style={{
               background: '#fafafa', padding: '12px 16px', borderRadius: 12,
@@ -253,7 +330,6 @@ function TurnBubble({ turn }: { turn: ChatTurn }) {
             </div>
           )}
 
-          {/* 等待中 */}
           {isStreaming && !assistant.reasoning && !assistant.tokens
             && Object.keys(assistant.progressNodes).length === 0 && (
             <div style={{
@@ -264,14 +340,29 @@ function TurnBubble({ turn }: { turn: ChatTurn }) {
             </div>
           )}
 
-          {/* 完成结果 */}
           {hasResult && (
             <ResultCard sql={assistant.sql} reasoning={assistant.reasoning}
               tokens={assistant.tokens} finalResult={finalResult}
               validationErrors={assistant.validationErrors} />
           )}
 
-          {/* 错误 */}
+          {/* 恢复的历史会话 — 含 SQL 折叠面板 */}
+          {isRestored && (
+            <Card size="small" style={{ background: '#fafafa', borderRadius: 12 }}>
+              {assistant.tokens && (
+                <Typography.Text style={{ fontSize: 13, whiteSpace: 'pre-wrap', display: 'block', marginBottom: assistant.sql ? 8 : 0 }}>
+                  {assistant.tokens}
+                </Typography.Text>
+              )}
+              {assistant.sql && (
+                <SqlPanel sqlCode={assistant.sql} />
+              )}
+              {!assistant.tokens && !assistant.sql && (
+                <Typography.Text type="secondary" style={{ fontSize: 12 }}>（历史对话记录）</Typography.Text>
+              )}
+            </Card>
+          )}
+
           {hasError && (
             <Card size="small" style={{
               background: '#fff2f0', borderColor: '#ffccc7', borderRadius: 12,

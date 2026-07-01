@@ -21,8 +21,9 @@ async def build_response_node(state: AnalysisState) -> dict:
             "error_message": str(state["validation_errors"]),
             "user_query": state.get("user_query", ""),
         }}
+    exec_error = state.get("execution_error", "")
     result = {
-        "success": True,
+        "success": not exec_error,
         "session_id": "",
         "user_query": state.get("user_query", ""),
         "sql": state.get("generated_sql", ""),
@@ -30,6 +31,8 @@ async def build_response_node(state: AnalysisState) -> dict:
         "analysis": state.get("analysis_result", {}),
         "chart": state.get("chart_config", {}),
     }
+    if exec_error:
+        result["error_message"] = exec_error
     reasoning = state.get("sql_reasoning_content", "")
     if reasoning:
         result["sql_reasoning_content"] = reasoning

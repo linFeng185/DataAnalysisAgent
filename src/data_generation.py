@@ -17,7 +17,7 @@ ORDER_COUNT = 50000          # 订单数
 LOG_COUNT = 2000             # 等级变更记录数
 
 START_DATE = datetime.date(2024, 7, 1)
-END_DATE   = datetime.date(2026, 6, 30)
+END_DATE   = datetime.date(2028, 6, 30)
 
 OUTPUT_FILE = 'test_data.sql'  # 输出文件名
 # =============================================
