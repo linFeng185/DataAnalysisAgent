@@ -100,6 +100,9 @@ async def stream_analysis(user_query: str, datasource: str, session_id: str = ""
                     yield _sse("node_end", {"node": name})
                     if name == "generate_sql" and isinstance(output, dict) and "generated_sql" in output:
                         yield _sse("sql", {"sql": output["generated_sql"]})
+                    elif name == "execute_sql" and isinstance(output, dict) and output.get("generated_sql"):
+                        # 方言重写后的最终 SQL，覆盖 generate_sql 发送的原始版本
+                        yield _sse("sql", {"sql": output["generated_sql"]})
                     elif name == "layer3_validate":
                         yield _sse("validation", {"valid": output.get("sql_valid", True)})
                     elif name == "build_response" and isinstance(output, dict):

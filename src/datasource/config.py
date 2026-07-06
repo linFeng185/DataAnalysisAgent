@@ -23,5 +23,6 @@ class DataSourceConfig:
     schema: object = None  # SchemaSnapshot, resolve() 时注入
 
     description: str = ""
+    version: str = ""  # 数据库版本号 (如 "8.0", "16", "24.x")，影响函数可用性和知识库匹配
     tags: list[str] = field(default_factory=list)
     extra_params: dict = field(default_factory=dict)

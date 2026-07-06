@@ -140,8 +140,9 @@ async def update_column_comment(
 async def register_datasource(req: DataSourceCreateRequest):
     from src.datasource.providers.external import ExternalDataSourceProvider
     ds = await ExternalDataSourceProvider().register(req)
-    return DataSourceInfo(name=ds.name, dialect=ds.dialect, mode=ds.mode,
-                          host=ds.host, description=ds.description)
+    return DataSourceInfo(name=ds.name, dialect=ds.dialect, version=ds.version,
+                          mode=ds.mode, host=ds.host, database=ds.database,
+                          description=ds.description)
 
 
 @router.delete("/datasources/{name}")
@@ -554,6 +555,48 @@ async def upload_status(task_id: str = Query(default="")):
             raise HTTPException(404, f"任务 '{task_id}' 未找到")
         return {"task": t.to_dict()}
     return {"tasks": mgr.list_recent()}
+
+
+@router.get("/knowledge/test-search")
+async def test_knowledge_search(q: str = Query(default=""), datasource: str = Query(default="")):
+    """测试知识库检索效果——验证上传的文档是否能被检索到。
+
+    有 q 时做语义搜索，返回匹配条目和相关性分数。
+    无 q 时返回全部条目列表。
+    """
+    try:
+        from src.knowledge.schema_manager import get_schema_manager
+        sm = get_schema_manager()
+        sm._ensure_initialized()
+        where = {}
+        if datasource:
+            where["datasource"] = datasource
+        if q:
+            results = sm._collection.query(
+                query_texts=[q],
+                n_results=min(10, sm._collection.count()),
+                where=where if where else None,
+            )
+            items = []
+            ids_list = results.get("ids", [[]])[0]
+            docs_list = results.get("documents", [[]])[0]
+            dists_list = results.get("distances", [[]])[0]
+            for i in range(len(ids_list)):
+                items.append({
+                    "rank": i + 1,
+                    "id": ids_list[i],
+                    "content": docs_list[i][:200] if i < len(docs_list) and docs_list[i] else "",
+                    "relevance": round(1 - min(dists_list[i], 1), 4) if i < len(dists_list) else 0,
+                })
+            return {"query": q, "results": items, "total": len(items)}
+        else:
+            results = sm._collection.get(where=where if where else None)
+            return {
+                "total": len(results.get("ids", [])),
+                "ids": results.get("ids", []),
+            }
+    except Exception as e:
+        raise HTTPException(500, f"知识库检索测试失败: {e}")
 
 
 @router.get("/knowledge/docs")

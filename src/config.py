@@ -60,6 +60,13 @@ class Settings(BaseSettings):
     # ---- Redis ----
     redis_url: str = "redis://localhost:6379/0"
 
+    # ---- 会话上下文裁剪 ----
+    # DeepSeek V4 有 1M 上下文，默认 50K 足够 20+ 轮完整对话，且不浪费 Token 成本
+    context_max_tokens: int = 50000   # Token 预算上限（DeepSeek V4: 1M, 本地模型: 酌情降低）
+    context_hot_turns: int = 5        # 热窗口: 最近 N 轮完整保留
+    context_warm_turns: int = 20      # 温窗口: N+1~M 轮压缩为摘要
+    context_summary_model: str = ""   # 压缩摘要专用模型，空则复用 cheap_llm
+
     # ---- 重试 ----
     max_retry_count: int = 3
 
