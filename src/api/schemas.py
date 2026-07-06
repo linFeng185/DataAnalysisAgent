@@ -33,13 +33,19 @@ class ErrorResponse(BaseModel):
 
 class DataSourceCreateRequest(BaseModel):
     name: str = Field(..., min_length=1, max_length=64)
-    dialect: str = Field(..., pattern="^(clickhouse|mysql|postgres|presto|hive|oracle|mssql)$")
+    dialect: str = Field(..., pattern="^(clickhouse|mysql|postgres|presto|hive|oracle|mssql|sqlite)$")
     host: str = "localhost"
     port: int = 0
     database: str = ""
     username: str = ""
     password: str = ""
+    version: str = ""
     description: str = ""
+    schema: str = ""
+    tablespace: str = ""
+    service_name: str = ""
+    instance: str = ""
+    file_path: str = ""
     tags: list[str] = []
     extra_params: dict[str, Any] = {}
 
@@ -51,8 +57,10 @@ class ColumnCommentRequest(BaseModel):
 class DataSourceInfo(BaseModel):
     name: str
     dialect: str
+    version: str = ""
     mode: str
     host: str
+    database: str = ""
     description: str = ""
     connected: bool = False
 

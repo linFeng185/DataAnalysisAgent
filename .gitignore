@@ -34,3 +34,23 @@ frontend/dist/
 # 用户上传的额外 Skills（非内置）
 extra_skills/
 
+# 根目录前端文件（前端在 frontend/ 子目录，不在根目录 npm install）
+/node_modules/
+/package.json
+/package-lock.json
+
+# TypeScript 构建缓存
+*.tsbuildinfo
+
+# 日志
+logs/
+*.log
+
+# 测试和缓存
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# 生成的测试数据文件
+test_data.sql
+
