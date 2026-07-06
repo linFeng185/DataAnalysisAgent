@@ -18,6 +18,12 @@ async def execute_sql_node(state: AnalysisState) -> dict:
     sql = (state.get("generated_sql", "") or "").strip()
     ds_name = state.get("datasource", "")
 
+    # SQL 方言重写 — 修复 LLM 常见语法错误（纯正则，非 LLM call）
+    dialect = state.get("dialect", "")
+    if sql and dialect:
+        from src.tools.sql_rewriter import rewrite_sql
+        sql = rewrite_sql(sql, dialect)
+
     # LLM 返回空 SQL（如问题无法用现有数据回答）时直接跳过执行
     if not sql:
         logger.info("SQL 为空，跳过数据库执行", datasource=ds_name)
@@ -40,6 +46,7 @@ async def execute_sql_node(state: AnalysisState) -> dict:
             "query_result_sample": [],
             "query_result_full_count": 0,
             "query_result_statistics": {"row_count": 0},
+            "generated_sql": sql,
             "execution_error": col_err,
         }
 
@@ -73,6 +80,7 @@ async def execute_sql_node(state: AnalysisState) -> dict:
             asyncio.create_task(log_audit("anonymous", ds_name, sql, len(rows), elapsed, True))
             logger.info("节点完成", node="execute_sql", elapsed_ms=elapsed)
             return {
+                "generated_sql": sql,  # 同步重写后的 SQL 到前端
                 "query_result_sample": rows[:200],
                 "query_result_full_count": len(rows),
                 "query_result_statistics": {"row_count": len(rows)},
@@ -95,6 +103,7 @@ async def execute_sql_node(state: AnalysisState) -> dict:
             "query_result_sample": [],
             "query_result_full_count": 0,
             "query_result_statistics": {"row_count": 0},
+            "generated_sql": sql,
             "execution_error": err_msg,
         }
 

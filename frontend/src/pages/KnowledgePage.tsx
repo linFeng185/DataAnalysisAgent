@@ -6,8 +6,13 @@ import type { KnowledgeEntry, KnowledgeDoc } from '../types';
 import dayjs from 'dayjs';
 
 const STRATEGY_OPTIONS = [
-  { value: 'auto', label: '自动' }, { value: 'heading', label: '按标题' },
-  { value: 'paragraph', label: '按段落' }, { value: 'fixed', label: '固定长度' },
+  { value: 'auto', label: '自动检测', desc: '根据文档内容自动选择最佳策略（推荐）' },
+  { value: 'sql_ddl', label: '按 DDL 语句', desc: '每个 CREATE TABLE/VIEW/INDEX 独立成块，适合 .sql 建表文件' },
+  { value: 'reference', label: '按函数签名', desc: '按 #### 标题或 **函数名()** 切分，适合 MySQL/官方技术文档' },
+  { value: 'table', label: '按数据字典表', desc: '按 ### 表: 表名 标记切分，适合项目数据字典 Markdown' },
+  { value: 'heading', label: '按标题', desc: '按 Markdown 标题层级 (# ## ###) 切分，适合结构化文档' },
+  { value: 'paragraph', label: '按段落', desc: '按空行分段后合并到 chunk_size，适合纯文本' },
+  { value: 'fixed', label: '固定长度', desc: '固定大小滑动窗口切分，无结构文档兜底' },
 ];
 const CAT_COLORS = ['blue', 'green', 'orange', 'purple', 'cyan', 'magenta', 'gold', 'lime', 'geekblue', 'volcano'];
 
@@ -302,7 +307,17 @@ export default function KnowledgePage() {
               onChange={e => setUploadCfg(p => ({ ...p, category: e.target.value }))} /></div>
           <div><Typography.Text strong>分割策略</Typography.Text>
             <Select style={{ width: '100%' }} value={uploadCfg.strategy}
-              onChange={v => setUploadCfg(p => ({ ...p, strategy: v }))} options={STRATEGY_OPTIONS} /></div>
+              onChange={v => setUploadCfg(p => ({ ...p, strategy: v }))}
+              options={STRATEGY_OPTIONS}
+              optionRender={(opt) => (
+                <div style={{ padding: '4px 0' }}>
+                  <div style={{ fontWeight: 500, fontSize: 13 }}>{opt.label}</div>
+                  <div style={{ color: '#999', fontSize: 11, marginTop: 1 }}>
+                    {(STRATEGY_OPTIONS.find(s => s.value === opt.value) || {}).desc}
+                  </div>
+                </div>
+              )}
+            /></div>
           <div><Typography.Text strong>块大小</Typography.Text>
             <InputNumber style={{ width: '100%' }} min={200} max={4000} value={uploadCfg.chunkSize}
               onChange={v => setUploadCfg(p => ({ ...p, chunkSize: v || 800 }))} /></div>

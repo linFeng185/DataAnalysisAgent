@@ -36,7 +36,12 @@ class DataSourceRegistry:
         self._providers[name] = provider
 
     async def resolve(self, name: str) -> DataSourceConfig:
-        """解析数据源 → 注入 engine + schema → 缓存。"""
+        """解析数据源 → 注入 engine → 缓存。
+
+        schema 延迟加载：不在 resolve 时 introspect，
+        交由 SchemaManager（ChromaDB 缓存优先）统一管理。
+        避免每次服务重启都全量 INFORMATION_SCHEMA 查询。
+        """
         if name in self._cache:
             return self._cache[name]
 
@@ -55,7 +60,9 @@ class DataSourceRegistry:
                 if not await provider.test_connection(config):
                     raise ConnectionError(f"数据源 '{name}' 连接失败")
 
-                config.schema = await provider.extract_schema(config)
+                # 不在 resolve 时做全量 introspect——
+                # 如果 config 已有预设 schema 则保留，否则设为 None
+                # SchemaManager.get_or_fetch_schema 会在需要时才从 ChromaDB 取
             except (ConnectionError, Exception) as e:
                 logger.warning("数据源不可用，跳过", datasource=name, error=str(e)[:120])
                 continue

@@ -5,14 +5,11 @@
 
 from __future__ import annotations
 
+from src.config import get_settings
 from src.logging_config import get_logger
 from src.memory.models import ConversationTurn
 
 logger = get_logger(__name__)
-
-_HOT_WINDOW = 3
-_WARM_WINDOW = 10
-_MAX_PROMPT_TOKENS = 7000
 
 
 def _g(turn, key: str):
@@ -30,14 +27,20 @@ async def build_llm_context(
 ) -> str:
     """7.5.1 统一上下文裁剪 — 热/温/冷三层策略。
 
-    - 热数据: 最近 3 轮完整注入
-    - 温数据: 4~10 轮压缩为摘要
-    - 冷数据: 超过 10 轮走 ChromaDB 向量检索
+    - 热数据: 最近 N 轮完整注入 (context_hot_turns)
+    - 温数据: N+1 ~ M 轮压缩为摘要 (context_warm_turns)
+    - 冷数据: 超过 M 轮走 ChromaDB 向量检索
+
+    参数通过 settings 配置，可按模型上下文窗口调整。
     """
+    s = get_settings()
+    hot_window = s.context_hot_turns
+    warm_window = s.context_warm_turns
+    max_tokens = s.context_max_tokens
     parts: list[str] = []
 
     # 热: 最近 3 轮完整
-    hot = conversation_history[-_HOT_WINDOW:] if conversation_history else []
+    hot = conversation_history[-hot_window:] if conversation_history else []
     for turn in hot:
         parts.append(f"用户: {_g(turn, 'user_query')}")
         if _g(turn, 'generated_sql'):
@@ -46,12 +49,12 @@ async def build_llm_context(
             parts.append(f"分析结论: {_g(turn, 'analysis_summary')}")
 
     # 温: 4~10 轮摘要 (LLM 优先，规则回退)
-    warm = conversation_history[-_WARM_WINDOW:-_HOT_WINDOW]
-    if warm and len(conversation_history) > _HOT_WINDOW:
+    warm = conversation_history[-warm_window:-hot_window]
+    if warm and len(conversation_history) > hot_window:
         parts.append(f"[前序对话摘要] {await _summarize_turns(warm)}")
 
     # 冷: 向量检索
-    if len(conversation_history) > _WARM_WINDOW and long_term_store and user_query:
+    if len(conversation_history) > warm_window and long_term_store and user_query:
         try:
             hits = await long_term_store.search(user_query, top_k=3)
             if hits:
@@ -63,9 +66,9 @@ async def build_llm_context(
     context = "\n---\n".join(parts)
 
     # 7.5.4 Token 预算检查
-    if estimate_tokens(context) > _MAX_PROMPT_TOKENS:
+    if estimate_tokens(context) > max_tokens:
         logger.warning("上下文超预算", estimated=estimate_tokens(context),
-                       limit=_MAX_PROMPT_TOKENS, node=node_name)
+                       limit=max_tokens, node=node_name)
         parts = []
         if hot:
             t = hot[-1]
@@ -88,8 +91,13 @@ async def _summarize_turns(turns: list[ConversationTurn]) -> str:
 
 
 async def _summarize_turns_llm(turns: list[ConversationTurn]) -> str:
-    """7.5.5 用 cheap_llm 异步预计算对话摘要。"""
-    from src.llm.client import get_cheap_llm, is_llm_available
+    """用 LLM 压缩对话摘要。
+
+    使用原生 HTTP 调用而非 LangChain LLM 接口，
+    确保摘要请求不会被 LangGraph astream_events 捕获并流式输出到前端。
+    """
+    from src.config import get_settings
+    from src.llm.client import is_llm_available
     if not is_llm_available():
         return ""
 
@@ -101,16 +109,36 @@ async def _summarize_turns_llm(turns: list[ConversationTurn]) -> str:
     )
 
     try:
-        from langchain_core.messages import HumanMessage, SystemMessage
-        llm = get_cheap_llm()
-        resp = await llm.ainvoke([
-            SystemMessage(content="将以下多轮数据查询对话压缩为一段中文摘要（1-3句话），保留核心业务问题、数据查询目的和关键结论。"),
-            HumanMessage(content=f"对话:\n{turns_text}\n\n摘要:"),
-        ])
-        summary = resp.content.strip() if resp.content else ""
-        if summary:
-            logger.info("LLM 摘要生成成功", turns=len(turns), chars=len(summary))
-            return summary
+        import aiohttp
+        s = get_settings()
+        summary_model = s.context_summary_model or s.cheap_llm_model or s.llm_model
+        payload = {
+            "model": summary_model,
+            "messages": [
+                {"role": "system", "content": "将以下多轮数据查询对话压缩为一段中文摘要（1-3句话），保留核心业务问题、数据查询目的和关键结论。"},
+                {"role": "user", "content": f"对话:\n{turns_text}\n\n摘要:"},
+            ],
+            "temperature": 0,
+            "max_tokens": 200,
+            "stream": False,
+        }
+        headers = {
+            "Authorization": f"Bearer {s.openai_api_key}",
+            "Content-Type": "application/json",
+        }
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                f"{s.openai_base_url}/chat/completions", json=payload, headers=headers,
+                timeout=aiohttp.ClientTimeout(total=15),
+            ) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    summary = data["choices"][0]["message"]["content"].strip()
+                    if summary:
+                        logger.info("LLM 摘要生成成功", turns=len(turns), chars=len(summary))
+                        return summary
+                else:
+                    logger.debug("LLM 摘要请求失败", status=resp.status)
         return ""
     except Exception as e:
         logger.warning("LLM 摘要生成失败，回退到规则", error=str(e))

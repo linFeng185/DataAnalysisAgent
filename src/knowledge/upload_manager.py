@@ -86,13 +86,17 @@ async def _write_to_chromadb(chunks, file_name: str, config: ChunkConfig,
     for c in chunks:
         ids.append(c.id)
         docs.append(c.content)
-        metas.append({
+        meta = {
             "source": "user_upload",
             "source_file": file_name,
             "category": category or "general",
             "strategy": c.metadata.get("strategy", ""),
             "chunk_size": c.metadata.get("chunk_size", 0),
-        })
+        }
+        tbl = c.metadata.get("table_name", "")
+        if tbl:
+            meta["table_name"] = tbl
+        metas.append(meta)
     if ids:
         sm._collection.add(ids=ids, documents=docs, metadatas=metas)  # noqa: SLF001
 

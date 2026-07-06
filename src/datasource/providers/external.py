@@ -51,6 +51,7 @@ class ExternalDataSourceProvider(DataSourceProvider):
             ds = DataSourceConfig(
                 name=name, mode="external",
                 dialect=cfg.get("dialect", "postgres"),
+                version=cfg.get("version", ""),
                 host=cfg.get("host", "localhost"),
                 port=cfg.get("port", 0) or _DIALECT_DEFAULTS.get(cfg.get("dialect", ""), 0),
                 database=cfg.get("database", ""),
@@ -70,6 +71,7 @@ class ExternalDataSourceProvider(DataSourceProvider):
         cred_mgr = CredentialManager()
         ds = DataSourceConfig(
             name=req.name, mode="external", dialect=req.dialect,
+            version=req.version,
             host=req.host, port=req.port or _DIALECT_DEFAULTS.get(req.dialect, 0),
             database=req.database, username=req.username,
             password=cred_mgr.encrypt(req.password),

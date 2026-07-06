@@ -4,6 +4,7 @@
 datasources:
   clickhouse_prod:
     dialect: clickhouse
+    version: "24.x"
     host: 10.0.1.100
     port: 9000
     database: analytics
@@ -16,6 +17,7 @@ datasources:
 
   mysql_test:
     dialect: mysql
+    version: "8.0"
     host: 192.168.195.133
     port: 3306
     database: test
@@ -28,6 +30,7 @@ datasources:
 
   postgres_main:
     dialect: postgres
+    version: "16"
     host: 192.168.195.133
     port: 5432
     database: postgres
@@ -40,6 +43,7 @@ datasources:
 
   oracle_xe:
     dialect: oracle
+    version: "21c"
     host: 192.168.195.133
     port: 1521
     database: XEPDB1
@@ -52,6 +56,7 @@ datasources:
 
   mssql_express:
     dialect: mssql
+    version: "2019"
     host: 192.168.195.133
     port: 1433
     database: master
