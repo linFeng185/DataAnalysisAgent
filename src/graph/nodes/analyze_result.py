@@ -43,7 +43,6 @@ async def analyze_result_node(state: AnalysisState) -> dict:
     if not rows:
         logger.info("节点完成", node="analyze_result", elapsed_ms=round((time.monotonic() - _start) * 1000))
         return {"analysis_result": {"summary": "无数据可供分析", "insights": [], "recommended_chart_type": "table", "follow_up_questions": []}}
-        return {"analysis_result": {"summary": "无数据可供分析", "insights": [], "recommended_chart_type": "table", "follow_up_questions": []}}
 
     stats = compute_statistics(rows)
     numeric_cols = stats.get("numeric_columns", [])
