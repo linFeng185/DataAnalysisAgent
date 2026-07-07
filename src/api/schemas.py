@@ -11,6 +11,7 @@ class ChatRequest(BaseModel):
     query: str = Field(..., examples=["过去7天各品类销售额"])
     session_id: str = ""
     datasource: str = "demo"
+    datasources: list[str] = []
     stream: bool = False
 
 
@@ -41,7 +42,7 @@ class DataSourceCreateRequest(BaseModel):
     password: str = ""
     version: str = ""
     description: str = ""
-    schema: str = ""
+    db_schema: str = Field(default="", alias="schema")
     tablespace: str = ""
     service_name: str = ""
     instance: str = ""

@@ -32,7 +32,7 @@ class BusinessRuleStore:
             loader = DocLoader(self._docs_dir)
             entries = loader.scan_and_load()
             if entries:
-                self._upsert_rules(entries)
+                await self._upsert_rules(entries)
                 logger.info("业务规则索引完成", count=len(entries))
             else:
                 logger.info("未发现业务规则文档")
@@ -51,44 +51,23 @@ class BusinessRuleStore:
         后续 Phase 可升级为语义向量检索。
         """
         try:
-            results = self._collection.get(
-                where={"category": "business_rule"},
-            )
-            entries = []
-            ids = results.get("ids", [])
-            if not ids:
-                return []
-
-            metadatas = results.get("metadatas", [])
-            documents = results.get("documents", [])
-
-            for i, entry_id in enumerate(ids):
-                if i >= top_k:
-                    break
-                meta = metadatas[i] if i < len(metadatas) else {}
-                content = documents[i] if i < len(documents) else ""
-                entries.append(KnowledgeEntry.from_dict({
-                    "id": entry_id, "content": content, **meta
-                }))
-            return entries
+            from src.memory.vector_store import get_vector_store
+            store = await get_vector_store()
+            results = await store.get_by_filter({"category": "business_rule"}, limit=top_k)
+            return [KnowledgeEntry.from_dict({"id": r.id, "content": r.content, **r.metadata})
+                    for r in results]
         except Exception as e:
             logger.warning("业务规则检索失败", error=str(e))
             return []
 
-    def _upsert_rules(self, entries: list[KnowledgeEntry]) -> None:
-        """幂等写入（先删后写）。"""
+    async def _upsert_rules(self, entries: list[KnowledgeEntry]) -> None:
+        """幂等写入向量存储。"""
         if not entries:
             return
         try:
-            ids = [e.id for e in entries]
-            documents = [e.content for e in entries]
-            metadatas = [e.to_dict() for e in entries]
-
-            try:
-                self._collection.delete(ids=ids)
-            except Exception:
-                pass
-
-            self._collection.add(ids=ids, documents=documents, metadatas=metadatas)
+            from src.memory.vector_store import VectorEntry, get_vector_store
+            store = await get_vector_store()
+            await store.upsert([VectorEntry(id=e.id, content=e.content, metadata=e.to_dict())
+                                for e in entries])
         except Exception as e:
             logger.error("业务规则写入失败", error=str(e))

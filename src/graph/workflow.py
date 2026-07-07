@@ -145,15 +145,15 @@ def should_retry(state: AnalysisState) -> str:
 
 
 def route_by_intent(state: AnalysisState) -> str:
-    """
-    意图分类后的第一层路由。
-
-    去向：
-      - file_analysis → 走 mcp_agent 路径（目前直接 END，Phase 2 将接入 MCP 子图）
-      - 其他所有意图 → 走标准 SQL 分析流水线（从 retrieve_schema 开始）
-    """
-    if state.get("intent") == "file_analysis":
-        return "mcp_agent"  # Phase 2 将替换为 mcp_agent → ... → build_response
+    """意图路由：多源→并行, file_analysis→MCP, metadata/chat→LLM, 其他→SQL。"""
+    sources = state.get("selected_datasources", []) or []
+    if len(sources) > 1:
+        return "multi_source_dispatch"
+    intent = state.get("intent", "")
+    if intent == "file_analysis":
+        return "mcp_agent"
+    if intent in ("metadata", "chat"):
+        return "llm_direct_answer"
     return "retrieve_schema"
 
 
@@ -179,6 +179,11 @@ async def build_workflow() -> StateGraph:
     workflow.add_node("generate_chart", generate_chart_node)
     workflow.add_node("build_response", build_response_node)
     workflow.add_node("mcp_agent", mcp_agent_node)
+    from src.graph.nodes.llm_answer import llm_direct_answer_node
+    workflow.add_node("llm_direct_answer", llm_direct_answer_node)
+    from src.graph.nodes.multi_source import multi_source_dispatch_node, merge_results_node
+    workflow.add_node("multi_source_dispatch", multi_source_dispatch_node)
+    workflow.add_node("merge_results", merge_results_node)
 
     # Step 3: 设置入口节点（用户请求从这里开始）
     workflow.set_entry_point("classify_intent")
@@ -188,8 +193,13 @@ async def build_workflow() -> StateGraph:
     # 意图路由：按意图分叉 → 主路径或 MCP 文件分析路径
     workflow.add_conditional_edges(
         "classify_intent", route_by_intent,
-        {"retrieve_schema": "retrieve_schema", "mcp_agent": END}
+        {"retrieve_schema": "retrieve_schema", "mcp_agent": END,
+         "llm_direct_answer": "llm_direct_answer",
+         "multi_source_dispatch": "multi_source_dispatch"}
     )
+    workflow.add_edge("llm_direct_answer", END)
+    workflow.add_edge("multi_source_dispatch", "merge_results")
+    workflow.add_edge("merge_results", "build_response")
 
     # 固定边：Schema 检索 → SQL 生成
     workflow.add_edge("retrieve_schema", "generate_sql")

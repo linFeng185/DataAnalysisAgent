@@ -66,8 +66,8 @@ class SchemaManager:
         """
         self._ensure_initialized()
 
-        # ① 查 ChromaDB 缓存
-        cached = self._query_cache(datasource_name)
+        # ① 查向量存储缓存
+        cached = await self._query_cache(datasource_name)
         if cached and not self._any_expired(cached):
             logger.info("Schema 缓存命中", datasource=datasource_name, entries=len(cached))
             snapshot = self._build_snapshot(cached)
@@ -88,7 +88,7 @@ class SchemaManager:
         # 合并：文档优先于自动内省
         merged = self._merge_entries(doc_entries, introspected)
         if merged:
-            self._upsert_to_cache(merged)
+            await self._upsert_to_cache(merged)
 
         result = merged or cached or []
         snapshot = self._build_snapshot(result)
@@ -98,29 +98,29 @@ class SchemaManager:
 
     # ── 私有：缓存查询 ─────────────────────────────────
 
-    def _query_cache(self, datasource_name: str) -> list[KnowledgeEntry]:
-        """从 ChromaDB 缓存中检索指定数据源的所有知识条目。"""
+    async def _query_cache(self, datasource_name: str) -> list[KnowledgeEntry]:
+        """从向量存储检索指定数据源的所有知识条目。"""
         try:
-            results = self._collection.get(
-                where={"table_name": {"$ne": ""}},
-            )
+            from src.memory.vector_store import get_vector_store
+            store = await get_vector_store()
+            results = await store.get_by_filter(
+                {"table_name": {"$ne": ""}}, limit=500)
             entries = []
-            ids = results.get("ids", [])
-            if not ids:
-                return []
-
-            metadatas = results.get("metadatas", [])
-            documents = results.get("documents", [])
-
-            for i, entry_id in enumerate(ids):
-                if not self._belongs_to_datasource(entry_id, datasource_name):
+            for r in results:
+                if not self._belongs_to_datasource(r.id, datasource_name):
                     continue
-                meta = metadatas[i] if i < len(metadatas) else {}
-                content = documents[i] if i < len(documents) else ""
-                entries.append(self._row_to_entry(entry_id, content, meta))
+                entries.append(KnowledgeEntry(
+                    id=r.id, content=r.content,
+                    datasource=r.metadata.get("datasource", ""),
+                    category=r.metadata.get("category", "table"),
+                    source=r.metadata.get("source", "auto"),
+                    table_name=r.metadata.get("table_name", ""),
+                    created_at=r.metadata.get("created_at", 0),
+                    updated_at=r.metadata.get("updated_at", 0),
+                ))
             return entries
         except Exception:
-            logger.warning("ChromaDB 缓存查询失败，降级到 DB 内省")
+            logger.warning("向量存储缓存查询失败，降级到 DB 内省")
             return []
 
     def _belongs_to_datasource(self, entry_id: str, datasource_name: str) -> bool:
@@ -271,25 +271,19 @@ class SchemaManager:
 
     # ── 私有：缓存写入 ──────────────────────────────────
 
-    def _upsert_to_cache(self, entries: list[KnowledgeEntry]) -> None:
-        """将 KnowledgeEntry 批量写入 ChromaDB 缓存。"""
+    async def _upsert_to_cache(self, entries: list[KnowledgeEntry]) -> None:
+        """将 KnowledgeEntry 批量写入向量存储。"""
         if not entries:
             return
         try:
-            ids = [e.id for e in entries]
-            documents = [e.content for e in entries]
-            metadatas = [e.to_dict() for e in entries]
-
-            # 先删后写，实现 upsert 语义
-            try:
-                self._collection.delete(ids=ids)
-            except Exception:
-                pass
-
-            self._collection.add(ids=ids, documents=documents, metadatas=metadatas)
-            logger.info("ChromaDB 缓存写入完成", count=len(entries))
+            from src.memory.vector_store import VectorEntry, get_vector_store
+            store = await get_vector_store()
+            vec_entries = [VectorEntry(id=e.id, content=e.content, metadata=e.to_dict())
+                           for e in entries]
+            await store.upsert(vec_entries)
+            logger.info("向量存储缓存写入完成", count=len(entries))
         except Exception as e:
-            logger.error("ChromaDB 缓存写入失败", error=str(e))
+            logger.error("向量存储缓存写入失败", error=str(e))
 
     # ── 私有：条目合并 ──────────────────────────────────
 
@@ -381,7 +375,7 @@ class SchemaManager:
         fk_graph = self._build_fk_graph(tables)
 
         # ② 语义搜索相关表
-        matched_names = self._semantic_search_tables(user_query, datasource_name, tables)
+        matched_names = await self._semantic_search_tables(user_query, datasource_name, tables)
         logger.info("语义搜索完成", matched=len(matched_names),
                     tables=sorted(matched_names))
 
@@ -428,34 +422,24 @@ class SchemaManager:
             result.update(neighbors)
         return result
 
-    def _semantic_search_tables(
+    async def _semantic_search_tables(
         self, user_query: str, datasource_name: str, tables: list
     ) -> set[str]:
-        """通过 ChromaDB 语义搜索找到与用户查询最相关的表。
-
-        使用 ChromaDB 的 query 做 embedding 相似度匹配，
-        然后通过 ID 前缀过滤到目标数据源。
-        """
+        """通过向量语义搜索找到与用户查询最相关的表。"""
         try:
-            # 获取足够多的候选结果（跨数据源），再后过滤
-            n_fetch = max(self._SEMANTIC_TOP_K * 5, 100)
-            results = self._collection.query(
-                query_texts=[user_query],
-                where={"category": "table"},
-                n_results=min(n_fetch, self._collection.count()),
-            )
-            ids_list = results.get("ids", [[]])
-            distances = results.get("distances", [[]])
-            if not ids_list or not ids_list[0]:
+            from src.memory.vector_store import get_vector_store
+            store = await get_vector_store()
+            results = await store.search(user_query, top_k=50, filters={"category": "table"})
+            if not results:
                 logger.warning("语义搜索无结果，回退到全部表")
                 return {t.name.lower() for t in tables}
 
             prefix = f"table:{datasource_name}."
             matched: list[tuple[str, float]] = []
-            for entry_id, dist in zip(ids_list[0], distances[0] if distances else []):
-                if entry_id.startswith(prefix):
-                    table_name = entry_id[len(prefix):]
-                    matched.append((table_name, dist))
+            for r in results:
+                if r.id.startswith(prefix):
+                    table_name = r.id[len(prefix):]
+                    matched.append((table_name, 1.0 - r.score))
 
             # 按相似度排序，取 top-K
             matched.sort(key=lambda x: x[1])

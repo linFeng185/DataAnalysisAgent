@@ -15,6 +15,9 @@ class SupportedFeatures:
     function_calling: bool = True
     json_mode: bool = True
     max_tokens_limit: int = 16384
+    context_window: int = 128000
+    vision: bool = False
+    default_temperature: float = 0.0
 
 
 @dataclass

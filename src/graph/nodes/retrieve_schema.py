@@ -111,14 +111,42 @@ async def retrieve_schema_node(state: AnalysisState) -> dict:
         "resolved_schema": schema,
         "relevant_tables": [
             {"name": t.name, "description": t.description,
-             "columns": [{"name": c.name, "type": c.type, "comment": c.comment} for c in t.columns]}
+             "columns": [{"name": c.name, "type": c.type, "comment": c.comment,
+                          "is_indexed": getattr(c, "is_indexed", False)}
+                         for c in t.columns],
+             "indexes": [{"columns": idx.columns, "unique": idx.unique}
+                         for idx in (getattr(t, "indexes", []) or [])]}
             for t in tables
         ],
         "few_shot_examples": [],
         "business_rules_text": "",
+        "enum_dictionary": await _load_enum_dictionary(datasource_name, tables),
         "long_term_memories_text": knowledge_text,
         "conversation_history": history,
     }
+
+
+async def _load_enum_dictionary(datasource: str, tables: list) -> dict[str, list[str]]:
+    """从知识库加载每列的合法枚举值列表。
+
+    用户上传的知识库文档中可定义: status: paid|refunded|cancelled
+    """
+    try:
+        from src.memory.vector_store import get_vector_store
+        store = await get_vector_store()
+        results = await store.get_by_filter(
+            {"datasource": datasource, "category": "enum_value"}, limit=200)
+        enum_dict: dict[str, list[str]] = {}
+        for r in results:
+            col = r.metadata.get("column_name", "")
+            vals = r.metadata.get("values", "")
+            if col and vals:
+                enum_dict[col] = [v.strip() for v in vals.split("|") if v.strip()]
+        if enum_dict:
+            logger.info("枚举值字典加载", datasource=datasource, columns=len(enum_dict))
+        return enum_dict
+    except Exception:
+        return {}
 
 
 async def _load_knowledge_context(datasource: str, query: str) -> str:
@@ -129,38 +157,21 @@ async def _load_knowledge_context(datasource: str, query: str) -> str:
     - 只返回最相关的 Top-3，避免上下文爆炸
     """
     try:
-        from src.knowledge.schema_manager import get_schema_manager
-        sm = get_schema_manager()
-        sm._ensure_initialized()  # noqa: SLF001
-        total = sm._collection.count()
+        from src.memory.vector_store import get_vector_store
+        store = await get_vector_store()
+        total = await store.count()
         if total == 0:
             return ""
 
-        # 语义向量搜索：用用户问题匹配最相关的知识库片段
-        n = min(5, total)
-        results = sm._collection.query(  # noqa: SLF001
-            query_texts=[query if query else datasource],
-            n_results=n,
-        )
-        ids_list = results.get("ids", [[]])[0]
-        docs_list = results.get("documents", [[]])[0]
-        dists_list = results.get("distances", [[]])[0]
+        results = await store.search(query if query else datasource, top_k=5)
+        relevant = [r for r in results if r.score > 0.3]
+        relevant.sort(key=lambda x: x.score, reverse=True)
 
-        # 过滤低相关性（距离 > 0.7 的丢弃）
-        relevant: list[tuple[str, str, float]] = []
-        for i in range(len(ids_list)):
-            doc = docs_list[i] if i < len(docs_list) else ""
-            dist = dists_list[i] if i < len(dists_list) else 1.0
-            if doc and dist < 0.7:
-                relevant.append((ids_list[i], doc, dist))
-        relevant.sort(key=lambda x: x[2])  # 距离升序 = 相关度降序
-
-        # Top-3 完整注入，每块截断到 1000 字符
         top_chunks: list[str] = []
-        for doc_id, doc, dist in relevant[:3]:
-            chunk = doc[:1000]
+        for r in relevant[:3]:
+            chunk = r.content[:1000]
             top_chunks.append(chunk)
-            logger.debug("  知识库匹配 [dist=%.3f] %s: %s", dist, doc_id[:30], doc[:80])
+            logger.debug("  知识库匹配 [score=%.3f] %s: %s", r.score, r.id[:30], r.content[:80])
 
         if top_chunks:
             logger.info("知识库语义检索命中", datasource=datasource or "全部",

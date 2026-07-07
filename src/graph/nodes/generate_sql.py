@@ -341,14 +341,15 @@ def format_schema_for_prompt(tables: list[dict], dialect: str = "") -> str:
 
     for t in tables:
         lines.append(f"### 表: {t['name']} — {t.get('description', '')}")
-        lines.append("| 字段 | 类型 | 说明 |")
-        lines.append("|------|------|------|")
+        lines.append("| 字段 | 类型 | 索引 | 说明 |")
+        lines.append("|------|------|------|------|")
         for c in t.get("columns", []):
             sample = c.get("sample", "")
             comment = c.get("comment", "") or ""
             if sample:
                 comment = f"{comment}（示例: {sample}）" if comment else f"示例: {sample}"
-            lines.append(f"| {c['name']} | {c['type']} | {comment} |")
+            idx_flag = "🔑" if c.get("is_indexed") else ""
+            lines.append(f"| {c['name']} | {c['type']} | {idx_flag} | {comment} |")
         # 追加行数提示
         row_est = t.get("row_estimate")
         if row_est:

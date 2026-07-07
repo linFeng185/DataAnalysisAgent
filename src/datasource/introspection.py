@@ -124,6 +124,7 @@ async def introspect_columns(
             comment=row.get("comment") or "",
             is_nullable=_parse_nullable(row.get("is_nullable", True)),
             is_primary_key=row.get("column_key") == "PRI" or row.get("is_primary_key", False),
+            is_indexed=row.get("column_key", "") in ("PRI", "UNI", "MUL"),
         ))
     return columns
 

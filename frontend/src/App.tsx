@@ -12,6 +12,8 @@ import SchemaPage from './pages/SchemaPage';
 import HistoryPage from './pages/HistoryPage';
 import SkillsPage from './pages/SkillsPage';
 import KnowledgePage from './pages/KnowledgePage';
+import LoginPage from './pages/LoginPage';
+import { AuthProvider } from './hooks/AuthContext';
 import ErrorBoundary from './components/ErrorBoundary';
 import { get } from './api/client';
 import type { HealthResponse } from './types';
@@ -99,7 +101,12 @@ export default function App() {
   return (
     <ConfigProvider locale={zhCN} theme={{ algorithm: theme.defaultAlgorithm }}>
       <BrowserRouter>
-        <AppContent />
+        <AuthProvider>
+          <Routes>
+            <Route path="/login" element={<LoginPage />} />
+            <Route path="/*" element={<AppContent />} />
+          </Routes>
+        </AuthProvider>
       </BrowserRouter>
     </ConfigProvider>
   );

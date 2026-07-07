@@ -42,7 +42,8 @@ _PROGRESS_MAP: dict[str, str] = {
 }
 
 
-async def stream_analysis(user_query: str, datasource: str, session_id: str = ""):
+async def stream_analysis(user_query: str, datasource: str, session_id: str = "",
+                          datasources: list[str] | None = None):
     """SSE: 逐 Node 推送进度 + LLM token + 关键结果。
 
     每个 thinking / token 事件均携带 node 字段，
@@ -76,8 +77,24 @@ async def stream_analysis(user_query: str, datasource: str, session_id: str = ""
     active_llm_nodes: set[str] = set()
 
     try:
-        async for event in app.astream_events(
-            {"user_query": user_query, "datasource": datasource}, config, version="v2"
+        input_state = {"user_query": user_query, "datasource": datasource,
+                       "selected_datasources": datasources if datasources and len(datasources) > 1 else [datasource]}
+        if get_settings().multi_tenant:
+            try:
+                from src.api.auth import get_current_tenant_id
+                import asyncpg as _apg
+                url = get_settings().database_url.replace("postgresql+asyncpg://", "postgresql://")
+                c = await _apg.connect(url)
+                r = await c.fetchrow(
+                    "SELECT allowed_columns, row_filter_sql FROM datasource_permissions "
+                    "WHERE datasource_name=$1 AND tenant_id=$2", datasource, get_current_tenant_id())
+                await c.close()
+                if r:
+                    input_state["allowed_columns"] = r["allowed_columns"] or []
+                    input_state["row_filter_sql"] = r["row_filter_sql"] or ""
+            except Exception:
+                pass
+        async for event in app.astream_events(input_state, config, version="v2"
         ):
             kind = event["event"]
 

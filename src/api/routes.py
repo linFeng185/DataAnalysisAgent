@@ -41,7 +41,7 @@ async def chat(req: ChatRequest):
         from fastapi.responses import StreamingResponse
         from src.api.streaming import stream_analysis
         return StreamingResponse(
-            stream_analysis(req.query, req.datasource, req.session_id or ""),
+            stream_analysis(req.query, req.datasource, req.session_id or "", req.datasources),
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
@@ -97,7 +97,9 @@ async def list_tables(
         if search and search.lower() not in t.name.lower():
             continue
         tables.append(TableInfo(name=t.name, description=t.description,
-            columns=[{"name": c.name, "type": c.type, "comment": c.comment} for c in t.columns],
+            columns=[{"name": c.name, "type": c.type, "comment": c.comment,
+                      "is_indexed": c.is_indexed, "is_primary_key": c.is_primary_key}
+                     for c in t.columns],
             row_count_estimate=t.row_count_estimate))
     total = len(tables)
     start = (page - 1) * page_size
@@ -223,6 +225,32 @@ async def list_session_turns(
     """
     turns = await _load_session_turns(session_id, before=before, limit=limit)
     return {"turns": turns, "has_more": len(turns) >= limit}
+
+
+# ---- 模型管理 ----
+
+@router.get("/models")
+async def list_models():
+    from src.llm.model_registry import get_model_registry
+    items = []
+    for m in get_model_registry().list_all():
+        items.append({"id": m.model_id, "provider": m.provider, "name": m.display_name,
+                      "context_window": m.capabilities.context_window,
+                      "vision": m.capabilities.vision, "reasoning": m.capabilities.reasoning})
+    return {"models": items, "default": get_settings().llm_model}
+
+
+@router.post("/models/test")
+async def test_model(req: dict):
+    import time as _t
+    from src.llm.client import get_provider
+    try:
+        p = get_provider(req.get("model_id", ""))
+        s = _t.monotonic()
+        await p.agenerate([{"role": "user", "content": "ping"}], max_tokens=1)
+        return {"ok": True, "latency_ms": round((_t.monotonic() - s) * 1000)}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
 
 
 @router.delete("/sessions/{session_id}")
@@ -565,36 +593,18 @@ async def test_knowledge_search(q: str = Query(default=""), datasource: str = Qu
     无 q 时返回全部条目列表。
     """
     try:
-        from src.knowledge.schema_manager import get_schema_manager
-        sm = get_schema_manager()
-        sm._ensure_initialized()
-        where = {}
-        if datasource:
-            where["datasource"] = datasource
+        from src.memory.vector_store import get_vector_store
+        store = await get_vector_store()
         if q:
-            results = sm._collection.query(
-                query_texts=[q],
-                n_results=min(10, sm._collection.count()),
-                where=where if where else None,
-            )
-            items = []
-            ids_list = results.get("ids", [[]])[0]
-            docs_list = results.get("documents", [[]])[0]
-            dists_list = results.get("distances", [[]])[0]
-            for i in range(len(ids_list)):
-                items.append({
-                    "rank": i + 1,
-                    "id": ids_list[i],
-                    "content": docs_list[i][:200] if i < len(docs_list) and docs_list[i] else "",
-                    "relevance": round(1 - min(dists_list[i], 1), 4) if i < len(dists_list) else 0,
-                })
+            filters = {"datasource": datasource} if datasource else None
+            results = await store.search(q, top_k=10, filters=filters)
+            items = [{"rank": i+1, "id": r.id, "content": r.content[:200],
+                      "relevance": r.score} for i, r in enumerate(results)]
             return {"query": q, "results": items, "total": len(items)}
         else:
-            results = sm._collection.get(where=where if where else None)
-            return {
-                "total": len(results.get("ids", [])),
-                "ids": results.get("ids", []),
-            }
+            filters = {"datasource": datasource} if datasource else {}
+            results = await store.get_by_filter(filters, limit=1000)
+            return {"total": len(results), "ids": [r.id for r in results]}
     except Exception as e:
         raise HTTPException(500, f"知识库检索测试失败: {e}")
 

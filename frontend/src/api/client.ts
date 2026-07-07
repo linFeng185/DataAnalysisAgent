@@ -66,12 +66,14 @@ export function streamChat(
   onEvent: (evt: Record<string, unknown>) => void,
   onDone: () => void,
   onError: (err: string) => void,
+  datasources?: string[],
+  modelId?: string,
 ): AbortController {
   const controller = new AbortController();
   fetch(`${BASE}/chat`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ query, datasource, stream: true, session_id: sessionId }),
+    body: JSON.stringify({ query, datasource, datasources: datasources || [datasource], model_id: modelId || '', stream: true, session_id: sessionId }),
     signal: controller.signal,
   }).then(async (res) => {
     if (!res.ok) {

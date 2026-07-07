@@ -32,7 +32,9 @@ function saveDs(name: string) {
 
 export default function ChatPage() {
   const [query, setQuery] = useState('');
-  const [ds, setDs] = useState(loadDs);
+  const [ds, setDs] = useState<string[]>(() => { const v = loadDs(); return v ? [v] : []; });
+  const [modelId, setModelId] = useState('');
+  const [models, setModels] = useState<{id:string;name:string}[]>([]);
   const [datasources, setDatasources] = useState<DatasourceConfig[]>([]);
   const [drawerOpen, setDrawerOpen] = useState(false);
   const {
@@ -48,8 +50,11 @@ export default function ChatPage() {
       .then(data => {
         const list = data.datasources || [];
         setDatasources(list);
-        if (list.length > 0 && !ds) { setDs(list[0].name); saveDs(list[0].name); }
+        if (list.length > 0 && ds.length === 0) { setDs([list[0].name]); saveDs(list[0].name); }
       })
+    get<{models:{id:string;name:string}[],default:string}>('/models')
+      .then(data => { setModels(data.models||[]); if (!modelId) setModelId(data.default||''); })
+      .catch(() => {})
       .catch(() => message.warning('无法加载数据源列表'));
   }, []);
 
@@ -71,7 +76,7 @@ export default function ChatPage() {
   const handleSend = () => {
     if (!query.trim() || loading) return;
     if (!ds) { message.warning('请选择数据源'); return; }
-    send(query, ds);
+    send(query, ds[0] || 'demo');
     setQuery('');
   };
 
@@ -81,7 +86,7 @@ export default function ChatPage() {
     if (!el || loadingMore || !hasMore) return;
     if (el.scrollTop <= 20) {
       const prevHeight = el.scrollHeight;
-      loadMoreTurns(sessionId, ds).then(() => {
+      loadMoreTurns(sessionId, ds[0] || '').then(() => {
         requestAnimationFrame(() => {
           if (msgAreaRef.current) {
             msgAreaRef.current.scrollTop = msgAreaRef.current.scrollHeight - prevHeight;
@@ -97,7 +102,7 @@ export default function ChatPage() {
     try {
       const detail = await fetchSession(session.session_id);
       restoreTurns(detail.turns, session.session_id, session.datasource, detail.latest_state);
-      setDs(session.datasource);
+      setDs([session.datasource]);
       message.success('已恢复会话');
     } catch {
       message.error('恢复会话失败');
@@ -181,7 +186,7 @@ export default function ChatPage() {
           <div style={{ marginBottom: 8, display: 'flex', flexWrap: 'wrap', gap: 4 }}>
             {(lastAnalysis.follow_up_questions as string[])?.slice(0, 4).map((q, i) => (
               <Tag key={i} color="processing" style={{ cursor: 'pointer', fontSize: 12, borderRadius: 6 }}
-                onClick={() => send(q, ds)}>{q}</Tag>
+                onClick={() => send(q, ds[0] || '')}>{q}</Tag>
             ))}
           </div>
         )}
@@ -203,8 +208,9 @@ export default function ChatPage() {
               fontSize: 14, lineHeight: 1.6, padding: '4px 0',
             }}
           />
-          <Select
-            value={ds || undefined} onChange={v => { setDs(v); saveDs(v); }}
+          <Select mode="multiple" maxTagCount={1}
+            value={ds.length > 0 ? ds : undefined}
+            onChange={v => { const arr = Array.isArray(v) ? v : [v]; setDs(arr); saveDs(arr[0]||''); }}
             options={dsOptions} disabled={loading}
             size="small" style={{ minWidth: 130, flexShrink: 0 }}
             dropdownMatchSelectWidth={false}
@@ -228,6 +234,11 @@ export default function ChatPage() {
               <Typography.Text type="secondary" style={{ fontSize: 11 }}>
                 会话: {sessionId.slice(-8)}
               </Typography.Text>
+            )}
+            {models.length > 1 && (
+              <Select size="small" value={modelId || undefined} onChange={v => setModelId(v || '')}
+                options={models.map(m => ({ value: m.id, label: m.name }))}
+                style={{ minWidth: 140 }} dropdownMatchSelectWidth={false} />
             )}
           </Space>
           <Space size={4}>
@@ -262,6 +273,7 @@ function TurnBubble({ turn }: { turn: ChatTurn }) {
   const hasError = status === 'error';
   const isStreaming = status === 'streaming';
   const isRestored = status === 'done' && !finalResult;
+  const isLLMDirect = finalResult?.source === 'llm_direct';
   const activeSkills = (finalResult?.activated_skills as string[]) || [];
   const activeKnowledge = (finalResult?.activated_knowledge as string) || '';
 
@@ -340,7 +352,14 @@ function TurnBubble({ turn }: { turn: ChatTurn }) {
             </div>
           )}
 
-          {hasResult && (
+          {hasResult && isLLMDirect ? (
+            <Card size="small" style={{ background: '#f6ffed', borderRadius: 12, border: '1px solid #b7eb8f' }}>
+              <Space><Tag color="green">直接回答</Tag><Typography.Text type="secondary" style={{ fontSize: 11 }}>不涉及数据库查询</Typography.Text></Space>
+              <Typography.Paragraph style={{ marginTop: 8, fontSize: 14, whiteSpace: 'pre-wrap' }}>
+                {(finalResult?.analysis as Record<string,unknown>)?.summary as string || assistant.tokens}
+              </Typography.Paragraph>
+            </Card>
+          ) : hasResult && (
             <ResultCard sql={assistant.sql} reasoning={assistant.reasoning}
               tokens={assistant.tokens} finalResult={finalResult}
               validationErrors={assistant.validationErrors} />
