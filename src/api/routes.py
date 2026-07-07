@@ -232,6 +232,7 @@ async def list_session_turns(
 @router.get("/models")
 async def list_models():
     from src.llm.model_registry import get_model_registry
+    from src.config import get_settings
     items = []
     for m in get_model_registry().list_all():
         items.append({"id": m.model_id, "provider": m.provider, "name": m.display_name,
