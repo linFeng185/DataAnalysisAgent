@@ -111,7 +111,10 @@ def create_app() -> FastAPI:
         docs_url="/docs" if settings.env == "dev" else None,
     )
 
+    from src.api.auth import AuthMiddleware, auth_router
+    app.add_middleware(AuthMiddleware)
     app.include_router(router, prefix="/api/v1")
+    app.include_router(auth_router, prefix="/api/v1")
     register_exception_handlers(app)
 
     return app

@@ -9,12 +9,9 @@ class DeepSeekV4ProAdapter(ModelAdapter):
     provider = "openai"
     default_base_url = "https://api.deepseek.com"
     supported_features = SupportedFeatures(
-        streaming=True,
-        reasoning=True,
-        reasoning_content_in_response=True,
-        function_calling=True,
-        json_mode=True,
-    )
+        streaming=True, reasoning=True, reasoning_content_in_response=True,
+        function_calling=True, json_mode=True, max_tokens_limit=8192,
+        context_window=1_000_000, vision=False)
 
     def get_chat_openai_kwargs(self) -> dict:
         return {

@@ -52,6 +52,11 @@ class Settings(BaseSettings):
     # ---- 数据库 (智能体自身的状态存储) ----
     database_url: str = "postgresql+asyncpg://postgres:postgres@localhost:5432/data_agent"
 
+    # ---- 向量存储 ----
+    vector_store_type: str = "chroma"
+    vector_store_abstract_enabled: bool = True
+    milvus_uri: str = ""
+
     # ---- ChromaDB ----
     chroma_persist_dir: str = "./chroma_data"
     chroma_collection_name: str = "data_agent_knowledge"
@@ -59,6 +64,15 @@ class Settings(BaseSettings):
 
     # ---- Redis ----
     redis_url: str = "redis://localhost:6379/0"
+
+    # ---- 多租户与认证 ----
+    multi_tenant: bool = False               # 是否启用多租户
+    jwt_secret: str = "dev-secret-change-in-production"
+    jwt_access_token_expire_hours: int = 24
+    jwt_refresh_token_expire_days: int = 7
+
+    # ---- LLM 降级 ----
+    llm_fallback_chain: str = ""             # 降级链 "gpt-4o,claude-sonnet-4-6"
 
     # ---- 会话上下文裁剪 ----
     # DeepSeek V4 有 1M 上下文，默认 50K 足够 20+ 轮完整对话，且不浪费 Token 成本

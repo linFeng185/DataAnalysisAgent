@@ -105,7 +105,7 @@ export function useChat() {
     }
   }, [turns, sessionId]);
 
-  const send = useCallback((query: string, datasource: string) => {
+  const send = useCallback((query: string, datasource: string, _datasources?: string[], _modelId?: string) => {
     setLoading(true);
     const turnId = nextId.current++;
     const newTurn: ChatTurn = {
@@ -124,8 +124,10 @@ export function useChat() {
     const sid = sessionId || `sess_${Date.now()}`;
     if (!sessionId) setSessionId(sid);
 
+    const dss = _datasources && _datasources.length > 1 ? _datasources : undefined;
+    const mid = _modelId || undefined;
     aborterRef.current = streamChat(query, datasource, sid,
-      (evt) => {
+      (evt: Record<string, unknown>) => {
         const e = evt as Record<string, unknown>;
         switch (e.type) {
           case 'node_start':
@@ -208,6 +210,12 @@ export function useChat() {
       },
     );
   }, [sessionId]);
+
+  const sendMulti = useCallback((query: string, datasourcesList: string[], modelId: string) => {
+    if (datasourcesList.length > 0) {
+      send(query, datasourcesList[0], datasourcesList, modelId);
+    }
+  }, [send]);
 
   const cancel = useCallback(() => { aborterRef.current?.abort(); setLoading(false); }, []);
   const clearSession = useCallback(() => {

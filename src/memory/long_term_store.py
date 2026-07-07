@@ -16,15 +16,9 @@ logger = get_logger(__name__)
 
 
 class LongTermMemoryStore:
-    """7.3.3 长期记忆写入与检索。
+    """7.3.3 长期记忆写入与检索。VectorStore 抽象 + PG 双写。"""
 
-    - 语义相似: ChromaDB 向量检索 Top-K
-    - 置信度过滤: confidence >= 0.3
-    - 双写: PG 先写，ChromaDB 后写 (失败补偿)
-    """
-
-    def __init__(self, chroma_collection, pg_pool=None):
-        self._collection = chroma_collection
+    def __init__(self, pg_pool=None):
         self._pg = pg_pool
 
     # ── 检索 ─────────────────────────────────────────
@@ -34,38 +28,23 @@ class LongTermMemoryStore:
     ) -> list[LongTermMemory]:
         """7.3.4 语义检索 + 置信度过滤。"""
         try:
-            where: dict[str, Any] = {"confidence": {"$gte": 0.3}}
-            if memory_type:
-                where["memory_type"] = memory_type.value
-
-            results = self._collection.query(
-                query_texts=[query], n_results=min(top_k * 3, 50), where=where,
-            )
-            ids_list = results.get("ids", [[]])[0]
-            metas_list = results.get("metadatas", [[]])[0]
-            docs_list = results.get("documents", [[]])[0]
+            from src.memory.vector_store import get_vector_store
+            store = await get_vector_store()
+            filters = {"not:memory_type": ""} if not memory_type else {"memory_type": memory_type.value}
+            results = await store.search(query, top_k=top_k, filters=filters)
 
             memories: list[LongTermMemory] = []
-            seen: set[str] = set()
-            for i in range(min(len(ids_list), top_k)):
-                mem_id = ids_list[i]
-                if mem_id in seen:
-                    continue
-                seen.add(mem_id)
-                meta = metas_list[i] if i < len(metas_list) else {}
-                doc = docs_list[i] if i < len(docs_list) else ""
+            for r in results:
+                m = r.metadata
                 memories.append(LongTermMemory(
-                    id=mem_id,
-                    memory_type=MemoryType(meta.get("memory_type", "learned_pattern")),
-                    scope=meta.get("scope", ""),
-                    content=doc,
-                    payload=meta.get("payload", {}),
-                    created_at=_parse_dt(meta.get("created_at")),
-                    last_accessed_at=_parse_dt(meta.get("last_accessed_at")),
-                    access_count=meta.get("access_count", 0),
-                    confidence=meta.get("confidence", 1.0),
-                    ttl_days=meta.get("ttl_days"),
-                ))
+                    id=r.id, memory_type=MemoryType(m.get("memory_type", "learned_pattern")),
+                    scope=m.get("scope", ""), content=r.content,
+                    payload=m.get("payload", {}),
+                    created_at=_parse_dt(m.get("created_at")),
+                    last_accessed_at=_parse_dt(m.get("last_accessed_at")),
+                    access_count=m.get("access_count", 0),
+                    confidence=m.get("confidence", 1.0),
+                    ttl_days=m.get("ttl_days")))
             for m in memories:
                 m.touch()
             return memories
@@ -176,14 +155,13 @@ class LongTermMemoryStore:
 
         try:
             try:
-                self._collection.delete(ids=[entry.id])
+                await store.delete_by_ids([entry.id])
             except Exception:
                 pass
-            self._collection.add(
-                ids=[entry.id], documents=[entry.content], metadatas=[meta],
-            )
+            from src.memory.vector_store import VectorEntry
+            await store.upsert([VectorEntry(id=entry.id, content=entry.content, metadata=meta)])
         except Exception as e:
-            logger.error("ChromaDB 写入失败", error=str(e))
+            logger.error("VectorStore 写入失败", error=str(e))
             if pg_ok and self._pg:
                 await self._mark_pending_sync(entry.id)
 

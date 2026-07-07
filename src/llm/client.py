@@ -73,6 +73,21 @@ def get_cheap_llm() -> BaseChatModel:
     return get_openai_llm(model=get_settings().cheap_llm_model, temperature=0, max_tokens=1024)
 
 
+def get_provider(model_id: str | None = None) -> "LLMProvider":
+    s = get_settings()
+    mid = model_id or s.llm_model
+    from src.llm.model_registry import get_model_registry
+    info = get_model_registry().get(mid)
+    if not info:
+        raise ValueError(f"未知模型: {mid}")
+    if info.provider == "openai":
+        if not s.openai_api_key:
+            raise ValueError(f"模型 {mid} 需要 OPENAI_API_KEY")
+        from src.llm.provider_openai import OpenAIProvider
+        return OpenAIProvider(mid, s.openai_base_url, s.openai_api_key)
+    raise ValueError(f"不支持的 Provider: {info.provider}")
+
+
 def is_llm_available() -> bool:
     """API Key 是否已配置。"""
     s = get_settings()

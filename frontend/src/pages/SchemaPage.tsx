@@ -78,6 +78,7 @@ export default function SchemaPage() {
                 { title: '注释', dataIndex: 'comment', ellipsis: true },
                 { title: '可空', dataIndex: 'is_nullable', width: 70, render: (v: boolean) => v ? <Tag color="orange">是</Tag> : <Tag>否</Tag> },
                 { title: '主键', dataIndex: 'is_primary_key', width: 70, render: (v: boolean) => v && <Tag color="blue">PK</Tag> },
+                { title: '索引', dataIndex: 'is_indexed', width: 70, render: (v: boolean) => v && <Tag color="green">索引</Tag> },
               ]} />
           )}} columns={[
             { title: '表名', dataIndex: 'name', key: 'name', ellipsis: true },

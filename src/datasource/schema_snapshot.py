@@ -14,6 +14,7 @@ class ColumnInfo:
     comment: str = ""
     is_nullable: bool = True
     is_primary_key: bool = False
+    is_indexed: bool = False  # 主键/唯一/普通索引
     enum_values: list[str] = field(default_factory=list)
 
 

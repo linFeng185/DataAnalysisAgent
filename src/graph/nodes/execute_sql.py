@@ -37,18 +37,30 @@ async def execute_sql_node(state: AnalysisState) -> dict:
                 "query_result_sample": [], "query_result_full_count": 0,
                 "query_result_statistics": {"row_count": 0}}
 
-    # ===== Layer 2: 执行前列名验证 =====
-    # 解析 SQL 中的列引用，检查是否都存在于表结构中
+    # 行列级权限（多租户时生效）
+    from src.config import get_settings
+    if get_settings().multi_tenant:
+        allowed = state.get("allowed_columns", []) or []
+        rfilter = state.get("row_filter_sql", "") or ""
+        if allowed:
+            from src.security.permission_check import check_column_whitelist
+            col_err_perm = check_column_whitelist(sql, allowed)
+            if col_err_perm:
+                logger.warning("列权限拦截", datasource=ds_name, error=col_err_perm)
+                return {"query_result_sample": [], "query_result_full_count": 0,
+                        "query_result_statistics": {"row_count": 0},
+                        "generated_sql": sql, "execution_error": col_err_perm}
+        if rfilter:
+            from src.security.permission_check import inject_row_filter
+            sql = inject_row_filter(sql, rfilter)
+
+    # Layer 2: 列名验证
     col_err = _validate_column_references(sql, state.get("relevant_tables", []))
     if col_err:
         logger.warning("列名验证失败，触发重试", datasource=ds_name, error=col_err)
-        return {
-            "query_result_sample": [],
-            "query_result_full_count": 0,
-            "query_result_statistics": {"row_count": 0},
-            "generated_sql": sql,
-            "execution_error": col_err,
-        }
+        return {"query_result_sample": [], "query_result_full_count": 0,
+                "query_result_statistics": {"row_count": 0},
+                "generated_sql": sql, "execution_error": col_err}
 
     # 尝试连接数据源
     try:

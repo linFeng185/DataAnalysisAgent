@@ -18,17 +18,21 @@ async def classify_intent_node(state: AnalysisState) -> dict:
     logger.info("对话历史检查", has_history=len(ch) > 0, turns=len(ch))
     q = state["user_query"].lower()
 
-    if any(w in q for w in ("为什么", "原因", "归因")):
+    if any(w in q for w in ("表结构", "有哪些表", "字段", "schema", "有哪些列",
+                             "怎么用", "函数", "语法", "是什么意思", "什么是")):
+        intent = "metadata"
+    elif any(w in q for w in ("上传", "文件", "csv", "excel")):
+        intent = "file_analysis"
+    elif any(w in q for w in ("为什么", "原因", "归因")):
         intent = "attribution"
     elif any(w in q for w in ("趋势", "变化", "走势")):
         intent = "trend"
     elif any(w in q for w in ("排名", "top", "各品类", "分类")):
         intent = "aggregation"
-    elif any(w in q for w in ("表结构", "有哪些表", "字段", "schema")):
-        intent = "metadata"
-    elif any(w in q for w in ("上传", "文件", "csv", "excel")):
-        intent = "file_analysis"
-    elif any(w in q for w in ("查", "多少", "统计", "总共")):
+    elif any(w in q for w in ("你好", "谢谢", "帮助", "功能", "能做什么", "你是谁")):
+        intent = "chat"
+    elif any(w in q for w in ("查", "多少", "统计", "总共", "列出", "看看",
+                               "多少行", "销售额", "订单", "用户")):
         intent = "query"
     else:
         intent = "chat"

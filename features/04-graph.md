@@ -13,9 +13,9 @@
 | 4.1.5 | should_retry() | 同上 | 执行错误且<3→generate_sql / 否则→build_response | 单测完成 | P0 |
 | 4.1.6 | route_by_intent() | 同上 | file_analysis→mcp_agent / 其他→retrieve_schema | 单测完成 | P0 |
 | 4.1.7 | MCP Agent Node 扩展 | 同上 | 使用 create_react_agent 为文件分析场景创建动态工具调用 Node | 待开发 |
-| 4.1.8 | route_by_intent 扩展 `[P2]` | 同上 | metadata→retrieve_knowledge / chat→llm_direct / web→web_agent | 待开发 |
+| 4.1.8 | route_by_intent 扩展 `[P2]` | `src/graph/workflow.py` | metadata→llm_direct_answer / chat→llm_direct_answer | 开发完成 |
 | 4.1.9 | multi_source 路由 `[P2]` | 同上 | 多数据源时用 Send API 并行触发 worker 子图 (§15.4) | 待开发 |
-| 4.1.10 | llm_direct_answer Node `[P2]` | `src/graph/nodes/llm_answer.py`（新） | 跳过 SQL 流水线，知识库+对话直接回答 (§15.9) | 待开发 |
+| 4.1.10 | llm_direct_answer Node `[P2]` | `src/graph/nodes/llm_answer.py` | 跳过 SQL 流水线，知识库+对话直接回答 | 开发完成 |
 
 ### 4.2 classify_intent Node
 
