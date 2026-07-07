@@ -38,6 +38,11 @@ class AnalysisState(TypedDict, total=False):
     activated_skills: list[str]
     skill_prompt_override: str
     skill_tools: list[Any]
+    conversation_history: list[dict]
+    selected_datasources: list[str]
+    multi_source_results: list[dict]
+    allowed_columns: list[str]
+    row_filter_sql: str
 
     # ── Schema 层 ──────────────────────────────────
     dialect: str
