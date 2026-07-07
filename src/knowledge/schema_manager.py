@@ -72,7 +72,7 @@ class SchemaManager:
             logger.info("Schema 缓存命中", datasource=datasource_name, entries=len(cached))
             snapshot = self._build_snapshot(cached)
             if user_query:
-                snapshot = self._filter_relevant_tables(snapshot, user_query, datasource_name)
+                snapshot = await self._filter_relevant_tables(snapshot, user_query, datasource_name)
             return snapshot
 
         if cached:
@@ -361,7 +361,7 @@ class SchemaManager:
     # 语义搜索返回的候选表数量
     _SEMANTIC_TOP_K: int = 20
 
-    def _filter_relevant_tables(
+    async def _filter_relevant_tables(
         self, snapshot, user_query: str, datasource_name: str
     ):
         """语义搜索 + FK 图扩张，从大量表中筛选与查询相关的子集。"""
