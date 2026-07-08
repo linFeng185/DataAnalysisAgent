@@ -72,17 +72,37 @@ async def mcp_agent_node(state: AnalysisState) -> dict:
         messages = [SystemMessage(content=system_prompt),
                     HumanMessage(content=state.get("user_query", ""))]
 
+        agent_text = ""
         if all_tools:
             from langgraph.prebuilt import create_react_agent
             agent = create_react_agent(llm, all_tools)
             result = await agent.ainvoke({"messages": messages})
             final = result["messages"][-1] if result.get("messages") else None
-            return {"final_response": {"success": True, "agent_response": getattr(final, 'content', '') or ''}}
+            agent_text = (final.content if final and hasattr(final, "content") else "") or ""
+            return _mcp_standard_output(state, agent_text, success=True)
         resp = await llm.ainvoke(messages)
-        return {"final_response": {"success": True, "agent_response": resp.content or ''}}
+        agent_text = (resp.content if resp and hasattr(resp, "content") else "") or ""
+        return _mcp_standard_output(state, agent_text, success=True)
     except Exception as e:
         logger.error("MCP Agent 失败", error=str(e))
-        return {"final_response": {"success": False, "error_message": str(e)}}
+        return _mcp_standard_output(state, str(e), success=False)
+
+
+def _mcp_standard_output(state: AnalysisState, agent_text: str, success: bool) -> dict:
+    """标准化 MCP Agent 输出，与 execute_sql 格式兼容，确保 build_response 可正常消费。"""
+    return {
+        "final_response": {
+            "success": success, "source": "mcp_agent",
+            "user_query": state.get("user_query", ""), "sql": "",
+            "data": [], "analysis": {"summary": agent_text, "insights": [],
+                "recommended_chart_type": "table"},
+            "chart": {"type": "table", "option": {}},
+        },
+        "analysis_result": {"summary": agent_text, "insights": [],
+            "recommended_chart_type": "table"},
+        "chart_config": {"type": "table", "option": {}},
+        "query_result_sample": [],
+    }
 
 
 # ================================================================
@@ -184,6 +204,8 @@ async def build_workflow() -> StateGraph:
     from src.graph.nodes.multi_source import multi_source_dispatch_node, merge_results_node
     workflow.add_node("multi_source_dispatch", multi_source_dispatch_node)
     workflow.add_node("merge_results", merge_results_node)
+    from src.graph.nodes.decompose_query import decompose_query_node
+    workflow.add_node("decompose_query", decompose_query_node)
 
     # Step 3: 设置入口节点（用户请求从这里开始）
     workflow.set_entry_point("classify_intent")
@@ -201,8 +223,9 @@ async def build_workflow() -> StateGraph:
     workflow.add_edge("multi_source_dispatch", "merge_results")
     workflow.add_edge("merge_results", "build_response")
 
-    # 固定边：Schema 检索 → SQL 生成
-    workflow.add_edge("retrieve_schema", "generate_sql")
+    # Schema 检索 → 查询分解 → SQL 生成
+    workflow.add_edge("retrieve_schema", "decompose_query")
+    workflow.add_edge("decompose_query", "generate_sql")
     workflow.add_edge("generate_sql", "layer3_validate")
 
     # 安全校验路由：通过 → EXPLAIN / 安全拦截 → 终止 / 语法错 → 重试
