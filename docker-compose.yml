@@ -100,6 +100,7 @@ services:
     image: milvusdb/milvus:v2.4.0
     container_name: milvus
     restart: unless-stopped
+    command: ["milvus", "run", "standalone"]
     environment:
       ETCD_ENDPOINTS: etcd:2379
       MINIO_ADDRESS: minio:9000

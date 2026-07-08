@@ -84,21 +84,26 @@ async def _analyze_one(datasource: str, state: AnalysisState) -> dict | None:
 
         # SQL 生成
         from src.graph.nodes.generate_sql import generate_sql_node
-        r2 = await generate_sql_node({**s1, **r1}, {})
-        sql = (r2 or {}).get("generated_sql", "")
+        s2 = {**s1, **r1}
+        r2 = await generate_sql_node(s2)
+        sql = r2.get("generated_sql", "") if isinstance(r2, dict) else ""
         if not sql:
             return {"datasource": datasource, "success": False, "error": "SQL 生成失败"}
 
-        # 方言重写 + 执行
+        # 安全校验
         dialect = r1.get("dialect", "mysql")
-        from src.tools.sql_rewriter import rewrite_sql
-        sql = rewrite_sql(sql, dialect)
+        from src.graph.nodes.layer3_validate import layer3_validate_node
+        v3 = await layer3_validate_node({**s2, "generated_sql": sql, "dialect": dialect})
+        if v3.get("validation_errors"):
+            from src.tools.sql_rewriter import rewrite_sql
+            sql = rewrite_sql(sql, dialect)
 
+        # 执行
         from src.graph.nodes.execute_sql import execute_sql_node
-        r3 = await execute_sql_node({**s1, **r1, "generated_sql": sql, "dialect": dialect})
-        data = r3.get("query_result_sample", []) or []
+        r4 = await execute_sql_node({**s2, "generated_sql": sql, "dialect": dialect})
+        data = r4.get("query_result_sample", []) or []
 
-        return {"datasource": datasource, "success": not r3.get("execution_error"),
+        return {"datasource": datasource, "success": not r4.get("execution_error"),
                 "sql": sql, "data": data[:50], "dialect": dialect,
                 "tables": len(r1.get("relevant_tables", []))}
     except Exception as e:
@@ -156,5 +161,28 @@ async def merge_results_node(state: AnalysisState) -> dict:
         except Exception as e:
             logger.warning("LLM 跨源合并失败", error=str(e))
 
-    return {"analysis_result": {"summary": summary, "insights": []},
-            "chart_config": {"type": "table", "option": {}}}
+    # 有数据时走分析+图表流水线
+    analysis = {"summary": summary, "insights": [], "recommended_chart_type": "table"}
+    chart = {"type": "table", "option": {}}
+    all_data = []
+    for r in ok:
+        for d in r.get("data", [])[:30]:
+            d_copy = dict(d)
+            d_copy["_datasource"] = r["datasource"]
+            all_data.append(d_copy)
+
+    if all_data:
+        try:
+            from src.graph.nodes.analyze_result import analyze_result_node
+            from src.graph.nodes.generate_chart import generate_chart_node
+            merged_state = {"query_result_sample": all_data[:200],
+                            "user_query": query, "intent": "aggregation"}
+            a_result = await analyze_result_node(merged_state)
+            analysis = a_result.get("analysis_result", analysis)
+            c_result = await generate_chart_node({**merged_state, "analysis_result": analysis})
+            chart = c_result.get("chart_config", chart)
+        except Exception as e:
+            logger.warning("跨源分析/图表生成失败", error=str(e))
+
+    return {"analysis_result": analysis, "chart_config": chart,
+            "query_result_sample": all_data[:200]}

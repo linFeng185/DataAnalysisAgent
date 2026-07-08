@@ -225,7 +225,7 @@ async def build_workflow() -> StateGraph:
     workflow.add_edge("analyze_result", "generate_chart")
     workflow.add_edge("generate_chart", "build_response")
     workflow.add_edge("build_response", END)
-    workflow.add_edge("mcp_agent", END)      # MCP Agent 路径终点
+    workflow.add_edge("mcp_agent", "build_response")      # MCP Agent 路径终点
 
     # Step 5: 编译 — 注入 Checkpointer 实现多轮对话状态持久化
     from src.memory.checkpointer import get_checkpointer
