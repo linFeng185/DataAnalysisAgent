@@ -116,6 +116,13 @@ async def stream_analysis(user_query: str, datasource: str, session_id: str = ""
                 if name and not name.startswith("Runnable") and name != "LangGraph":
                     stats["chain_end"] += 1
                     yield _sse("node_end", {"node": name})
+                    # 重试透明：generate_sql 重试时发通知
+                    if name == "generate_sql" and isinstance(output, dict):
+                        rc = output.get("retry_count", 0)
+                        if rc and rc > 1:
+                            yield _sse("retry_status", {"retry": rc,
+                                      "max": get_settings().max_retry_count,
+                                      "reason": "SQL 生成/校验/执行失败，正在自动重试"})
                     if name == "generate_sql" and isinstance(output, dict) and "generated_sql" in output:
                         yield _sse("sql", {"sql": output["generated_sql"]})
                     elif name == "execute_sql" and isinstance(output, dict) and output.get("generated_sql"):

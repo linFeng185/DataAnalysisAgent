@@ -35,7 +35,7 @@ async def classify_intent_node(state: AnalysisState) -> dict:
                                "多少行", "销售额", "订单", "用户")):
         intent = "query"
     else:
-        intent = "chat"
+        intent = await _llm_classify(q) or "chat"
 
     # Skill 匹配 (9.1.6 关键词+意图+表名三重匹配)
     activated_skills = []
@@ -53,6 +53,45 @@ async def classify_intent_node(state: AnalysisState) -> dict:
         logger.warning("Skill 匹配失败", error=str(e))
 
     logger.info("节点完成", node="classify_intent", elapsed_ms=round((time.monotonic() - _start) * 1000))
+    return {
+        "intent": intent,
+        "activated_skills": [s.name for s in activated_skills],
+        "skill_prompt_override": skill_prompt,
+        "skill_tools": skill_tools,
+    }
+
+
+async def _llm_classify(query: str) -> str | None:
+    """LLM 意图分类——规则未命中时的回退。"""
+    try:
+        from src.config import get_settings
+        s = get_settings()
+        import aiohttp
+        payload = {
+            "model": s.cheap_llm_model or s.llm_model,
+            "messages": [
+                {"role": "system", "content": "意图分类器。只输出: query/aggregation/trend/attribution/metadata/chat/file_analysis"},
+                {"role": "user", "content": query},
+            ],
+            "temperature": 0, "max_tokens": 10, "stream": False,
+        }
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                f"{s.openai_base_url}/chat/completions", json=payload,
+                headers={"Authorization": f"Bearer {s.openai_api_key}", "Content-Type": "application/json"},
+                timeout=aiohttp.ClientTimeout(total=3),
+            ) as resp:
+                if resp.status != 200:
+                    return None
+                data = await resp.json()
+                text = data["choices"][0]["message"]["content"].strip().lower()
+        valid = {"query", "aggregation", "trend", "attribution", "metadata", "chat", "file_analysis"}
+        for w in text.split():
+            if w in valid:
+                return w
+        return None
+    except Exception:
+        return None
     return {
         "intent": intent,
         "activated_skills": [s.name for s in activated_skills],
