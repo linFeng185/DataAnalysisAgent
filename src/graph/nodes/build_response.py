@@ -16,14 +16,15 @@ async def build_response_node(state: AnalysisState) -> dict:
     if state.get("validation_errors"):
         logger.info("节点完成", node="build_response", elapsed_ms=round((time.monotonic() - _start) * 1000))
         return {"final_response": {
-            "success": False,
+            "success": False, "source": "sql_query",
             "error_code": "VALIDATION_FAILED",
             "error_message": str(state["validation_errors"]),
-            "user_query": state.get("user_query", ""),
+            "user_query": state.get("user_query", ""), "sql": "",
+            "data": [], "analysis": {}, "chart": {},
         }}
     exec_error = state.get("execution_error", "")
     result = {
-        "success": not exec_error,
+        "success": not exec_error, "source": "sql_query",
         "session_id": "",
         "user_query": state.get("user_query", ""),
         "sql": state.get("generated_sql", ""),
@@ -32,6 +33,7 @@ async def build_response_node(state: AnalysisState) -> dict:
         "chart": state.get("chart_config", {}),
     }
     if exec_error:
+        result["error_code"] = "SQL_EXECUTION_FAILED"
         result["error_message"] = exec_error
     reasoning = state.get("sql_reasoning_content", "")
     if reasoning:

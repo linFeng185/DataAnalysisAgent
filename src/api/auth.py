@@ -56,14 +56,32 @@ def get_current_tenant_id() -> int:
 
 # ── JWT ──
 
+_secret: str | None = None
+
+
 def _secret() -> str:
-    """获取 JWT 签名密钥。
+    """获取 JWT 签名密钥。优先环境变量 JWT_SECRET，回退 config。
 
-    优先读环境变量 JWT_SECRET，回退 config.jwt_secret。
-
-    Returns: 签名密钥字符串
+    未配置时自动生成临时密钥（仅开发模式），打印生产警告。
     """
-    return os.getenv("JWT_SECRET") or get_settings().jwt_secret
+    global _secret
+    if _secret is not None:
+        return _secret
+
+    env_key = os.getenv("JWT_SECRET", "")
+    cfg_key = get_settings().jwt_secret
+    key = env_key or cfg_key
+
+    if not key:
+        import secrets
+        key = secrets.token_hex(32)
+        logger.warning("JWT_SECRET 未配置！已生成临时密钥（服务重启后所有 Token 失效）。生产环境必须设置 JWT_SECRET。")
+
+    if key == "dev-secret-change-in-production" or len(key) < 16:
+        logger.warning("JWT_SECRET 强度不足！生产环境请使用至少 32 字节的随机密钥。")
+
+    _secret = key
+    return key
 
 
 def create_access_token(user_id: int, tenant_id: int, role: str) -> str:
@@ -176,6 +194,7 @@ async def register(req: RegisterRequest):
 # ── 无需认证的公开端点 ──
 
 PUBLIC_PATHS = {"/api/v1/health", "/api/v1/auth/login", "/api/v1/auth/register"}
+_MGMT_METHODS = {"POST", "PUT", "DELETE", "PATCH"}
 
 
 class AuthMiddleware(BaseHTTPMiddleware):
@@ -222,5 +241,11 @@ class AuthMiddleware(BaseHTTPMiddleware):
         except jwt.PyJWTError as e:
             logger.warning("JWT 无效", error=str(e))
             raise HTTPException(401, "令牌无效")
+
+        # 管理端点保护
+        s2 = get_settings()
+        if s2.admin_api_key and request.method in _MGMT_METHODS:
+            if request.headers.get("X-Admin-Key", "") != s2.admin_api_key:
+                raise HTTPException(401, "管理端点需要 X-Admin-Key")
 
         return await call_next(request)

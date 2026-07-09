@@ -11,7 +11,7 @@ from fastapi import APIRouter, File, HTTPException, Query, UploadFile
 
 from src.api.schemas import (
     ChatRequest, ChatResponse, ColumnCommentRequest,
-    DataSourceCreateRequest, DataSourceInfo, HealthResponse, TableInfo,
+    DataSourceCreateRequest, DataSourceInfo, HealthResponse, MCPServerCreate, TableInfo,
 )
 from src.exceptions import DataSourceNotFoundError
 from src.llm.client import is_llm_available
@@ -158,6 +158,84 @@ async def list_datasources(page: int = Query(default=1, ge=1), page_size: int = 
     total = len(items)
     start = (page - 1) * page_size
     return {"datasources": items[start:start+page_size], "total": total, "page": page, "page_size": page_size}
+
+
+# ---- MCP Server 管理 ----
+
+
+@router.get("/mcp/servers")
+async def list_mcp_servers():
+    """列出当前租户可用的 MCP Server（内置 + 自定义）。"""
+    from src.api.auth import get_current_tenant_id
+    tid = get_current_tenant_id()
+    try:
+        import asyncpg
+        from src.config import get_settings
+        url = get_settings().database_url.replace("postgresql+asyncpg://", "postgresql://")
+        conn = await asyncpg.connect(url)
+        rows = await conn.fetch(
+            "SELECT name, transport, command, args, url, env_vars, description, is_builtin "
+            "FROM mcp_servers WHERE tenant_id=$1 ORDER BY is_builtin DESC, name", tid)
+        servers = [{"name": r["name"], "transport": r["transport"], "command": r["command"],
+                     "args": r["args"], "url": r["url"],
+                     "env_vars": r["env_vars"] or {}, "description": r["description"],
+                     "is_builtin": r["is_builtin"]} for r in rows]
+        await conn.close()
+        return {"servers": servers, "total": len(servers)}
+    except Exception:
+        return {"servers": [], "total": 0}
+
+
+@router.post("/mcp/servers", status_code=201)
+async def create_mcp_server(req: MCPServerCreate):
+    """上传自定义 MCP Server 配置（租户级别）。"""
+    from src.api.auth import get_current_tenant_id
+    tid = get_current_tenant_id()
+    try:
+        import asyncpg, json
+        from src.config import get_settings
+        url = get_settings().database_url.replace("postgresql+asyncpg://", "postgresql://")
+        conn = await asyncpg.connect(url)
+        await conn.execute(
+            "INSERT INTO mcp_servers (name, tenant_id, transport, command, args, url, env_vars, description) "
+            "VALUES ($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT (name, tenant_id) DO UPDATE SET "
+            "transport=$3, command=$4, args=$5, url=$6, env_vars=$7, description=$8",
+            req.name, tid, req.transport, req.command, req.args, req.url,
+            json.dumps(req.env_vars), req.description)
+        await conn.close()
+        return {"status": "ok", "name": req.name}
+    except Exception as e:
+        raise HTTPException(500, f"创建失败: {e}")
+
+
+@router.delete("/mcp/servers/{name}")
+async def delete_mcp_server(name: str):
+    """删除自定义 MCP Server（内置不可删）。"""
+    from src.api.auth import get_current_tenant_id
+    tid = get_current_tenant_id()
+    try:
+        import asyncpg
+        from src.config import get_settings
+        url = get_settings().database_url.replace("postgresql+asyncpg://", "postgresql://")
+        conn = await asyncpg.connect(url)
+        await conn.execute(
+            "DELETE FROM mcp_servers WHERE name=$1 AND tenant_id=$2 AND is_builtin=FALSE", name, tid)
+        await conn.close()
+        return {"status": "ok", "name": name}
+    except Exception as e:
+        raise HTTPException(500, f"删除失败: {e}")
+
+
+@router.post("/mcp/servers/{name}/test")
+async def test_mcp_server(name: str):
+    """测试 MCP Server 连通性。"""
+    try:
+        from src.mcp_client.client_manager import get_mcp_client_manager
+        mgr = get_mcp_client_manager()
+        ok = await mgr.test_connection(name)
+        return {"name": name, "ok": ok}
+    except Exception as e:
+        return {"name": name, "ok": False, "error": str(e)}
 
 
 # ---- 查询历史 ----
@@ -448,7 +526,9 @@ async def upload_skills(files: list[UploadFile] = File(...)):
                 continue
 
         # 写文件
-        dest_dir = os.path.join(skills_dir, skill_name)
+        dest_dir = os.path.realpath(os.path.join(skills_dir, os.path.basename(skill_name)))
+        if not dest_dir.startswith(os.path.realpath(skills_dir)):
+            raise HTTPException(403, "禁止访问")
         os.makedirs(dest_dir, exist_ok=True)
         dest = os.path.join(dest_dir, "SKILL.md")
         with open(dest, "w", encoding="utf-8") as fp:
@@ -629,7 +709,10 @@ async def get_doc_content(doc_name: str):
         size = doc["size"]
     else:
         # 磁盘回退
-        doc_path = os.path.join(os.path.dirname(__file__), "..", "..", "docs", "metrics", doc_name)
+        base_dir = os.path.realpath(os.path.join(os.path.dirname(__file__), "..", "..", "docs", "metrics"))
+        doc_path = os.path.realpath(os.path.join(base_dir, os.path.basename(doc_name)))
+        if not doc_path.startswith(base_dir):
+            raise HTTPException(403, "禁止访问")
         if not os.path.isfile(doc_path):
             raise HTTPException(404, f"文档 '{doc_name}' 未找到")
         with open(doc_path, "rb") as fp:

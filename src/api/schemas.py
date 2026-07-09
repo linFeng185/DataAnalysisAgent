@@ -73,6 +73,16 @@ class TableInfo(BaseModel):
     row_count_estimate: int = 0
 
 
+class MCPServerCreate(BaseModel):
+    name: str = Field(..., min_length=1, max_length=64)
+    transport: str = "stdio"
+    command: str = ""
+    args: str = ""
+    url: str = ""
+    env_vars: dict = {}
+    description: str = ""
+
+
 class HealthResponse(BaseModel):
     status: str = "ok"
     version: str = "0.1.0"

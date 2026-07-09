@@ -62,29 +62,17 @@ async def classify_intent_node(state: AnalysisState) -> dict:
 
 
 async def _llm_classify(query: str) -> str | None:
-    """LLM 意图分类——规则未命中时的回退。"""
+    """LLM 意图分类——规则未命中时回退，复用 get_llm() 配置。"""
     try:
-        from src.config import get_settings
-        s = get_settings()
-        import aiohttp
-        payload = {
-            "model": s.cheap_llm_model or s.llm_model,
-            "messages": [
-                {"role": "system", "content": "意图分类器。只输出: query/aggregation/trend/attribution/metadata/chat/file_analysis"},
-                {"role": "user", "content": query},
-            ],
-            "temperature": 0, "max_tokens": 10, "stream": False,
-        }
-        async with aiohttp.ClientSession() as session:
-            async with session.post(
-                f"{s.openai_base_url}/chat/completions", json=payload,
-                headers={"Authorization": f"Bearer {s.openai_api_key}", "Content-Type": "application/json"},
-                timeout=aiohttp.ClientTimeout(total=3),
-            ) as resp:
-                if resp.status != 200:
-                    return None
-                data = await resp.json()
-                text = data["choices"][0]["message"]["content"].strip().lower()
+        from src.llm.client import get_llm, is_llm_available
+        if not is_llm_available():
+            return None
+        llm = get_llm(temperature=0, reasoning=False)
+        from langchain_core.messages import SystemMessage, HumanMessage
+        resp = await llm.ainvoke([
+            SystemMessage(content="意图分类器。只输出: query/aggregation/trend/attribution/metadata/chat/file_analysis"),
+            HumanMessage(content=query)])
+        text = (resp.content or "").strip().lower()
         valid = {"query", "aggregation", "trend", "attribution", "metadata", "chat", "file_analysis"}
         for w in text.split():
             if w in valid:

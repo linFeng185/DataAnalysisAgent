@@ -40,14 +40,14 @@ async def lifespan(app: FastAPI):
     from src.datasource.setup import ensure_demo_datasource
     await ensure_demo_datasource()
 
-    # 预热 SchemaManager（提前加载嵌入模型 + ChromaDB，避免首次检索时等待）
-    try:
-        from src.knowledge.schema_manager import get_schema_manager
-        sm = get_schema_manager()
-        sm._ensure_initialized()  # noqa: SLF001
-        logger.info("SchemaManager 预热完成（嵌入模型 + ChromaDB）")
-    except Exception as e:
-        logger.warning("SchemaManager 预热失败", error=str(e))
+    if get_settings().vector_store_type == "chroma":
+        try:
+            from src.knowledge.schema_manager import get_schema_manager
+            sm = get_schema_manager()
+            sm._ensure_initialized()  # noqa: SLF001
+            logger.info("ChromaDB 预热完成")
+        except Exception as e:
+            logger.warning("ChromaDB 预热失败", error=str(e))
 
     # 预热 LLM 客户端（验证 API Key + 网络连通性）
     try:
@@ -79,7 +79,7 @@ async def lifespan(app: FastAPI):
 
     # 8.1.2 连接外部 MCP Server
     try:
-        from src.mcp.client_manager import get_mcp_client_manager
+        from src.mcp_client.client_manager import get_mcp_client_manager
         await get_mcp_client_manager().connect_all()
     except Exception as e:
         logger.warning("MCP 连接失败", error=str(e))

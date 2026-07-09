@@ -1,38 +1,44 @@
-"""凭证加解密管理。"""
+"""凭证加解密管理 — PBKDF2 派生 Fernet 密钥。"""
 
 from __future__ import annotations
 
-import os
-import re
-from base64 import b64encode
-
+import os, re
+from base64 import urlsafe_b64encode
 from cryptography.fernet import Fernet
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
+from src.logging_config import get_logger
+
+logger = get_logger(__name__)
+_DEFAULT = "credential-encryption-key-change-in-production"
 
 
 class CredentialManager:
-    """AES-256 凭证加解密。"""
+    """PBKDF2 派生密钥，加密数据源凭证。"""
 
     def __init__(self, key: str | None = None) -> None:
-        raw = key or os.getenv("CREDENTIAL_ENCRYPTION_KEY", "changeme_default_key_32bytes!")
-        self._fernet = Fernet(b64encode(raw.encode()[:32].ljust(32, b"\0")))
+        raw = key or os.getenv("CREDENTIAL_ENCRYPTION_KEY", "")
+        if not raw or raw == _DEFAULT:
+            logger.warning("CREDENTIAL_ENCRYPTION_KEY 使用默认值，生产必须配置")
+            raw = _DEFAULT
+        kdf = PBKDF2HMAC(algorithm=hashes.SHA256(), length=32,
+                         salt=b"data-agent-salt", iterations=480000)
+        self._fernet = Fernet(urlsafe_b64encode(kdf.derive(raw.encode())))
 
     def encrypt(self, plain: str) -> str:
         return self._fernet.encrypt(plain.encode()).decode()
 
     def decrypt(self, token: str) -> str:
-        """解密凭证，失败时回退返回原文（兼容明文密码和环境变量占位符）。"""
         if not token:
             return ""
         try:
             return self._fernet.decrypt(token.encode()).decode()
         except Exception:
-            return token
+            if not token.startswith("gAAAAA"):
+                logger.warning("发现未加密凭证，请重新保存数据源")
+                return token
+            raise
 
     @staticmethod
     def resolve_env_ref(value: str) -> str:
-        """解析 ${VAR_NAME} 占位符。"""
-        return re.sub(
-            r"\$\{(\w+)\}",
-            lambda m: os.getenv(m.group(1), m.group(0)),
-            value,
-        )
+        return re.sub(r"\$\{(\w+)\}", lambda m: os.getenv(m.group(1), m.group(0)), value)

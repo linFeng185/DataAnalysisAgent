@@ -35,10 +35,15 @@ sentence-transformers>=3.0
 # HTTP 异步客户端
 aiohttp>=3.9
 
-# 可选依赖 — 按需取消注释
+# 加密（独立于 pyjwt/passlib 的直接引用）
+cryptography>=41.0
+
+# 数据库驱动
+asyncpg>=0.30.0
+
+# 可选依赖
 # clickhouse-connect>=0.8.0
 # aiomysql>=0.2.0
-# asyncpg>=0.30.0
 
 # 向量库切换 (二选一，对应 VECTOR_STORE_TYPE)
 # pymilvus>=2.4

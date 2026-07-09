@@ -17,6 +17,11 @@ _DANGEROUS = [
     (r"\bGRANT\b", "GRANT"), (r"\bREVOKE\b", "REVOKE"),
     (r"\bMERGE\b", "MERGE"), (r"\bREPLACE\b", "REPLACE"),
     (r"\bEXEC\b", "EXEC"), (r"\b(SLEEP|BENCHMARK)\s*\(|\bsleep\s*\(|\bbenchmark\s*\(", "危险函数"),
+    (r"\bCOPY\s+.*\bTO\s+PROGRAM\b", "COPY TO PROGRAM"),
+    (r"\bINTO\s+OUTFILE\b", "INTO OUTFILE"), (r"\bINTO\s+DUMPFILE\b", "INTO DUMPFILE"),
+    (r"\bLOAD_FILE\s*\(", "LOAD_FILE"), (r"\bATTACH\b", "ATTACH DATABASE"),
+    (r"\bpg_read_file\b", "pg_read_file"), (r"\bDBCC\b", "DBCC"),
+    (r"\bxp_\w+", "扩展存储过程"),
 ]
 
 

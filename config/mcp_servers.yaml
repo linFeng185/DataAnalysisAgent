@@ -1,10 +1,17 @@
 # 1.2.3 MCP Server 配置 — 启动时自动连接
 # 详情: SPEC §3.9.1
 mcp_servers:
-  # filesystem:
+  filesystem:
+    transport: stdio
+    command: "npx"
+    args: ["-y", "mcp-filesystem", "/data/uploads"]
+    description: "文件系统访问"
+  # web_search:
   #   transport: stdio
   #   command: "npx"
-  #   args: ["-y", "@anthropic-ai/mcp-filesystem", "/data/uploads"]
+  #   args: ["-y", "@anthropic-ai/mcp-brave-search"]
+  #   env:
+  #     BRAVE_API_KEY: "${BRAVE_API_KEY}"
   # confluence:
   #   transport: sse
   #   url: "http://confluence-mcp.internal:3000/sse"

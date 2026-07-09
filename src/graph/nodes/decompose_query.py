@@ -22,39 +22,25 @@ async def decompose_query_node(state: AnalysisState) -> dict:
         return {"needs_decompose": False, "decompose_steps": []}
 
     try:
-        from src.config import get_settings
-        s = get_settings()
         schema_hint = state.get("long_term_memories_text", "")[:800]
-
-        import aiohttp
-        payload = {
-            "model": s.cheap_llm_model or s.llm_model,
-            "messages": [
-                {"role": "system", "content": (
-                    "你是SQL查询规划器。判断是否需要多步分解。"
-                    "单表查询/简单聚合/简单JOIN→false。"
-                    "需要中间结果的复杂问题(先查A再基于A结果查B)→true。"
-                    "输出JSON:{\"needs_decompose\":bool,\"steps\":[{\"step\":1,\"question\":\"子问题\",\"depends_on\":[],\"output_columns\":[\"id\"]}]}"
-                )},
-                {"role": "user", "content": f"表结构:{schema_hint}\n\n问题:{query}"},
-            ],
-            "temperature": 0, "max_tokens": 500, "stream": False,
-        }
-        async with aiohttp.ClientSession() as session:
-            async with session.post(
-                f"{s.openai_base_url}/chat/completions", json=payload,
-                headers={"Authorization": f"Bearer {s.openai_api_key}", "Content-Type": "application/json"},
-                timeout=aiohttp.ClientTimeout(total=8),
-            ) as resp:
-                if resp.status != 200:
-                    return {"needs_decompose": False, "decompose_steps": []}
-                data = await resp.json()
-                text = data["choices"][0]["message"]["content"].strip()
-                result = _parse(text)
+        from src.llm.client import get_llm, is_llm_available
+        if not is_llm_available():
+            return {"needs_decompose": False, "decompose_steps": []}
+        llm = get_llm(temperature=0, reasoning=False)
+        from langchain_core.messages import SystemMessage, HumanMessage
+        resp = await llm.ainvoke([
+            SystemMessage(content=(
+                "你是SQL查询规划器。判断是否需要多步分解。"
+                "单表查询/简单聚合/简单JOIN→false。"
+                "需要中间结果的复杂问题(先查A再基于A结果查B)→true。"
+                "输出JSON:{\"needs_decompose\":bool,\"steps\":[{\"step\":1,\"question\":\"子问题\",\"depends_on\":[],\"output_columns\":[\"id\"]}]}")),
+            HumanMessage(content=f"表结构:{schema_hint}\n\n问题:{query}")])
+        text = (resp.content or "").strip()
+        result = _parse(text)
 
         elapsed = round((time.monotonic() - _start) * 1000)
         if result["needs_decompose"]:
-            logger.info("查询已分解", steps=len(result["steps"]), elapsed_ms=elapsed)
+            logger.info("查询已分解", steps=len(result["decompose_steps"]), elapsed_ms=elapsed)
         else:
             logger.info("查询无需分解", elapsed_ms=elapsed)
         return result
