@@ -20,6 +20,7 @@ def _json_default(obj):
     if isinstance(obj, Decimal):
         return float(obj)
     raise TypeError(f"Type {type(obj)} not serializable")
+from src.tools.processors import *  # noqa: F401 — 触发 @register 注册
 from src.tools.analyzer import (
     compute_concentration,
     compute_statistics,
@@ -43,6 +44,21 @@ async def analyze_result_node(state: AnalysisState) -> dict:
     if not rows:
         logger.info("节点完成", node="analyze_result", elapsed_ms=round((time.monotonic() - _start) * 1000))
         return {"analysis_result": {"summary": "无数据可供分析", "insights": [], "recommended_chart_type": "table", "follow_up_questions": []}}
+
+    # 数据处理器（脚本精确计算，LLM 仅润色）
+    processor_result = None
+    try:
+        from src.tools.data_processor import get_processor
+        proc = get_processor(intent)
+        if proc:
+            nc = _find_numeric(rows)
+            params = {"value_col": nc[0] if nc else "", "group_col": _find_cat_col(rows, nc) or "",
+                      "time_col": _find_time_col(rows) or ""}
+            processor_result = proc.process(rows, params)
+            logger.info("处理器完成", processor=proc.name, intent=intent,
+                        confidence=processor_result.confidence)
+    except Exception as e:
+        logger.warning("处理器失败，回退 LLM", error=str(e))
 
     stats = compute_statistics(rows)
     numeric_cols = stats.get("numeric_columns", [])
@@ -95,6 +111,7 @@ async def _llm_analyze(rows, sql, stats, trend, outlier, conc, history=None) -> 
     if history:
         from src.memory.context_builder import build_llm_context
         context_text = await build_llm_context(history, node_name="analyze_result")
+    history_block = f"## 对话历史\n{context_text}" if context_text else ""
 
     user_msg = f"""## 执行的 SQL
 ```sql
@@ -109,7 +126,7 @@ async def _llm_analyze(rows, sql, stats, trend, outlier, conc, history=None) -> 
 
 ## 发现
 {trend} | {outlier} | {conc}
-{f"## 对话历史\n{context_text}" if context_text else ""}
+    {history_block}
 请给出分析报告。"""
 
     try:

@@ -93,7 +93,7 @@ class SchemaManager:
         result = merged or cached or []
         snapshot = self._build_snapshot(result)
         if user_query:
-            snapshot = self._filter_relevant_tables(snapshot, user_query, datasource_name)
+            snapshot = await self._filter_relevant_tables(snapshot, user_query, datasource_name)
         return snapshot
 
     # ── 私有：缓存查询 ─────────────────────────────────

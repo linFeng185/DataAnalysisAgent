@@ -175,26 +175,26 @@ User: {query}
 ## 17.6 实现检查清单
 
 ### 查询分解
-- [ ] `src/graph/nodes/decompose_query.py`
-- [ ] `src/llm/prompts.py`：QUERY_DECOMPOSE 模板
-- [ ] `src/graph/state.py`：+decompose_steps
-- [ ] `src/graph/workflow.py`：注册 + 条件边
+- [x] `src/graph/nodes/decompose_query.py`
+- [x] `src/llm/prompts.py`：QUERY_DECOMPOSE 模板
+- [x] `src/graph/state.py`：+decompose_steps
+- [x] `src/graph/workflow.py`：注册 + 条件边
 
 ### MCP Agent
-- [ ] `src/graph/nodes/mcp_agent.py`：输出标准化
-- [ ] `src/graph/workflow.py`：mcp_agent → build_response
+- [x] `src/graph/nodes/mcp_agent.py`：输出标准化
+- [x] `src/graph/workflow.py`：mcp_agent → build_response
 
 ### 重试透明
-- [ ] `src/api/streaming.py`：retry_status 事件
-- [ ] `frontend/src/hooks/useChat.ts`：处理事件
-- [ ] `frontend/src/pages/ChatPage.tsx`：重试标签
+- [x] `src/api/streaming.py`：retry_status 事件
+- [x] `frontend/src/hooks/useChat.ts`：处理事件
+- [x] `frontend/src/pages/ChatPage.tsx`：重试标签
 
 ### 昂贵查询
-- [ ] `src/graph/nodes/execute_sql.py`：行数检查
-- [ ] `src/api/streaming.py`：confirm 事件
-- [ ] `src/config.py`：+max_safe_rows + expensive_query_confirm
-- [ ] 前端确认弹窗
+- [x] `src/graph/nodes/execute_sql.py`：行数检查
+- [x] `src/api/streaming.py`：confirm 事件
+- [x] `src/config.py`：+max_safe_rows + expensive_query_confirm
+- [x] 前端确认弹窗
 
 ### LLM 意图
-- [ ] `src/graph/nodes/classify_intent.py`：LLM 分支
-- [ ] `src/llm/prompts.py`：INTENT_LLM_CLASSIFY
+- [x] `src/graph/nodes/classify_intent.py`：LLM 分支
+- [x] `src/llm/prompts.py`：INTENT_LLM_CLASSIFY

@@ -119,6 +119,11 @@ async def execute_sql_node(state: AnalysisState) -> dict:
             "execution_error": err_msg,
         }
 
+    logger.error("execute_sql 未预期路径", datasource=ds_name)
+    return {"query_result_sample": [], "query_result_full_count": 0,
+            "query_result_statistics": {"row_count": 0},
+            "generated_sql": sql, "execution_error": f"数据源 '{ds_name}' 内部错误"}
+
 
 def _validate_column_references(sql: str, tables: list[dict]) -> str | None:
     """执行前验证 SQL 中的列引用是否都存在于表结构中。

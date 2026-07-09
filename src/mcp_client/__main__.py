@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from src.mcp.server import create_mcp_server
+from src.mcp_client.server import create_mcp_server
 
 if __name__ == "__main__":
     create_mcp_server().run()

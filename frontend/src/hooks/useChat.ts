@@ -92,6 +92,7 @@ export function useChat() {
   const saved = useRef(loadFromStorage());
   const [turns, setTurns] = useState<ChatTurn[]>(saved.current?.turns || []);
   const [loading, setLoading] = useState(false);
+  const [retryInfo, setRetryInfo] = useState<{current:number;max:number;reason:string}|null>(null);
   const [sessionId, setSessionId] = useState(saved.current?.sessionId || '');
   const [hasMore, setHasMore] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
@@ -189,6 +190,9 @@ export function useChat() {
               ...t, finalResult: e as unknown as Record<string, unknown>, status: 'done',
             } : t));
             break;
+          case 'retry_status':
+            setRetryInfo({current: (e.retry as number)||0, max: (e.max as number)||3, reason: (e.reason as string)||''});
+            break;
           case 'error':
             setTurns(prev => prev.map(t => t.id === turnId ? {
               ...t, status: 'error', errorMessage: (e.message as string) || '未知错误',
@@ -197,7 +201,7 @@ export function useChat() {
         }
       },
       () => {
-        setLoading(false);
+        setLoading(false); setRetryInfo(null);
         setTurns(prev => prev.map(t =>
           t.id === turnId && t.status === 'streaming' ? { ...t, status: 'done' } : t,
         ));
@@ -268,5 +272,6 @@ export function useChat() {
   }, []);
 
   return { turns, loading, sessionId, send, cancel, clearSession,
-           restoreTurns, loadMoreTurns, hasMore, loadingMore, checkHasMore };
+           restoreTurns, loadMoreTurns, hasMore, loadingMore, checkHasMore,
+           retryInfo };
 }

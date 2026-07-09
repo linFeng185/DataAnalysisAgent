@@ -31,9 +31,9 @@
 | # | 功能 | 文件 | 描述 | 状态 |
 |---|------|------|------|------|
 | 4.3.1 | retrieve_schema_node() | `src/graph/nodes/retrieve_schema.py` | 从 injected schema 提取表结构 (Phase 2 向量检索) | 单测完成 | P0 |
-| 4.3.2 | 关键词提取 + 向量检索 | 同上 | Phase 2: ChromaDB 语义检索 (依赖模块 6) | 待开发[^5] | P1 |
-| 4.3.5 | 检索业务规则 | 同上 | Phase 2: BusinessRuleStore (依赖模块 6) | 待开发[^5] | P1 |
-| 4.3.6 | 检索历史 SQL 模板 | 同上 | Phase 2: LongTermMemoryStore (依赖模块 7) | 待开发[^5] | P1 |
+| 4.3.2 | 向量语义检索 | `retrieve_schema.py` | VectorStore.search 语义检索 | 开发完成 | P1 |
+| 4.3.5 | 检索业务规则 | `business_rules.py` | VectorStore 统一接口 | 开发完成 | P1 |
+| 4.3.6 | 检索历史 SQL 模板 | `long_term_store.py` | VectorStore 统一接口 | 开发完成 | P1 |
 
 ### 4.4 generate_sql Node
 

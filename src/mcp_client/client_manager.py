@@ -180,6 +180,47 @@ class MCPClientManager:
         return sse_client(url)
 
 
+    # ── 测试 + PG 重载 ──
+
+    async def test_connection(self, name: str) -> bool:
+        """测试 MCP Server 连通性。"""
+        cfg = self._server_configs.get(name)
+        if not cfg: return False
+        try:
+            session = await self._create_session(name, cfg)
+            await session.send_ping()
+            await session.__aexit__(None, None, None)
+            return True
+        except Exception:
+            return False
+
+    async def reload_from_db(self, tenant_id: int = 1) -> int:
+        """从 PG 加载租户自定义 MCP 配置。"""
+        try:
+            import asyncpg, json as _j
+            from src.config import get_settings
+            url = get_settings().database_url.replace("postgresql+asyncpg://", "postgresql://")
+            conn = await asyncpg.connect(url)
+            rows = await conn.fetch(
+                "SELECT name, transport, command, args, url, env_vars FROM mcp_servers WHERE tenant_id=$1", tenant_id)
+            count = 0
+            for r in rows:
+                if r["name"] not in self._server_configs:
+                    cfg = {"transport": r["transport"]}
+                    if r["transport"] == "stdio": cfg["command"] = r["command"]; cfg["args"] = (r["args"] or "").split()
+                    else: cfg["url"] = r["url"]
+                    env = r["env_vars"] or {}
+                    if isinstance(env, str): env = _j.loads(env)
+                    if env: cfg["env"] = env
+                    self._server_configs[r["name"]] = cfg; count += 1
+            await conn.close()
+            if count: logger.info("PG MCP 配置已加载", tenant_id=tenant_id, count=count)
+            return count
+        except Exception as e:
+            logger.warning("PG MCP 加载失败", error=str(e))
+            return 0
+
+
 def _json_type_to_python(type_name: str) -> type:
     return {"string": str, "integer": int, "number": float, "boolean": bool,
             "array": list, "object": dict}.get(type_name, str)

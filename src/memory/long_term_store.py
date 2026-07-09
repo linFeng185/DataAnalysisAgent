@@ -115,15 +115,15 @@ class LongTermMemoryStore:
 
     async def _get_prefs_from_chroma(self, user_id: str) -> dict[str, Any]:
         try:
-            results = self._collection.get(where={
+            from src.memory.vector_store import get_vector_store
+            store = await get_vector_store()
+            results = await store.get_by_filter({
                 "memory_type": MemoryType.USER_PREFERENCE.value,
-                "scope": f"user:{user_id}",
-            })
+                "scope": f"user:{user_id}"})
             prefs: dict[str, Any] = {}
-            for meta in (results.get("metadatas", []) or []):
-                p = meta.get("payload", {})
-                if "preference" in p:
-                    prefs[p["preference"]] = p["value"]
+            for r in results:
+                p = r.metadata.get("payload", {})
+                if "preference" in p: prefs[p["preference"]] = p["value"]
             return prefs
         except Exception:
             return {}
@@ -153,6 +153,8 @@ class LongTermMemoryStore:
             except Exception as e:
                 logger.warning("PG 写入失败", error=str(e))
 
+        from src.memory.vector_store import get_vector_store
+        store = await get_vector_store()
         try:
             try:
                 await store.delete_by_ids([entry.id])

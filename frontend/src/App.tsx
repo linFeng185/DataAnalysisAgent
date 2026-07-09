@@ -4,7 +4,7 @@ import { Layout, Menu, ConfigProvider, Tag, Typography, theme } from 'antd';
 import {
   MessageOutlined, DatabaseOutlined, HistoryOutlined, SettingOutlined,
   CheckCircleOutlined, CloseCircleOutlined, LoadingOutlined,
-  ThunderboltOutlined, ReadOutlined,
+  ThunderboltOutlined, ReadOutlined, ApiOutlined,
 } from '@ant-design/icons';
 import ChatPage from './pages/ChatPage';
 import DatasourcePage from './pages/DatasourcePage';
@@ -12,6 +12,7 @@ import SchemaPage from './pages/SchemaPage';
 import HistoryPage from './pages/HistoryPage';
 import SkillsPage from './pages/SkillsPage';
 import KnowledgePage from './pages/KnowledgePage';
+import McpPage from './pages/McpPage';
 import LoginPage from './pages/LoginPage';
 import { AuthProvider } from './hooks/AuthContext';
 import ErrorBoundary from './components/ErrorBoundary';
@@ -78,6 +79,9 @@ function AppContent() {
             <Menu.Item key="knowledge" icon={<ReadOutlined />}>
               <NavLink to="/knowledge">知识库</NavLink>
             </Menu.Item>
+            <Menu.Item key="mcp" icon={<ApiOutlined />}>
+              <NavLink to="/mcp">MCP</NavLink>
+            </Menu.Item>
           </Menu>
         </Sider>
         <Content style={{ background: '#f5f5f5' }}>
@@ -89,6 +93,7 @@ function AppContent() {
               <Route path="/history" element={<HistoryPage />} />
               <Route path="/skills" element={<SkillsPage />} />
               <Route path="/knowledge" element={<KnowledgePage />} />
+              <Route path="/mcp" element={<McpPage />} />
             </Routes>
           </ErrorBoundary>
         </Content>

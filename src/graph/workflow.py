@@ -55,7 +55,7 @@ logger = get_logger(__name__)
 async def mcp_agent_node(state: AnalysisState) -> dict:
     """8.3.1 文件分析等场景的动态工具调用 Node。"""
     try:
-        from src.mcp.client_manager import get_mcp_client_manager
+        from src.mcp_client.client_manager import get_mcp_client_manager
         mcp_tools = get_mcp_client_manager().get_all_tools()
         skill_tools = state.get("skill_tools", [])
         all_tools = list(skill_tools) + list(mcp_tools)

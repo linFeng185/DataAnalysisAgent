@@ -51,6 +51,7 @@ class Settings(BaseSettings):
 
     # ---- 数据库 (智能体自身的状态存储) ----
     database_url: str = "postgresql+asyncpg://postgres:postgres@localhost:5432/data_agent"
+    database_readonly_url: str = ""  # 只读账号，配了就用它执行用户 SQL
 
     # ---- 向量存储 ----
     vector_store_type: str = "chroma"
@@ -67,9 +68,10 @@ class Settings(BaseSettings):
 
     # ---- 多租户与认证 ----
     multi_tenant: bool = False               # 是否启用多租户
-    jwt_secret: str = "dev-secret-change-in-production"
+    jwt_secret: str = ""
     jwt_access_token_expire_hours: int = 24
     jwt_refresh_token_expire_days: int = 7
+    admin_api_key: str = ""                  # 管理端点 API Key，空=不启用
 
     # ---- LLM 降级 ----
     llm_fallback_chain: str = ""             # 降级链 "gpt-4o,claude-sonnet-4-6"

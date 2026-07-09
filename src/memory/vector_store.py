@@ -210,4 +210,4 @@ async def _create_chroma_store() -> VectorStore:
     logger.debug("初始化 ChromaVectorStore")
     sm = get_schema_manager()
     sm._ensure_initialized()  # noqa: SLF001
-    return ChromaVectorStore(sm._collection, embedding_fn=sm._embedding_fn)  # noqa: SLF001
+    return ChromaVectorStore(sm._collection)  # noqa: SLF001

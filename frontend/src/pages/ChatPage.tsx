@@ -39,7 +39,7 @@ export default function ChatPage() {
   const [drawerOpen, setDrawerOpen] = useState(false);
   const {
     turns, loading, sessionId, send, cancel, clearSession,
-    restoreTurns, loadMoreTurns, hasMore, loadingMore,
+    restoreTurns, loadMoreTurns, hasMore, loadingMore, retryInfo,
   } = useChat();
   const bottomRef = useRef<HTMLDivElement>(null);
   const msgAreaRef = useRef<HTMLDivElement>(null);
@@ -76,7 +76,7 @@ export default function ChatPage() {
   const handleSend = () => {
     if (!query.trim() || loading) return;
     if (!ds) { message.warning('请选择数据源'); return; }
-    send(query, ds[0] || 'demo');
+    send(query, ds[0] || 'demo', ds.length > 1 ? ds : undefined, modelId || undefined);
     setQuery('');
   };
 
@@ -120,6 +120,12 @@ export default function ChatPage() {
       {/* 消息区 */}
       <div ref={msgAreaRef} onScroll={handleMsgScroll}
         style={{ flex: 1, overflow: 'auto', padding: isEmpty ? 0 : '16px 20px 0' }}>
+        {/* 重试状态提示 */}
+        {retryInfo && (
+          <div style={{ textAlign: 'center', padding: '4px 0' }}>
+            <Tag color="orange">第 {retryInfo.current}/{retryInfo.max} 次重试 — 自动修正 SQL 中...</Tag>
+          </div>
+        )}
         {/* 加载更多指示器 */}
         {loadingMore && (
           <div style={{ textAlign: 'center', padding: '8px 0' }}>
@@ -344,10 +350,7 @@ function TurnBubble({ turn }: { turn: ChatTurn }) {
 
           {isStreaming && !assistant.reasoning && !assistant.tokens
             && Object.keys(assistant.progressNodes).length === 0 && (
-            <div style={{
-              display: 'flex', alignItems: 'center', gap: 8, padding: '10px 16px',
-              color: '#999', fontSize: 13,
-            }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '10px 16px', color: '#999', fontSize: 13 }}>
               <LoadingOutlined style={{ color: '#1677ff' }} /> 正在连接分析服务...
             </div>
           )}
