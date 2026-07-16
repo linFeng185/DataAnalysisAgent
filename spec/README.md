@@ -18,3 +18,5 @@
 | [13-prompt-templates.md](13-prompt-templates.md) | 12. Prompt 模板管理 | 53 行 |
 | [14-evaluation.md](14-evaluation.md) | 13. 评估指标与质量保障 | 42 行 |
 | [15-design-review.md](15-design-review.md) | 14. 设计审查与风险缓解 | 192 行 |
+| [21-defect-remediation-design.md](21-defect-remediation-design.md) | 缺陷系统整改设计 | 动态 |
+| [22-defect-remediation-implementation-plan.md](22-defect-remediation-implementation-plan.md) | 缺陷系统整改实施计划 | 动态 |
