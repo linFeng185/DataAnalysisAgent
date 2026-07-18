@@ -710,7 +710,12 @@ async def get_session(session_id: str):
     turns = loaded_turns[-20:]
     # 提取最新一轮的富数据用于前端还原完整 UI
     latest_state = await _load_latest_state(session_id)
-    if turns and isinstance(latest_state, dict) and latest_state:
+    if turns:
+        # 持久化逐轮结果是权威数据，checkpoint 只补充缺失字段，避免贫化状态覆盖完整响应。
+        latest_state = _merge_rich_result(
+            turns[-1].get("final_result", {}) or {}, latest_state or {},
+        )
+    if turns and latest_state:
         # latest_state 只对应会话最后一轮，禁止向更早轮次扩散。
         turns[-1] = {
             **turns[-1],
@@ -800,6 +805,43 @@ async def delete_session(session_id: str):
     if not ok:
         raise HTTPException(500, "删除失败")
     return {"status": "ok", "session_id": session_id}
+
+
+# 方法作用：按字段优先级合并持久化富结果与 checkpoint 回退结果。
+# Args: primary - 权威的逐轮持久化结果；fallback - checkpoint 或兼容路径结果。
+# Returns: 合并后的结构化响应字典。
+def _merge_rich_result(primary: dict | None, fallback: dict | None) -> dict:
+    """以持久化响应为主，仅用回退响应补齐空的富数据字段。"""
+    try:
+        primary_value = primary if isinstance(primary, dict) else {}
+        fallback_value = fallback if isinstance(fallback, dict) else {}
+        logger.debug(
+            "合并历史富结果入口",
+            primary_keys=sorted(primary_value.keys()),
+            fallback_keys=sorted(fallback_value.keys()),
+        )
+        merged = dict(fallback_value)
+        merged.update(primary_value)
+        rich_fields = (
+            "sql", "sql_statements", "data", "row_count", "analysis", "chart",
+            "sql_reasoning_content",
+        )
+        for field in rich_fields:
+            value = primary_value.get(field)
+            if value is None or value == "" or value == [] or value == {} or value == 0:
+                if field in fallback_value and fallback_value[field] not in (None, "", [], {}, 0):
+                    merged[field] = fallback_value[field]
+        logger.info(
+            "合并历史富结果完成",
+            primary_rich=bool(primary_value),
+            fallback_rich=bool(fallback_value),
+            sql_statements=len(merged.get("sql_statements", []) or []),
+            data_rows=len(merged.get("data", []) or []),
+        )
+        return merged
+    except Exception as exc:
+        logger.error("合并历史富结果失败", error=str(exc), exc_info=True)
+        return dict(primary or fallback or {})
 
 
 async def _load_checkpoint_tuple(session_id: str) -> object | None:
@@ -1075,16 +1117,13 @@ async def _load_session_turns(session_id: str, before: int | None = None, limit:
             logger.info("会话轮次从 checkpoint 输入恢复", session_id=session_id[:20])
 
         from src.memory.history_store import get_history_store
-        if checkpoint_history:
-            history = await get_history_store().list_session(
-                session_id, before=None, limit=1000,
-            )
-        elif not turns:
-            history = await get_history_store().list_session(
-                session_id, before=before, limit=limit,
-            )
-        else:
-            history = []
+        # 无论 checkpoint 保存的是 dict 历史还是纯 messages，都读取逐轮 JSONB，
+        # 这样旧 checkpoint 也能恢复 SQL、数据和图表；没有 checkpoint 时保留分页参数。
+        history = await get_history_store().list_session(
+            session_id,
+            before=None if turns else before,
+            limit=1000 if turns else limit,
+        )
         persisted_turns = [{
                 "turn_id": item.get("turn_id", index + 1),
                 "user_query": item.get("query", "") or "",
@@ -1110,7 +1149,9 @@ async def _load_session_turns(session_id: str, before: int | None = None, limit:
                 if not persisted:
                     continue
                 if persisted.get("final_result"):
-                    turn["final_result"] = persisted["final_result"]
+                    turn["final_result"] = _merge_rich_result(
+                        persisted["final_result"], turn.get("final_result", {}) or {},
+                    )
                 turn["sql"] = persisted.get("sql") or turn.get("sql", "")
                 turn["timestamp"] = persisted.get("timestamp") or turn.get("timestamp", "")
                 if not turn.get("assistant_summary"):

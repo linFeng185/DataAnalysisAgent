@@ -275,7 +275,9 @@ class TestSessionRouteIsolation:
         assert turns[0]["assistant_summary"] == "Schema 加载失败"
         assert turns[0]["sql"] == ""
         assert turns[0]["final_result"]["analysis"]["summary"] == "Schema 加载失败"
-        history.list_session.assert_not_awaited()
+        history.list_session.assert_awaited_once_with(
+            "legacy-session", before=None, limit=1000,
+        )
 
     # 验证命名空间迁移前的 checkpoint 仍可恢复完整对话轮次。
     # Args: monkeypatch - pytest 提供的运行时替换工具。
@@ -314,7 +316,9 @@ class TestSessionRouteIsolation:
         assert turns[0]["assistant_summary"] == "已按销售额降序统计"
         assert turns[0]["sql"] == "SELECT category, SUM(amount) FROM orders GROUP BY category"
         assert turns[0]["final_result"]["sql"] == turns[0]["sql"]
-        history.list_session.assert_not_awaited()
+        history.list_session.assert_awaited_once_with(
+            "legacy-session", before=None, limit=1000,
+        )
 
     # 验证最新富状态也兼容命名空间迁移前的 checkpoint。
     # Args: monkeypatch - pytest 提供的运行时替换工具。

@@ -452,6 +452,65 @@ class TestEndpoints:
             )
             raise
 
+    # 方法作用：验证仅有消息 checkpoint 时仍合并查询历史中的逐轮富数据。
+    # Args: self - pytest 测试类实例；monkeypatch - pytest 补丁工具。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    async def test_load_session_turns_merges_history_for_message_checkpoint(self, monkeypatch):
+        """消息 checkpoint 不应阻断 SQL、数据、图表从 query_history 恢复。"""
+        logger.debug("test_load_session_turns_merges_history_for_message_checkpoint 入口")
+        try:
+            # Arrange：模拟旧 checkpoint 只保存 messages，新历史保存每轮富结果。
+            from types import SimpleNamespace
+            from unittest.mock import AsyncMock
+
+            from langchain_core.messages import AIMessage, HumanMessage
+
+            import src.api.routes as routes
+            import src.memory.history_store as history_module
+
+            checkpoint = SimpleNamespace(checkpoint={"channel_values": {
+                "messages": [
+                    HumanMessage(content="问题一"), AIMessage(content="回答一"),
+                    HumanMessage(content="问题二"), AIMessage(content="回答二"),
+                ],
+                "conversation_history": [],
+            }})
+            rich_rows = [
+                {"turn_id": 1, "query": "问题一", "sql": "SQL-1", "time": "T1",
+                 "final_result": {"success": True, "sql": "SQL-1",
+                                  "sql_statements": [{"datasource": "a", "dialect": "mysql", "sql": "SQL-1"}],
+                                  "data": [{"value": 1}], "analysis": {"summary": "结论一"},
+                                  "chart": {"type": "table", "option": {}}}},
+                {"turn_id": 2, "query": "问题二", "sql": "SQL-2", "time": "T2",
+                 "final_result": {"success": True, "sql": "SQL-2",
+                                  "sql_statements": [{"datasource": "b", "dialect": "postgres", "sql": "SQL-2"}],
+                                  "data": [{"value": 2}], "analysis": {"summary": "结论二"},
+                                  "chart": {"type": "bar", "option": {}}}},
+            ]
+            monkeypatch.setattr(
+                routes, "_load_checkpoint_tuple", AsyncMock(return_value=checkpoint),
+            )
+            history = SimpleNamespace(list_session=AsyncMock(return_value=rich_rows))
+            monkeypatch.setattr(history_module, "get_history_store", lambda: history)
+
+            # Act
+            turns = await routes._load_session_turns("session-message-only", limit=20)
+
+            # Assert：两轮都必须保留各自的结构化结果。
+            assert turns[0]["final_result"]["data"] == [{"value": 1}]
+            assert turns[1]["final_result"]["sql_statements"][0]["datasource"] == "b"
+            history.list_session.assert_awaited_once_with(
+                "session-message-only", before=None, limit=1000,
+            )
+            logger.info("test_load_session_turns_merges_history_for_message_checkpoint 完成")
+        except Exception as exc:
+            logger.error(
+                "test_load_session_turns_merges_history_for_message_checkpoint 异常: %s",
+                exc,
+                exc_info=True,
+            )
+            raise
+
     # 方法作用：验证会话轮次分页默认返回最新一页并支持向前翻页。
     # Args: self - pytest 测试类实例；monkeypatch - pytest 补丁工具。
     # Returns: 无返回值，断言失败时由 pytest 报告。
@@ -541,6 +600,58 @@ class TestEndpoints:
         except Exception as exc:
             logger.error(
                 "test_get_session_enriches_only_last_legacy_turn 异常: %s",
+                exc,
+                exc_info=True,
+            )
+            raise
+
+    # 方法作用：验证贫化 latest_state 不会覆盖已恢复的最后一轮富结果。
+    # Args: self - pytest 测试类实例；monkeypatch - pytest 补丁工具。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    async def test_get_session_preserves_rich_last_turn_when_latest_state_is_partial(self, monkeypatch):
+        """checkpoint 回退结果为空时，最后一轮仍应保留 query_history 富数据。"""
+        logger.debug("test_get_session_preserves_rich_last_turn_when_latest_state_is_partial 入口")
+        try:
+            # Arrange：逐轮历史已有完整结果，但兼容字段 latest_state 只有摘要。
+            from types import SimpleNamespace
+            from unittest.mock import AsyncMock
+
+            import src.api.routes as routes
+            import src.memory.session_store as session_module
+
+            rich_last = {
+                "success": True, "sql": "SQL-2",
+                "sql_statements": [{"datasource": "demo", "dialect": "sqlite", "sql": "SQL-2"}],
+                "data": [{"value": 2}], "row_count": 1,
+                "analysis": {"summary": "完整回答二"},
+                "chart": {"type": "bar", "option": {}},
+            }
+            turns = [
+                {"turn_id": 1, "user_query": "问题一", "sql": "SQL-1",
+                 "assistant_summary": "回答一", "timestamp": "", "final_result": {
+                     "success": True, "sql": "SQL-1", "data": [{"value": 1}]}},
+                {"turn_id": 2, "user_query": "问题二", "sql": "SQL-2",
+                 "assistant_summary": "完整回答二", "timestamp": "", "final_result": rich_last},
+            ]
+            partial_latest = {
+                "success": True, "sql": "", "sql_statements": [], "data": [],
+                "row_count": 0, "analysis": {}, "chart": {},
+            }
+            store = SimpleNamespace(get=AsyncMock(return_value={"session_id": "session-rich"}))
+            monkeypatch.setattr(session_module, "get_session_store", lambda: store)
+            monkeypatch.setattr(routes, "_load_session_turns", AsyncMock(return_value=turns))
+            monkeypatch.setattr(routes, "_load_latest_state", AsyncMock(return_value=partial_latest))
+
+            # Act
+            result = await routes.get_session("session-rich")
+
+            # Assert：兼容状态只能补缺，不能抹掉最后一轮富字段。
+            assert result["turns"][1]["final_result"] == rich_last
+            assert result["latest_state"] == rich_last
+            logger.info("test_get_session_preserves_rich_last_turn_when_latest_state_is_partial 完成")
+        except Exception as exc:
+            logger.error(
+                "test_get_session_preserves_rich_last_turn_when_latest_state_is_partial 异常: %s",
                 exc,
                 exc_info=True,
             )
