@@ -1,8 +1,8 @@
 """11.3 SSE 流式输出 — astream_events 逐 Node 推送。
 
 并行 LLM 调用支持：
-  - thinking / token 事件均携带 node 字段标识来源节点
-  - llm_content_parts 按节点分区，互不污染
+  - thinking / token 事件均携带 node 与 stream_id 标识调用实例
+  - llm_content_parts 按 stream_id 分区，互不污染
   - on_chat_model_stream 独立查找父节点，不依赖全局状态
 """
 
@@ -19,12 +19,71 @@ from src.logging_config import get_logger
 logger = get_logger(__name__)
 
 
+def _clean_float(f: float) -> Decimal:
+    """float → Decimal，智能检测 IEEE 754 噪声并去除。
+
+    规律：IEEE 754 噪声在十进制中表现为小数末尾出现连续4个以上的 0 或 9。
+    例如 532917884.0400004 → "0400004" 结尾归到 .04。
+    """
+    s = str(f)
+    if "." not in s or "e" in s.lower():
+        return Decimal(s)
+    integer_part, frac = s.split(".", 1)
+    # 检测连续重复的 0 或 9（IEEE 噪声特征），从噪声起点截断
+    noise_start = _find_noise(frac)
+    if noise_start > 0:
+        # 量化到噪声前精度，四舍五入
+        return Decimal(s).quantize(Decimal(f"0.{'0'*noise_start}"))
+    return Decimal(s)
+
+
+def _find_noise(frac: str) -> int:
+    """找到小数部分末尾噪声的起始位置。返回 0 表示无噪声。"""
+    if len(frac) < 6:
+        return 0
+    # 从末位往前找，连续 >=4 个相同字符(0或9) = 噪声
+    i = len(frac) - 1
+    run_char = frac[i]
+    run_len = 1
+    while i > 0:
+        i -= 1
+        if frac[i] == run_char:
+            run_len += 1
+        else:
+            if run_len >= 3 and run_char in "09":
+                return i + 1  # 噪声起点
+            run_char = frac[i]
+            run_len = 1
+    if run_len >= 3 and run_char in "09":
+        return 0
+    return 0
+
+
+class _PrecisionEncoder(json.JSONEncoder):
+    """遍历数据树，float → 智能清洗 → Decimal → 精确序列化。"""
+    def encode(self, o):
+        return super().encode(self._walk(o))
+
+    @staticmethod
+    def _walk(obj):
+        if isinstance(obj, float) and not isinstance(obj, bool):
+            return _clean_float(obj)
+        if isinstance(obj, dict):
+            return {k: _PrecisionEncoder._walk(v) for k, v in obj.items()}
+        if isinstance(obj, (list, tuple)):
+            return [_PrecisionEncoder._walk(v) for v in obj]
+        return obj
+
 def _json_serialize(obj):
-    """JSON 序列化器，处理 date/datetime/Decimal 等非原生类型。"""
+    """JSON 序列化器，Decimal 保持精确数值。"""
     if isinstance(obj, (datetime, date)):
         return obj.isoformat()
     if isinstance(obj, Decimal):
-        return float(obj)
+        normalized = obj.normalize()
+        _, _, exp = normalized.as_tuple()
+        if exp >= 0:
+            return int(normalized)
+        return float(normalized) if abs(exp) <= 12 else str(normalized)
     if isinstance(obj, bytes):
         return obj.decode("utf-8", errors="replace")
     raise TypeError(f"Type {type(obj)} not serializable")
@@ -43,18 +102,45 @@ _PROGRESS_MAP: dict[str, str] = {
 }
 
 
+# 提取 LangChain 事件的稳定模型调用标识。
+# Args: event - astream_events 返回的单个事件。
+# Returns: 优先使用 run_id；旧事件缺少 run_id 时返回节点兼容标识。
+def _event_stream_id(event: dict) -> str:
+    """同名并行节点必须按模型调用 run_id 隔离流式缓冲区。"""
+    logger.debug("流式调用标识提取入口", event_name=event.get("name", ""))
+    run_id = event.get("run_id")
+    if run_id:
+        stream_id = str(run_id)
+    else:
+        node = _find_parent_node(event) or str(event.get("name", "") or "unknown")
+        stream_id = f"legacy:{node}"
+    logger.debug("流式调用标识提取完成", stream_id=stream_id)
+    return stream_id
+
+
+# 方法作用：执行 LangGraph 并通过 SSE 推送节点进度、模型事件和最终结果。
+# Args: user_query - 用户问题；datasource - 主数据源；session_id - 会话；datasources - 多数据源；tenant_id/user_id/user_role - 认证身份。
+# Returns: SSE 事件异步生成器。
 async def stream_analysis(user_query: str, datasource: str, session_id: str = "",
-                          datasources: list[str] | None = None):
+                          datasources: list[str] | None = None,
+                          tenant_id: int | None = None, user_id: int | None = None,
+                          user_role: str | None = None):
     """SSE: 逐 Node 推送进度 + LLM token + 关键结果。
 
-    每个 thinking / token 事件均携带 node 字段，
-    前端可按 node 分组渲染并行 LLM 调用的输出。
+    每个 thinking / token 事件均携带 node 和 stream_id 字段，
+    前端可按调用实例分组渲染并行 LLM 输出。
     """
     from src.graph.workflow import app
 
     import uuid
     effective_id = session_id or str(uuid.uuid4())
-    config = {"configurable": {"thread_id": effective_id}}
+    from src.api.auth import (
+        get_current_role, get_current_tenant_id, get_current_user_id, scope_thread_id,
+    )
+    tenant_id = get_current_tenant_id() if tenant_id is None else tenant_id
+    user_id = get_current_user_id() if user_id is None else user_id
+    user_role = get_current_role() if user_role is None else user_role
+    config = {"configurable": {"thread_id": scope_thread_id(effective_id)}}
     is_new = not session_id
     if is_new:
         logger.info("新会话", session_id=effective_id[:20])
@@ -75,11 +161,16 @@ async def stream_analysis(user_query: str, datasource: str, session_id: str = ""
     stats = {"chain_start": 0, "chain_end": 0, "chat_model_stream": 0, "chat_model_start": 0,
              "thinking_events": 0, "token_events": 0}
     llm_content_parts: dict[str, list[str]] = defaultdict(list)
-    active_llm_nodes: set[str] = set()
+    active_llm_streams: set[str] = set()
+    stream_nodes: dict[str, str] = {}
 
     try:
         input_state = {"user_query": user_query, "datasource": datasource,
-                       "selected_datasources": datasources if datasources and len(datasources) > 1 else [datasource]}
+                       "session_id": effective_id,
+                       "selected_datasources": datasources if datasources and len(datasources) > 1 else [datasource],
+                       "allowed_columns": [], "row_filter_sql": "",
+                       "tenant_id": tenant_id, "user_id": user_id,
+                       "user_role": user_role}
         if get_settings().multi_tenant:
             try:
                 from src.api.auth import get_current_tenant_id
@@ -135,17 +226,29 @@ async def stream_analysis(user_query: str, datasource: str, session_id: str = ""
                     elif name == "analyze_result" and isinstance(output, dict):
                         yield _sse("analysis", output.get("analysis_result", {}))
                     # 回退：该节点 LLM 流式 token 没到时，输出累积内容
-                    if name in active_llm_nodes and llm_content_parts.get(name):
-                        yield _sse("token", {"node": name, "content": "".join(llm_content_parts[name])})
+                    pending_streams = [
+                        stream_id for stream_id in active_llm_streams
+                        if stream_nodes.get(stream_id) == name and llm_content_parts.get(stream_id)
+                    ]
+                    for stream_id in pending_streams:
+                        yield _sse("token", {
+                            "node": name,
+                            "stream_id": stream_id,
+                            "content": "".join(llm_content_parts[stream_id]),
+                        })
 
             # ---- LLM 流式开始 ----
             elif kind == "on_chat_model_start":
                 stats["chat_model_start"] += 1
                 node = _find_parent_node(event)
-                if node:
-                    active_llm_nodes.add(node)
-                    llm_content_parts[node].clear()
-                yield _sse("llm_start", {"node": node or "unknown"})
+                stream_id = _event_stream_id(event)
+                active_llm_streams.add(stream_id)
+                stream_nodes[stream_id] = node or "unknown"
+                llm_content_parts[stream_id].clear()
+                yield _sse("llm_start", {
+                    "node": node or "unknown",
+                    "stream_id": stream_id,
+                })
 
             # ---- LLM 流式 token ----
             elif kind == "on_chat_model_stream":
@@ -162,26 +265,34 @@ async def stream_analysis(user_query: str, datasource: str, session_id: str = ""
 
                     # 从事件 metadata 独立查找父节点（并行 LLM 时各自归因）
                     node = _find_parent_node(event)
+                    stream_id = _event_stream_id(event)
+                    stream_nodes.setdefault(stream_id, node or "unknown")
 
                     from src.llm.adapters.registry import get_adapter
-                    from src.config import get_settings
                     adapter = get_adapter(get_settings().llm_model)
                     sc = adapter.parse_stream_chunk(chunk)
                     if sc.reasoning_content:
                         stats["thinking_events"] += 1
-                        yield _sse("thinking", {"node": node, "reasoning_content": sc.reasoning_content})
+                        yield _sse("thinking", {
+                            "node": node,
+                            "stream_id": stream_id,
+                            "reasoning_content": sc.reasoning_content,
+                        })
                     if sc.content:
                         stats["token_events"] += 1
-                        if node:
-                            llm_content_parts[node].append(sc.content)
-                        yield _sse("token", {"node": node, "content": sc.content})
+                        llm_content_parts[stream_id].append(sc.content)
+                        yield _sse("token", {
+                            "node": node,
+                            "stream_id": stream_id,
+                            "content": sc.content,
+                        })
 
             # ---- LLM 流式结束 ----
             elif kind == "on_chat_model_end":
                 node = _find_parent_node(event)
-                if node:
-                    active_llm_nodes.discard(node)
-                yield _sse("llm_end", {"node": node})
+                stream_id = _event_stream_id(event)
+                active_llm_streams.discard(stream_id)
+                yield _sse("llm_end", {"node": node, "stream_id": stream_id})
 
     except Exception as e:
         logger.error("流式错误", error=str(e))

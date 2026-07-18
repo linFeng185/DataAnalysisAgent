@@ -33,10 +33,10 @@
 - `setup_logging()` 同时配置控制台与 7 天文件轮转
 - `MCPClientManager.connect_all()` 跳过 `enabled=false` 的服务
 
-- [ ] 编写生产配置拒绝弱密钥、日志轮转和禁用 MCP 的失败测试。
-- [ ] 运行 `pytest tests/test_config_security.py -q`，确认因缺少实现失败。
-- [ ] 实现最小生产配置验证、日志轮转、Docker 环境变量和禁用默认远程 MCP。
-- [ ] 运行定向测试并确认通过。
+- [x] 编写生产配置拒绝弱密钥、日志轮转和禁用 MCP 的失败测试。
+- [x] 运行 `pytest tests/test_config_security.py -q`，确认因缺少实现失败。
+- [x] 实现生产配置验证、日志轮转、Docker 环境变量和禁用默认远程 MCP。
+- [x] 运行定向测试并确认通过（5 passed）。
 
 ### 任务 2：SQL 只读白名单、权限关闭、结果上限与脱敏审计
 
@@ -46,8 +46,13 @@
 - 修改：`src/security/data_masker.py`
 - 修改：`src/graph/nodes/execute_sql.py`
 - 修改：`src/graph/nodes/build_response.py`
+- 修改：`src/graph/state.py`
+- 修改：`src/api/schemas.py`
+- 修改：`src/api/routes.py`
+- 修改：`frontend/src/types/index.ts`
 - 测试：`tests/test_security/test_sql_security.py`
 - 测试：`tests/test_graph/test_execute_security.py`
+- 测试：`tests/test_api/test_routes.py`
 
 **接口：**
 - 新增 `validate_readonly_sql(sql: str, dialect: str) -> list[dict]`
@@ -55,15 +60,17 @@
 - `mask_sensitive_data()` 在结果写入 state 前执行
 - SQLAlchemy 结果最多读取 `max_result_rows + 1` 行并报告截断
 
-- [ ] 编写 `CALL`、`VACUUM`、`SET ROLE`、坏 SQL、坏行过滤、PII 和超限结果测试。
-- [ ] 运行定向测试，确认旧实现失败。
-- [ ] 实现 AST 白名单、失败关闭、有界读取、用户级限流、脱敏和 hash 审计。
-- [ ] 运行任务 2 全部测试并确认通过。
+- [x] 编写 `CALL`、`VACUUM`、`SET ROLE`、坏 SQL、坏行过滤、PII 和超限结果测试。
+- [x] 运行定向测试，确认旧实现失败（11 failed）。
+- [x] 实现 AST 白名单、失败关闭、有界读取、用户级限流、脱敏和 hash 审计。
+- [x] 运行任务 2 全部测试并确认通过（16 passed，前端 build 通过）。
 
 ### 任务 3：Cookie 认证与租户资源隔离
 
 **文件：**
 - 修改：`src/api/auth.py`
+- 修改：`src/api/routes.py`
+- 修改：`src/api/streaming.py`
 - 修改：`src/memory/session_store.py`
 - 修改：`src/memory/history_store.py`
 - 修改：`src/knowledge/file_store.py`
@@ -80,10 +87,10 @@
 - Session/History/FileStore 的读写使用当前 `tenant_id` / `user_id`
 - 前端请求统一 `credentials: 'include'`
 
-- [ ] 编写 Cookie、ContextVar 清理和跨租户不可见测试。
-- [ ] 运行定向测试，确认旧实现失败。
-- [ ] 实现认证与租户字段、查询过滤、迁移顺序修正和前端 Cookie 客户端。
-- [ ] 运行后端定向测试与前端 TypeScript 构建。
+- [x] 编写 Cookie、ContextVar 清理和跨租户不可见测试。
+- [x] 运行定向测试，确认旧实现失败（8 failed）。
+- [x] 实现认证与租户字段、查询过滤、迁移顺序修正和前端 Cookie 客户端。
+- [x] 运行后端定向测试（11 passed）与前端 TypeScript 构建（通过）。
 
 ### 任务 4：管理 API、上传与 XSS
 
@@ -91,6 +98,9 @@
 - 修改：`src/datasource/registry.py`
 - 修改：`src/datasource/providers/external.py`
 - 修改：`src/knowledge/schema_manager.py`
+- 修改：`src/knowledge/models.py`
+- 修改：`src/knowledge/upload_manager.py`
+- 修改：`src/memory/vector_store_chroma.py`
 - 修改：`src/api/routes.py`
 - 修改：`src/config.py`
 - 修改：`frontend/src/pages/KnowledgePage.tsx`
@@ -102,10 +112,10 @@
 - 上传在读取前后校验 `max_upload_bytes`
 - `_docx_to_html()` 对段落和单元格内容进行 HTML 转义
 
-- [ ] 编写注册后可见、删除后不可见、不存在数据源刷新 404、XSS 转义和超限上传测试。
-- [ ] 运行定向测试，确认旧实现失败。
-- [ ] 实现全局 Provider 生命周期、真实刷新/备注、上传限制和 HTML 转义。
-- [ ] 运行任务 4 测试并使用 ASGI 客户端复核状态变化。
+- [x] 编写注册后可见、删除后不可见、不存在数据源刷新 404、XSS 转义和超限上传测试。
+- [x] 运行定向测试，确认旧实现失败（6 failed）。
+- [x] 实现全局 Provider 生命周期、真实刷新/备注、上传限制和 HTML 转义。
+- [x] 运行任务 4 测试并使用 ASGI 客户端复核状态变化（7 passed；组合回归 23 passed）。
 
 ### 任务 5：分析、方言、workflow 与旧测试契约
 
@@ -124,14 +134,25 @@
 - 处理器路径始终返回 `statistics`
 - workflow 测试通过显式 `await build_workflow()` 或应用 lifespan 初始化
 
-- [ ] 编写数量回退、SQLite 内省、LLM 分析长度和统计契约测试。
-- [ ] 运行定向测试，确认旧实现失败。
-- [ ] 实现正确性修复并更新已经漂移的旧测试契约。
-- [ ] 运行全部 graph、knowledge、API 测试并消除 coroutine 警告。
+- [x] 编写数量回退、SQLite 内省、LLM 分析长度和统计契约测试。
+- [x] 运行定向测试，确认旧实现失败（5 failed）。
+- [x] 实现正确性修复并更新已经漂移的旧测试契约。
+- [x] 运行全部 graph、knowledge、API 测试并消除 coroutine 警告（阶段基线 358 passed，最终全量 369 passed）。
 
 ### 任务 6：状态同步与完整验收
 
 **文件：**
+- 修改：`src/datasource/providers/external.py`
+- 修改：`src/datasource/registry.py`
+- 修改：`src/connectors/oracle.py`
+- 修改：`src/connectors/clickhouse.py`
+- 修改：`config/datasources.yaml`
+- 测试：`tests/test_datasource/test_clickhouse_registry.py`
+- 测试：`tests/test_connectors/test_base.py`
+- 测试：`tests/test_config_security.py`
+- 修改：`features/02-datasource.md`
+- 修改：`features/03-connectors.md`
+- 修改：`features/README.md`
 - 修改：`features/04-graph.md`
 - 修改：`features/11-api.md`
 - 修改：`features/12-security.md`
@@ -139,9 +160,14 @@
 - 修改：`features/17-ops.md`
 - 视目录/数据流变化决定是否修改：`CODE_GUIDE.md`
 
-- [ ] 更新本轮功能状态和缺陷修复说明，纠正桩实现或失败测试对应的虚假完成状态。
-- [ ] 运行 `.venv\\Scripts\\python.exe -m pytest -q`，要求零失败和零未处理 coroutine 警告。
-- [ ] 运行 `.venv\\Scripts\\python.exe -m compileall -q src tests`。
-- [ ] 运行 `npm run build`。
-- [ ] 受控启动服务并用 curl 验证 health、chat、认证和数据源注册/删除。
-- [ ] 检查 `git diff --check`、敏感信息扫描和最终工作树差异。
+- [x] 更新本轮功能状态和缺陷修复说明，纠正桩实现或失败测试对应的虚假完成状态。
+- [x] 修复 Oracle 21c 的 DUAL 连通性探针、Oracle 同步 Engine 异步适配和 service_name URL。
+- [x] 修复 ClickHouse 缺失 SQLAlchemy 方言、HTTP 端口映射和工具 Connector 路径。
+- [x] 移除数据源 YAML 与导入脚本中的明文数据库密码，统一使用环境变量。
+- [x] 运行 `.venv\\Scripts\\python.exe -m pytest -q`（369 passed，0 warning）。
+- [x] 运行 `.venv\\Scripts\\python.exe -m compileall -q src tests`。
+- [x] 运行 `npm run build`（构建成功；Vite 提示主包超过 500 kB 的性能建议）。
+- [x] 受控启动服务并用 curl 验证 health、chat、认证、五种数据库 Schema 和数据源注册/删除。
+- [x] 检查 `git diff --check`、高风险密钥格式扫描和最终工作树差异。
+
+> 验收备注：当前工作区未运行 Docker；数据库服务通过 `192.168.195.133` 提供。ClickHouse 使用已声明的 `clickhouse-connect` HTTP 客户端，配置 `CLICKHOUSE_PASSWORD` 后可用；生产环境仍需按 `features/16-testing.md` 与 `features/17-ops.md` 中的条件完成后续专项。

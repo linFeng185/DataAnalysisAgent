@@ -15,8 +15,8 @@
 
 | # | 功能 | 文件 | 描述 | 状态 |
 |---|------|------|------|------|
-| 3.2.1 | ClickHouseConnector | `src/connectors/clickhouse.py` | 继承 ConnectorBase, clickhouse+asynch 驱动 | 单测完成 | P0 |
-| 3.2.2 | execute() | 同上 | 继承自 ConnectorBase.execute() | 单测完成 | P0 |
+| 3.2.1 | ClickHouseConnector | `src/connectors/clickhouse.py` | 继承 ConnectorBase，使用已声明的 clickhouse-connect HTTP 客户端 | 单测完成 | P0 |
+| 3.2.2 | execute() | 同上 | clickhouse-connect 查询结果统一转换为 list[dict] | 单测完成 | P0 |
 | 3.2.3 | explain() | 同上 | EXPLAIN SYNTAX — 继承自基类 | 单测完成 | P0 |
 | 3.2.4 | health_check() | 同上 | SELECT 1 — 继承自基类 | 单测完成 | P0 |
 | 3.2.5 | get_partition_key() | 同上 | 查询 system.tables 分区键 | 单测完成 | P0 |
@@ -38,5 +38,19 @@
 | 3.4.2 | execute() | 同上 | 继承自基类 | 单测完成 | P2 |
 | 3.4.3 | explain() | 同上 | EXPLAIN (ANALYZE false) — 继承自基类 | 单测完成 | P2 |
 | 3.4.4 | health_check() | 同上 | 继承自基类 | 单测完成 | P2 |
+
+### 3.5 Oracle 连接器
+
+| # | 功能 | 文件 | 描述 | 状态 |
+|---|------|------|------|------|
+| 3.5.1 | OracleConnector | `src/connectors/oracle.py` | oracledb 驱动，同步 Engine + 线程池异步适配 | 单测完成 | P1 |
+| 3.5.2 | service_name URL | 同上 | 使用 `?service_name=` 连接 Oracle XE PDB | 单测完成 | P1 |
+| 3.5.3 | execute() | 同上 | 首次执行可 await 创建引擎，结果统一为 list[dict] | 单测完成 | P1 |
+| 3.5.4 | health_check() | 同上 | 使用 SELECT 1 FROM DUAL | 单测完成 | P1 |
+| 3.5.5 | close() | 同上 | 在线程池释放同步连接池 | 单测完成 | P1 |
+
+### 模块收尾
+
+模块功能点共 22 项，已完成 22 项，待开发 0 项。
 
 ---

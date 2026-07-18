@@ -8,6 +8,10 @@ import pytest
 
 from src.datasource.config import DataSourceConfig
 from src.datasource.introspection import (
+    COLUMNS_QUERY,
+    FK_QUERY,
+    ROW_COUNT_QUERY,
+    _list_tables,
     estimate_row_count,
     introspect_columns,
     introspect_database,
@@ -224,6 +228,90 @@ class TestIntrospectTable:
 # ================================================================
 
 class TestIntrospectDatabase:
+
+    def test_oracle_lists_current_schema_tables(self):
+        """Oracle 表列表必须查询当前 schema，不能回退到 PostgreSQL 系统表。"""
+        captured: dict[str, object] = {}
+
+        async def _exec(ds, sql, params):
+            captured["sql"] = sql
+            captured["params"] = params
+            return [{"name": "ORDERS"}]
+
+        names = asyncio.run(_list_tables(_ds("oracle"), _exec))
+
+        assert names == ["ORDERS"]
+        assert "pg_catalog.pg_tables" not in str(captured["sql"])
+        assert "ALL_TABLES" in str(captured["sql"])
+        assert "CURRENT_SCHEMA" in str(captured["sql"])
+
+    def test_mssql_lists_tables_via_information_schema(self):
+        """MSSQL 表列表必须查询 INFORMATION_SCHEMA.TABLES，不能回退到 PostgreSQL 系统表。
+
+        回归背景: sql_map 缺 mssql 键时回退 postgres 的 pg_catalog.pg_tables，
+        MSSQL 报 208 Invalid object name，导致表列表为空、该数据源被跳过。
+        """
+        captured: dict[str, object] = {}
+
+        async def _capture(ds, sql, params):
+            captured["sql"] = sql
+            captured["params"] = params
+            return [{"name": "customers"}, {"name": "orders"}]
+
+        names = asyncio.run(_list_tables(_ds("mssql"), _capture))
+
+        assert names == ["customers", "orders"]
+        assert "pg_catalog.pg_tables" not in str(captured["sql"])
+        assert "INFORMATION_SCHEMA.TABLES" in str(captured["sql"])
+        assert "TABLE_CATALOG = :database" in str(captured["sql"])
+        assert "BASE TABLE" in str(captured["sql"])
+
+    def test_mssql_columns_query_is_valid_tsql(self):
+        """MSSQL 列查询必须是合法 T-SQL。
+
+        回归背景: 旧版用 chr(39)+PRI+chr(39) 拼引号，SQL Server 无 chr() 函数，
+        报 195 'chr' is not a recognized built-in function name，所有表列内省全挂。
+        且 SELECT 列不带 c. 前缀时与 pk 子查询的 COLUMN_NAME 歧义。
+        """
+        sql = COLUMNS_QUERY["mssql"]
+        assert "chr(" not in sql
+        assert "'PRI'" in sql
+        assert "'MS_Description'" in sql
+        assert "'IsPrimaryKey'" in sql
+        assert "c.COLUMN_NAME AS name" in sql
+        assert "c.IS_NULLABLE" in sql
+        assert ":table" in sql
+
+    def test_mssql_column_parsing(self):
+        """行为: mssql 行（含主键标记与 NULL comment）解析为 ColumnInfo。"""
+        rows = [
+            {"name": "id", "type": "int", "comment": None,
+             "is_nullable": "NO", "column_key": "PRI"},
+            {"name": "note", "type": "nvarchar", "comment": "备注",
+             "is_nullable": "YES", "column_key": None},
+        ]
+        columns = asyncio.run(introspect_columns(_ds("mssql"), "customers", _exec(rows)))
+
+        assert columns[0].is_primary_key is True
+        assert columns[0].comment == ""
+        assert columns[0].is_nullable is False
+        assert columns[1].is_primary_key is False
+        assert columns[1].comment == "备注"
+        assert columns[1].is_nullable is True
+
+    def test_oracle_metadata_queries_use_current_schema(self):
+        """Oracle 列、外键和行数查询必须限定当前 schema，且使用合法 Oracle 字面量。"""
+        assert "SYS_CONTEXT('USERENV', 'CURRENT_SCHEMA')" in COLUMNS_QUERY["oracle"]
+        assert "SYS_CONTEXT('USERENV', 'CURRENT_SCHEMA')" in ROW_COUNT_QUERY["oracle"]
+        assert "SYS_CONTEXT('USERENV', 'CURRENT_SCHEMA')" in FK_QUERY["oracle"]
+        assert "chr(39)+R+chr(39)" not in FK_QUERY["oracle"]
+        assert "c_pkc.COLUMN_NAME" in FK_QUERY["oracle"]
+        assert "NULL AS column_comment" in COLUMNS_QUERY["oracle"]
+        assert "NULL AS comment" not in COLUMNS_QUERY["oracle"]
+        for query in (COLUMNS_QUERY["oracle"], FK_QUERY["oracle"], ROW_COUNT_QUERY["oracle"]):
+            assert ":table_name" in query
+            assert ":table)" not in query
+            assert "UPPER(:table_name)" not in query
 
     def test_specified_tables(self):
         """正常路径: 指定表列表返回 SchemaSnapshot。"""

@@ -191,10 +191,14 @@ def _build_where(filters: dict[str, str] | None) -> dict | None:
     """
     if not filters:
         return None
-    result: dict[str, Any] = {}
+    conditions: list[dict[str, Any]] = []
     for k, v in filters.items():
-        result[k[4:]] = {"$ne": v} if k.startswith("not:") else v
-    return result or None
+        key = k[4:] if k.startswith("not:") else k
+        value = {"$ne": v} if k.startswith("not:") else v
+        conditions.append({key: value})
+    if len(conditions) == 1:
+        return conditions[0]
+    return {"$and": conditions} if conditions else None
 
 
 def _parse_results(raw: dict) -> list[VectorSearchResult]:

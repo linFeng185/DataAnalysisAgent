@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timezone
 from unittest.mock import patch
 
 import pytest
 
 from src.knowledge.models import AUTO_TTL_SECONDS, KnowledgeEntry, KnowledgeSource
+
+
+logger = logging.getLogger(__name__)
 
 
 class TestFormatHelpers:
@@ -115,13 +119,138 @@ class TestBuildSnapshot:
             KnowledgeEntry("table:x.o", "o", KnowledgeSource.AUTO_INTROSPECT, "table",
                 table_name="o", metadata={"row_count_estimate": 100}),
             KnowledgeEntry("column:x.o.id", "o.id: Int", KnowledgeSource.AUTO_INTROSPECT, "column",
-                table_name="o", column_name="id", metadata={"type": "Int", "is_primary_key": True}),
+                table_name="o", column_name="id",
+                metadata={"type": "Int", "comment": "主键", "is_primary_key": True}),
         ]
         snapshot = m._build_snapshot(entries)
         assert len(snapshot.tables) == 1
         assert snapshot.tables[0].name == "o"
         assert len(snapshot.tables[0].columns) == 1
         assert snapshot.tables[0].columns[0].is_primary_key is True
+        assert snapshot.tables[0].columns[0].comment == "主键"
+
+
+class TestSchemaCacheRecovery:
+    """覆盖不完整 Schema 缓存触发重新内省。"""
+
+    async def test_incomplete_table_cache_triggers_introspection(self, monkeypatch):
+        """缓存只有表级条目时，应重新加载字段结构。"""
+        from types import SimpleNamespace
+        from unittest.mock import AsyncMock
+        from src.knowledge.schema_manager import SchemaManager
+
+        # 隔离连接级持久化缓存，确保本用例只验证旧向量缓存不完整的恢复路径。
+        shared_cache = SimpleNamespace(
+            get=AsyncMock(return_value=None),
+            set=AsyncMock(),
+            delete=AsyncMock(return_value=False),
+        )
+        manager = SchemaManager(datasource_cache=shared_cache)
+        monkeypatch.setattr(manager, "_resolve_datasource", AsyncMock(return_value=None))
+        table = KnowledgeEntry(
+            "table:oracle_xe.customers", "customers", KnowledgeSource.AUTO_INTROSPECT,
+            "table", table_name="customers",
+        )
+        column = KnowledgeEntry(
+            "column:oracle_xe.customers.id", "customers.id: NUMBER",
+            KnowledgeSource.AUTO_INTROSPECT, "column", table_name="customers",
+            column_name="id", metadata={"type": "NUMBER", "comment": "主键"},
+        )
+        monkeypatch.setattr(manager, "_ensure_initialized", lambda: None)
+        monkeypatch.setattr(manager, "_query_cache", AsyncMock(return_value=[table]))
+        monkeypatch.setattr(manager, "_load_from_docs", lambda _: [])
+        introspect = AsyncMock(return_value=[table, column])
+        monkeypatch.setattr(manager, "_introspect_from_db", introspect)
+        monkeypatch.setattr(manager, "_upsert_to_cache", AsyncMock())
+
+        snapshot = await manager.get_or_fetch_schema("oracle_xe")
+
+        assert snapshot.tables[0].columns[0].name == "id"
+        introspect.assert_awaited_once_with("oracle_xe")
+
+    # 验证自动内省刷新后会删除已经不在当前 Schema 中的孤儿缓存。
+    # Args: self - pytest 测试类实例；monkeypatch - pytest 补丁工具。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    async def test_expired_cache_refresh_deletes_stale_entries(self, monkeypatch):
+        """过期缓存触发内省后，应删除新 Schema 中已不存在的旧字段。"""
+        logger.debug("test_expired_cache_refresh_deletes_stale_entries 入口")
+        try:
+            # Arrange：旧缓存包含已删除字段，新内省只返回当前表和字段。
+            from types import SimpleNamespace
+            from unittest.mock import AsyncMock
+
+            import src.memory.vector_store as vector_module
+            from src.knowledge.schema_manager import SchemaManager
+
+            expired_at = datetime(2000, 1, 1, tzinfo=timezone.utc)
+            stale = KnowledgeEntry(
+                "column:mysql_test.orders.legacy_id",
+                "orders.legacy_id: BIGINT",
+                KnowledgeSource.AUTO_INTROSPECT,
+                "column",
+                table_name="orders",
+                column_name="legacy_id",
+                created_at=expired_at,
+                ttl=1,
+                metadata={"datasource": "mysql_test", "type": "BIGINT"},
+            )
+            current_table = KnowledgeEntry(
+                "table:mysql_test.orders",
+                "orders",
+                KnowledgeSource.AUTO_INTROSPECT,
+                "table",
+                table_name="orders",
+                metadata={"datasource": "mysql_test"},
+            )
+            current_column = KnowledgeEntry(
+                "column:mysql_test.orders.id",
+                "orders.id: BIGINT",
+                KnowledgeSource.AUTO_INTROSPECT,
+                "column",
+                table_name="orders",
+                column_name="id",
+                metadata={"datasource": "mysql_test", "type": "BIGINT"},
+            )
+            shared_cache = SimpleNamespace(
+                get=AsyncMock(return_value=None),
+                set=AsyncMock(),
+                delete=AsyncMock(return_value=False),
+            )
+            manager = SchemaManager(datasource_cache=shared_cache)
+            monkeypatch.setattr(manager, "_resolve_datasource", AsyncMock(return_value=None))
+            monkeypatch.setattr(manager, "_ensure_initialized", lambda: None)
+            monkeypatch.setattr(
+                manager,
+                "_query_cache",
+                AsyncMock(return_value=[current_table, current_column, stale]),
+            )
+            monkeypatch.setattr(manager, "_load_from_docs", lambda _: [])
+            monkeypatch.setattr(
+                manager,
+                "_introspect_from_db",
+                AsyncMock(return_value=[current_table, current_column]),
+            )
+            monkeypatch.setattr(manager, "_upsert_to_cache", AsyncMock())
+            store = type("Store", (), {"delete_by_ids": AsyncMock(return_value=1)})()
+            monkeypatch.setattr(vector_module, "get_vector_store", AsyncMock(return_value=store))
+
+            # Act：执行正常的缓存获取路径。
+            snapshot = await manager.get_or_fetch_schema("mysql_test")
+
+            # Assert：当前条目被保留，仅删除孤儿字段。
+            assert [table.name for table in snapshot.tables] == ["orders"]
+            store.delete_by_ids.assert_awaited_once_with([stale.id])
+            logger.info(
+                "test_expired_cache_refresh_deletes_stale_entries 完成",
+                extra={"deleted_id": stale.id},
+            )
+        except Exception as exc:
+            logger.error(
+                "test_expired_cache_refresh_deletes_stale_entries 异常: %s",
+                exc,
+                exc_info=True,
+            )
+            raise
 
 
 class TestLoadFromDocs:
@@ -158,59 +287,132 @@ class TestSnapshotToEntries:
 class TestSchemaManagerIntegration:
     """SchemaManager ChromaDB 集成测试 -- mock collection 避免 ChromaDB 初始化。"""
 
-    def test_cache_write_and_read(self):
+    async def test_cache_write_and_read(self, monkeypatch):
         from src.knowledge.schema_manager import SchemaManager
-        from unittest.mock import MagicMock
+        from unittest.mock import AsyncMock
+        import src.memory.vector_store as vector_module
 
         m = SchemaManager()
-        m._collection = MagicMock()
-        m._collection.get.return_value = {"ids": [], "metadatas": [], "documents": []}
         m._initialized = True
+        store = type("Store", (), {"upsert": AsyncMock(return_value=1)})()
+        monkeypatch.setattr(vector_module, "get_vector_store", AsyncMock(return_value=store))
 
         entries = [KnowledgeEntry("table:x.o", "desc", KnowledgeSource.AUTO_INTROSPECT,
-            "table", table_name="o", ttl=AUTO_TTL_SECONDS)]
-        m._upsert_to_cache(entries)
-        # 验证 add() 被调用
-        assert m._collection.add.called
+            "table", table_name="o", ttl=AUTO_TTL_SECONDS,
+            metadata={"datasource": "x"})]
+        await m._upsert_to_cache(entries)
+        store.upsert.assert_awaited_once()
+        saved = store.upsert.await_args.args[0][0]
+        assert saved.metadata["datasource"] == "x"
 
-    def test_query_cache_empty(self):
+    async def test_query_cache_empty(self, monkeypatch):
         from src.knowledge.schema_manager import SchemaManager
-        from unittest.mock import MagicMock
+        from unittest.mock import AsyncMock
+        import src.memory.vector_store as vector_module
 
         m = SchemaManager()
-        m._collection = MagicMock()
-        m._collection.get.return_value = {"ids": [], "metadatas": [], "documents": []}
         m._initialized = True
+        store = type("Store", (), {"get_by_filter": AsyncMock(return_value=[])})()
+        monkeypatch.setattr(vector_module, "get_vector_store", AsyncMock(return_value=store))
 
-        cached = m._query_cache("nonexistent")
+        cached = await m._query_cache("nonexistent")
         assert cached == []
 
-    def test_query_cache_finds_entries(self):
+    async def test_query_cache_finds_entries(self, monkeypatch):
         from src.knowledge.schema_manager import SchemaManager
-        from unittest.mock import MagicMock
+        from src.memory.vector_store import VectorEntry
+        from unittest.mock import AsyncMock
+        import src.memory.vector_store as vector_module
         from datetime import datetime, timezone
 
         m = SchemaManager()
         now = datetime.now(timezone.utc).isoformat()
-        m._collection = MagicMock()
-        m._collection.get.return_value = {
-            "ids": ["table:demo.orders"],
-            "metadatas": [{
+        store = type("Store", (), {"get_by_filter": AsyncMock(return_value=[
+            VectorEntry("table:demo.orders", "orders - 订单表", {
                 "source": "auto_introspect", "category": "table",
-                "table_name": "orders", "column_name": "", "tags": "",
+                "table_name": "orders", "column_name": "", "tags": [""],
                 "created_at": now, "ttl": str(AUTO_TTL_SECONDS), "meta_json": "{}"
-            }],
-            "documents": ["orders - 订单表"],
-        }
+            }),
+        ])})()
+        monkeypatch.setattr(vector_module, "get_vector_store", AsyncMock(return_value=store))
         m._initialized = True
 
-        cached = m._query_cache("demo")
+        cached = await m._query_cache("demo")
         assert len(cached) == 1
         assert cached[0].id == "table:demo.orders"
         assert cached[0].table_name == "orders"
+        filters = store.get_by_filter.await_args.args[0]
+        assert filters["datasource"] == "demo"
 
     def test_singleton(self):
         from src.knowledge.schema_manager import get_schema_manager
         m1 = get_schema_manager()
         m2 = get_schema_manager()
         assert m1 is m2
+
+
+class TestSchemaManagerManagement:
+    """覆盖管理 API 使用的刷新与字段备注接口。"""
+
+    async def test_refresh_deletes_old_cache_and_upserts_introspection(self, monkeypatch):
+        """刷新应删除旧条目并把新的内省结果写回缓存。"""
+        # Arrange
+        from unittest.mock import AsyncMock
+
+        import src.memory.vector_store as vector_module
+        from src.knowledge.schema_manager import SchemaManager
+
+        manager = SchemaManager()
+        manager._initialized = True
+        old_entry = KnowledgeEntry(
+            "table:demo.old", "old", KnowledgeSource.AUTO_INTROSPECT,
+            "table", table_name="old",
+        )
+        new_entry = KnowledgeEntry(
+            "table:demo.orders", "orders - 订单表", KnowledgeSource.AUTO_INTROSPECT,
+            "table", table_name="orders",
+        )
+        monkeypatch.setattr(manager, "_query_cache", AsyncMock(return_value=[old_entry]))
+        monkeypatch.setattr(manager, "_introspect_from_db", AsyncMock(return_value=[new_entry]))
+        monkeypatch.setattr(manager, "_upsert_to_cache", AsyncMock())
+        store = type("Store", (), {"delete_by_ids": AsyncMock(return_value=1)})()
+        monkeypatch.setattr(vector_module, "get_vector_store", AsyncMock(return_value=store))
+
+        # Act
+        snapshot = await manager.refresh("demo")
+
+        # Assert
+        store.delete_by_ids.assert_awaited_once_with(["table:demo.old"])
+        manager._upsert_to_cache.assert_awaited_once_with([new_entry])
+        assert [table.name for table in snapshot.tables] == ["orders"]
+
+    async def test_update_column_comment_upserts_changed_content(self, monkeypatch):
+        """字段备注更新应重写指定字段的向量文本。"""
+        # Arrange
+        from unittest.mock import AsyncMock
+
+        import src.memory.vector_store as vector_module
+        from src.knowledge.schema_manager import SchemaManager
+        from src.memory.vector_store import VectorEntry
+
+        manager = SchemaManager()
+        manager._initialized = True
+        entry = VectorEntry(
+            id="column:demo.orders.amount",
+            content="orders.amount: Decimal",
+            metadata={"type": "Decimal", "tenant_id": 1},
+        )
+        store = type("Store", (), {
+            "get_by_id": AsyncMock(return_value=entry),
+            "upsert": AsyncMock(return_value=1),
+        })()
+        monkeypatch.setattr(vector_module, "get_vector_store", AsyncMock(return_value=store))
+
+        # Act
+        updated = await manager.update_column_comment("demo", "orders", "amount", "订单金额")
+
+        # Assert
+        assert updated is True
+        saved = store.upsert.await_args.args[0][0]
+        assert saved.id == "column:demo.orders.amount"
+        assert "订单金额" in saved.content

@@ -32,10 +32,21 @@ async def llm_direct_answer_node(state: AnalysisState) -> dict:
     intent = state.get("intent", "chat")
     query = state.get("user_query", "")
     knowledge_text = state.get("long_term_memories_text", "") or ""
+    schema_text = _format_schema_context(state.get("relevant_tables", []) or [])
     logger.info("节点开始", node="llm_direct_answer", intent=intent, query=query[:60])
+    logger.info(
+        "直接回答上下文到达",
+        intent=intent,
+        table_count=len(state.get("relevant_tables", []) or []),
+        schema_chars=len(schema_text),
+        knowledge_chars=len(knowledge_text),
+        history_turns=len(state.get("conversation_history", []) or []),
+    )
 
     # 组装上下文：知识库参考 + 对话历史
     parts = []
+    if schema_text:
+        parts.append(f"## 当前数据源 Schema\n{schema_text}")
     if knowledge_text:
         parts.append(f"## 知识库参考\n{knowledge_text[:2000]}")
     history = state.get("conversation_history", []) or []
@@ -62,9 +73,9 @@ async def llm_direct_answer_node(state: AnalysisState) -> dict:
 
     # LLM 调用
     try:
-        from src.llm.client import is_llm_available, get_llm
-        if is_llm_available():
-            llm = get_llm(temperature=0, reasoning=False)
+        from src.llm.client import get_task_llm, is_task_llm_available
+        if is_task_llm_available("direct_answer"):
+            llm = get_task_llm("direct_answer", temperature=0, reasoning=False)
             from langchain_core.messages import SystemMessage, HumanMessage
             resp = await llm.ainvoke([
                 SystemMessage(content="你是数据分析助手。简洁用中文回答，不编造。"),
@@ -72,10 +83,10 @@ async def llm_direct_answer_node(state: AnalysisState) -> dict:
             ])
             answer = resp.content.strip() if resp.content else ""
         else:
-            answer = _fallback_answer(intent, query, knowledge_text)
+            answer = _fallback_answer(intent, query, knowledge_text, schema_text)
     except Exception as e:
         logger.warning("LLM 直接回答失败，使用回退", error=str(e))
-        answer = _fallback_answer(intent, query, knowledge_text)
+        answer = _fallback_answer(intent, query, knowledge_text, schema_text)
 
     elapsed = round((time.monotonic() - _start) * 1000)
     logger.info("节点完成", node="llm_direct_answer", elapsed_ms=elapsed, answer_len=len(answer))
@@ -99,18 +110,48 @@ async def llm_direct_answer_node(state: AnalysisState) -> dict:
     }
 
 
-def _fallback_answer(intent: str, query: str, knowledge: str) -> str:
+def _fallback_answer(intent: str, query: str, knowledge: str, schema_text: str = "") -> str:
     """LLM 不可用时的规则回退回答。
 
     Args:
         intent: 意图类型
         query: 用户问题
         knowledge: 知识库上下文
+        schema_text: 当前数据源的确定性 Schema 摘要
 
     Returns: 回退文本
     """
     if intent == "metadata":
+        if schema_text:
+            return f"当前数据源结构:\n{schema_text}"
         if knowledge:
             return f"根据知识库记录:\n{knowledge[:500]}"
         return "未找到相关数据库结构信息。请上传数据库文档到知识库，或使用 /schema 查看已注册的表结构。"
     return "你好！我是数据分析助手，可以帮你用自然语言查询和分析数据库。请选择一个数据源并输入你的问题。"
+
+
+# 方法作用：把 retrieve_schema 的结构化表信息转换为直接回答可用的确定性摘要。
+# Args: tables - 当前数据源相关表列表。
+# Returns: 包含表名、说明和字段的紧凑文本，无表时返回空字符串。
+def _format_schema_context(tables: list[dict]) -> str:
+    """格式化 metadata 回答使用的真实 Schema，不依赖知识库是否命中。"""
+    logger.debug("格式化 metadata Schema 入口", table_count=len(tables))
+    lines: list[str] = []
+    for table in tables[:30]:
+        name = str(table.get("name", "") or "").strip()
+        if not name:
+            continue
+        description = str(table.get("description", "") or "").strip()
+        columns = table.get("columns", []) or []
+        column_text = ", ".join(
+            f"{column.get('name', '')} ({column.get('type', '')})"
+            for column in columns[:50]
+            if column.get("name")
+        )
+        header = f"- {name}" + (f": {description}" if description else "")
+        lines.append(header)
+        if column_text:
+            lines.append(f"  字段: {column_text}")
+    result = "\n".join(lines)
+    logger.info("格式化 metadata Schema 完成", table_count=len(tables), chars=len(result))
+    return result

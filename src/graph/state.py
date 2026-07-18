@@ -30,6 +30,18 @@ class AnalysisState(TypedDict, total=False):
     datasource: str
     """目标数据源名称，由 routes.py 注入。—— retrieve_schema / execute_sql 读"""
 
+    session_id: str
+    """对外会话 ID，由 API 注入并写入历史记录。—— build_response 写入响应和查询历史"""
+
+    tenant_id: int
+    """认证中间件注入的租户 ID，供异步图节点执行请求级资源过滤。"""
+
+    user_id: int
+    """认证中间件注入的用户 ID，供 Skill/MCP 私有资源过滤。"""
+
+    user_role: str
+    """认证中间件注入的角色，不接受用户请求体覆盖。"""
+
     intent: str
     """意图分类结果（query/trend/aggregation/attribution/metadata/file_analysis/chat）。
     —— classify_intent 写，route_by_intent / analyze_result 读"""
@@ -39,10 +51,22 @@ class AnalysisState(TypedDict, total=False):
     skill_prompt_override: str
     skill_tools: list[Any]
     conversation_history: list[dict]
+    previous_turn_snapshot: dict[str, Any]
+    """上一轮响应完成时固化的结构化结果，只供明确的跨轮结果追问恢复。"""
+
+    previous_result_restored: bool
+    """当前轮是否已通过数据源校验并恢复上一轮结构化结果。"""
+
     selected_datasources: list[str]
     multi_source_results: list[dict]
     allowed_columns: list[str]
     row_filter_sql: str
+
+    needs_decompose: bool
+    """当前问题是否需要多步规划。—— decompose_query 写，generate_sql 读"""
+
+    decompose_steps: list[dict]
+    """结构化查询步骤。—— decompose_query 写，generate_sql 读"""
 
     # ── Schema 层 ──────────────────────────────────
     dialect: str
@@ -61,12 +85,21 @@ class AnalysisState(TypedDict, total=False):
     business_rules_text: str
     """业务规则文本，从知识库检索后注入 Prompt。—— retrieve_schema 初始化为空"""
 
+    enum_dictionary: dict[str, list[str]]
+    """字段合法枚举值，键优先使用 table.column。—— retrieve_schema 写，generate_sql 读"""
+
     long_term_memories_text: str
     """长期记忆文本，从记忆系统检索后注入 Prompt。—— retrieve_schema 初始化为空"""
 
     # ── SQL 生成层 ─────────────────────────────────
     generated_sql: str
     """LLM 生成的 SQL 语句。—— generate_sql 写，layer3_validate / execute_sql 读"""
+
+    needs_time_range: bool
+    """是否需要用户补充时间范围。—— generate_sql 写，build_response 读"""
+
+    time_range_explanation: str
+    """时间范围补充提示文本。—— generate_sql 写，build_response 读"""
 
     sql_reasoning_content: str
     """SQL 生成时的模型推理链（DeepSeek thinking）。—— generate_sql 写，build_response 读"""
@@ -99,11 +132,20 @@ class AnalysisState(TypedDict, total=False):
     execution_error: str
     """SQL 执行错误信息。—— execute_sql 写，should_retry 读"""
 
+    execution_error_type: str
+    """执行错误分类（transient/sql_semantic/configuration/security/rate_limit）。"""
+
+    execution_retry_count: int
+    """瞬态数据库错误的原 SQL 重试次数，不与 SQL 重新生成次数混用。"""
+
     query_result_sample: list[dict]
     """查询结果前 200 行（list[dict]）。—— execute_sql 写，analyze_result / build_response 读"""
 
     query_result_full_count: int
-    """查询结果总行数。—— execute_sql 写"""
+    """实际返回的结果行数。—— execute_sql 写"""
+
+    query_result_truncated: bool
+    """查询结果是否因 MAX_RESULT_ROWS 限制而截断。—— execute_sql 写，build_response 读"""
 
     query_result_statistics: dict
     """查询结果的基本统计（行数/数值列名）。—— execute_sql 写（当前未填充），analyze_result 读"""

@@ -6,9 +6,9 @@
 
 | # | 功能 | 文件 | 描述 | 状态 |
 |---|------|------|------|------|
-| 7.1.1 | PostgresSaver 配置 | `src/memory/checkpointer.py` | 生产环境 PostgreSQL checkpointer 初始化 + setup() | 开发完成 |
+| 7.1.1 | PostgresSaver 配置 | `src/memory/checkpointer.py` | 生产环境 PostgreSQL checkpointer 初始化 + setup()，Windows 自动切换 SelectorEventLoop | 单测完成 |
 | 7.1.2 | MemorySaver 配置 | 同上 | 开发环境内存 checkpointer (用于测试) | 开发完成 |
-| 7.1.3 | checkpointer 工厂函数 | 同上 | get_checkpointer() — 根据环境变量自动选择 PostgresSaver / MemorySaver | 开发完成 |
+| 7.1.3 | checkpointer 工厂函数 | 同上 | get_checkpointer() — 根据环境变量自动选择 PostgresSaver / MemorySaver | 单测完成 |
 
 ### 7.2 短期记忆
 
@@ -22,6 +22,7 @@
 | 7.2.6 | on_session_start() | 同上 | 会话启动钩子: 加载用户偏好 + 检索相关长期记忆 | 开发完成 |
 | 7.2.7 | archive_sessions() | 同上 | 归档超过 30 天的 inactive 会话 checkpoint | 开发完成 |
 | 7.2.8 | summarize_session() | `src/memory/context_builder.py` | 规则拼接摘要文本用于归档 | 开发完成 |
+| 7.2.9 | 逐轮结构化响应持久化 | `src/memory/history_store.py` | `query_history.final_result` JSONB 保存每轮 SQL、数据、分析、图表和推理，支持跨进程恢复 | 单测完成 |
 
 ### 7.3 长期记忆
 

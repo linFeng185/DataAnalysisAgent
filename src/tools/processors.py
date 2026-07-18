@@ -66,6 +66,10 @@ class DistributionProcessor(DataProcessor):
         if mn==mx: return ProcessorResult(f"所有值相同({mn})",[],"table",rows,"low")
         step=(mx-mn)/nb
         data=[{"range":f"{round(mn+step*i,2)}-{round(mn+step*(i+1),2)}","count":sum(1 for v in vals if mn+step*i<=v<mn+step*(i+1))} for i in range(nb)]
+        # 末桶改为闭区间，补回最大值 v==mx
+        if data:
+            last_low = mn + step * (nb - 1)
+            data[-1]["count"] = sum(1 for v in vals if v >= last_low)
         return ProcessorResult(f"范围{mn}~{mx}，中位{self._pct(vals,0.5)}",[f"Q1={self._pct(vals,0.25)} Q3={self._pct(vals,0.75)}"],"bar",data)
 
 

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import logging
+from logging.handlers import TimedRotatingFileHandler
+from pathlib import Path
 
 import structlog
 
@@ -10,7 +12,14 @@ from src.config import get_settings
 
 
 def setup_logging() -> None:
-    """初始化 structlog，根据 Settings 切换 console / JSON 格式。"""
+    """初始化 structlog，并配置控制台及保留七天的文件日志。
+
+    Args:
+        无。
+
+    Returns:
+        无返回值。
+    """
     settings = get_settings()
 
     shared_processors: list = [
@@ -45,12 +54,26 @@ def setup_logging() -> None:
         ],
     )
 
-    handler = logging.StreamHandler()
-    handler.setFormatter(formatter)
+    console_handler = logging.StreamHandler()
+    console_handler.setFormatter(formatter)
+
+    log_path = Path(settings.log_file)
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    file_handler = TimedRotatingFileHandler(
+        log_path,
+        when="D",
+        interval=1,
+        backupCount=7,
+        encoding="utf-8",
+    )
+    file_handler.setFormatter(formatter)
 
     root_logger = logging.getLogger()
+    for old_handler in root_logger.handlers:
+        old_handler.close()
     root_logger.handlers.clear()
-    root_logger.addHandler(handler)
+    root_logger.addHandler(console_handler)
+    root_logger.addHandler(file_handler)
     root_logger.setLevel(settings.log_level)
 
     logging.getLogger("httpx").setLevel(logging.WARNING)
@@ -60,6 +83,9 @@ def setup_logging() -> None:
     # 移除 SQLAlchemy 自带的 handler，防止与 structlog handler 重复输出
     logging.getLogger("sqlalchemy.engine").handlers.clear()
     logging.getLogger("sqlalchemy.engine").propagate = True
+    structlog.get_logger(__name__).info(
+        "日志配置完成", log_file=str(log_path), backup_days=file_handler.backupCount,
+    )
 
 
 def get_logger(name: str) -> structlog.stdlib.BoundLogger:

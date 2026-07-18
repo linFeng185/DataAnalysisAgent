@@ -4,47 +4,92 @@ import { useNavigate } from 'react-router-dom';
 interface User { user_id: number; tenant_id: number; role: string; username: string; }
 
 interface AuthState {
-  user: User | null; token: string | null;
+  user: User | null;
   login: (u: string, p: string) => Promise<void>;
-  logout: () => void; isAuthenticated: boolean;
+  logout: () => void;
+  isAuthenticated: boolean;
+  authRequired: boolean;
+  loading: boolean;
 }
 
 const AuthContext = createContext<AuthState | null>(null);
 
-function decodeJWT(token: string): User | null {
-  try {
-    const p = JSON.parse(atob(token.split('.')[1]));
-    return p.exp * 1000 > Date.now()
-      ? { user_id: p.user_id, tenant_id: p.tenant_id, role: p.role, username: '' } : null;
-  } catch { return null; }
-}
-
 export function AuthProvider({ children }: { children: ReactNode }) {
-  const [user, setUser] = useState<User | null>(() => {
-    const t = localStorage.getItem('auth_token');
-    return t ? decodeJWT(t) : null;
-  });
-  const [token, setToken] = useState<string | null>(() => localStorage.getItem('auth_token'));
+  const [user, setUser] = useState<User | null>(null);
+  const [authRequired, setAuthRequired] = useState(false);
+  const [loading, setLoading] = useState(true);
   const navigate = useNavigate();
 
-  useEffect(() => { token ? localStorage.setItem('auth_token', token) : localStorage.removeItem('auth_token'); }, [token]);
+  useEffect(() => {
+    let active = true;
+    fetch('/api/v1/auth/me', { credentials: 'include' })
+      .then(async response => {
+        const data = await response.json().catch(() => ({}));
+        if (!active) return;
+        setAuthRequired(Boolean(data.auth_required));
+        setUser(data.authenticated ? {
+          user_id: data.user_id,
+          tenant_id: data.tenant_id,
+          role: data.role,
+          username: data.username || '',
+        } : null);
+      })
+      .catch(() => {
+        if (active) setUser(null);
+      })
+      .finally(() => {
+        if (active) setLoading(false);
+      });
+    return () => { active = false; };
+  }, []);
 
-  const login = useCallback(async (u: string, p: string) => {
-    const r = await fetch('/api/v1/auth/login', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ username: u, password: p }),
+  const login = useCallback(async (username: string, password: string) => {
+    const response = await fetch('/api/v1/auth/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify({ username, password }),
     });
-    if (!r.ok) { const e = await r.json().catch(() => ({ detail: '失败' })); throw new Error(e.detail); }
-    const d = await r.json();
-    setToken(d.access_token); setUser({ user_id: d.user_id, tenant_id: d.tenant_id, role: d.role, username: u });
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({ detail: '登录失败' }));
+      throw new Error(error.detail || '登录失败');
+    }
+    const data = await response.json();
+    setAuthRequired(true);
+    setUser({
+      user_id: data.user_id,
+      tenant_id: data.tenant_id,
+      role: data.role,
+      username,
+    });
     navigate('/');
   }, [navigate]);
 
   const logout = useCallback(() => {
-    setToken(null); setUser(null); localStorage.removeItem('auth_token'); navigate('/login');
+    void fetch('/api/v1/auth/logout', {
+      method: 'POST',
+      credentials: 'include',
+    });
+    setUser(null);
+    navigate('/login');
   }, [navigate]);
 
-  return <AuthContext.Provider value={{ user, token, login, logout, isAuthenticated: !!token }}>{children}</AuthContext.Provider>;
+  return (
+    <AuthContext.Provider value={{
+      user,
+      login,
+      logout,
+      isAuthenticated: user !== null,
+      authRequired,
+      loading,
+    }}>
+      {children}
+    </AuthContext.Provider>
+  );
 }
 
-export function useAuth() { const c = useContext(AuthContext); if (!c) throw new Error('useAuth'); return c; }
+export function useAuth() {
+  const context = useContext(AuthContext);
+  if (!context) throw new Error('useAuth');
+  return context;
+}

@@ -36,7 +36,8 @@ COLUMNS_QUERY = {
                CASE WHEN pk.column_name IS NOT NULL THEN true ELSE false END AS is_primary_key
         FROM INFORMATION_SCHEMA.COLUMNS c
         LEFT JOIN pg_catalog.pg_description pgd
-            ON pgd.objsubid = c.ordinal_position AND pgd.objoid = :table::regclass
+            ON pgd.objsubid = c.ordinal_position
+            AND pgd.objoid = (SELECT oid FROM pg_class WHERE relname = :table)
         LEFT JOIN (
             SELECT ku.column_name FROM INFORMATION_SCHEMA.TABLE_CONSTRAINTS tc
             JOIN INFORMATION_SCHEMA.KEY_COLUMN_USAGE ku ON tc.constraint_name = ku.constraint_name
@@ -45,25 +46,41 @@ COLUMNS_QUERY = {
         WHERE c.table_name = :table
     """,
     "oracle": """
-        SELECT COLUMN_NAME AS name, DATA_TYPE AS type,
-               NULL AS comment, NULLABLE AS is_nullable,
-               NULL AS column_key
-        FROM ALL_TAB_COLUMNS
-        WHERE TABLE_NAME = UPPER(:table) AND OWNER = UPPER(:database)
+        SELECT c.COLUMN_NAME AS name, c.DATA_TYPE AS type,
+               NULL AS column_comment, c.NULLABLE AS is_nullable,
+               CASE WHEN pk.COLUMN_NAME IS NOT NULL THEN 'PRI' ELSE NULL END AS column_key
+        FROM ALL_TAB_COLUMNS c
+        LEFT JOIN (
+            SELECT acc.COLUMN_NAME
+            FROM ALL_CONS_COLUMNS acc
+            JOIN ALL_CONSTRAINTS ac
+              ON ac.OWNER = acc.OWNER AND ac.CONSTRAINT_NAME = acc.CONSTRAINT_NAME
+            WHERE ac.CONSTRAINT_TYPE = 'P'
+              AND ac.OWNER = SYS_CONTEXT('USERENV', 'CURRENT_SCHEMA')
+              AND acc.TABLE_NAME = :table_name
+        ) pk ON pk.COLUMN_NAME = c.COLUMN_NAME
+        WHERE c.TABLE_NAME = :table_name
+          AND c.OWNER = SYS_CONTEXT('USERENV', 'CURRENT_SCHEMA')
     """,
     "mssql": """
-        SELECT COLUMN_NAME AS name, DATA_TYPE AS type,
-               ISNULL(CAST(ep.value AS VARCHAR(200)), chr(39)+chr(39)) AS comment,
-               IS_NULLABLE AS is_nullable,
-               CASE WHEN pk.COLUMN_NAME IS NOT NULL THEN chr(39)+PRI+chr(39) ELSE NULL END AS column_key
+        SELECT c.COLUMN_NAME AS name, c.DATA_TYPE AS type,
+               CAST(ep.value AS NVARCHAR(200)) AS comment,
+               c.IS_NULLABLE AS is_nullable,
+               CASE WHEN pk.COLUMN_NAME IS NOT NULL THEN 'PRI' ELSE NULL END AS column_key
         FROM INFORMATION_SCHEMA.COLUMNS c
-        LEFT JOIN sys.extended_properties ep ON ep.major_id = OBJECT_ID(c.TABLE_NAME) AND ep.minor_id = c.ORDINAL_POSITION AND ep.name = chr(39)+MS_Description+chr(39)
+        LEFT JOIN sys.extended_properties ep
+            ON ep.major_id = OBJECT_ID(c.TABLE_SCHEMA + '.' + c.TABLE_NAME)
+            AND ep.minor_id = c.ORDINAL_POSITION
+            AND ep.name = 'MS_Description'
         LEFT JOIN (
             SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.KEY_COLUMN_USAGE
-            WHERE OBJECTPROPERTY(OBJECT_ID(CONSTRAINT_NAME), chr(39)+IsPrimaryKey+chr(39)) = 1 AND TABLE_NAME = :table
+            WHERE OBJECTPROPERTY(OBJECT_ID(CONSTRAINT_NAME), 'IsPrimaryKey') = 1
+              AND TABLE_NAME = :table
         ) pk ON c.COLUMN_NAME = pk.COLUMN_NAME
         WHERE c.TABLE_NAME = :table
+        ORDER BY c.ORDINAL_POSITION
     """,
+    "sqlite": "PRAGMA table_info({table})",
 }
 
 FK_QUERY = {
@@ -83,11 +100,19 @@ FK_QUERY = {
     "clickhouse": None,
     "oracle": """
         SELECT a.COLUMN_NAME AS column_name, c_pk.TABLE_NAME AS target_table,
-               a.COLUMN_NAME AS target_column
+               c_pkc.COLUMN_NAME AS target_column
         FROM ALL_CONS_COLUMNS a
-        JOIN ALL_CONSTRAINTS c ON a.CONSTRAINT_NAME = c.CONSTRAINT_NAME
-        JOIN ALL_CONSTRAINTS c_pk ON c.R_CONSTRAINT_NAME = c_pk.CONSTRAINT_NAME
-        WHERE c.CONSTRAINT_TYPE = chr(39)+R+chr(39) AND a.TABLE_NAME = UPPER(:table)
+        JOIN ALL_CONSTRAINTS c
+          ON c.OWNER = a.OWNER AND c.CONSTRAINT_NAME = a.CONSTRAINT_NAME
+        JOIN ALL_CONSTRAINTS c_pk
+          ON c_pk.OWNER = c.R_OWNER AND c_pk.CONSTRAINT_NAME = c.R_CONSTRAINT_NAME
+        JOIN ALL_CONS_COLUMNS c_pkc
+          ON c_pkc.OWNER = c_pk.OWNER
+         AND c_pkc.CONSTRAINT_NAME = c_pk.CONSTRAINT_NAME
+         AND c_pkc.POSITION = a.POSITION
+        WHERE c.CONSTRAINT_TYPE = 'R'
+          AND c.OWNER = SYS_CONTEXT('USERENV', 'CURRENT_SCHEMA')
+          AND a.TABLE_NAME = :table_name
     """,
     "mssql": """
         SELECT COL_NAME(fkc.parent_object_id, fkc.parent_column_id) AS column_name,
@@ -96,15 +121,37 @@ FK_QUERY = {
         FROM sys.foreign_key_columns fkc
         WHERE OBJECT_NAME(fkc.parent_object_id) = :table
     """,
+    "sqlite": "PRAGMA foreign_key_list({table})",
 }
 
 ROW_COUNT_QUERY = {
     "clickhouse": "SELECT COUNT(*) AS count FROM {table}",
     "mysql": "SELECT TABLE_ROWS AS table_rows FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = :database AND TABLE_NAME = :table",
     "postgres": "SELECT reltuples::bigint AS count FROM pg_class WHERE relname = :table",
-    "oracle": "SELECT NUM_ROWS AS count FROM ALL_TABLES WHERE TABLE_NAME = UPPER(:table)",
+    "oracle": """
+        SELECT NUM_ROWS AS count
+        FROM ALL_TABLES
+        WHERE TABLE_NAME = :table_name
+          AND OWNER = SYS_CONTEXT('USERENV', 'CURRENT_SCHEMA')
+    """,
     "mssql": "SELECT SUM(row_count) AS count FROM sys.dm_db_partition_stats WHERE OBJECT_ID = OBJECT_ID(:table) AND index_id IN (0,1)",
+    "sqlite": "SELECT COUNT(*) AS count FROM {table}",
 }
+
+
+def _quote_sqlite_identifier(identifier: str) -> str:
+    """安全引用 SQLite 标识符。
+
+    Args:
+        identifier: 表名等 SQLite 标识符。
+
+    Returns:
+        双引号转义后的标识符。
+    """
+    logger.debug("SQLite 标识符引用入口", identifier=identifier)
+    quoted = '"' + identifier.replace('"', '""') + '"'
+    logger.info("SQLite 标识符引用完成", identifier=identifier)
+    return quoted
 
 
 async def introspect_columns(
@@ -115,15 +162,22 @@ async def introspect_columns(
     if not sql:
         logger.warning("不支持的方言", dialect=ds.dialect)
         return []
-    result = await executor(ds, sql, {"table": table_name, "database": ds.database})
+    if ds.dialect == "sqlite":
+        sql = sql.format(table=_quote_sqlite_identifier(table_name))
+    result = await executor(ds, sql, {
+        "table": table_name, "table_name": table_name, "database": ds.database,
+    })
     columns = []
     for row in result:
+        sqlite = ds.dialect == "sqlite"
         columns.append(ColumnInfo(
             name=row.get("name", ""),
             type=row.get("type", ""),
-            comment=row.get("comment") or "",
-            is_nullable=_parse_nullable(row.get("is_nullable", True)),
-            is_primary_key=row.get("column_key") == "PRI" or row.get("is_primary_key", False),
+            comment=row.get("comment") or row.get("column_comment") or "",
+            is_nullable=(not bool(row.get("notnull", 0))) if sqlite
+                        else _parse_nullable(row.get("is_nullable", True)),
+            is_primary_key=bool(row.get("pk", 0)) if sqlite
+                           else row.get("column_key") == "PRI" or row.get("is_primary_key", False),
             is_indexed=row.get("column_key", "") in ("PRI", "UNI", "MUL"),
         ))
     return columns
@@ -136,11 +190,15 @@ async def introspect_foreign_keys(
     sql = FK_QUERY.get(ds.dialect)
     if not sql:
         return []
-    result = await executor(ds, sql, {"table": table_name, "database": ds.database})
+    if ds.dialect == "sqlite":
+        sql = sql.format(table=_quote_sqlite_identifier(table_name))
+    result = await executor(ds, sql, {
+        "table": table_name, "table_name": table_name, "database": ds.database,
+    })
     return [
         TableRelation(
-            target_table=row.get("target_table", ""),
-            join_key=row.get("column_name", ""),
+            target_table=row.get("target_table", "") or row.get("table", ""),
+            join_key=row.get("column_name", "") or row.get("from", ""),
             relation_type="many_to_one",
         )
         for row in result
@@ -155,7 +213,11 @@ async def estimate_row_count(
     if not sql:
         return 0
     try:
-        result = await executor(ds, sql, {"table": table_name, "database": ds.database})
+        if ds.dialect == "sqlite":
+            sql = sql.format(table=_quote_sqlite_identifier(table_name))
+        result = await executor(ds, sql, {
+            "table": table_name, "table_name": table_name, "database": ds.database,
+        })
         if result:
             count = result[0].get("count", 0) or result[0].get("table_rows", 0) or 0
             return int(count)
@@ -197,6 +259,14 @@ async def _list_tables(ds: DataSourceConfig, executor) -> list[str]:
         "clickhouse": "SELECT name FROM system.tables WHERE database = :database",
         "mysql": "SELECT TABLE_NAME AS name FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = :database AND TABLE_TYPE = 'BASE TABLE'",
         "postgres": "SELECT tablename AS name FROM pg_catalog.pg_tables WHERE schemaname = 'public'",
+        "oracle": """
+            SELECT TABLE_NAME AS name
+            FROM ALL_TABLES
+            WHERE OWNER = SYS_CONTEXT('USERENV', 'CURRENT_SCHEMA')
+            ORDER BY TABLE_NAME
+        """,
+        "mssql": "SELECT TABLE_NAME AS name FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_CATALOG = :database AND TABLE_TYPE = 'BASE TABLE' ORDER BY TABLE_NAME",
+        "sqlite": "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name",
     }
     sql = sql_map.get(ds.dialect, sql_map["postgres"])
     result = await executor(ds, sql, {"database": ds.database})

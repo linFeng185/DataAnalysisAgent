@@ -106,24 +106,54 @@ async def retrieve_schema_node(state: AnalysisState) -> dict:
     if not should_load:
         logger.debug("知识库跳过（chat 意图无需 SQL）", datasource=datasource_name)
 
-    return {
+    enum_dictionary = await _load_enum_dictionary(datasource_name, tables)
+    raw_business_rules = list(getattr(schema, "business_rules", []) or []) if schema else []
+    business_rules_text = "\n".join(
+        str(rule.get("content", "") if isinstance(rule, dict) else rule).strip()
+        for rule in raw_business_rules
+        if str(rule.get("content", "") if isinstance(rule, dict) else rule).strip()
+    )
+    few_shot_examples = list(getattr(schema, "sql_templates", []) or []) if schema else []
+    result = {
         "dialect": dialect,
         "resolved_schema": schema,
         "relevant_tables": [
             {"name": t.name, "description": t.description,
              "columns": [{"name": c.name, "type": c.type, "comment": c.comment,
-                          "is_indexed": getattr(c, "is_indexed", False)}
+                          "is_indexed": getattr(c, "is_indexed", False),
+                          "is_primary_key": getattr(c, "is_primary_key", False),
+                          "is_nullable": getattr(c, "is_nullable", True),
+                          "enum_values": getattr(c, "enum_values", []) or
+                          enum_dictionary.get(f"{t.name}.{c.name}", []) or
+                          enum_dictionary.get(c.name, [])}
                          for c in t.columns],
              "indexes": [{"columns": idx.columns, "unique": idx.unique}
-                         for idx in (getattr(t, "indexes", []) or [])]}
+                         for idx in (getattr(t, "indexes", []) or [])],
+             "relations": [{
+                 "target_table": relation.target_table,
+                 "join_key": relation.join_key,
+                 "relation_type": relation.relation_type,
+             } for relation in (getattr(t, "relations", []) or [])],
+             "row_count_estimate": getattr(t, "row_count_estimate", 0),
+             "partition_key": getattr(t, "partition_key", "")}
             for t in tables
         ],
-        "few_shot_examples": [],
-        "business_rules_text": "",
-        "enum_dictionary": await _load_enum_dictionary(datasource_name, tables),
+        "few_shot_examples": few_shot_examples[:5],
+        "business_rules_text": business_rules_text,
+        "enum_dictionary": enum_dictionary,
         "long_term_memories_text": knowledge_text,
         "conversation_history": history,
     }
+    logger.info(
+        "retrieve_schema 状态写回完成",
+        datasource=datasource_name,
+        table_count=len(result["relevant_tables"]),
+        enum_columns=len(enum_dictionary),
+        knowledge_chars=len(knowledge_text),
+        business_rule_count=len(raw_business_rules),
+        few_shot_count=len(few_shot_examples[:5]),
+    )
+    return result
 
 
 async def _load_enum_dictionary(datasource: str, tables: list) -> dict[str, list[str]]:
@@ -133,15 +163,23 @@ async def _load_enum_dictionary(datasource: str, tables: list) -> dict[str, list
     """
     try:
         from src.memory.vector_store import get_vector_store
+        from src.knowledge.retrieval import build_knowledge_filters
         store = await get_vector_store()
-        results = await store.get_by_filter(
-            {"datasource": datasource, "category": "enum_value"}, limit=200)
         enum_dict: dict[str, list[str]] = {}
-        for r in results:
-            col = r.metadata.get("column_name", "")
-            vals = r.metadata.get("values", "")
-            if col and vals:
-                enum_dict[col] = [v.strip() for v in vals.split("|") if v.strip()]
+        for category in ("column", "enum_value"):
+            results = await store.get_by_filter(
+                build_knowledge_filters(datasource=datasource, category=category),
+                limit=200,
+            )
+            for result in results:
+                metadata = dict(result.metadata or {})
+                column = str(metadata.get("column_name", "") or "")
+                table = str(metadata.get("table_name", "") or "")
+                values = metadata.get("enum_values") or metadata.get("values", "")
+                if isinstance(values, str):
+                    values = [value.strip() for value in values.split("|") if value.strip()]
+                if column and values:
+                    enum_dict[f"{table}.{column}" if table else column] = [str(value) for value in values]
         if enum_dict:
             logger.info("枚举值字典加载", datasource=datasource, columns=len(enum_dict))
         return enum_dict
@@ -158,20 +196,31 @@ async def _load_knowledge_context(datasource: str, query: str) -> str:
     """
     try:
         from src.memory.vector_store import get_vector_store
+        from src.knowledge.retrieval import search_knowledge
+        from src.knowledge.content_safety import render_evidence_context
         store = await get_vector_store()
         total = await store.count()
         if total == 0:
             return ""
 
-        results = await store.search(query if query else datasource, top_k=5)
-        relevant = [r for r in results if r.score > 0.3]
-        relevant.sort(key=lambda x: x.score, reverse=True)
+        relevant = await search_knowledge(
+            store,
+            query if query else datasource,
+            datasource=datasource,
+            top_k=5,
+        )
 
         top_chunks: list[str] = []
-        for r in relevant[:3]:
-            chunk = r.content[:1000]
+        for evidence in relevant[:3]:
+            chunk = render_evidence_context(evidence, max_chars=1000)
             top_chunks.append(chunk)
-            logger.debug("  知识库匹配 [score=%.3f] %s: %s", r.score, r.id[:30], r.content[:80])
+            logger.debug(
+                "知识库匹配",
+                score=evidence.scores.get("relevance", 0.0),
+                source_id=evidence.source_id[:30],
+                preview=evidence.content[:80],
+                lexical_score=evidence.scores.get("lexical", 0.0),
+            )
 
         if top_chunks:
             logger.info("知识库语义检索命中", datasource=datasource or "全部",

@@ -46,9 +46,10 @@ class TestGenerateSQLFallback:
         monkeypatch.setenv("OPENAI_API_KEY", "")
         from src.graph.nodes.generate_sql import generate_sql_node
         r = asyncio.run(generate_sql_node({
-            "user_query": "查订单", "relevant_tables": [{"name": "orders", "columns": []}],
+            "user_query": "查订单数", "relevant_tables": [{"name": "orders", "columns": []}],
             "dialect": "clickhouse", "retry_count": 0,
-        }))
+        }, {}))
+        assert "COUNT(*)" in r["generated_sql"].upper()
         assert "orders" in r["generated_sql"]
 
     def test_retry_mode(self, monkeypatch):
@@ -57,8 +58,9 @@ class TestGenerateSQLFallback:
         r = asyncio.run(generate_sql_node({
             "relevant_tables": [{"name": "t", "columns": []}], "retry_count": 2,
             "validation_errors": [{}],
-        }))
-        assert "fix" in r["generated_sql"].lower() or "t" in r["generated_sql"]
+        }, {}))
+        assert r["generated_sql"] == ""
+        assert "LLM" in r["execution_error"]
 
 
 class TestAnalyzeResultFallback:

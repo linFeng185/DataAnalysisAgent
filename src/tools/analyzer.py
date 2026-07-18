@@ -3,6 +3,12 @@
 from __future__ import annotations
 
 import math
+from decimal import Decimal
+
+from src.logging_config import get_logger
+
+logger = get_logger(__name__)
+_NUMERIC_TYPES = (int, float, Decimal)
 
 
 def compute_statistics(rows: list[dict]) -> dict:
@@ -89,16 +95,39 @@ def compute_correlation(col1: list[float], col2: list[float]) -> float:
     return round(cov / (s1 * s2), 4) if s1 and s2 else 0
 
 
+# 识别查询结果中的数值列，并兼容数据库 Decimal 类型。
+# Args: rows - 查询结果行列表。
+# Returns: 至少包含一个有效数值的列名列表。
 def _find_numeric(rows: list[dict]) -> list[str]:
+    logger.debug("数值列识别入口", row_count=len(rows))
+    if not rows:
+        logger.info("数值列识别完成", columns=[])
+        return []
     cols = []
     for key in rows[0]:
-        if any(isinstance(r.get(key), (int, float)) and not isinstance(r.get(key), bool) for r in rows):
+        if any(
+            isinstance(r.get(key), _NUMERIC_TYPES) and not isinstance(r.get(key), bool)
+            for r in rows
+        ):
             cols.append(key)
+    logger.info("数值列识别完成", columns=cols)
     return cols
 
 
+# 提取指定列的有效数值，并归一化为 float 供统计函数计算。
+# Args: rows - 查询结果行列表；col - 待提取的列名。
+# Returns: 排除空值、布尔值和非数值后的浮点数列表。
 def _extract(rows: list[dict], col: str) -> list[float]:
-    return [float(r[col]) for r in rows if r.get(col) is not None and isinstance(r.get(col), (int, float))]
+    logger.debug("数值提取入口", column=col, row_count=len(rows))
+    values = [
+        float(value)
+        for row in rows
+        if (value := row.get(col)) is not None
+        and isinstance(value, _NUMERIC_TYPES)
+        and not isinstance(value, bool)
+    ]
+    logger.info("数值提取完成", column=col, value_count=len(values))
+    return values
 
 
 def _pct(sorted_vals: list[float], p: float) -> float:

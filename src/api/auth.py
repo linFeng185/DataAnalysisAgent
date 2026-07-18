@@ -17,9 +17,10 @@ from contextvars import ContextVar
 from datetime import datetime, timedelta, timezone
 
 import jwt
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Request, Response
 from pydantic import BaseModel, Field
 from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.responses import JSONResponse
 
 from src.config import get_settings
 from src.logging_config import get_logger
@@ -31,6 +32,7 @@ logger = get_logger(__name__)
 _current_user_id: ContextVar[int] = ContextVar("current_user_id", default=0)
 _current_tenant_id: ContextVar[int] = ContextVar("current_tenant_id", default=1)
 _current_role: ContextVar[str] = ContextVar("current_role", default="anonymous")
+ACCESS_TOKEN_COOKIE = "access_token"
 
 
 def get_current_user_id() -> int:
@@ -54,9 +56,63 @@ def get_current_tenant_id() -> int:
     return _current_tenant_id.get()
 
 
+def get_current_role() -> str:
+    """获取当前请求的用户角色。
+
+    Returns:
+        当前角色；匿名请求返回 anonymous。
+    """
+    return _current_role.get()
+
+
+# 要求当前身份具备平台超级管理员权限。
+# Args: 无。
+# Returns: 授权成功时无返回值，否则抛出 HTTP 403。
+def require_super_admin() -> None:
+    logger.debug("校验超级管理员权限入口", role=get_current_role())
+    from src.knowledge.governance import is_super_admin
+
+    role = get_current_role()
+    if not is_super_admin(role):
+        logger.warning("校验超级管理员权限拒绝", role=role)
+        raise HTTPException(403, "需要超级管理员权限")
+    logger.info("校验超级管理员权限完成", role=role)
+
+
+# 要求当前身份具备租户管理权限或更高的平台权限。
+# Args: 无。
+# Returns: 授权成功时无返回值，否则抛出 HTTP 403。
+def require_tenant_admin() -> None:
+    logger.debug("校验租户管理员权限入口", role=get_current_role())
+    from src.knowledge.governance import is_super_admin, is_tenant_admin
+
+    role = get_current_role()
+    if not (is_super_admin(role) or is_tenant_admin(role)):
+        logger.warning("校验租户管理员权限拒绝", role=role)
+        raise HTTPException(403, "需要租户管理员权限")
+    logger.info("校验租户管理员权限完成", role=role)
+
+
+def scope_thread_id(session_id: str) -> str:
+    """为 Checkpointer 生成带租户和用户命名空间的线程 ID。
+
+    Args:
+        session_id: 对外暴露的会话 ID。
+
+    Returns:
+        不同用户无法碰撞的内部线程 ID。
+    """
+    tenant_id = get_current_tenant_id()
+    user_id = get_current_user_id()
+    logger.debug("会话线程命名空间入口", session_id=session_id[:20], tenant_id=tenant_id, user_id=user_id)
+    scoped = f"tenant:{tenant_id}:user:{user_id}:session:{session_id}"
+    logger.info("会话线程命名空间完成", scoped_session=scoped[-40:])
+    return scoped
+
+
 # ── JWT ──
 
-_secret: str | None = None
+_secret_cache: str | None = None
 
 
 def _secret() -> str:
@@ -64,9 +120,9 @@ def _secret() -> str:
 
     未配置时自动生成临时密钥（仅开发模式），打印生产警告。
     """
-    global _secret
-    if _secret is not None:
-        return _secret
+    global _secret_cache
+    if _secret_cache is not None:
+        return _secret_cache
 
     env_key = os.getenv("JWT_SECRET", "")
     cfg_key = get_settings().jwt_secret
@@ -80,7 +136,7 @@ def _secret() -> str:
     if key == "dev-secret-change-in-production" or len(key) < 16:
         logger.warning("JWT_SECRET 强度不足！生产环境请使用至少 32 字节的随机密钥。")
 
-    _secret = key
+    _secret_cache = key
     return key
 
 
@@ -94,11 +150,54 @@ def create_access_token(user_id: int, tenant_id: int, role: str) -> str:
 
     Returns: JWT 字符串
     """
+    logger.debug("创建访问令牌入口", user_id=user_id, tenant_id=tenant_id, role=role)
     s = get_settings()
-    return jwt.encode({
+    token = jwt.encode({
         "user_id": user_id, "tenant_id": tenant_id, "role": role,
         "exp": datetime.now(timezone.utc) + timedelta(hours=s.jwt_access_token_expire_hours),
     }, _secret(), algorithm="HS256")
+    logger.info("创建访问令牌完成", user_id=user_id, tenant_id=tenant_id)
+    return token
+
+
+def _set_access_cookie(response: Response, token: str) -> None:
+    """把访问令牌写入安全 Cookie。
+
+    Args:
+        response: FastAPI 响应对象。
+        token: 已签名的 JWT。
+
+    Returns:
+        无返回值。
+    """
+    settings = get_settings()
+    max_age = settings.jwt_access_token_expire_hours * 3600
+    logger.debug("设置访问 Cookie 入口", secure=settings.env == "prod", max_age=max_age)
+    response.set_cookie(
+        key=ACCESS_TOKEN_COOKIE,
+        value=token,
+        max_age=max_age,
+        httponly=True,
+        secure=settings.env == "prod",
+        samesite="lax",
+        path="/",
+    )
+    logger.info("设置访问 Cookie 完成", secure=settings.env == "prod")
+
+
+def _unauthorized(detail: str) -> JSONResponse:
+    """构造不会逃逸出中间件的 401 JSON 响应。
+
+    Args:
+        detail: 面向调用方的错误说明。
+
+    Returns:
+        HTTP 401 JSON 响应。
+    """
+    logger.debug("构造认证失败响应入口", detail=detail)
+    response = JSONResponse({"detail": detail}, status_code=401)
+    logger.info("构造认证失败响应完成", detail=detail)
+    return response
 
 
 # ── Pydantic 模型 ──
@@ -122,15 +221,17 @@ auth_router = APIRouter(prefix="/auth", tags=["auth"])
 
 
 @auth_router.post("/login")
-async def login(req: LoginRequest):
+async def login(req: LoginRequest, response: Response):
     """用户登录——验证密码，返回 JWT。
 
     Args:
         req: LoginRequest
 
-    Returns: {"access_token": str, "user_id": int, "tenant_id": int, "role": str}
+    Returns:
+        不含明文令牌的用户身份信息；令牌写入 HttpOnly Cookie。
     """
-    logger.info("登录请求", username=req.username)
+    logger.debug("登录入口", username=req.username)
+    conn = None
     try:
         import asyncpg
         s = get_settings()
@@ -138,7 +239,6 @@ async def login(req: LoginRequest):
         conn = await asyncpg.connect(url)
         row = await conn.fetchrow(
             "SELECT id, tenant_id, role, password_hash FROM users WHERE username=$1", req.username)
-        await conn.close()
         if not row:
             logger.warning("登录失败：用户不存在", username=req.username)
             raise HTTPException(401, "用户名或密码错误")
@@ -147,26 +247,31 @@ async def login(req: LoginRequest):
             logger.warning("登录失败：密码错误", username=req.username)
             raise HTTPException(401, "用户名或密码错误")
         token = create_access_token(row["id"], row["tenant_id"], row["role"])
+        _set_access_cookie(response, token)
         logger.info("登录成功", username=req.username, user_id=row["id"])
-        return {"access_token": token, "user_id": row["id"],
-                "tenant_id": row["tenant_id"], "role": row["role"]}
+        return {"user_id": row["id"], "tenant_id": row["tenant_id"], "role": row["role"]}
     except HTTPException:
         raise
-    except Exception as e:
-        logger.error("登录异常", error=str(e))
-        raise HTTPException(500, "登录服务暂不可用")
+    except Exception as exc:
+        logger.error("登录异常", error=str(exc), exc_info=True)
+        raise HTTPException(500, "登录服务暂不可用") from exc
+    finally:
+        if conn is not None:
+            await conn.close()
 
 
 @auth_router.post("/register")
-async def register(req: RegisterRequest):
+async def register(req: RegisterRequest, response: Response):
     """用户注册——创建用户，返回 JWT。
 
     Args:
         req: RegisterRequest
 
-    Returns: {"access_token": str, "user_id": int, "tenant_id": int, "role": "analyst"}
+    Returns:
+        不含明文令牌的用户身份信息；令牌写入 HttpOnly Cookie。
     """
-    logger.info("注册请求", username=req.username)
+    logger.debug("注册入口", username=req.username)
+    conn = None
     try:
         import asyncpg
         from passlib.hash import bcrypt
@@ -182,18 +287,69 @@ async def register(req: RegisterRequest):
         uid = await conn.fetchval(
             "INSERT INTO users (username, password_hash, role, tenant_id) "
             "VALUES ($1, $2, 'analyst', $3) RETURNING id", req.username, pwd, tid)
-        await conn.close()
         token = create_access_token(uid, tid, "analyst")
+        _set_access_cookie(response, token)
         logger.info("注册成功", username=req.username, user_id=uid, tenant_id=tid)
-        return {"access_token": token, "user_id": uid, "tenant_id": tid, "role": "analyst"}
-    except Exception as e:
-        logger.error("注册异常", error=str(e))
-        raise HTTPException(500, "注册服务暂不可用")
+        return {"user_id": uid, "tenant_id": tid, "role": "analyst"}
+    except Exception as exc:
+        logger.error("注册异常", error=str(exc), exc_info=True)
+        raise HTTPException(500, "注册服务暂不可用") from exc
+    finally:
+        if conn is not None:
+            await conn.close()
+
+
+@auth_router.post("/logout")
+async def logout(response: Response) -> dict:
+    """清除访问 Cookie 并结束浏览器会话。
+
+    Args:
+        response: FastAPI 响应对象。
+
+    Returns:
+        登出成功状态。
+    """
+    logger.debug("登出入口")
+    settings = get_settings()
+    response.delete_cookie(
+        key=ACCESS_TOKEN_COOKIE,
+        path="/",
+        httponly=True,
+        secure=settings.env == "prod",
+        samesite="lax",
+    )
+    logger.info("登出完成")
+    return {"status": "ok"}
+
+
+@auth_router.get("/me")
+async def current_user() -> dict:
+    """返回当前 Cookie/Bearer 身份和认证开关。
+
+    Returns:
+        当前身份、认证状态和服务端是否强制认证。
+    """
+    logger.debug("当前身份查询入口")
+    user_id = get_current_user_id()
+    result = {
+        "authenticated": user_id > 0,
+        "auth_required": get_settings().multi_tenant,
+        "user_id": user_id,
+        "tenant_id": get_current_tenant_id(),
+        "role": get_current_role(),
+    }
+    logger.info("当前身份查询完成", authenticated=result["authenticated"], user_id=user_id)
+    return result
 
 
 # ── 无需认证的公开端点 ──
 
-PUBLIC_PATHS = {"/api/v1/health", "/api/v1/auth/login", "/api/v1/auth/register"}
+PUBLIC_PATHS = {
+    "/api/v1/health",
+    "/api/v1/auth/login",
+    "/api/v1/auth/register",
+    "/api/v1/auth/logout",
+}
 _MGMT_METHODS = {"POST", "PUT", "DELETE", "PATCH"}
 
 
@@ -216,36 +372,61 @@ class AuthMiddleware(BaseHTTPMiddleware):
 
         Returns: Response
         """
-        # 公开端点放行
-        if request.url.path in PUBLIC_PATHS or request.url.path.startswith("/api/v1/auth/"):
-            return await call_next(request)
+        logger.debug("认证中间件入口", path=request.url.path, method=request.method)
+        if request.url.path in PUBLIC_PATHS:
+            response = await call_next(request)
+            logger.info("认证中间件完成", path=request.url.path, mode="public")
+            return response
 
         s = get_settings()
-        token = request.headers.get("Authorization", "").replace("Bearer ", "")
+
+        # 管理端点保护 — 在 token 校验之前执行，确保单租户模式也生效
+        admin_api_key = getattr(s, "admin_api_key", "")
+        if admin_api_key and request.method in _MGMT_METHODS:
+            if request.headers.get("X-Admin-Key", "") != admin_api_key:
+                logger.warning("管理端点认证失败", path=request.url.path)
+                return _unauthorized("管理端点需要 X-Admin-Key")
+
+        authorization = request.headers.get("Authorization", "")
+        bearer_token = authorization[7:].strip() if authorization.startswith("Bearer ") else ""
+        token = request.cookies.get(ACCESS_TOKEN_COOKIE, "") or bearer_token
+        is_auth_probe = request.url.path == "/api/v1/auth/me"
 
         if not token:
-            if s.multi_tenant:
-                raise HTTPException(401, "未提供认证令牌")
-            # 单租户模式：不强制登录
-            return await call_next(request)
+            if s.multi_tenant and not is_auth_probe:
+                logger.warning("认证令牌缺失", path=request.url.path)
+                return _unauthorized("未提供认证令牌")
+            logger.info("认证中间件匿名回退", path=request.url.path, probe=is_auth_probe)
 
+        identity = (0, 1, "anonymous")
         try:
-            payload = jwt.decode(token, _secret(), algorithms=["HS256"])
-            _current_user_id.set(payload["user_id"])
-            _current_tenant_id.set(payload["tenant_id"])
-            _current_role.set(payload["role"])
-            logger.debug("JWT 认证通过", user_id=payload["user_id"], role=payload["role"])
+            if token:
+                payload = jwt.decode(token, _secret(), algorithms=["HS256"])
+                identity = (
+                    int(payload["user_id"]),
+                    int(payload["tenant_id"]),
+                    str(payload["role"]),
+                )
         except jwt.ExpiredSignatureError:
             logger.info("JWT 已过期")
-            raise HTTPException(401, "令牌已过期")
-        except jwt.PyJWTError as e:
-            logger.warning("JWT 无效", error=str(e))
-            raise HTTPException(401, "令牌无效")
+            return _unauthorized("令牌已过期")
+        except (jwt.PyJWTError, KeyError, TypeError, ValueError) as exc:
+            logger.warning("JWT 无效", error=str(exc))
+            return _unauthorized("令牌无效")
 
-        # 管理端点保护
-        s2 = get_settings()
-        if s2.admin_api_key and request.method in _MGMT_METHODS:
-            if request.headers.get("X-Admin-Key", "") != s2.admin_api_key:
-                raise HTTPException(401, "管理端点需要 X-Admin-Key")
-
-        return await call_next(request)
+        user_context = _current_user_id.set(identity[0])
+        tenant_context = _current_tenant_id.set(identity[1])
+        role_context = _current_role.set(identity[2])
+        logger.info("请求身份已注入", user_id=identity[0], tenant_id=identity[1], role=identity[2])
+        try:
+            response = await call_next(request)
+            logger.info("认证中间件完成", path=request.url.path, user_id=identity[0])
+            return response
+        except Exception as exc:
+            logger.error("认证后请求异常", path=request.url.path, error=str(exc), exc_info=True)
+            raise
+        finally:
+            _current_user_id.reset(user_context)
+            _current_tenant_id.reset(tenant_context)
+            _current_role.reset(role_context)
+            logger.info("请求身份已清理", path=request.url.path)

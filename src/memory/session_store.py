@@ -24,8 +24,14 @@ class SessionStore:
         self._pg_ready: bool | None = None
 
     async def _ensure_pg(self) -> bool:
-        """确保 PG 表存在。"""
+        """确保包含身份列的 PG 表存在。
+
+        Returns:
+            PostgreSQL 可用且表结构就绪时返回 True。
+        """
+        logger.debug("会话 PG 初始化入口", cached=self._pg_ready)
         if self._pg_ready is not None:
+            logger.info("会话 PG 初始化命中缓存", ready=self._pg_ready)
             return self._pg_ready
         s = get_settings()
         url = s.database_url
@@ -42,43 +48,98 @@ class SessionStore:
                     title TEXT DEFAULT '',
                     datasource TEXT DEFAULT '',
                     first_query TEXT DEFAULT '',
+                    user_id INT NOT NULL DEFAULT 0,
+                    tenant_id INT NOT NULL DEFAULT 1,
                     created_at TIMESTAMPTZ DEFAULT NOW(),
                     last_active_at TIMESTAMPTZ DEFAULT NOW(),
                     turn_count INT DEFAULT 0
                 )
             """)
+            await conn.execute("ALTER TABLE sessions ADD COLUMN IF NOT EXISTS user_id INT NOT NULL DEFAULT 0")
+            await conn.execute("ALTER TABLE sessions ADD COLUMN IF NOT EXISTS tenant_id INT NOT NULL DEFAULT 1")
             await conn.execute(
-                "CREATE INDEX IF NOT EXISTS idx_sessions_last_active ON sessions (last_active_at DESC)")
+                "CREATE INDEX IF NOT EXISTS idx_sessions_identity_active "
+                "ON sessions (tenant_id, user_id, last_active_at DESC)")
             await conn.close()
             self._pg_ready = True
             logger.info("sessions 表已就绪（PG）")
             return True
-        except Exception as e:
-            logger.warning("sessions PG 不可用，使用内存模式", error=str(e))
+        except Exception as exc:
+            logger.error("sessions PG 不可用，使用内存模式", error=str(exc), exc_info=True)
             self._pg_ready = False
             return False
 
     async def _pg_conn(self):
+        """创建已注入当前身份参数的 PG 连接。
+
+        Returns:
+            可用的 asyncpg 连接；连接失败返回 None。
+        """
+        from src.api.auth import get_current_tenant_id, get_current_user_id
+
+        user_id = get_current_user_id()
+        tenant_id = get_current_tenant_id()
+        logger.debug("会话 PG 连接入口", user_id=user_id, tenant_id=tenant_id)
         s = get_settings()
         url = s.database_url
         try:
             import asyncpg
             pg_url = url.replace("postgresql+asyncpg://", "postgresql://")
-            return await asyncpg.connect(pg_url)
-        except Exception:
+            conn = await asyncpg.connect(pg_url)
+            await conn.execute(
+                "SELECT set_config('app.current_user_id', $1, false), "
+                "set_config('app.current_tenant_id', $2, false)",
+                str(user_id), str(tenant_id),
+            )
+            logger.info("会话 PG 连接完成", user_id=user_id, tenant_id=tenant_id)
+            return conn
+        except Exception as exc:
+            logger.error("会话 PG 连接失败", error=str(exc), exc_info=True)
             return None
 
     def _mem_item(self, session_id: str, title: str, datasource: str, first_query: str,
                   turn_count: int = 1) -> dict:
+        """创建绑定当前身份的内存会话记录。
+
+        Args:
+            session_id: 对外会话 ID。
+            title: 会话标题。
+            datasource: 数据源名称。
+            first_query: 首次用户查询。
+            turn_count: 初始轮次数。
+
+        Returns:
+            可写入内存缓冲区的会话字典。
+        """
+        from src.api.auth import get_current_tenant_id, get_current_user_id
+
+        logger.debug("构建内存会话入口", session_id=session_id[:20])
         now = datetime.now(timezone.utc)
-        return {
+        item = {
             "session_id": session_id, "title": title, "datasource": datasource,
             "first_query": first_query, "turn_count": turn_count,
+            "user_id": get_current_user_id(), "tenant_id": get_current_tenant_id(),
             "created_at": now.isoformat(), "last_active_at": now.isoformat(),
         }
+        logger.info("构建内存会话完成", session_id=session_id[:20], user_id=item["user_id"])
+        return item
 
     async def create(self, session_id: str, datasource: str, first_query: str) -> bool:
-        """创建新会话，title 由 first_query 截断。"""
+        """为当前身份创建新会话，title 由 first_query 截断。
+
+        Args:
+            session_id: 对外会话 ID。
+            datasource: 数据源名称。
+            first_query: 首次用户查询。
+
+        Returns:
+            创建成功返回 True。
+        """
+        from src.api.auth import get_current_tenant_id, get_current_user_id
+
+        user_id = get_current_user_id()
+        tenant_id = get_current_tenant_id()
+        logger.debug("创建会话入口", session_id=session_id[:20], user_id=user_id, tenant_id=tenant_id)
         title = (first_query[:30] + "…") if len(first_query) > 30 else first_query
 
         # 内存写入（始终成功）
@@ -93,16 +154,21 @@ class SessionStore:
                 try:
                     now = datetime.now(timezone.utc)
                     await conn.execute(
-                        "INSERT INTO sessions (session_id, title, datasource, first_query, created_at, last_active_at, turn_count) "
-                        "VALUES ($1, $2, $3, $4, $5, $5, 1) ON CONFLICT (session_id) DO UPDATE SET "
-                        "last_active_at = $5, turn_count = sessions.turn_count + 1",
-                        session_id, title, datasource, first_query, now)
-                except Exception as e:
-                    logger.debug("会话 PG 写入失败", error=str(e))
+                        "INSERT INTO sessions "
+                        "(session_id, title, datasource, first_query, user_id, tenant_id, "
+                        "created_at, last_active_at, turn_count) "
+                        "VALUES ($1, $2, $3, $4, $5, $6, $7, $7, 1) "
+                        "ON CONFLICT (session_id) DO UPDATE SET "
+                        "last_active_at = $7, turn_count = sessions.turn_count + 1 "
+                        "WHERE sessions.user_id = EXCLUDED.user_id "
+                        "AND sessions.tenant_id = EXCLUDED.tenant_id",
+                        session_id, title, datasource, first_query, user_id, tenant_id, now)
+                except Exception as exc:
+                    logger.error("会话 PG 写入失败", error=str(exc), exc_info=True)
                 finally:
                     await conn.close()
 
-        logger.info("会话已创建", session_id=session_id[:20])
+        logger.info("会话已创建", session_id=session_id[:20], user_id=user_id, tenant_id=tenant_id)
         return True
 
     async def touch(self, session_id: str, datasource: str = "", first_query: str = "") -> bool:
@@ -116,12 +182,19 @@ class SessionStore:
             datasource - 数据源（创建时填入）
             first_query - 首次提问（创建时填入 title）
         """
+        from src.api.auth import get_current_tenant_id, get_current_user_id
+
+        user_id = get_current_user_id()
+        tenant_id = get_current_tenant_id()
+        logger.debug("更新会话入口", session_id=session_id[:20], user_id=user_id, tenant_id=tenant_id)
         now = datetime.now(timezone.utc)
 
         # 内存更新/创建
         found = False
         for item in self._items:
-            if item["session_id"] == session_id:
+            if (item["session_id"] == session_id
+                    and item.get("user_id") == user_id
+                    and item.get("tenant_id") == tenant_id):
                 item["last_active_at"] = now.isoformat()
                 item["turn_count"] = item.get("turn_count", 0) + 1
                 found = True
@@ -135,42 +208,68 @@ class SessionStore:
             conn = await self._pg_conn()
             if conn:
                 try:
-                    if found or not first_query:
-                        await conn.execute(
-                            "UPDATE sessions SET last_active_at = $1, turn_count = turn_count + 1 "
-                            "WHERE session_id = $2", now, session_id)
-                    else:
+                    status = await conn.execute(
+                        "UPDATE sessions SET last_active_at = $1, turn_count = turn_count + 1 "
+                        "WHERE session_id = $2 AND user_id = $3 AND tenant_id = $4",
+                        now, session_id, user_id, tenant_id,
+                    )
+                    if status.endswith(" 0"):
                         title = (first_query[:30] + "…") if len(first_query) > 30 else first_query
                         await conn.execute(
-                            "INSERT INTO sessions (session_id, title, datasource, first_query, last_active_at, turn_count) "
-                            "VALUES ($1, $2, $3, $4, $5, 1) ON CONFLICT (session_id) DO UPDATE SET "
-                            "last_active_at = $5, turn_count = sessions.turn_count + 1",
-                            session_id, title, datasource, first_query, now)
-                except Exception:
-                    pass
+                            "INSERT INTO sessions "
+                            "(session_id, title, datasource, first_query, user_id, tenant_id, "
+                            "created_at, last_active_at, turn_count) "
+                            "VALUES ($1, $2, $3, $4, $5, $6, $7, $7, 1) "
+                            "ON CONFLICT (session_id) DO NOTHING",
+                            session_id, title, datasource, first_query, user_id, tenant_id, now)
+                except Exception as exc:
+                    logger.error("会话 PG 更新失败", error=str(exc), exc_info=True)
                 finally:
                     await conn.close()
+        logger.info("更新会话完成", session_id=session_id[:20], user_id=user_id)
         return True
 
     async def list(self, cursor: str | None = None, limit: int = 20) -> list[dict]:
-        """游标分页列出会话。PG 优先，内存回退。"""
+        """按当前身份游标分页列出会话。
+
+        Args:
+            cursor: 上一页最后活跃时间。
+            limit: 最大返回条数。
+
+        Returns:
+            当前身份可见的会话列表。
+        """
+        from src.api.auth import get_current_tenant_id, get_current_user_id
+
+        user_id = get_current_user_id()
+        tenant_id = get_current_tenant_id()
+        logger.debug("列出会话入口", user_id=user_id, tenant_id=tenant_id, cursor=cursor, limit=limit)
         if await self._ensure_pg():
             conn = await self._pg_conn()
             if conn:
                 try:
                     if cursor:
+                        pg_cursor = datetime.fromisoformat(cursor.replace("Z", "+00:00"))
+                        if pg_cursor.tzinfo is None:
+                            logger.warning("会话游标缺少时区，按 UTC 解析", cursor=cursor)
+                            pg_cursor = pg_cursor.replace(tzinfo=timezone.utc)
+                        logger.info("会话 PG 游标解析完成", cursor=pg_cursor.isoformat())
                         rows = await conn.fetch(
                             "SELECT session_id, title, datasource, turn_count, created_at, last_active_at "
-                            "FROM sessions WHERE last_active_at < $1::timestamptz "
-                            "ORDER BY last_active_at DESC LIMIT $2", cursor, limit)
+                            "FROM sessions WHERE tenant_id = $1 AND user_id = $2 "
+                            "AND last_active_at < $3::timestamptz "
+                            "ORDER BY last_active_at DESC LIMIT $4", tenant_id, user_id, pg_cursor, limit)
                     else:
                         rows = await conn.fetch(
                             "SELECT session_id, title, datasource, turn_count, created_at, last_active_at "
-                            "FROM sessions ORDER BY last_active_at DESC LIMIT $1", limit)
+                            "FROM sessions WHERE tenant_id = $1 AND user_id = $2 "
+                            "ORDER BY last_active_at DESC LIMIT $3", tenant_id, user_id, limit)
                     await conn.close()
-                    return [_row_to_dict(r) for r in rows]
-                except Exception:
-                    pass
+                    result = [_row_to_dict(r) for r in rows]
+                    logger.info("列出会话完成", source="postgres", count=len(result), user_id=user_id)
+                    return result
+                except Exception as exc:
+                    logger.error("会话 PG 查询失败", error=str(exc), exc_info=True)
                 finally:
                     try:
                         await conn.close()
@@ -178,25 +277,46 @@ class SessionStore:
                         pass
 
         # 内存回退：按 last_active_at 降序，游标分页
-        sorted_items = sorted(self._items, key=lambda x: x.get("last_active_at", ""), reverse=True)
+        visible_items = [
+            item for item in self._items
+            if item.get("user_id") == user_id and item.get("tenant_id") == tenant_id
+        ]
+        sorted_items = sorted(visible_items, key=lambda x: x.get("last_active_at", ""), reverse=True)
         if cursor:
             sorted_items = [i for i in sorted_items if i.get("last_active_at", "") < cursor]
-        return sorted_items[:limit]
+        result = sorted_items[:limit]
+        logger.info("列出会话完成", source="memory", count=len(result), user_id=user_id)
+        return result
 
     async def get(self, session_id: str) -> dict | None:
-        """获取单个会话元数据。"""
+        """获取当前身份拥有的单个会话元数据。
+
+        Args:
+            session_id: 对外会话 ID。
+
+        Returns:
+            可见的会话字典；不存在或无权访问返回 None。
+        """
+        from src.api.auth import get_current_tenant_id, get_current_user_id
+
+        user_id = get_current_user_id()
+        tenant_id = get_current_tenant_id()
+        logger.debug("获取会话入口", session_id=session_id[:20], user_id=user_id, tenant_id=tenant_id)
         if await self._ensure_pg():
             conn = await self._pg_conn()
             if conn:
                 try:
                     row = await conn.fetchrow(
                         "SELECT session_id, title, datasource, turn_count, created_at, last_active_at "
-                        "FROM sessions WHERE session_id = $1", session_id)
+                        "FROM sessions WHERE session_id = $1 AND tenant_id = $2 AND user_id = $3",
+                        session_id, tenant_id, user_id)
                     await conn.close()
                     if row:
-                        return _row_to_dict(row)
-                except Exception:
-                    pass
+                        result = _row_to_dict(row)
+                        logger.info("获取会话完成", source="postgres", found=True, user_id=user_id)
+                        return result
+                except Exception as exc:
+                    logger.error("会话 PG 读取失败", error=str(exc), exc_info=True)
                 finally:
                     try:
                         await conn.close()
@@ -204,24 +324,54 @@ class SessionStore:
                         pass
 
         for item in self._items:
-            if item["session_id"] == session_id:
+            if (item["session_id"] == session_id
+                    and item.get("tenant_id") == tenant_id
+                    and item.get("user_id") == user_id):
+                logger.info("获取会话完成", source="memory", found=True, user_id=user_id)
                 return item
+        logger.info("获取会话完成", source="memory", found=False, user_id=user_id)
         return None
 
     async def delete(self, session_id: str) -> bool:
-        """删除会话。"""
-        self._items = [i for i in self._items if i["session_id"] != session_id]
+        """删除当前身份拥有的会话。
+
+        Args:
+            session_id: 对外会话 ID。
+
+        Returns:
+            确实删除了可见会话时返回 True。
+        """
+        from src.api.auth import get_current_tenant_id, get_current_user_id
+
+        user_id = get_current_user_id()
+        tenant_id = get_current_tenant_id()
+        logger.debug("删除会话入口", session_id=session_id[:20], user_id=user_id, tenant_id=tenant_id)
+        original_count = len(self._items)
+        self._items = [
+            item for item in self._items
+            if not (
+                item["session_id"] == session_id
+                and item.get("tenant_id") == tenant_id
+                and item.get("user_id") == user_id
+            )
+        ]
+        deleted = len(self._items) < original_count
 
         if await self._ensure_pg():
             conn = await self._pg_conn()
             if conn:
                 try:
-                    await conn.execute("DELETE FROM sessions WHERE session_id = $1", session_id)
-                except Exception:
-                    pass
+                    status = await conn.execute(
+                        "DELETE FROM sessions WHERE session_id = $1 AND tenant_id = $2 AND user_id = $3",
+                        session_id, tenant_id, user_id,
+                    )
+                    deleted = deleted or not status.endswith(" 0")
+                except Exception as exc:
+                    logger.error("会话 PG 删除失败", error=str(exc), exc_info=True)
                 finally:
                     await conn.close()
-        return True
+        logger.info("删除会话完成", session_id=session_id[:20], deleted=deleted, user_id=user_id)
+        return deleted
 
 
 def _row_to_dict(row) -> dict:

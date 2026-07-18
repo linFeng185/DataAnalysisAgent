@@ -10,6 +10,7 @@ export type SSEEventType =
 export interface SSEEvent {
   type: SSEEventType;
   node?: string;
+  stream_id?: string;
   message?: string;
   content?: string;
   reasoning_content?: string;
@@ -24,12 +25,21 @@ export interface SSEEvent {
   [key: string]: unknown;
 }
 
+export interface SQLStatement {
+  datasource: string;
+  dialect: string;
+  sql: string;
+}
+
 export interface ChatResponse {
   success: boolean;
   user_query: string;
   sql: string;
+  sql_statements: SQLStatement[];
   sql_reasoning_content?: string;
   data: Record<string, unknown>[];
+  row_count: number;
+  truncated: boolean;
   analysis: {
     summary: string;
     insights: string[];
@@ -104,6 +114,25 @@ export interface SkillInfo {
   tools: string[];
   dependencies: string[];
   is_builtin: boolean;
+  scope: KnowledgeScope;
+  tenant_id: number;
+  owner_user_id: number;
+}
+
+export type KnowledgeScope = 'system' | 'tenant' | 'private';
+
+export interface KnowledgeTag {
+  id: number;
+  name: string;
+  slug: string;
+  tag_group: string;
+  aliases: string[];
+  description: string;
+  scope: 'global' | 'private';
+  tenant_id: number | null;
+  owner_user_id: number | null;
+  is_active: boolean;
+  is_seed: boolean;
 }
 
 export interface KnowledgeEntry {
@@ -114,6 +143,12 @@ export interface KnowledgeEntry {
   table_name: string;
   source: string;
   source_file: string;
+  scope: KnowledgeScope;
+  tag_ids: number[];
+  tags: string[];
+  tenant_id?: number | null;
+  owner_user_id?: number | null;
+  can_delete: boolean;
   is_builtin: boolean;
 }
 
@@ -121,6 +156,12 @@ export interface KnowledgeDoc {
   name: string;
   size: number;
   modified: number;
+  scope: KnowledgeScope;
+  datasource?: string;
+  tag_ids: number[];
+  tenant_id?: number | null;
+  owner_user_id?: number | null;
+  can_delete: boolean;
   is_builtin: boolean;
 }
 
@@ -139,6 +180,7 @@ export interface ChatTurnData {
   assistant_summary: string;
   sql: string;
   timestamp: string;
+  final_result: Record<string, unknown>;
 }
 
 export interface SessionListResponse {
@@ -150,15 +192,20 @@ export interface SessionListResponse {
 /** 会话最新一轮的富数据，用于恢复完整 UI */
 export interface SessionLatestState {
   sql: string;
+  sql_statements?: SQLStatement[];
   analysis: Record<string, unknown>;
   chart: Record<string, unknown>;
   data: Record<string, unknown>[];
+  row_count: number;
+  truncated: boolean;
   success: boolean;
   error_message: string;
+  sql_reasoning_content?: string;
 }
 
 export interface SessionDetailResponse {
   session: SessionInfo;
   turns: ChatTurnData[];
   latest_state: SessionLatestState | null;
+  has_more: boolean;
 }

@@ -17,6 +17,10 @@
 | 6.1.9 | _format_table_summary() | 同上 | 格式化为表级描述文本 | 开发完成 |
 | 6.1.10 | _format_column_detail() | 同上 | 格式化为字段级描述文本 | 开发完成 |
 | 6.1.11 | _execute_metadata_query() | 同上 | 执行元数据查询 → 通过 introspect_database() 间接实现 | 开发完成 |
+| 6.1.12 | 连接身份指纹 | `src/knowledge/datasource_cache.py` | 按规范化连接信息生成稳定指纹，不含用户/会话/显示名称 | 单测完成 | P1 |
+| 6.1.13 | LocalDatasourceCache | 同上 | JSON 持久化、TTL 校验、损坏文件隔离和原子替换 | 单测完成 | P1 |
+| 6.1.14 | RedisDatasourceCache | 同上 | Redis `GET/SET EX/DELETE` 多实例共享缓存 | 单测完成 | P1 |
+| 6.1.15 | SchemaManager 共享缓存接入 | `src/knowledge/schema_manager.py` | 同连接跨用户/别名复用，缓存失败降级实时内省 | 单测完成 | P1 |
 
 ### 6.2 知识条目
 
@@ -69,10 +73,48 @@
 
 | # | 功能 | 文件 | 描述 | 状态 | 优先级 |
 |---|------|------|------|------|--------|
-| 6.7.1 | 多格式解析 | `src/knowledge/doc_parser.py` | PDF (PyPDF2) / Word / TXT / MD 文本提取 | 开发完成 | P2 |
+| 6.7.1 | 多格式解析 | `src/knowledge/doc_parser.py`、`src/knowledge/document_assets.py` | PDF (PyPDF2) / Word / TXT / MD 文本提取，并保留页码、段落、标题和表格定位 | 单测完成 | P2 |
 | 6.7.2 | 智能分块引擎 | 同上 | 4 种策略 + 重叠 + 最小块配置 | 开发完成 | P2 |
 | 6.7.3 | 异步上传任务 | `src/knowledge/upload_manager.py` | UploadTask 状态 + asyncio 后台 + ChromaDB 写入 | 开发完成 | P2 |
 | 6.7.4 | 上传/查询 API | `src/api/routes.py` | POST upload + GET status + GET content + GET raw | 开发完成 | P2 |
 | 6.7.5 | 删除保护 | 同上 | 系统条目/文档禁止删除 | 开发完成 | P2 |
+
+### 6.8 知识治理与证据契约（Phase A）
+
+| # | 功能 | 文件 | 描述 | 状态 | 优先级 |
+|---|------|------|------|------|--------|
+| 6.8.1 | build_knowledge_filters() | `src/knowledge/retrieval.py` | 统一 tenant/visibility/datasource/category/asset 过滤 | 单测完成 | P0 |
+| 6.8.2 | search_knowledge() | 同上 | VectorStore 安全检索并转换为 Evidence/Citation | 单测完成 | P0 |
+| 6.8.3 | DataAsset/Evidence 契约 | `src/knowledge/asset_models.py` | 统一资产、证据、分析计划和产物模型 | 单测完成 | P0 |
+| 6.8.4 | KnowledgeEntry 来源版本 | `src/knowledge/models.py` | checksum/版本/页码或 Sheet 定位/embedding 版本 | 单测完成 | P1 |
+| 6.8.5 | 上传 VectorStore 收口 | `src/knowledge/upload_manager.py` | 上传写入统一走 VectorStore，不访问 Chroma 私有对象 | 单测完成 | P0 |
+| 6.8.6 | 知识管理 API VectorStore 收口 | `src/api/routes.py` | 列表/删除通过抽象接口并保留租户和所有者检查 | 单测完成 | P0 |
+| 6.8.7 | 混合召回 | `src/knowledge/retrieval.py` | 向量召回与正文/字段关键词精确匹配融合，保持同一 ACL 过滤 | 单测完成 | P1 |
+| 6.8.8 | 不可信内容隔离 | `src/knowledge/content_safety.py`、`src/graph/nodes/retrieve_schema.py` | 检测提示词注入、证据分隔渲染，禁止文档内容改变系统指令或工具权限 | 单测完成 | P0 |
+| 6.8.9 | LightweightReranker | `src/knowledge/reranker.py` | 对向量/关键词候选按字段精确度、来源多样性和相似度做确定性重排 | 单测完成 | P1 |
+| 6.8.10 | RetrievalEvaluation | `src/knowledge/retrieval_eval.py` | 计算 Recall@K、MRR、引用命中率和租户越权召回指标 | 单测完成 | P1 |
+
+### 6.9 三范围知识与标签治理
+
+| # | 功能 | 文件 | 描述 | 状态 | 优先级 |
+|---|------|------|------|------|--------|
+| 6.9.1 | KnowledgeScope 权限模型 | `src/knowledge/governance.py` | system/tenant/private 三范围读写授权，区分 super_admin 与 tenant_admin | 单测完成 | P0 |
+| 6.9.2 | KnowledgeTagStore | `src/knowledge/tag_store.py` | 全局/个人标签持久化、搜索、创建、停用与提升 | 单测完成 | P1 |
+| 6.9.3 | 标签初始化 | `migrations/003_knowledge_governance.sql` | 初始化知识类型和数据库技术标签，不预置业务领域标签 | 单测完成 | P1 |
+| 6.9.4 | 多范围安全检索 | `src/knowledge/retrieval.py` | system + 当前租户 tenant + 当前用户 private 分范围召回、去重与重排 | 单测完成 | P0 |
+| 6.9.5 | 范围化文档上传 | `src/knowledge/upload_manager.py`、`file_store.py` | 上传范围、数据源绑定、多标签 metadata 与文件 ACL | 单测完成 | P0 |
+| 6.9.6 | 系统知识目录扫描 | `src/knowledge/system_scanner.py` | SYSTEM_KNOWLEDGE_DIRS 启动扫描、checksum 幂等摄取 | 单测完成 | P1 |
+
+### 模块收尾
+
+模块功能点共 57 项，已完成 52 项，待开发 5 项。
+
+| 功能点 | 不开发原因 | 可开发条件 | 预计开发时机 |
+|--------|------------|------------|--------------|
+| 6.4.1 CacheRefresher 类 | 本轮只完成按请求 TTL 失效，后台刷新需要持久化任务和进程生命周期设计 | 确定调度器、任务状态表和多实例主节点策略 | Phase 3，知识摄取任务持久化批次 |
+| 6.4.2 refresh_expired() | 当前本地/Redis 精确缓存会在读取时删除过期项，批量扫描需要后端统一索引 | CacheRefresher 和可分页缓存索引完成 | Phase 3，随 6.4.1 开发 |
+| 6.4.3 refresh_on_schema_change() | 各数据库 DDL 更新时间与权限差异较大，尚无统一变更指纹契约 | 完成五种方言的 Schema fingerprint 和轮询成本评测 | Phase 3，Schema 新鲜度治理批次 |
+| 6.4.4 DDL 触发器/CDC 集成 | 依赖数据库侧权限和外部 CDC 基础设施，不适合默认部署 | 选定 CDC 平台并明确各数据源授权方式 | Phase 4，生产实时元数据阶段 |
+| 6.4.5 Redis 分布式锁 | 当前 Redis 后端已共享载荷，但并发刷新锁需与后台刷新/租约续期共同设计 | Redis 作为生产缓存且 CacheRefresher 方案确认 | Phase 3，多实例刷新批次 |
 
 ---

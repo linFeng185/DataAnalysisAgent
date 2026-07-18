@@ -90,6 +90,24 @@ class KnowledgeEntry:
     metadata: dict = field(default_factory=dict)
     """扩展元数据（如字段类型、是否主键、枚举值列表等）"""
 
+    asset_id: str = ""
+    """关联的统一 DataAsset ID。"""
+
+    source_file: str = ""
+    """原始文件名或文档 URI。"""
+
+    document_version: str = "v1"
+    """原始文档或知识版本。"""
+
+    locator: dict = field(default_factory=dict)
+    """页码、段落、Sheet、单元格或结果行定位。"""
+
+    checksum: str = ""
+    """原始资产 checksum，用于幂等摄取。"""
+
+    embedding_version: str = ""
+    """向量模型/版本标识。"""
+
     def is_expired(self) -> bool:
         """判断该条目是否已过期。"""
         if self.ttl == 0:
@@ -111,6 +129,15 @@ class KnowledgeEntry:
             "created_at": self.created_at.isoformat(),
             "ttl": str(self.ttl),
             "meta_json": _json.dumps(self.metadata, ensure_ascii=False) if self.metadata else "{}",
+            "tenant_id": int(self.metadata.get("tenant_id", 1)),
+            "owner_user_id": int(self.metadata.get("owner_user_id", 0)),
+            "visibility": str(self.metadata.get("visibility", "tenant")),
+            "asset_id": self.asset_id or str(self.metadata.get("asset_id", "")),
+            "source_file": self.source_file or str(self.metadata.get("source_file", "")),
+            "document_version": self.document_version,
+            "locator_json": _json.dumps(self.locator, ensure_ascii=False),
+            "checksum": self.checksum,
+            "embedding_version": self.embedding_version,
         }
 
     @classmethod
@@ -142,6 +169,9 @@ class KnowledgeEntry:
             extra = _json.loads(meta_json) if isinstance(meta_json, str) else {}
         except (_json.JSONDecodeError, TypeError):
             extra = {}
+        for key in ("tenant_id", "owner_user_id", "visibility"):
+            if key in d and key not in extra:
+                extra[key] = d[key]
 
         ttl_str = d.get("ttl", "0")
         try:
@@ -152,6 +182,13 @@ class KnowledgeEntry:
         tags = d.get("tags", [])
         if tags == [""] or tags is None:
             tags = []
+
+        locator = d.get("locator", {})
+        if not locator and isinstance(d.get("locator_json"), str):
+            try:
+                locator = _json.loads(d["locator_json"])
+            except (_json.JSONDecodeError, TypeError):
+                locator = {}
 
         return cls(
             id=d.get("id", ""),
@@ -164,4 +201,10 @@ class KnowledgeEntry:
             created_at=created_at,
             ttl=ttl,
             metadata=extra,
+            asset_id=str(d.get("asset_id", extra.get("asset_id", "")) or ""),
+            source_file=str(d.get("source_file", extra.get("source_file", "")) or ""),
+            document_version=str(d.get("document_version", "v1") or "v1"),
+            locator=locator if isinstance(locator, dict) else {},
+            checksum=str(d.get("checksum", "") or ""),
+            embedding_version=str(d.get("embedding_version", "") or ""),
         )

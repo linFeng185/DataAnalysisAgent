@@ -20,9 +20,24 @@ class BusinessRuleStore:
     """
 
     def __init__(self, collection, docs_dir: str = "docs/metrics") -> None:
+        """初始化业务规则存储并保留注入的 collection。
+
+        Args:
+            collection: ChromaDB collection 或 VectorStore 实例。
+            docs_dir: 业务规则文档目录。
+
+        Returns:
+            无返回值。
+        """
+        from src.memory.vector_store import VectorStore
+        from src.memory.vector_store_chroma import ChromaVectorStore
+
+        logger.debug("业务规则存储初始化入口", docs_dir=docs_dir)
         self._collection = collection
+        self._store = collection if isinstance(collection, VectorStore) else ChromaVectorStore(collection)
         self._docs_dir = docs_dir
         self._initialized = False
+        logger.info("业务规则存储初始化完成", docs_dir=docs_dir)
 
     async def initialize(self) -> None:
         """扫描 docs/metrics/ → DocLoader → 幂等写入 ChromaDB。"""
@@ -51,9 +66,12 @@ class BusinessRuleStore:
         后续 Phase 可升级为语义向量检索。
         """
         try:
-            from src.memory.vector_store import get_vector_store
-            store = await get_vector_store()
-            results = await store.get_by_filter({"category": "business_rule"}, limit=top_k)
+            filters = {"category": "business_rule"}
+            from src.config import get_settings
+            if get_settings().multi_tenant:
+                from src.api.auth import get_current_tenant_id
+                filters["tenant_id"] = get_current_tenant_id()
+            results = await self._store.get_by_filter(filters, limit=top_k)
             return [KnowledgeEntry.from_dict({"id": r.id, "content": r.content, **r.metadata})
                     for r in results]
         except Exception as e:
@@ -65,9 +83,10 @@ class BusinessRuleStore:
         if not entries:
             return
         try:
-            from src.memory.vector_store import VectorEntry, get_vector_store
-            store = await get_vector_store()
-            await store.upsert([VectorEntry(id=e.id, content=e.content, metadata=e.to_dict())
-                                for e in entries])
+            from src.memory.vector_store import VectorEntry
+            await self._store.upsert([
+                VectorEntry(id=e.id, content=e.content, metadata=e.to_dict())
+                for e in entries
+            ])
         except Exception as e:
             logger.error("业务规则写入失败", error=str(e))

@@ -36,6 +36,168 @@ class TestConnectionURL:
         url = PostgreSQLConnector(ds)._build_url()  # noqa: SLF001
         assert url == "postgresql+asyncpg://ro:p@pg:5432/analytics"
 
+    @pytest.mark.asyncio
+    async def test_oracle_create_engine_is_async_and_uses_service_name(self, monkeypatch):
+        """Oracle 首次执行创建引擎时必须可 await，并使用 service_name 连接服务。"""
+        # Arrange
+        from src.connectors import oracle as oracle_module
+        from src.connectors.oracle import OracleConnector
+
+        ds = _ds(
+            "oracle",
+            host="oracle.local",
+            port=1521,
+            database="XEPDB1",
+            username="reader",
+            password="secret",
+        )
+        captured: dict[str, object] = {}
+
+        def fake_create_engine(url, **kwargs):
+            captured["url"] = url
+            captured["kwargs"] = kwargs
+            return object()
+
+        monkeypatch.setattr(oracle_module.sa, "create_engine", fake_create_engine)
+        connector = OracleConnector(ds)
+
+        # Act
+        engine = await connector.create_engine()
+
+        # Assert
+        assert engine is connector.engine
+        assert "service_name=XEPDB1" in str(captured["url"])
+
+    @pytest.mark.asyncio
+    async def test_oracle_execute_returns_dict_rows(self):
+        """Oracle execute 应在线程池中运行并返回 list[dict]。"""
+        # Arrange
+        from src.connectors.oracle import OracleConnector
+
+        class Row:
+            _mapping = {"id": 1}
+
+        class Connection:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def execute(self, statement, params):
+                assert str(statement) == "SELECT 1"
+                assert params == {}
+                return type("Result", (), {"fetchall": lambda self: [Row()]})()
+
+        class Engine:
+            def connect(self):
+                return Connection()
+
+        connector = OracleConnector(_ds("oracle"))
+        connector._engine = Engine()  # noqa: SLF001
+
+        # Act
+        result = await connector.execute("SELECT 1")
+
+        # Assert
+        assert result == [{"id": 1}]
+
+    @pytest.mark.asyncio
+    async def test_oracle_health_check_uses_dual(self):
+        """Oracle health_check 必须使用 DUAL 探针。"""
+        # Arrange
+        from unittest.mock import AsyncMock
+        from src.connectors.oracle import OracleConnector
+
+        connector = OracleConnector(_ds("oracle"))
+        connector.execute = AsyncMock(return_value=[])  # type: ignore[method-assign]
+
+        # Act
+        result = await connector.health_check()
+
+        # Assert
+        assert result is True
+        connector.execute.assert_awaited_once_with("SELECT 1 FROM DUAL")
+
+    @pytest.mark.asyncio
+    async def test_oracle_explain_reports_failure(self):
+        """Oracle explain 失败时返回语义错误摘要。"""
+        # Arrange
+        from unittest.mock import AsyncMock
+        from src.connectors.oracle import OracleConnector
+
+        connector = OracleConnector(_ds("oracle"))
+        connector.execute = AsyncMock(side_effect=RuntimeError("ORA-00933"))  # type: ignore[method-assign]
+
+        # Act
+        result = await connector.explain("SELECT 1")
+
+        # Assert
+        assert result["valid"] is False
+        assert result["errors"][0]["type"] == "semantic_error"
+        connector.execute.assert_awaited_once_with("EXPLAIN PLAN FOR SELECT 1")
+
+    @pytest.mark.asyncio
+    async def test_oracle_close_disposes_sync_engine(self):
+        """Oracle close 应在线程池中释放同步引擎并清空引用。"""
+        # Arrange
+        from src.connectors.oracle import OracleConnector
+
+        class Engine:
+            disposed = False
+
+            def dispose(self):
+                self.disposed = True
+
+        connector = OracleConnector(_ds("oracle"))
+        engine = Engine()
+        connector._engine = engine  # noqa: SLF001
+
+        # Act
+        await connector.close()
+
+        # Assert
+        assert engine.disposed is True
+        assert connector.engine is None
+
+    @pytest.mark.asyncio
+    async def test_clickhouse_connector_uses_clickhouse_connect_client(self, monkeypatch):
+        """ClickHouseConnector 首次执行应使用已安装的 clickhouse-connect 客户端。"""
+        # Arrange
+        from src.connectors import clickhouse as clickhouse_module
+        from src.connectors.clickhouse import ClickHouseConnector
+
+        class QueryResult:
+            column_names = ["value"]
+            result_rows = [(1,)]
+
+        class FakeClient:
+            def __init__(self):
+                self.queries: list[str] = []
+
+            def query(self, sql, parameters=None):
+                self.queries.append(sql)
+                return QueryResult()
+
+            def close(self):
+                return None
+
+        client = FakeClient()
+        import clickhouse_connect
+        monkeypatch.setattr(clickhouse_connect, "get_client", lambda **kwargs: client)
+        connector = ClickHouseConnector(_ds(
+            "clickhouse", host="ch.local", port=9000,
+            database="default", username="reader", password="secret",
+        ))
+
+        # Act
+        await connector.create_engine()
+        result = await connector.execute("SELECT 1")
+
+        # Assert
+        assert result == [{"value": 1}]
+        assert client.queries == ["SELECT 1"]
+
 
 # ================================================================
 # 工厂 (3.1)

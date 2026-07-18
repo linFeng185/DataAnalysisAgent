@@ -11,7 +11,7 @@ def test_route_file_analysis():
 
 def test_route_metadata():
     from src.graph.workflow import route_by_intent
-    assert route_by_intent({"intent": "metadata"}) == "llm_direct_answer"
+    assert route_by_intent({"intent": "metadata"}) == "retrieve_schema"
 
 def test_route_chat():
     from src.graph.workflow import route_by_intent

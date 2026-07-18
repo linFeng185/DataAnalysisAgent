@@ -8,17 +8,22 @@ from datetime import date, datetime
 from decimal import Decimal
 
 from src.graph.state import AnalysisState
-from src.llm.client import get_llm, is_llm_available
+from src.llm.client import get_task_llm as _get_task_llm
+from src.llm.client import is_task_llm_available as _is_task_llm_available
 from src.llm.prompts import DATA_ANALYSIS_SYSTEM
 from src.logging_config import get_logger
 
 
 def _json_default(obj):
-    """处理 date/datetime/Decimal，供 json.dumps 使用。"""
+    """处理 date/datetime/Decimal，Decimal 保持精确。"""
     if isinstance(obj, (datetime, date)):
         return obj.isoformat()
     if isinstance(obj, Decimal):
-        return float(obj)
+        normalized = obj.normalize()
+        __, __, exp = normalized.as_tuple()
+        if exp >= 0:
+            return int(normalized)
+        return float(normalized) if abs(exp) <= 12 else str(normalized)
     raise TypeError(f"Type {type(obj)} not serializable")
 from src.tools.processors import *  # noqa: F401 — 触发 @register 注册
 from src.tools.analyzer import (
@@ -33,6 +38,28 @@ from src.tools.analyzer import (
 logger = get_logger(__name__)
 
 
+# 方法作用：兼容旧测试和扩展点，同时检查分析任务的模型可用性。
+# Args: 无。
+# Returns: 本地分析模型或显式远程兜底可用时返回 True。
+def is_llm_available() -> bool:
+    """返回结果分析任务的模型可用状态。"""
+    logger.debug("分析任务模型可用性入口")
+    available = _is_task_llm_available("analyze_result")
+    logger.info("分析任务模型可用性完成", available=available)
+    return available
+
+
+# 方法作用：兼容旧 Mock 接口并创建结果分析任务模型。
+# Args: temperature - 分析文本生成温度。
+# Returns: 按 analyze_result 任务策略创建的 ChatModel。
+def get_llm(temperature: float = 0.3):
+    """创建结果分析模型，默认使用快速本地模型。"""
+    logger.debug("创建分析任务模型入口", temperature=temperature)
+    model = _get_task_llm("analyze_result", temperature=temperature, reasoning=False)
+    logger.info("创建分析任务模型完成")
+    return model
+
+
 async def analyze_result_node(state: AnalysisState) -> dict:
     """描述统计 + 趋势 + 异常 + 占比 → LLM 解读 (有 API Key) 或规则摘要。"""
     _start = time.monotonic()
@@ -40,10 +67,19 @@ async def analyze_result_node(state: AnalysisState) -> dict:
     rows: list[dict] = state.get("query_result_sample", [])
     intent = state.get("intent", "query")
     sql = state.get("generated_sql", "")
+    logger.info(
+        "分析节点边界输入",
+        intent=intent,
+        data_rows=len(rows),
+        has_sql=bool(sql),
+        history_turns=len(state.get("conversation_history", []) or []),
+    )
 
     if not rows:
         logger.info("节点完成", node="analyze_result", elapsed_ms=round((time.monotonic() - _start) * 1000))
-        return {"analysis_result": {"summary": "无数据可供分析", "insights": [], "recommended_chart_type": "table", "follow_up_questions": []}}
+        return {"analysis_result": {"summary": "无数据可供分析", "insights": [], "recommended_chart_type": "table", "follow_up_questions": [], "statistics": compute_statistics([])}}
+
+    stats = compute_statistics(rows)
 
     # 数据处理器（脚本精确计算，LLM 仅润色）
     processor_result = None
@@ -52,7 +88,7 @@ async def analyze_result_node(state: AnalysisState) -> dict:
         proc = get_processor(intent)
         if proc:
             nc = _find_numeric(rows)
-            params = {"value_col": nc[0] if nc else "", "group_col": _find_cat_col(rows, nc) or "",
+            params = {"value_col": nc[0] if nc else "", "group_col": _find_category_col(rows) or "",
                       "time_col": _find_time_col(rows) or ""}
             processor_result = proc.process(rows, params)
             logger.info("处理器完成", processor=proc.name, intent=intent,
@@ -60,10 +96,33 @@ async def analyze_result_node(state: AnalysisState) -> dict:
     except Exception as e:
         logger.warning("处理器失败，回退 LLM", error=str(e))
 
-    stats = compute_statistics(rows)
+    # 处理器结果有效 — 直接用脚本结果，LLM 仅做自然语言润色
+    if processor_result and processor_result.data:
+        result = {
+            "summary": processor_result.summary,
+            "insights": processor_result.insights,
+            "recommended_chart_type": processor_result.chart_type,
+            "follow_up_questions": [],
+            "processor_name": getattr(proc, "name", "unknown"),
+            "statistics": stats,
+        }
+        result = _attach_skill_outputs(result, rows, state.get("activated_skills", []) or [])
+        # LLM 润色总结（不参与数值计算）
+        if _is_task_llm_available("polish_result"):
+            try:
+                data_sample = _to_compact(processor_result.data)
+                llm_polish = await _llm_polish(processor_result.summary, processor_result.insights, data_sample)
+                if llm_polish:
+                    result["summary"] = llm_polish.get("summary", result["summary"])
+            except Exception as e:
+                logger.warning("LLM 润色失败", error=str(e))
+        logger.info("节点完成", node="analyze_result", processor=result.get("processor_name"),
+                    elapsed_ms=round((time.monotonic() - _start) * 1000))
+        return {"analysis_result": result}
+
+    # 回退：旧统计路径（无匹配处理器时）
     numeric_cols = stats.get("numeric_columns", [])
 
-    # 统计计算
     trend_info = ""
     if intent in ("trend", "aggregation"):
         time_col = _find_time_col(rows)
@@ -89,44 +148,236 @@ async def analyze_result_node(state: AnalysisState) -> dict:
 
     chart_type = _recommend_chart_type(rows, numeric_cols)
 
-    # LLM 分析 (如有 API Key)
     if is_llm_available():
         history = state.get("conversation_history", [])
-        result = await _llm_analyze(rows, sql, stats, trend_info, outlier_info, conc_info, history)
+        business_context = "\n\n".join(
+            part for part in (
+                state.get("business_rules_text", "") or "",
+                state.get("long_term_memories_text", "") or "",
+            ) if part
+        )
+        result = await _llm_analyze(
+            rows,
+            sql,
+            stats,
+            trend_info,
+            outlier_info,
+            conc_info,
+            history,
+            user_query=state.get("user_query", ""),
+            result_full_count=state.get("query_result_full_count", len(rows)),
+            result_truncated=state.get("query_result_truncated", False),
+            business_context=business_context,
+        )
     else:
         result = _rule_analyze(rows, stats, trend_info, outlier_info, conc_info, chart_type, intent)
 
     result["statistics"] = stats
+    result = _attach_skill_outputs(result, rows, state.get("activated_skills", []) or [])
     logger.info("节点完成", node="analyze_result", elapsed_ms=round((time.monotonic() - _start) * 1000))
     return {"analysis_result": result}
 
 
-async def _llm_analyze(rows, sql, stats, trend, outlier, conc, history=None) -> dict:
-    """LLM 生成分析报告。"""
-    sample = json.dumps(rows[:20], ensure_ascii=False, indent=2, default=_json_default)
-    stat_text = json.dumps(stats.get("columns", {}), ensure_ascii=False, default=_json_default)
+async def _llm_polish(summary: str, insights: list[str], data_sample: str) -> dict | None:
+    """LLM 对处理器输出做自然语言润色，不参与数值计算。"""
+    try:
+        from langchain_core.messages import HumanMessage, SystemMessage
+        from src.llm.client import get_llm
+        llm = _get_task_llm("polish_result", temperature=0.3, reasoning=False)
+        prompt = f"""## 分析摘要
+{summary}
 
-    # 7.5.3 注入对话上下文
+## 关键洞察
+{chr(10).join(f'- {i}' for i in insights[:5])}
+
+## 数据样本
+{data_sample}
+
+请对以上摘要进行自然语言润色，使其更易于理解。保持专业准确但不啰嗦。返回 JSON 格式: {{"summary": "润色后的中文摘要"}}"""
+        resp = await llm.ainvoke([SystemMessage(content="你是数据分析师，擅长用通俗易懂的语言解释数据。"),
+                                  HumanMessage(content=prompt)])
+        content = resp.content.strip().removeprefix("```json").removesuffix("```").strip()
+        return json.loads(content) if content.startswith("{") else None
+    except Exception:
+        return None
+
+
+def _to_compact(rows: list[dict]) -> str:
+    """全量数据转紧凑 JSON，超限按比例均匀抽取。上限通过 ANALYSIS_DATA_MAX_CHARS 环境变量配置。"""
+    if not rows:
+        return "[]"
+    from src.config import get_settings
+    limit = get_settings().analysis_data_max_chars
+    text = json.dumps(rows, ensure_ascii=False, default=_json_default,
+                      separators=(",", ":"))
+    if len(text) <= limit:
+        return text
+    # 超限：按比例均匀取点，保证覆盖面
+    row_size = len(text) / len(rows)
+    max_rows = max(10, int(limit / row_size))
+    step = max(1, len(rows) // max_rows)
+    sampled = rows[::step]
+    if rows[0] not in sampled:
+        sampled.insert(0, rows[0])
+    if rows[-1] not in sampled:
+        sampled.append(rows[-1])
+    return json.dumps(sampled, ensure_ascii=False, default=_json_default,
+                      separators=(",", ":"))
+
+
+# 方法作用：为已激活且有确定性实现的 Skill 写入真实分析产物。
+# Args: result - 基础分析结果；rows - 查询结果样本；activated_skills - 当前激活 Skill 名称。
+# Returns: 附加质量报告和质量说明后的分析结果。
+def _attach_skill_outputs(
+    result: dict,
+    rows: list[dict],
+    activated_skills: list[str],
+) -> dict:
+    """只声明真正执行过的 Skill 输出，避免“已激活但未运行”的假状态。"""
+    logger.debug(
+        "附加 Skill 分析产物入口",
+        activated_skills=activated_skills,
+        row_count=len(rows),
+    )
+    if "data-quality-check" not in activated_skills:
+        logger.info("附加 Skill 分析产物跳过", reason="未激活数据质量 Skill")
+        return result
+
+    columns = sorted({str(column) for row in rows for column in row})
+    null_rates = {
+        column: round(
+            sum(1 for row in rows if row.get(column) is None) / len(rows),
+            4,
+        )
+        for column in columns
+    } if rows else {}
+    serialized_rows = [
+        json.dumps(row, ensure_ascii=False, sort_keys=True, default=_json_default)
+        for row in rows
+    ]
+    duplicate_row_count = len(serialized_rows) - len(set(serialized_rows))
+    outliers: dict[str, list[dict]] = {}
+    for column in _find_numeric(rows):
+        detected = detect_outliers_zscore(_extract(rows, column))
+        if detected:
+            outliers[column] = detected
+    quality_report = {
+        "row_count": len(rows),
+        "null_rates": null_rates,
+        "duplicate_row_count": duplicate_row_count,
+        "outliers": outliers,
+    }
+    enriched = dict(result)
+    enriched["quality_report"] = quality_report
+    quality_notes = list(enriched.get("data_quality", []) or [])
+    high_null_columns = [column for column, rate in null_rates.items() if rate > 0.1]
+    if high_null_columns:
+        quality_notes.append(f"高空值率字段: {', '.join(high_null_columns)}")
+    if duplicate_row_count:
+        quality_notes.append(f"检测到 {duplicate_row_count} 行重复记录")
+    if outliers:
+        quality_notes.append(f"检测到异常值字段: {', '.join(sorted(outliers))}")
+    enriched["data_quality"] = quality_notes
+    logger.info(
+        "附加 Skill 分析产物完成",
+        null_column_count=len(high_null_columns),
+        duplicate_row_count=duplicate_row_count,
+        outlier_column_count=len(outliers),
+    )
+    return enriched
+
+
+async def _llm_analyze(
+    rows,
+    sql,
+    stats,
+    trend,
+    outlier,
+    conc,
+    history=None,
+    *,
+    user_query: str = "",
+    result_full_count: int | None = None,
+    result_truncated: bool = False,
+    business_context: str = "",
+) -> dict:
+    """基于问题、结果完整性、统计和业务证据生成分析报告。
+
+    Args:
+        rows: 进入分析器的数据行。
+        sql: 实际执行的 SQL。
+        stats: 确定性统计摘要。
+        trend: 规则引擎趋势发现。
+        outlier: 规则引擎异常发现。
+        conc: 规则引擎集中度发现。
+        history: 裁剪前的对话历史。
+        user_query: 用户当前原始问题。
+        result_full_count: 查询返回的总行数。
+        result_truncated: 查询结果是否被安全上限截断。
+        business_context: 业务规则和知识库证据。
+
+    Returns:
+        兼容基础字段并包含质量、限制、置信度和行动建议的分析结果。
+    """
+    logger.debug(
+        "LLM 数据分析入口",
+        user_query=user_query[:80],
+        input_rows=len(rows),
+        result_full_count=result_full_count,
+        result_truncated=result_truncated,
+        business_chars=len(business_context),
+    )
+    total_rows = len(rows)
+    sample = _to_compact(rows)
+    sample_row_count = 0
+    if sample.startswith("["):
+        try:
+            parsed_sample = json.loads(sample)
+            sample_row_count = len(parsed_sample) if isinstance(parsed_sample, list) else 0
+        except json.JSONDecodeError:
+            logger.warning("LLM 分析样本 JSON 解析失败", sample_preview=sample[:120])
+    is_full = sample_row_count == total_rows
+    stat_text = json.dumps(stats.get("columns", {}), ensure_ascii=False, default=_json_default,
+                           separators=(",", ":"))
+
     context_text = ""
     if history:
         from src.memory.context_builder import build_llm_context
         context_text = await build_llm_context(history, node_name="analyze_result")
     history_block = f"## 对话历史\n{context_text}" if context_text else ""
 
-    user_msg = f"""## 执行的 SQL
+    input_label = f"输入全量 {total_rows} 行" if is_full else f"输入均匀采样 {sample_row_count}/{total_rows} 行"
+    database_count = result_full_count if result_full_count is not None else total_rows
+    completeness = (
+        f"数据库查询返回 {database_count} 行；{input_label}；"
+        f"安全截断={'是' if result_truncated else '否'}。"
+    )
+    business_block = business_context or "(无额外业务口径，以 SQL 与统计结果为准)"
+    question = user_query or "(未提供原问题，仅解释当前结果)"
+    user_msg = f"""## 用户原问题
+{question}
+
+## 执行的 SQL
 ```sql
 {sql}
 ```
 
-## 查询结果 (前 20 行)
+## 数据完整性
+{completeness}
+
+## 查询结果 ({input_label})
 {sample}
 
 ## 统计摘要
 {stat_text}
 
-## 发现
+## 确定性分析器发现
 {trend} | {outlier} | {conc}
-    {history_block}
+
+## 业务规则与知识上下文
+{business_block}
+
+{history_block}
 请给出分析报告。"""
 
     try:
@@ -143,12 +394,22 @@ async def _llm_analyze(rows, sql, stats, trend, outlier, conc, history=None) -> 
             "insights": data.get("insights", []),
             "recommended_chart_type": data.get("recommended_chart_type", "table"),
             "follow_up_questions": data.get("follow_up_questions", []),
+            "data_quality": data.get("data_quality", []),
+            "limitations": data.get("limitations", []),
+            "confidence": data.get("confidence", "low"),
+            "recommended_actions": data.get("recommended_actions", []),
         }
         if parsed.reasoning_content:
             result["analysis_reasoning_content"] = parsed.reasoning_content
+        logger.info(
+            "LLM 数据分析完成",
+            confidence=result["confidence"],
+            insight_count=len(result["insights"]),
+            limitation_count=len(result["limitations"]),
+        )
         return result
     except Exception as e:
-        logger.error("LLM 分析失败", error=str(e))
+        logger.error("LLM 分析失败", error=str(e), exc_info=True)
         return _rule_analyze(rows, stats, trend, outlier, conc, "table", "query")
 
 

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import logging
+from decimal import Decimal
 
 from src.tools.analyzer import (
     compute_concentration,
@@ -12,6 +14,8 @@ from src.tools.analyzer import (
     detect_outliers_iqr,
     detect_outliers_zscore,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class TestStats:
@@ -32,6 +36,26 @@ class TestStats:
     def test_skips_strings(self):
         r = compute_statistics([{"a": 1, "b": "x"}])
         assert "b" not in r["numeric_columns"]
+
+    # 验证数据库 Decimal 数值能进入统计计算并排除非数值字段。
+    # Args: self - pytest 测试类实例。
+    # Returns: 无返回值，断言 Decimal 列识别与统计结果。
+    def test_decimal_is_recognized_as_numeric(self):
+        """Decimal 销售额应被识别为数值列并正确计算均值。"""
+        logger.debug("test_decimal_is_recognized_as_numeric 入口")
+        # Arrange
+        rows = [
+            {"category": "食品饮料", "sales": Decimal("10.25")},
+            {"category": "图书文娱", "sales": Decimal("20.75")},
+        ]
+
+        # Act
+        result = compute_statistics(rows)
+
+        # Assert
+        assert result["numeric_columns"] == ["sales"]
+        assert result["columns"]["sales"]["mean"] == 15.5
+        logger.info("test_decimal_is_recognized_as_numeric 完成", extra={"numeric_columns": result["numeric_columns"]})
 
 
 class TestTrend:
@@ -99,9 +123,10 @@ class TestCorrelation:
 class TestAnalyzeResultNode:
     """4.8 集成"""
 
-    def test_with_data(self):
-        from src.graph.nodes.analyze_result import analyze_result_node
-        r = asyncio.run(analyze_result_node({
+    def test_with_data(self, monkeypatch):
+        import src.graph.nodes.analyze_result as analyze_module
+        monkeypatch.setattr(analyze_module, "is_llm_available", lambda: False)
+        r = asyncio.run(analyze_module.analyze_result_node({
             "query_result_sample": [
                 {"category": "电子", "sales": 128000},
                 {"category": "家居", "sales": 102000},
@@ -118,3 +143,29 @@ class TestAnalyzeResultNode:
         from src.graph.nodes.analyze_result import analyze_result_node
         r = asyncio.run(analyze_result_node({"query_result_sample": []}))
         assert "无数据" in r["analysis_result"]["summary"]
+
+    # 验证 Decimal 聚合结果仍会推荐可视化图表。
+    # Args: self - pytest 测试类实例；monkeypatch - pytest 运行时替换工具。
+    # Returns: 无返回值，断言聚合分析推荐柱状图。
+    def test_decimal_aggregation_recommends_bar_chart(self, monkeypatch):
+        """分类销售额为 Decimal 时，聚合处理器应输出高置信度柱状图。"""
+        logger.debug("test_decimal_aggregation_recommends_bar_chart 入口")
+        # Arrange
+        import src.graph.nodes.analyze_result as analyze_module
+
+        monkeypatch.setattr(analyze_module, "is_llm_available", lambda: False)
+        state = {
+            "query_result_sample": [
+                {"category_name": "食品饮料", "total_sales": Decimal("645000000.25")},
+                {"category_name": "图书文娱", "total_sales": Decimal("612000000.75")},
+            ],
+            "intent": "query",
+        }
+
+        # Act
+        result = asyncio.run(analyze_module.analyze_result_node(state))["analysis_result"]
+
+        # Assert
+        assert result["statistics"]["numeric_columns"] == ["total_sales"]
+        assert result["recommended_chart_type"] == "bar"
+        logger.info("test_decimal_aggregation_recommends_bar_chart 完成", extra={"chart_type": result["recommended_chart_type"]})

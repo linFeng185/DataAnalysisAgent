@@ -11,9 +11,28 @@ datasources:
     username: reader
     password: ${CK_PROD_PASSWORD}
     description: 生产环境 ClickHouse 订单库
+    extra_params:
+      connect_timeout: 5
+      query_retries: 0
     tags:
       - 生产
       - 只读
+
+  clickhouse_test:
+    dialect: clickhouse
+    version: "24.8"
+    host: 192.168.195.133
+    port: 9000
+    database: analytics
+    username: reader
+    password: ${CLICKHOUSE_PASSWORD}
+    description: ClickHouse 24.8 测试库
+    extra_params:
+      connect_timeout: 5
+      query_retries: 0
+    tags:
+      - 测试
+      - clickhouse
 
   mysql_test:
     dialect: mysql

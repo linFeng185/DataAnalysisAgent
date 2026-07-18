@@ -49,7 +49,7 @@ class DocChunk:
 
 def extract_text(file_name: str, content: bytes) -> str:
     ext = os.path.splitext(file_name)[1].lower()
-    if ext in (".txt", ".md", ".markdown"):
+    if ext in (".txt", ".md", ".markdown", ".csv"):
         return content.decode("utf-8", errors="replace")
     elif ext == ".pdf":
         return _extract_pdf(content)
@@ -61,7 +61,7 @@ def extract_text(file_name: str, content: bytes) -> str:
 def chunk_text(text: str, config: ChunkConfig, file_name: str = "") -> list[DocChunk]:
     strategy = config.strategy
     if strategy == ChunkStrategy.AUTO:
-        strategy = _auto_detect(text)
+        strategy = _auto_detect(text, file_name)
     logger.info("文档分块", file=file_name, strategy=strategy.value,
                 text_len=len(text), chunk_size=config.chunk_size)
     if strategy == ChunkStrategy.HEADING:
@@ -75,7 +75,7 @@ def chunk_text(text: str, config: ChunkConfig, file_name: str = "") -> list[DocC
     elif strategy == ChunkStrategy.REFERENCE:
         chunks = _chunk_by_reference(text, config)
     else:
-        chunks = _chunk_fixed(text, config)
+        chunks = _chunk_by_line(text, config)
 
     # 每块附加元数据，尝试提取表名
     enriched: list[DocChunk] = []
@@ -117,11 +117,14 @@ def _extract_docx(content: bytes) -> str:
     return "\n\n".join(parts)
 
 
-def _auto_detect(text: str) -> ChunkStrategy:
+def _auto_detect(text: str, file_name: str = "") -> ChunkStrategy:
     """自动检测最佳分块策略。
 
-    优先级: DDL > REFERENCE > table > heading > paragraph > fixed
+    优先级: CSV > DDL > REFERENCE > table > heading > paragraph > line(原fixed)
     """
+    # CSV 文件按行切，避免固定字节切分行内数据
+    if file_name.lower().endswith(".csv"):
+        return ChunkStrategy.FIXED  # FIXED 策略现在映射到 _chunk_by_line
     # 1) DDL: 多行 CREATE TABLE/VIEW/INDEX
     create_count = len(re.findall(r'\bCREATE\s+(TABLE|VIEW|INDEX)\b', text, re.IGNORECASE))
     if create_count >= 2:
@@ -256,13 +259,39 @@ def _extract_table_name(chunk: str) -> str:
 
 
 def _chunk_fixed(text: str, cfg: ChunkConfig) -> list[str]:
+    """旧固定字节切分，已废弃，保留兼容。"""
+    return _chunk_by_line(text, cfg)
+
+
+def _chunk_by_line(text: str, cfg: ChunkConfig) -> list[str]:
+    """按行切分 — 在 chunk_size 附近找最近的换行符切分，保证每行完整。
+
+    用于 CSV 等无空行结构的文本，替代固定字节切分。
+    """
+    lines = text.split("\n")
     chunks: list[str] = []
-    start = 0
-    while start < len(text):
-        end = min(start + cfg.chunk_size, len(text))
-        chunks.append(text[start:end].strip())
-        start += cfg.chunk_size - cfg.chunk_overlap
-    return [c for c in chunks if len(c) >= cfg.min_chunk_size]
+    current = ""
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        if len(current) + len(line) + 1 <= cfg.chunk_size:
+            current = f"{current}\n{line}" if current else line
+        else:
+            if len(current) >= cfg.min_chunk_size:
+                chunks.append(current)
+            # 超长单行强制截断
+            if len(line) > cfg.chunk_size:
+                for i in range(0, len(line), cfg.chunk_size - cfg.chunk_overlap):
+                    piece = line[i:i + cfg.chunk_size].strip()
+                    if len(piece) >= cfg.min_chunk_size:
+                        chunks.append(piece)
+                current = ""
+            else:
+                current = line
+    if len(current) >= cfg.min_chunk_size:
+        chunks.append(current)
+    return chunks
 
 
 def _chunk_by_paragraph(text: str, cfg: ChunkConfig) -> list[str]:
