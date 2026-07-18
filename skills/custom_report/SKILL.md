@@ -7,7 +7,7 @@ tags: [report, presentation, export]
 
 triggers:
   keywords: [周报, 月报, 报告, 总结, 导出, 报表]
-  intents: [aggregation, trend]
+  intents: []
   tables: []
 
 depends_on:

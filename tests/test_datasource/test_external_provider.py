@@ -113,3 +113,49 @@ class TestExternalProviderInterface:
     def test_list_all_empty(self):
         from src.datasource.providers.external import ExternalDataSourceProvider
         assert asyncio.run(ExternalDataSourceProvider().list_all()) == []
+
+    def test_oracle_connection_probe_uses_dual(self):
+        """Oracle 21c 连通性探针必须带 FROM DUAL，避免 SELECT 1 语法错误。"""
+        # Arrange
+        from src.datasource.config import DataSourceConfig
+        from src.datasource.providers.external import ExternalDataSourceProvider
+
+        class FakeConnection:
+            def __init__(self):
+                self.statements: list[str] = []
+
+            def execute(self, statement):
+                sql = str(statement)
+                self.statements.append(sql)
+                if sql.strip().upper() == "SELECT 1":
+                    raise RuntimeError("ORA-00923: FROM keyword not found where expected")
+                return object()
+
+        class ConnectionContext:
+            def __init__(self, connection):
+                self.connection = connection
+
+            def __enter__(self):
+                return self.connection
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+        class FakeEngine:
+            def __init__(self, connection):
+                self.connection = connection
+
+            def connect(self):
+                return ConnectionContext(self.connection)
+
+        connection = FakeConnection()
+        config = DataSourceConfig(
+            name="oracle_test", dialect="oracle", mode="external", engine=FakeEngine(connection)
+        )
+
+        # Act
+        result = asyncio.run(ExternalDataSourceProvider().test_connection(config))
+
+        # Assert
+        assert result is True
+        assert connection.statements == ["SELECT 1 FROM DUAL"]

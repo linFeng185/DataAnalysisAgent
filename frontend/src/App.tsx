@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
-import { BrowserRouter, Routes, Route, NavLink, useLocation } from 'react-router-dom';
-import { Layout, Menu, ConfigProvider, Tag, Typography, theme } from 'antd';
+import { BrowserRouter, Routes, Route, NavLink, Navigate, useLocation } from 'react-router-dom';
+import { Layout, Menu, ConfigProvider, Tag, Typography, theme, Grid } from 'antd';
 import {
   MessageOutlined, DatabaseOutlined, HistoryOutlined, SettingOutlined,
   CheckCircleOutlined, CloseCircleOutlined, LoadingOutlined,
@@ -15,6 +15,7 @@ import KnowledgePage from './pages/KnowledgePage';
 import McpPage from './pages/McpPage';
 import LoginPage from './pages/LoginPage';
 import { AuthProvider } from './hooks/AuthContext';
+import { useAuth } from './hooks/AuthContext';
 import ErrorBoundary from './components/ErrorBoundary';
 import { get } from './api/client';
 import type { HealthResponse } from './types';
@@ -22,10 +23,19 @@ import zhCN from 'antd/locale/zh_CN';
 
 const { Header, Sider, Content } = Layout;
 
+function ProtectedApp() {
+  const { loading, authRequired, isAuthenticated } = useAuth();
+  if (loading) return <Layout style={{ minHeight: '100vh' }} />;
+  if (authRequired && !isAuthenticated) return <Navigate to="/login" replace />;
+  return <AppContent />;
+}
+
 function AppContent() {
   const [collapsed, setCollapsed] = useState(false);
   const [health, setHealth] = useState<HealthResponse | null>(null);
   const location = useLocation();
+  const screens = Grid.useBreakpoint();
+  const isCompact = screens.md === false;
 
   useEffect(() => {
     get<HealthResponse>('/health')
@@ -59,7 +69,8 @@ function AppContent() {
         </div>
       </Header>
       <Layout>
-        <Sider collapsible collapsed={collapsed} onCollapse={setCollapsed} theme="dark" width={200}>
+        <Sider collapsible collapsed={isCompact || collapsed} collapsedWidth={isCompact ? 64 : 80}
+          onCollapse={setCollapsed} theme="dark" width={200}>
           <Menu theme="dark" mode="inline" selectedKeys={[menuKey]} style={{ marginTop: 4 }}>
             <Menu.Item key="chat" icon={<MessageOutlined />}>
               <NavLink to="/">对话分析</NavLink>
@@ -84,7 +95,7 @@ function AppContent() {
             </Menu.Item>
           </Menu>
         </Sider>
-        <Content style={{ background: '#f5f5f5' }}>
+        <Content style={{ background: '#f5f5f5', minWidth: 0 }}>
           <ErrorBoundary>
             <Routes>
               <Route path="/" element={<ChatPage />} />
@@ -109,7 +120,7 @@ export default function App() {
         <AuthProvider>
           <Routes>
             <Route path="/login" element={<LoginPage />} />
-            <Route path="/*" element={<AppContent />} />
+            <Route path="/*" element={<ProtectedApp />} />
           </Routes>
         </AuthProvider>
       </BrowserRouter>

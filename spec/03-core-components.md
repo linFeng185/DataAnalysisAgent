@@ -124,6 +124,26 @@ class AnalysisState(TypedDict):
                                └─────────────┘
 ```
 
+> **当前实现校正（2026-07-18）**：入口先执行 `prepare_turn` 清理 checkpoint 瞬态字段。意图路由
+> 先判断 `file_analysis/chat/metadata/meta`，仅数据库查询意图再判断多源。当前主拓扑如下：
+
+```text
+START -> prepare_turn -> classify_intent
+  file_analysis -> mcp_agent -> build_response -> END
+  chat -> llm_direct_answer -> build_response -> END
+  metadata -> retrieve_schema -> llm_direct_answer -> build_response -> END
+  meta -> analyze_result -> generate_chart -> build_response -> END
+  multi source query -> multi_source_dispatch -> merge_results -> build_response -> END
+  query -> retrieve_schema -> decompose_query -> generate_sql
+       -> layer3_validate -> layer4_explain -> execute_sql
+       -> analyze_result -> generate_chart -> build_response -> END
+```
+
+`layer4_explain` 必须复用 Registry 已解析引擎，在目标库执行方言化 EXPLAIN；多源 worker 也不得
+绕过该边界。语法、字段和 EXPLAIN 语义错误回到 `generate_sql`；连接超时、网络中断等瞬态错误
+使用原 SQL 重试 `execute_sql`；配置、权限和限流错误直接终止。SQL 重生成次数与执行重试次数分别
+使用 `retry_count`、`execution_retry_count`，均受 `MAX_RETRY_COUNT` 限制。
+
 **条件路由逻辑**：
 
 ```python
@@ -720,6 +740,33 @@ class TableRelation:
     relation_type: str  # "many_to_one" | "one_to_one" | "one_to_many"
 ```
 
+#### 3.2.9 连接级数据库内容缓存
+
+数据库内容缓存只保存可复用的元数据资产：Schema、表说明、字段语义、外键关系、
+行数估算和受控低基数枚举。禁止缓存整表业务数据、用户查询结果、权限过滤后的结果和
+对话派生结论，避免跨用户数据泄露、陈旧结果和不可控容量。
+
+**缓存身份**：缓存键不得包含用户 ID、会话 ID 或数据源显示名称。系统对以下规范化连接
+字段计算 SHA-256 指纹：`dialect / host / port / database / schema / username`，并补充会影响
+数据库命名空间的连接参数。密码和其他密钥不进入原文或缓存载荷；同一数据库账号密码轮换
+不应导致元数据缓存整体失效。
+
+**后端切换**：
+
+| 配置 | 说明 |
+|------|------|
+| `DATASOURCE_CACHE_BACKEND=local` | JSON 文件持久化，单机默认方案，临时文件 + 原子替换 |
+| `DATASOURCE_CACHE_BACKEND=redis` | Redis 多实例共享，使用 `SET EX` 写入 TTL |
+| `DATASOURCE_CACHE_TTL_SECONDS` | Schema/表内容缓存有效期，默认 604800 秒 |
+| `DATASOURCE_CACHE_DIR` | 本地缓存目录，默认 `./data/cache/datasource` |
+| `DATASOURCE_CACHE_REDIS_PREFIX` | Redis key 前缀，默认 `data-agent:datasource-cache` |
+
+缓存载荷必须包含 `version / fingerprint / created_at / expires_at / entries`。读取时校验版本、
+连接指纹、TTL 和 JSON 结构；任一校验失败均视为 miss，并降级到文档合并与实时 DB 内省。
+`SchemaManager.refresh()` 必须按连接指纹失效，因此同连接的不同显示名称在刷新后看到一致结果。
+精确缓存与 VectorStore 分工如下：前者负责一致、快速恢复完整元数据，后者只负责语义召回；
+精确缓存命中后仍可为当前数据源别名补建向量索引，避免语义筛选能力退化。
+
 ### 3.3 SQL 生成器
 
 **输入**：
@@ -1001,6 +1048,8 @@ if state.get("retry_count", 0) >= 2:
 - **多数据源适配**：通过连接器模式支持 ClickHouse、MySQL、PostgreSQL、Presto/Trino 等
 - **连接池管理**：每个数据源维护独立连接池
 - **查询超时控制**：`statement_timeout` / `max_execution_time` 设置
+- **连接超时控制**：ClickHouse 外挂数据源通过 `extra_params.connect_timeout` 配置建连超时，默认 5 秒 TCP 探针且不做查询重试
+- **多源失败隔离**：交叉分析调度全部已选数据源，单源连接失败不阻塞其他来源，并在最终分析摘要中显式列出失败来源
 - **结果格式化**：将原始查询结果转为结构化数据（DataFrame / JSON），统一后续处理
 - **异步执行**：支持异步查询，大查询可轮询获取结果
 
@@ -1624,9 +1673,11 @@ class MCPClientManager:
             args_schema=self._build_schema(mcp_tool.inputSchema),
         )
 
-    def get_all_tools(self) -> list[BaseTool]:
-        """返回所有 MCP 转换来的工具 — 供 LangGraph Agent 使用"""
-        return list(self.langchain_tools.values())
+    def get_all_tools(self, tenant_id: int | None, user_id: int | None) -> list[BaseTool]:
+        """仅返回 system、当前 tenant 和本人 private 工具"""
+        return filter_scoped_tools(
+            self.langchain_tools, tenant_id=tenant_id, user_id=user_id,
+        )
 
     async def health_check(self):
         """定期健康检查 — 断线自动重连"""
@@ -1783,7 +1834,7 @@ from langgraph.prebuilt import create_react_agent
 
 mcp_agent = create_react_agent(
     model=ChatOpenAI(model="gpt-4o"),
-    tools=mcp_manager.get_all_tools(),
+    tools=mcp_manager.get_all_tools(tenant_id=current_tenant_id, user_id=current_user_id),
     system_prompt="你是一个数据分析助手，可以访问文件系统和外部知识库。"
 )
 ```
@@ -1867,13 +1918,17 @@ class Skill:
     output_schema_extension: dict
     source_path: Path
     enabled: bool = True
+    scope: str = "system"
+    tenant_id: int = 0
+    owner_user_id: int = 0
+    resource_id: str = ""
 
 
 class SkillManager:
     """
     管理 Skill 的发现、加载、激活与生命周期。
 
-    Skill 目录结构:
+    Skill 目录结构（作用域由路径决定，Manifest 不得自行声明）:
     skills/
     ├── data_quality_check/
     │   ├── SKILL.md           # Skill 描述 (YAML frontmatter)
@@ -1888,6 +1943,10 @@ class SkillManager:
         ├── SKILL.md
         └── templates/
             └── weekly_report.jinja2
+    data/skills/
+    ├── system/{skill_name}/SKILL.md
+    ├── tenant/{tenant_id}/{skill_name}/SKILL.md
+    └── private/{tenant_id}/{user_id}/{skill_name}/SKILL.md
     """
 
     def __init__(self, skills_dir: str = "skills"):
@@ -1910,7 +1969,10 @@ class SkillManager:
             self.skills[skill.name] = skill
             logger.info(f"Skill 已加载: {skill.name} v{skill.version}")
 
-    def match_skills(self, user_query: str, intent: str, tables: list[str]) -> list[Skill]:
+    def match_skills(
+        self, user_query: str, intent: str, tables: list[str],
+        tenant_id: int, user_id: int,
+    ) -> list[Skill]:
         """
         根据用户输入匹配应激活的 Skill。
 
@@ -1922,7 +1984,7 @@ class SkillManager:
         activated = []
         query_lower = user_query.lower()
 
-        for skill in self.skills.values():
+        for skill in self.get_visible_skills(tenant_id, user_id):
             if not skill.enabled:
                 continue
 
@@ -1943,7 +2005,7 @@ class SkillManager:
                 activated.append(skill)
                 continue
 
-        return activated
+        return prefer_same_name(activated, priority=["private", "tenant", "system"])
 
     def get_active_tools(self, activated_skills: list[Skill]) -> list[BaseTool]:
         """获取当前激活 Skills 的所有工具"""

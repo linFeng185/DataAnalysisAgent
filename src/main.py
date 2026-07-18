@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -10,8 +11,25 @@ from src.api.middleware import register_exception_handlers
 from src.api.routes import router
 from src.config import get_settings
 from src.logging_config import get_logger, setup_logging
+from src.memory.checkpointer import configure_asyncio_event_loop
 
 logger = get_logger(__name__)
+configure_asyncio_event_loop()
+
+
+def selector_event_loop_factory(use_subprocess: bool = False) -> asyncio.AbstractEventLoop:
+    """创建兼容 psycopg 异步连接的 SelectorEventLoop，供 Uvicorn 使用。
+
+    Args:
+        use_subprocess: Uvicorn 是否需要子进程支持；当前服务不改变事件循环选择。
+
+    Returns:
+        新建的 asyncio SelectorEventLoop。
+    """
+    logger.debug("创建 SelectorEventLoop 入口", use_subprocess=use_subprocess)
+    loop = asyncio.SelectorEventLoop()
+    logger.info("创建 SelectorEventLoop 完成", loop_type=type(loop).__name__)
+    return loop
 
 
 @asynccontextmanager
@@ -49,12 +67,31 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             logger.warning("ChromaDB 预热失败", error=str(e))
 
-    # 预热 LLM 客户端（验证 API Key + 网络连通性）
+    # 按配置目录增量摄取平台系统知识。
+    if s.system_knowledge_dirs.strip():
+        try:
+            from src.knowledge.system_scanner import scan_configured_system_knowledge
+
+            scan_result = await scan_configured_system_knowledge()
+            logger.info(
+                "系统知识目录预热完成",
+                ingested=scan_result.ingested_files,
+                skipped=scan_result.skipped_files,
+                errors=scan_result.error_files,
+                chunks=scan_result.written_chunks,
+            )
+        except Exception as e:
+            logger.error("系统知识目录预热失败", error=str(e), exc_info=True)
+
+    # 只预热快速本地模型；远程模型按显式任务在请求阶段创建，避免拖慢应用启动。
     try:
-        from src.llm.client import is_llm_available, get_llm
-        if is_llm_available():
-            get_llm(temperature=0, reasoning=False)
-            logger.info("LLM 客户端预热完成", model=s.llm_model)
+        from src.llm.client import get_task_llm, resolve_llm_task_target
+        target = resolve_llm_task_target("classify_intent", settings=s)
+        if target == "local":
+            get_task_llm("classify_intent", temperature=0, reasoning=False)
+            logger.info("本地 LLM 客户端预热完成", model=s.local_llm_model)
+        else:
+            logger.info("LLM 客户端预热跳过", target=target, reason="仅预热本地轻量模型")
     except Exception as e:
         logger.warning("LLM 预热失败", error=str(e))
 
@@ -73,14 +110,18 @@ async def lifespan(app: FastAPI):
     # 9.1.3 加载 Skills
     try:
         from src.skill_manager import get_skill_manager
-        await get_skill_manager(s.skills_dir, s.extra_skills_dirs).discover()
+        await get_skill_manager(
+            s.skills_dir, s.extra_skills_dirs, s.managed_skills_dir,
+        ).discover()
     except Exception as e:
         logger.warning("Skill 加载失败", error=str(e))
 
     # 8.1.2 连接外部 MCP Server
     try:
         from src.mcp_client.client_manager import get_mcp_client_manager
-        await get_mcp_client_manager().connect_all()
+        mcp_manager = get_mcp_client_manager()
+        await mcp_manager.ensure_schema()
+        await mcp_manager.connect_all()
     except Exception as e:
         logger.warning("MCP 连接失败", error=str(e))
 
@@ -101,7 +142,28 @@ async def lifespan(app: FastAPI):
 
 
 def create_app() -> FastAPI:
+    """创建并配置 FastAPI 应用。
+
+    Args:
+        无。
+
+    Returns:
+        已挂载中间件、路由和生命周期的 FastAPI 应用。
+    """
     settings = get_settings()
+    logger.debug("create_app 入口", env=settings.env)
+    from src.config import validate_production_settings
+    validate_production_settings(settings)
+
+    import json as _json
+    from starlette.responses import JSONResponse as _JSONResponse
+
+    class _PrecisionResponse(_JSONResponse):
+        """FastAPI 全局 JSON 响应：float → Decimal → 精确序列化。"""
+        def render(self, content) -> bytes:
+            from src.api.streaming import _PrecisionEncoder, _json_serialize
+            return _json.dumps(content, cls=_PrecisionEncoder, default=_json_serialize,
+                               ensure_ascii=False).encode("utf-8")
 
     app = FastAPI(
         title="Data Analysis Agent",
@@ -109,6 +171,7 @@ def create_app() -> FastAPI:
         version="0.1.0",
         lifespan=lifespan,
         docs_url="/docs" if settings.env == "dev" else None,
+        default_response_class=_PrecisionResponse,
     )
 
     from src.api.auth import AuthMiddleware, auth_router
@@ -117,6 +180,7 @@ def create_app() -> FastAPI:
     app.include_router(auth_router, prefix="/api/v1")
     register_exception_handlers(app)
 
+    logger.info("create_app 完成", env=settings.env)
     return app
 
 
@@ -125,4 +189,7 @@ app = create_app()
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("src.main:app", host="0.0.0.0", port=8000, reload=True)
+    uvicorn.run(
+        "src.main:app", host="0.0.0.0", port=8000, reload=True,
+        loop="src.main:selector_event_loop_factory",
+    )

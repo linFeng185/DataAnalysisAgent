@@ -101,7 +101,7 @@ export default function ChatPage() {
     setDrawerOpen(false);
     try {
       const detail = await fetchSession(session.session_id);
-      restoreTurns(detail.turns, session.session_id, session.datasource, detail.latest_state);
+      restoreTurns(detail.turns, session.session_id, session.datasource, detail.has_more);
       setDs([session.datasource]);
       message.success('已恢复会话');
     } catch {
@@ -178,7 +178,8 @@ export default function ChatPage() {
           </div>
         ) : (
           /* 对话列表 */
-          turns.map((t) => <TurnBubble key={t.id} turn={t} />)
+          turns.map((t) => <TurnBubble key={t.id} turn={t}
+            onSendMessage={(msg: string) => { send(`${t.userQuery} - ${msg}`, ds[0] || 'demo', ds.length > 1 ? ds : undefined, modelId || undefined); }} />)
         )}
         <div ref={bottomRef} />
       </div>
@@ -198,7 +199,7 @@ export default function ChatPage() {
         )}
 
         <div style={{
-          display: 'flex', gap: 10, alignItems: 'flex-end',
+          display: 'flex', flexWrap: 'wrap', gap: 10, alignItems: 'flex-end',
           background: '#fff', borderRadius: 16, padding: '8px 8px 8px 16px',
           border: '1px solid #e8e8e8', boxShadow: '0 2px 8px rgba(0,0,0,0.04)',
           transition: 'box-shadow 0.2s',
@@ -234,7 +235,10 @@ export default function ChatPage() {
         </div>
 
         {/* 工具栏 */}
-        <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 6, padding: '0 4px' }}>
+        <div style={{
+          display: 'flex', flexWrap: 'wrap', justifyContent: 'space-between',
+          gap: 6, marginTop: 6, padding: '0 4px',
+        }}>
           <Space size={8}>
             {sessionId && (
               <Typography.Text type="secondary" style={{ fontSize: 11 }}>
@@ -273,7 +277,7 @@ export default function ChatPage() {
 }
 
 /* 单条消息气泡 */
-function TurnBubble({ turn }: { turn: ChatTurn }) {
+function TurnBubble({ turn, onSendMessage }: { turn: ChatTurn; onSendMessage?: (msg: string) => void }) {
   const { userQuery, assistant, finalResult, status } = turn;
   const hasResult = status === 'done' && !!finalResult;
   const hasError = status === 'error';
@@ -365,7 +369,8 @@ function TurnBubble({ turn }: { turn: ChatTurn }) {
           ) : hasResult && (
             <ResultCard sql={assistant.sql} reasoning={assistant.reasoning}
               tokens={assistant.tokens} finalResult={finalResult}
-              validationErrors={assistant.validationErrors} />
+              validationErrors={assistant.validationErrors}
+              onSendMessage={onSendMessage} />
           )}
 
           {/* 恢复的历史会话 — 含 SQL 折叠面板 */}

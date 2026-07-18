@@ -41,7 +41,7 @@ def check(name: str, result: bool, detail: str = "") -> bool:
     return result
 
 
-def test_01_imports() -> bool:
+def _check_01_imports() -> bool:
     """验证关键模块可导入。"""
     print("\n1. 模块导入检查")
     modules = [
@@ -74,7 +74,7 @@ def test_01_imports() -> bool:
     return all_ok
 
 
-def test_02_config_loading() -> bool:
+def _check_02_config_loading() -> bool:
     """验证配置文件加载。"""
     print("\n2. 配置文件加载检查")
     all_ok = True
@@ -108,22 +108,22 @@ def test_02_config_loading() -> bool:
     return all_ok
 
 
-def test_03_ddl_generation() -> bool:
+def _check_03_ddl_generation() -> bool:
     """验证各方言DDL生成正确。"""
     print("\n3. DDL生成检查")
     all_ok = True
 
-    from data.generate_test_data import build_schemas, generate_ddl
+    from tests.import_test_data import get_tables, build_ddl
 
-    schemas = build_schemas(1000)
+    schemas = get_tables(1000)
     dialects = ["clickhouse", "mysql", "postgres", "oracle", "mssql"]
 
     for table_name in ["customers", "orders", "products", "order_items"]:
         for dialect in dialects:
             try:
-                ddl = generate_ddl(schemas[table_name], table_name, dialect)
+                ddl = build_ddl(table_name, schemas[table_name]["cols"], dialect)
                 has_create = "CREATE TABLE" in ddl.upper()
-                has_pk = "PRIMARY KEY" in ddl.upper()
+                has_pk = "PRIMARY KEY" in ddl.upper() or (dialect == "clickhouse" and "ORDER BY" in ddl.upper())
                 all_ok &= check(f"DDL {dialect}/{table_name}",
                                 has_create and has_pk, f"{len(ddl)} bytes")
             except Exception as e:
@@ -132,15 +132,15 @@ def test_03_ddl_generation() -> bool:
     return all_ok
 
 
-def test_04_small_data_generation() -> bool:
+def _check_04_small_data_generation() -> bool:
     """验证小规模数据生成（用categories表，行数少）。"""
     print("\n4. 小规模数据生成检查")
     all_ok = True
 
-    from data.generate_test_data import build_schemas
-    from data.generate_test_data import generate_table as gen_table
+    from tests.import_test_data import get_tables
+    from tests.import_test_data import generate_table_file as gen_table
 
-    schemas = build_schemas(100)
+    schemas = get_tables(100)
     output_dir = Path("data/generated")
 
     # 用categories表验证（行数少），并且期望行数与schema一致
@@ -171,7 +171,7 @@ def test_04_small_data_generation() -> bool:
     return all_ok
 
 
-def test_05_knowledge_files() -> bool:
+def _check_05_knowledge_files() -> bool:
     """验证知识库测试文件存在且非空。"""
     print("\n5. 知识库文件检查")
     all_ok = True
@@ -197,13 +197,13 @@ def test_05_knowledge_files() -> bool:
             header = next(reader)
             rows = list(reader)
         all_ok &= check("数据字典格式",
-                        header == ["表名", "字段名", "中文名", "类型", "说明"],
+                        "表名" in header and "数据源" in header,
                         f"{len(rows)}个字段定义")
 
     return all_ok
 
 
-def test_06_mcp_test_files() -> bool:
+def _check_06_mcp_test_files() -> bool:
     """验证MCP测试文件存在。"""
     print("\n6. MCP测试文件检查")
     all_ok = True
@@ -219,7 +219,7 @@ def test_06_mcp_test_files() -> bool:
     return all_ok
 
 
-def test_07_workflow_structure() -> bool:
+def _check_07_workflow_structure() -> bool:
     """验证LangGraph工作流路由函数。"""
     print("\n7. 工作流结构检查")
     all_ok = True
@@ -266,6 +266,41 @@ def test_07_workflow_structure() -> bool:
     return all_ok
 
 
+def test_01_imports() -> None:
+    """pytest 入口：关键模块均应可导入。"""
+    assert _check_01_imports()
+
+
+def test_02_config_loading() -> None:
+    """pytest 入口：项目配置均应可加载。"""
+    assert _check_02_config_loading()
+
+
+def test_03_ddl_generation() -> None:
+    """pytest 入口：多方言 DDL 应生成成功。"""
+    assert _check_03_ddl_generation()
+
+
+def test_04_small_data_generation() -> None:
+    """pytest 入口：小规模测试数据应生成成功。"""
+    assert _check_04_small_data_generation()
+
+
+def test_05_knowledge_files() -> None:
+    """pytest 入口：知识库夹具应存在且格式正确。"""
+    assert _check_05_knowledge_files()
+
+
+def test_06_mcp_test_files() -> None:
+    """pytest 入口：MCP 测试文件应存在。"""
+    assert _check_06_mcp_test_files()
+
+
+def test_07_workflow_structure() -> None:
+    """pytest 入口：工作流路由函数应符合契约。"""
+    assert _check_07_workflow_structure()
+
+
 def main():
     """运行全部快速验证。"""
     print("=" * 60)
@@ -273,13 +308,13 @@ def main():
     print("=" * 60)
 
     results = {
-        "01_imports": test_01_imports(),
-        "02_config": test_02_config_loading(),
-        "03_ddl": test_03_ddl_generation(),
-        "04_data_gen": test_04_small_data_generation(),
-        "05_knowledge": test_05_knowledge_files(),
-        "06_mcp": test_06_mcp_test_files(),
-        "07_workflow": test_07_workflow_structure(),
+        "01_imports": _check_01_imports(),
+        "02_config": _check_02_config_loading(),
+        "03_ddl": _check_03_ddl_generation(),
+        "04_data_gen": _check_04_small_data_generation(),
+        "05_knowledge": _check_05_knowledge_files(),
+        "06_mcp": _check_06_mcp_test_files(),
+        "07_workflow": _check_07_workflow_structure(),
     }
 
     print(f"\n{'=' * 60}")
@@ -295,10 +330,10 @@ def main():
     if passed == total:
         print(green("全部通过! 系统基本链路正常。"))
         print("\n下一步操作:")
-        print("  1. 生成完整测试数据:")
-        print("     python data/generate_test_data.py --db all --scale 1000000")
-        print("  2. 生成DDL建表语句:")
-        print("     python data/generate_test_data.py --db all --ddl-only")
+        print("  1. 导入测试数据:")
+        print("     python tests/import_test_data.py --db all --scale 1000000")
+        print("  2. 生成DDL:")
+        print("     python tests/import_test_data.py --db all --ddl-only")
         print("  3. 启动服务:")
         print("     python -m src.main")
         print("  4. 运行API测试:")

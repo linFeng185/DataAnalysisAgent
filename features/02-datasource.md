@@ -32,14 +32,15 @@
 | # | 功能 | 文件 | 描述 | 状态 |
 |---|------|------|------|------|
 | 2.3.1 | ExternalDataSourceProvider 类 | `src/datasource/providers/external.py` | DataSourceProvider 完整实现 | 单测完成 | P1 |
-| 2.3.2 | register() | 同上 | 加密凭证 → 注册 → 后台预采集 Schema | 单测完成 | P1 |
+| 2.3.2 | register() | 同上 | 加密凭证 → 注册到全局 Provider，Schema 在 resolve/refresh 时加载 | 单测完成 | P1 |
 | 2.3.3 | unregister() | 同上 | 移除数据源，关闭连接池 | 单测完成 | P1 |
-| 2.3.4 | test_connection() | 同上 | SELECT 1 连通性测试 | 单测完成 | P1 |
+| 2.3.4 | test_connection() | 同上 | 按方言选择连通性探针，Oracle 使用 SELECT 1 FROM DUAL | 单测完成 | P1 |
 | 2.3.5 | extract_schema() — 纯内省 | 同上 | DB 内省 + 手工标注补充 | 单测完成 | P1 |
 | 2.3.6 | load_yaml() + from_yaml() | 同上 | 解析 config/datasources.yaml | 单测完成 | P1 |
 | 2.3.7 | POST /datasources | `src/api/routes.py` | 注册数据源 | 单测完成 | P1 |
 | 2.3.8 | DELETE /datasources/{name} | `src/api/routes.py` | 删除数据源 | 单测完成 | P1 |
 | 2.3.9 | GET /datasources | `src/api/routes.py` | 列出数据源 (分页) | 单测完成 | P1 |
+| 2.3.10 | Oracle 连通性探针 | `src/datasource/providers/external.py` | Oracle 21c 使用 DUAL 探针并记录失败原因，避免错误回退为 404 | 单测完成 | P1 |
 
 ### 2.4 凭证管理
 
@@ -63,6 +64,7 @@
 | 2.5.8 | estimate_row_count() — MySQL | 同上 | `INFORMATION_SCHEMA.TABLES` 行数估算 | 单测完成 | P0 |
 | 2.5.9 | estimate_row_count() — PostgreSQL | 同上 | `pg_class.reltuples` 估算 | 单测完成 | P0 |
 | 2.5.10 | _query_metadata() 权限告警 | 同上 | INFORMATION_SCHEMA 权限不足时写入 SYSTEM_WARNING 类型的 KnowledgeEntry | 待开发 | P1 |
+| 2.5.11 | Oracle Schema 内省 | `src/datasource/introspection.py` | 使用 `ALL_TABLES`、`ALL_TAB_COLUMNS` 和当前 schema 查询表、字段、外键及行数 | 单测完成 | P1 |
 
 ### 2.6 Schema 数据结构
 
@@ -74,5 +76,15 @@
 | 2.6.4 | TableSchema 定义 | 同上 | dataclass: name / description / columns / relations / row_count_estimate / partition_key / tags | 单测完成 | P0 |
 | 2.6.5 | ColumnInfo 定义 | 同上 | dataclass: name / type / comment / is_nullable / is_primary_key / enum_values | 单测完成 | P0 |
 | 2.6.6 | TableRelation 定义 | 同上 | dataclass: target_table / join_key / relation_type | 单测完成 | P0 |
+
+### 模块收尾
+
+模块功能点共 47 项，已完成 44 项，待开发 3 项。
+
+| 功能点 | 不开发原因 | 可开发条件 | 预计开发时机 |
+|--------|------------|------------|--------------|
+| 2.1.4 DataSourceConfigStore | 动态数据源当前驻留全局 Provider，持久化表和加密字段尚未落地 | 完成 17.1.5 数据源配置表及租户唯一键设计 | Phase 3，多实例部署前 |
+| 2.4.3 KMS 集成 | 当前 PBKDF2 + Fernet 已满足本地部署，外部 Vault/KMS 需要额外运维依赖 | 确定生产密钥托管平台和轮换流程 | Phase 3，生产密钥治理批次 |
+| 2.5.10 _query_metadata() 权限告警 | 当前只返回可用元数据，权限不足告警需要统一 SYSTEM_WARNING 知识条目契约 | 固化各方言权限错误映射并接入知识库告警 | Phase 2，Schema 权限治理批次 |
 
 ---

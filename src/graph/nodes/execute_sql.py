@@ -3,10 +3,24 @@
 from __future__ import annotations
 
 import time
+from decimal import Decimal
 
 from src.config import get_settings
 from src.graph.state import AnalysisState
 from src.logging_config import get_logger
+
+logger = get_logger(__name__)
+
+
+def _row_to_dict(row) -> dict:
+    """Row → dict，float→Decimal 保证后续运算精度。"""
+    d = {}
+    for k, v in dict(row._mapping).items():
+        if isinstance(v, float) and not isinstance(v, bool):
+            d[k] = Decimal(str(v))
+        else:
+            d[k] = v
+    return d
 
 logger = get_logger(__name__)
 
@@ -28,12 +42,16 @@ async def execute_sql_node(state: AnalysisState) -> dict:
     if not sql:
         logger.info("SQL 为空，跳过数据库执行", datasource=ds_name)
         return {"query_result_sample": [], "query_result_full_count": 0,
-                "query_result_statistics": {"row_count": 0}}
+                "query_result_statistics": {"row_count": 0},
+                "query_result_truncated": False,
+                "execution_error": "", "execution_error_type": "",
+                "execution_retry_count": 0}
 
     # 12.2.1 频率限制检查
     from src.security.data_masker import check_rate_limit
     if not check_rate_limit():
         return {"execution_error": "请求频率超限",
+                "execution_error_type": "rate_limit",
                 "query_result_sample": [], "query_result_full_count": 0,
                 "query_result_statistics": {"row_count": 0}}
 
@@ -49,7 +67,8 @@ async def execute_sql_node(state: AnalysisState) -> dict:
                 logger.warning("列权限拦截", datasource=ds_name, error=col_err_perm)
                 return {"query_result_sample": [], "query_result_full_count": 0,
                         "query_result_statistics": {"row_count": 0},
-                        "generated_sql": sql, "execution_error": col_err_perm}
+                        "generated_sql": sql, "execution_error": col_err_perm,
+                        "execution_error_type": "security"}
         if rfilter:
             from src.security.permission_check import inject_row_filter
             sql = inject_row_filter(sql, rfilter)
@@ -60,7 +79,8 @@ async def execute_sql_node(state: AnalysisState) -> dict:
         logger.warning("列名验证失败，触发重试", datasource=ds_name, error=col_err)
         return {"query_result_sample": [], "query_result_full_count": 0,
                 "query_result_statistics": {"row_count": 0},
-                "generated_sql": sql, "execution_error": col_err}
+                "generated_sql": sql, "execution_error": col_err,
+                "execution_error_type": "sql_semantic"}
 
     # 尝试连接数据源
     try:
@@ -70,8 +90,17 @@ async def execute_sql_node(state: AnalysisState) -> dict:
         if ds and ds.engine:
             # 直接使用已注入的 engine 执行
             import sqlalchemy as sa
-            async with ds.engine.connect() as conn:
-                # SQLite 跳过超时设置
+            from sqlalchemy.ext.asyncio import AsyncEngine
+
+            async def _run_async(conn) -> tuple[list[dict], bool]:
+                """流式读取异步查询结果并限制内存占用。
+
+                Args:
+                    conn: SQLAlchemy AsyncConnection。
+
+                Returns:
+                    有界结果行和是否截断。
+                """
                 if ds.dialect != "sqlite":
                     settings = get_settings()
                     from src.config import get_settings as _gs
@@ -82,21 +111,69 @@ async def execute_sql_node(state: AnalysisState) -> dict:
                         await conn.execute(sa.text(f"SET SESSION max_execution_time = {timeout_s * 1000}"))
                     elif ds.dialect == "postgres":
                         await conn.execute(sa.text(f"SET statement_timeout = '{timeout_s * 1000}ms'"))
+                max_rows = get_settings().max_result_rows
+                result = await conn.stream(sa.text(sql))
+                rows: list[dict] = []
+                async for row in result:
+                    rows.append(_row_to_dict(row))
+                    if len(rows) > max_rows:
+                        break
+                await result.close()
+                truncated = len(rows) > max_rows
+                return rows[:max_rows], truncated
 
-                result = await conn.execute(sa.text(sql))
-                rows = [dict(row._mapping) for row in result]
+            def _run_sync(conn) -> tuple[list[dict], bool]:
+                """分批读取同步查询结果并限制内存占用。
+
+                Args:
+                    conn: SQLAlchemy Connection。
+
+                Returns:
+                    有界结果行和是否截断。
+                """
+                if ds.dialect != "sqlite":
+                    settings = get_settings()
+                    from src.config import get_settings as _gs
+                    timeout_s = _gs().max_execution_time
+                    if ds.dialect == "clickhouse":
+                        conn.execute(sa.text(f"SET max_execution_time = {timeout_s}"))
+                    elif ds.dialect == "mysql":
+                        conn.execute(sa.text(f"SET SESSION max_execution_time = {timeout_s * 1000}"))
+                    elif ds.dialect == "postgres":
+                        conn.execute(sa.text(f"SET statement_timeout = '{timeout_s * 1000}ms'"))
+                max_rows = get_settings().max_result_rows
+                result = conn.execution_options(stream_results=True).execute(sa.text(sql))
+                fetched = result.fetchmany(max_rows + 1)
+                result.close()
+                truncated = len(fetched) > max_rows
+                return [_row_to_dict(row) for row in fetched[:max_rows]], truncated
+
+            if isinstance(ds.engine, AsyncEngine):
+                async with ds.engine.connect() as conn:
+                    rows, truncated = await _run_async(conn)
+            else:
+                with ds.engine.connect() as conn:
+                    rows, truncated = _run_sync(conn)
             elapsed = round((time.monotonic() - _start) * 1000)
             # 12.3.3 审计日志
             import asyncio
-            from src.security.data_masker import log_audit
-            asyncio.create_task(log_audit("anonymous", ds_name, sql, len(rows), elapsed, True))
+            from src.api.auth import get_current_tenant_id, get_current_user_id
+            from src.security.data_masker import log_audit, mask_sensitive_data
+            asyncio.create_task(log_audit(
+                get_current_user_id(), get_current_tenant_id(), ds_name,
+                sql, len(rows), elapsed, True,
+            ))
+            masked_rows = mask_sensitive_data(rows)
             logger.info("节点完成", node="execute_sql", elapsed_ms=elapsed)
             return {
                 "generated_sql": sql,  # 同步重写后的 SQL 到前端
-                "query_result_sample": rows[:200],
-                "query_result_full_count": len(rows),
-                "query_result_statistics": {"row_count": len(rows)},
+                "query_result_sample": masked_rows[:200],
+                "query_result_full_count": len(masked_rows),
+                "query_result_truncated": truncated,
+                "query_result_statistics": {"row_count": len(masked_rows), "truncated": truncated},
                 "execution_error": "",
+                "execution_error_type": "",
+                "execution_retry_count": 0,
             }
     except Exception as e:
         logger.warning("数据源执行失败", datasource=ds_name, error=str(e))
@@ -111,18 +188,53 @@ async def execute_sql_node(state: AnalysisState) -> dict:
             else:
                 err_msg = err_msg[:300]
         logger.info("节点完成", node="execute_sql", elapsed_ms=round((time.monotonic() - _start) * 1000))
+        error_type = _classify_execution_error(err_msg)
+        execution_retry_count = state.get("execution_retry_count", 0)
+        if error_type == "transient":
+            execution_retry_count += 1
         return {
             "query_result_sample": [],
             "query_result_full_count": 0,
             "query_result_statistics": {"row_count": 0},
             "generated_sql": sql,
             "execution_error": err_msg,
+            "execution_error_type": error_type,
+            "execution_retry_count": execution_retry_count,
         }
 
     logger.error("execute_sql 未预期路径", datasource=ds_name)
     return {"query_result_sample": [], "query_result_full_count": 0,
             "query_result_statistics": {"row_count": 0},
-            "generated_sql": sql, "execution_error": f"数据源 '{ds_name}' 内部错误"}
+            "generated_sql": sql,
+            "execution_error": f"数据源 '{ds_name}' 内部错误",
+            "execution_error_type": "configuration",
+            "retry_count": 99}
+
+
+# 方法作用：把数据库错误稳定分类为执行重试、SQL 重生成或直接终止三类。
+# Args: message - 数据库驱动或 Registry 返回的错误文本。
+# Returns: transient/sql_semantic/configuration 中的分类字符串。
+def _classify_execution_error(message: str) -> str:
+    """根据可审计关键词分类数据库执行错误，未知错误默认交给 SQL 修正。"""
+    normalized = (message or "").lower()
+    logger.debug("执行错误分类入口", error_preview=normalized[:160])
+    transient_markers = (
+        "timeout", "timed out", "connection reset", "connection refused",
+        "connection closed", "server has gone away", "network", "temporarily unavailable",
+        "deadlock", "lock wait timeout", "连接超时", "连接中断", "网络错误", "暂时不可用",
+    )
+    configuration_markers = (
+        "not found", "unknown database", "authentication", "access denied",
+        "未配置", "未找到", "不存在的数据源", "认证失败", "连接失败或不存在",
+    )
+    if any(marker in normalized for marker in transient_markers):
+        result = "transient"
+    elif any(marker in normalized for marker in configuration_markers):
+        result = "configuration"
+    else:
+        result = "sql_semantic"
+    logger.info("执行错误分类完成", error_type=result)
+    return result
 
 
 def _validate_column_references(sql: str, tables: list[dict]) -> str | None:

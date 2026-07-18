@@ -20,7 +20,10 @@ class ChatResponse(BaseModel):
     session_id: str = ""
     user_query: str = ""
     sql: str = ""
+    sql_statements: list[dict] = Field(default_factory=list)
     data: list[dict] = []
+    row_count: int = 0
+    truncated: bool = False
     analysis: dict = {}
     chart: dict = {}
 
@@ -74,13 +77,32 @@ class TableInfo(BaseModel):
 
 
 class MCPServerCreate(BaseModel):
+    """创建 system/tenant/private MCP Server 的请求。"""
+
     name: str = Field(..., min_length=1, max_length=64)
+    scope: str = Field(default="private", pattern="^(system|tenant|private)$")
     transport: str = "stdio"
     command: str = ""
     args: str = ""
     url: str = ""
     env_vars: dict = {}
     description: str = ""
+    enabled: bool = True
+
+
+class KnowledgeTagCreateRequest(BaseModel):
+    """创建个人或全局知识标签的请求。"""
+
+    name: str = Field(..., min_length=1, max_length=128)
+    tag_group: str = Field(default="custom", min_length=1, max_length=32)
+    description: str = Field(default="", max_length=1000)
+    aliases: list[str] = Field(default_factory=list, max_length=20)
+
+
+class KnowledgeTagStatusRequest(BaseModel):
+    """启用或停用知识标签的请求。"""
+
+    is_active: bool
 
 
 class HealthResponse(BaseModel):

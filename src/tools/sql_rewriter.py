@@ -13,6 +13,9 @@ from src.logging_config import get_logger
 logger = get_logger(__name__)
 
 _MYSQL_FIXES: list[tuple[str, str, str]] = [
+    # INTERVAL 'N' UNIT → INTERVAL N UNIT（去掉 LLM 误加的引号）
+    (r"\bINTERVAL\s+'(\d+)'\s+(\w+)",
+     r"INTERVAL \1 \2"),
     # CURDATE() - INTERVAL → DATE_SUB(CURDATE(), INTERVAL ...)
     (r"\bCURDATE\(\)\s*-\s*INTERVAL\s+(\d+)\s+(\w+)",
      r"DATE_SUB(CURDATE(), INTERVAL \1 \2)"),
@@ -68,14 +71,17 @@ _RULES: dict[str, list[tuple[str, str, str]]] = {
 }
 
 
+# 修正常见跨方言 SQL，并用目标方言重新渲染标识符。
+# Args: sql - 待修正的 SQL；dialect - 目标数据库方言。
+# Returns: 可交给目标数据库执行的修正后 SQL。
 def rewrite_sql(sql: str, dialect: str) -> str:
     """两层修正：① 正则替换跨方言函数 ② sqlglot 标识符加引号。
 
     Layer 2 解决 year_month / rank / status 等别名撞保留字的问题。
     """
+    logger.debug("rewrite_sql 入口", dialect=dialect, sql=sql[:150])
     rules = _RULES.get(dialect.lower(), [])
     applied = 0
-    original = sql
 
     # Layer 1: 正则替换
     if rules:
@@ -84,6 +90,55 @@ def rewrite_sql(sql: str, dialect: str) -> str:
             if count > 0:
                 sql = new_sql
                 applied += count
+
+    # PostgreSQL 两参数 ROUND 仅接受 numeric，显式 CAST 避免 double precision 运行时失败。
+    if dialect.lower() == "postgres":
+        try:
+            import sqlglot
+            from sqlglot import exp
+
+            tree = sqlglot.parse_one(sql, read="postgres")
+            round_fixes = 0
+            round_skips = 0
+            for round_node in tree.find_all(exp.Round):
+                if round_node.args.get("decimals") is None:
+                    continue
+                round_input = round_node.this
+                cast_type = (
+                    round_input.args.get("to")
+                    if isinstance(round_input, exp.Cast)
+                    else None
+                )
+                if (
+                    isinstance(cast_type, exp.DataType)
+                    and cast_type.this == exp.DataType.Type.DECIMAL
+                ):
+                    round_skips += 1
+                    continue
+                round_node.set(
+                    "this",
+                    exp.Cast(
+                        this=round_input.copy(),
+                        to=exp.DataType.build("DECIMAL"),
+                    ),
+                )
+                round_fixes += 1
+            if round_fixes:
+                sql = tree.sql(dialect="postgres")
+                applied += round_fixes
+                logger.info("PostgreSQL ROUND 类型修正完成", fixes=round_fixes)
+            if round_skips:
+                logger.info(
+                    "PostgreSQL ROUND 类型修正跳过",
+                    reason="输入已是 DECIMAL",
+                    skips=round_skips,
+                )
+        except Exception as exc:
+            logger.error(
+                "PostgreSQL ROUND 类型修正失败",
+                error=str(exc),
+                exc_info=True,
+            )
 
     # Layer 2: 所有标识符统一加引号（防撞保留字 + 避免正则遗漏）
     # sqlglot 是 AST 解析器，能区分 列名/表名/别名 vs 函数名/关键字——
@@ -97,10 +152,11 @@ def rewrite_sql(sql: str, dialect: str) -> str:
         if quoted and quoted[0] != sql:
             sql = quoted[0]
             applied += 1
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.error("SQL 标识符引用重写失败", error=str(exc), exc_info=True)
 
     if applied > 0:
         logger.info("SQL 方言重写", dialect=dialect, fixes=applied,
                     result=sql[:150])
+    logger.info("rewrite_sql 完成", dialect=dialect, fixes=applied, sql_chars=len(sql))
     return sql

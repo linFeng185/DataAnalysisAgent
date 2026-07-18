@@ -1,6 +1,6 @@
 import { useState, useRef, useCallback, useEffect } from 'react';
 import { streamChat, fetchSessionTurns } from '../api/client';
-import type { ChatTurnData, SessionLatestState } from '../types';
+import type { ChatTurnData } from '../types';
 
 const SESSION_KEY = 'chat_turns';
 const SESSION_ID_KEY = 'active_session_id';
@@ -9,9 +9,15 @@ interface ProgressNode {
   status: 'pending' | 'running' | 'done' | 'error';
   message: string;
 }
+interface StreamBuffer {
+  node: string;
+  reasoning: string;
+  tokens: string;
+}
 interface AssistantContent {
   reasoning: string;
   tokens: string;
+  streamBuffers: Record<string, StreamBuffer>;
   sql: string;
   progressNodes: Record<string, ProgressNode>;
   validationErrors: string[];
@@ -31,29 +37,23 @@ export interface ChatTurn {
 function emptyAssistant(): AssistantContent {
   return {
     reasoning: '', tokens: '', sql: '',
+    streamBuffers: {},
     progressNodes: {}, validationErrors: [], analysisText: '',
   };
 }
 
 /** 从 ChatTurnData 还原为 ChatTurn（历史会话恢复用） */
-function turnFromData(d: ChatTurnData, datasource: string, isLast: boolean, latest?: SessionLatestState | null): ChatTurn {
-  // 最后一轮注入富数据，恢复完整的分析结果 UI
-  const finalResult = isLast && latest ? {
-    success: latest.success,
-    error_message: latest.error_message,
-    sql: latest.sql,
-    data: latest.data,
-    analysis: latest.analysis,
-    chart: latest.chart,
-  } : null;
-
+function turnFromData(d: ChatTurnData, datasource: string): ChatTurn {
+  const finalResult = d.final_result && Object.keys(d.final_result).length > 0
+    ? d.final_result : null;
   return {
     id: d.turn_id,
     userQuery: d.user_query,
     datasource,
     assistant: {
       ...emptyAssistant(),
-      sql: latest?.sql || d.sql,
+      sql: (finalResult?.sql as string) || d.sql,
+      reasoning: (finalResult?.sql_reasoning_content as string) || '',
       tokens: d.assistant_summary,
     },
     finalResult,
@@ -156,16 +156,57 @@ export function useChat() {
             }));
             break;
           case 'llm_start':
+            if (e.stream_id) updateAssistant(a => {
+              const existingBuffers = a.streamBuffers || {};
+              return { streamBuffers: {
+                ...existingBuffers,
+                [e.stream_id as string]: existingBuffers[e.stream_id as string] || {
+                  node: (e.node as string) || 'unknown', reasoning: '', tokens: '',
+                },
+              } };
+            });
             break;
           case 'thinking':
-            if (e.reasoning_content) updateAssistant(a => ({
-              reasoning: a.reasoning + (e.reasoning_content as string),
-            }));
+            if (e.reasoning_content) updateAssistant(a => {
+              const streamId = (e.stream_id as string) || `legacy:${(e.node as string) || 'unknown'}`;
+              const existingBuffers = a.streamBuffers || {};
+              const current = existingBuffers[streamId] || {
+                node: (e.node as string) || 'unknown', reasoning: '', tokens: '',
+              };
+              const streamBuffers = {
+                ...existingBuffers,
+                [streamId]: {
+                  ...current,
+                  reasoning: current.reasoning + (e.reasoning_content as string),
+                },
+              };
+              const reasoning = Object.entries(streamBuffers)
+                .filter(([, buffer]) => buffer.reasoning)
+                .map(([id, buffer]) => `【${buffer.node} · ${id.slice(0, 8)}】\n${buffer.reasoning}`)
+                .join('\n\n');
+              return { streamBuffers, reasoning };
+            });
             break;
           case 'token':
-            if (e.content) updateAssistant(a => ({
-              tokens: a.tokens + (e.content as string),
-            }));
+            if (e.content) updateAssistant(a => {
+              const streamId = (e.stream_id as string) || `legacy:${(e.node as string) || 'unknown'}`;
+              const existingBuffers = a.streamBuffers || {};
+              const current = existingBuffers[streamId] || {
+                node: (e.node as string) || 'unknown', reasoning: '', tokens: '',
+              };
+              const streamBuffers = {
+                ...existingBuffers,
+                [streamId]: {
+                  ...current,
+                  tokens: current.tokens + (e.content as string),
+                },
+              };
+              const tokens = Object.entries(streamBuffers)
+                .filter(([, buffer]) => buffer.tokens)
+                .map(([id, buffer]) => `【${buffer.node} · ${id.slice(0, 8)}】\n${buffer.tokens}`)
+                .join('\n\n');
+              return { streamBuffers, tokens };
+            });
             break;
           case 'llm_end':
             break;
@@ -187,7 +228,12 @@ export function useChat() {
             break;
           case 'result':
             setTurns(prev => prev.map(t => t.id === turnId ? {
-              ...t, finalResult: e as unknown as Record<string, unknown>, status: 'done',
+              ...t,
+              assistant: {
+                ...t.assistant,
+                sql: (e.sql as string) || t.assistant.sql,
+              },
+              finalResult: e as unknown as Record<string, unknown>, status: 'done',
             } : t));
             break;
           case 'retry_status':
@@ -212,6 +258,8 @@ export function useChat() {
           t.id === turnId ? { ...t, status: 'error', errorMessage: err } : t,
         ));
       },
+      dss,
+      mid,
     );
   }, [sessionId]);
 
@@ -228,15 +276,14 @@ export function useChat() {
     clearStorage();
   }, []);
 
-  /** 恢复历史会话的对话记录，latest 为最后一轮的富数据 */
+  /** 恢复历史会话的逐轮结构化记录。 */
   const restoreTurns = useCallback((
-    savedTurns: ChatTurnData[], sid: string, datasource: string,
-    latest?: SessionLatestState | null,
+    savedTurns: ChatTurnData[], sid: string, datasource: string, hasOlder = false,
   ) => {
-    const lastIdx = savedTurns.length - 1;
-    const restored = savedTurns.map((d, i) => turnFromData(d, datasource, i === lastIdx, latest));
+    const restored = savedTurns.map(d => turnFromData(d, datasource));
     setTurns(restored);
     setSessionId(sid);
+    setHasMore(hasOlder);
     nextId.current = restored.length > 0
       ? Math.max(...restored.map(t => t.id)) + 1 : 1;
     saveToStorage(restored, sid);
@@ -250,7 +297,7 @@ export function useChat() {
     try {
       const res = await fetchSessionTurns(sid, earliest, 20);
       if (res.turns.length > 0) {
-        const older = res.turns.map(d => turnFromData(d, datasource, false));
+        const older = res.turns.map(d => turnFromData(d, datasource));
         setTurns(prev => {
           const existingIds = new Set(prev.map(t => t.id));
           const newTurns = older.filter(t => !existingIds.has(t.id));

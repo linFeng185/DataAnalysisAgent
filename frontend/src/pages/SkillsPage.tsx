@@ -1,8 +1,10 @@
 import { useState, useEffect, useRef } from 'react';
-import { Card, Table, Tag, Typography, Empty, Button, message, Space, Switch, Popconfirm, Modal, Descriptions } from 'antd';
+import { Card, Table, Tag, Typography, Empty, Button, message, Space, Switch, Popconfirm, Modal, Descriptions, Select } from 'antd';
 import { ToolOutlined, UploadOutlined, DeleteOutlined, ReloadOutlined } from '@ant-design/icons';
 import { get } from '../api/client';
 import type { SkillInfo } from '../types';
+import type { KnowledgeScope } from '../types';
+import { useAuth } from '../hooks/AuthContext';
 
 const nodeColors: Record<string, string> = {
   custom_report: 'orange', 'data-quality-check': 'blue',
@@ -11,12 +13,14 @@ const nodeColors: Record<string, string> = {
 };
 
 export default function SkillsPage() {
+  const { user } = useAuth();
   const [skills, setSkills] = useState<SkillInfo[]>([]);
   const [loading, setLoading] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [uploadResult, setUploadResult] = useState<Record<string, unknown> | null>(null);
   const [detail, setDetail] = useState<SkillInfo | null>(null);
   const [fileContent, setFileContent] = useState('');
+  const [uploadScope, setUploadScope] = useState<KnowledgeScope>('private');
   const fileRef = useRef<HTMLInputElement>(null);
 
   const load = async () => {
@@ -31,19 +35,23 @@ export default function SkillsPage() {
 
   const handleRefresh = async () => {
     try {
-      await fetch('/api/v1/skills/refresh', { method: 'POST' });
+      await fetch('/api/v1/skills/refresh', { method: 'POST', credentials: 'include' });
       message.success('刷新完成'); load();
     } catch { message.error('刷新失败'); }
   };
 
-  const handleToggle = async (name: string, enabled: boolean) => {
-    await fetch(`/api/v1/skills/${encodeURIComponent(name)}/toggle?enabled=${enabled}`, { method: 'PUT' });
+  const handleToggle = async (skill: SkillInfo, enabled: boolean) => {
+    await fetch(`/api/v1/skills/${encodeURIComponent(skill.name)}/toggle?enabled=${enabled}&skill_scope=${skill.scope}`, {
+      method: 'PUT', credentials: 'include',
+    });
     load();
   };
 
-  const handleDelete = async (name: string) => {
-    const res = await fetch(`/api/v1/skills/${encodeURIComponent(name)}`, { method: 'DELETE' });
-    if (res.ok) { message.success(`${name} 已删除`); load(); }
+  const handleDelete = async (skill: SkillInfo) => {
+    const res = await fetch(`/api/v1/skills/${encodeURIComponent(skill.name)}?skill_scope=${skill.scope}`, {
+      method: 'DELETE', credentials: 'include',
+    });
+    if (res.ok) { message.success(`${skill.name} 已删除`); load(); }
   };
 
   const handleUpload = async (files: FileList | null) => {
@@ -56,7 +64,9 @@ export default function SkillsPage() {
         const rp = (f as unknown as { webkitRelativePath?: string }).webkitRelativePath || f.name;
         form.append('files', f, rp);
       }
-      const res = await fetch('/api/v1/skills/upload', { method: 'POST', body: form });
+      const res = await fetch(`/api/v1/skills/upload?skill_scope=${uploadScope}`, {
+        method: 'POST', body: form, credentials: 'include',
+      });
       const data = await res.json();
       setUploadResult(data);
       if (data.total > 0) { message.success(`已导入 ${data.total} 个`); load(); }
@@ -70,7 +80,9 @@ export default function SkillsPage() {
     setDetail(s);
     setFileContent('加载中...');
     try {
-      const res = await fetch(`/api/v1/skills/${encodeURIComponent(s.name)}/content`);
+      const res = await fetch(`/api/v1/skills/${encodeURIComponent(s.name)}/content?skill_scope=${s.scope}`, {
+        credentials: 'include',
+      });
       if (res.ok) {
         const data = await res.json();
         setFileContent(data.content || '');
@@ -80,12 +92,24 @@ export default function SkillsPage() {
     } catch { setFileContent('// 读取失败'); }
   };
 
+  const scopeOptions = [
+    ...(user?.role === 'super_admin' ? [{ value: 'system', label: '系统' }] : []),
+    ...(['super_admin', 'tenant_admin'].includes(user?.role || '') ? [{ value: 'tenant', label: '租户' }] : []),
+    { value: 'private', label: '个人' },
+  ];
+
+  const scopeColor: Record<KnowledgeScope, string> = {
+    system: 'blue', tenant: 'green', private: 'default',
+  };
+
   return (
     <div style={{ maxWidth: 1000, margin: '0 auto' }}>
       <Card title="Skills 管理" extra={
         <Space>
           <Typography.Text type="secondary">共 {skills.length} 个</Typography.Text>
           <Button icon={<ReloadOutlined />} size="small" onClick={handleRefresh}>刷新</Button>
+          <Select<KnowledgeScope> value={uploadScope} options={scopeOptions}
+            style={{ width: 92 }} onChange={setUploadScope} />
           <input ref={fileRef} type="file" multiple
             // @ts-ignore
             webkitdirectory="" directory=""
@@ -99,7 +123,7 @@ export default function SkillsPage() {
             onClick={() => document.getElementById('skill-file-single')?.click()}>导入 SKILL.md</Button>
         </Space>
       }>
-        <Table<SkillInfo> dataSource={skills} rowKey="name" loading={loading}
+        <Table<SkillInfo> dataSource={skills} rowKey={r => `${r.scope}:${r.tenant_id}:${r.owner_user_id}:${r.name}`} loading={loading}
           locale={{ emptyText: <Empty description="暂无 Skill" /> }}
           size="small"
           onRow={r => ({ onClick: () => openDetail(r), style: { cursor: 'pointer' } })}
@@ -109,8 +133,10 @@ export default function SkillsPage() {
             { title: '状态', dataIndex: 'enabled', width: 70,
               render: (v: boolean, r: SkillInfo) => (
                 <Switch checked={v} size="small" onClick={(_, e) => e.stopPropagation()}
-                  onChange={checked => handleToggle(r.name, checked)} />
+                  onChange={checked => handleToggle(r, checked)} />
               ) },
+            { title: '范围', dataIndex: 'scope', width: 76,
+              render: (v: KnowledgeScope) => <Tag color={scopeColor[v]}>{v === 'system' ? '系统' : v === 'tenant' ? '租户' : '个人'}</Tag> },
             { title: '描述', dataIndex: 'description', ellipsis: true },
             { title: '触发词', dataIndex: 'triggers', width: 200, ellipsis: true,
               render: (v: string[]) => v?.length ? v.slice(0, 3).join(', ') + (v.length > 3 ? '...' : '') : '—' },
@@ -122,7 +148,7 @@ export default function SkillsPage() {
                   <Button size="small" danger disabled icon={<DeleteOutlined />}
                     onClick={e => e.stopPropagation()} title="内置不可删除" />
                 ) : (
-                  <Popconfirm title="确定删除？" onConfirm={() => handleDelete(r.name)}
+                  <Popconfirm title="确定删除？" onConfirm={() => handleDelete(r)}
                     onPopupClick={e => e.stopPropagation()}>
                     <Button size="small" danger icon={<DeleteOutlined />}
                       onClick={e => e.stopPropagation()} />
@@ -142,6 +168,7 @@ export default function SkillsPage() {
               <Descriptions.Item label="状态">{detail.enabled
                 ? <Tag color="success">启用</Tag> : <Tag color="error">禁用</Tag>}</Descriptions.Item>
               <Descriptions.Item label="类型">{detail.is_builtin ? <Tag color="blue">内置</Tag> : <Tag color="orange">用户上传</Tag>}</Descriptions.Item>
+              <Descriptions.Item label="范围"><Tag color={scopeColor[detail.scope]}>{detail.scope}</Tag></Descriptions.Item>
               <Descriptions.Item label="描述">{detail.description || '—'}</Descriptions.Item>
               <Descriptions.Item label="触发词">
                 {detail.triggers?.length ? detail.triggers.map(k => <Tag key={k} color="blue">{k}</Tag>) : '—'}

@@ -7,7 +7,7 @@ tags: [quality, validation, production]
 
 triggers:
   keywords: [数据质量, 空值, 重复, 异常检测, 数据校验, 完整性, 脏数据]
-  intents: [aggregation, query]
+  intents: []
   tables: []
 
 depends_on:

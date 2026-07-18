@@ -3,8 +3,12 @@
 from __future__ import annotations
 
 import json
+import logging
 
 import pytest
+
+
+logger = logging.getLogger(__name__)
 
 
 class TestSSEFormat:
@@ -68,3 +72,33 @@ class TestFindParentNode:
         from src.api.streaming import _find_parent_node
         event = {"metadata": {}, "tags": []}
         assert _find_parent_node(event) is None
+
+
+class TestStreamIdentity:
+    """覆盖并行 LLM SSE 调用实例隔离。"""
+
+    # 方法作用：验证同名节点的不同模型调用使用各自 run_id 作为流标识。
+    # Args: self - pytest 测试类实例。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    def test_event_stream_id_uses_run_id(self):
+        """两个 generate_sql 调用不得因为节点名相同而共享缓冲区。"""
+        logger.debug("test_event_stream_id_uses_run_id 入口")
+        try:
+            # Arrange
+            from src.api.streaming import _event_stream_id
+
+            first = {"run_id": "run-mysql", "metadata": {"langgraph_node": "generate_sql"}}
+            second = {"run_id": "run-postgres", "metadata": {"langgraph_node": "generate_sql"}}
+
+            # Act
+            first_id = _event_stream_id(first)
+            second_id = _event_stream_id(second)
+
+            # Assert
+            assert first_id == "run-mysql"
+            assert second_id == "run-postgres"
+            assert first_id != second_id
+            logger.info("test_event_stream_id_uses_run_id 完成")
+        except Exception as exc:
+            logger.error("test_event_stream_id_uses_run_id 异常: %s", exc, exc_info=True)
+            raise

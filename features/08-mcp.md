@@ -18,6 +18,9 @@
 | 8.1.10 | close_all() | 同上 | 关闭所有连接 (AsyncExitStack.aclose) | 开发完成 |
 | 8.1.11 | _sse_client() | 同上 | SSE transport 的客户端实现 | 开发完成 |
 | 8.1.12 | 降级策略 | 同上 | 重连 5 次失败 → 标记 degraded → 从 get_all_tools() 移除 → 健康检查恢复后自动启用 | 开发完成 |
+| 8.1.13 | MCP 工具租户隔离 `[P0]` | 同上 | 系统工具全局可见；租户工具按 tenant_id 过滤，无身份仅返回系统工具 | 单测完成 |
+| 8.1.14 | MCP 三级作用域隔离 `[P0]` | 同上 | system/tenant/private 工具按 tenant_id + owner_user_id 请求级过滤 | 单测完成 |
+| 8.1.15 | 租户与个人 MCP 生命周期 `[P1]` | 同上 + `src/main.py` | DB 配置加载后建立连接；新增、删除和重载同步运行时连接 | 单测完成 |
 
 ### 8.2 MCP Server
 
@@ -38,5 +41,16 @@
 | 8.3.1 | mcp_agent_node() | `src/graph/workflow.py` | 使用 create_react_agent 为文件分析场景创建动态工具调用 Node | 开发完成 |
 | 8.3.2 | route_by_intent() 集成 | 同上 | intent == "file_analysis" → 路由到 mcp_agent Node | 开发完成 |
 | 8.3.3 | MCP Agent system prompt | 同上 | Agent 内联 system prompt | 开发完成 |
+| 8.3.4 | MCP Agent 失败契约 `[P1]` | 同上 | 模型不可用时返回标准 mcp_agent 失败响应并经过统一历史出口 | 单测完成 |
+
+### 8.4 MCP 管理与授权
+
+| # | 功能 | 文件 | 描述 | 状态 |
+|---|------|------|------|------|
+| 8.4.1 | MCP 作用域管理 API `[P0]` | `src/api/routes.py` + `migrations/004_resource_scopes.sql` | system 仅超管、tenant 仅租户管理员、private 仅本人管理 | 单测完成 |
+
+### 模块收尾
+
+模块功能点共 27 项，已完成 27 项，待开发 0 项。
 
 ---

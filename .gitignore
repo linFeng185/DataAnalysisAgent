@@ -54,3 +54,6 @@ logs/
 # 生成的测试数据文件
 test_data.sql
 
+# 运行时数据缓存和生成文件
+data/cache/
+data/generated/

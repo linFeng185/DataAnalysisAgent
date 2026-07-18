@@ -2,10 +2,11 @@
 # 详情: SPEC §3.9.1
 mcp_servers:
   filesystem:
+    enabled: false
     transport: stdio
-    command: "npx"
-    args: ["-y", "mcp-filesystem", "/data/uploads"]
-    description: "文件系统访问"
+    command: ""
+    args: []
+    description: "文件系统访问（默认禁用，启用前必须配置本地固定版本服务）"
   # web_search:
   #   transport: stdio
   #   command: "npx"

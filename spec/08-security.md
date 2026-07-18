@@ -149,16 +149,24 @@ CREATE TABLE group_permissions (
 
 #### 7.3.8 租户超管与角色-菜单分离
 
+**平台超级管理员**：
+- `super_admin` 是整个系统的管理员，不隶属于某个租户的管理边界
+- 可维护全局系统知识、全局标签和平台级配置
+- 可查看并治理所有租户的知识标签，但业务数据访问仍必须审计
+- 只有 `super_admin` 可以把个人自定义标签提升为全局标签
+
 **租户超管**：
 - 创建租户时自动生成 `tenant_admin` 账号
 - 超管拥有租户内**所有权限**（全部数据源 + 全部列/行）
 - 超管不走 `datasource_permissions` 校验，直接放行
 - 超管可以创建/删除同租户下的其他用户和用户组
+- 超管只能管理本租户公共知识，不能管理系统知识、全局标签或其他租户资源
 
 **角色-菜单分离**（角色 ≠ 数据源权限）：
 
 | 角色 | 可见菜单 | 数据源权限 |
 |------|---------|-----------|
+| `super_admin` | 平台全部菜单（含全局知识和标签治理） | 平台治理权限，业务数据访问必须审计 |
 | `tenant_admin` | 全部菜单（对话/数据源/Schema/历史/Skills/知识库/系统设置/用户管理） | 租户内全部数据源，不校验权限表 |
 | `analyst` | 对话/数据源/Schema/历史/Skills/知识库 | 按权限表（个人 + 组叠加） |
 | `viewer` | 对话（只读）/历史 | 按权限表，强制只读 |
@@ -172,6 +180,7 @@ CREATE TABLE group_permissions (
 
 ```python
 ROLE_MENUS = {
+    "super_admin":  ["chat", "datasource", "schema", "history", "skills", "knowledge", "settings", "users", "platform"],
     "tenant_admin": ["chat", "datasource", "schema", "history", "skills", "knowledge", "settings", "users"],
     "analyst":      ["chat", "datasource", "schema", "history", "skills", "knowledge"],
     "viewer":       ["chat", "history"],
@@ -272,30 +281,43 @@ def get_current_user_id():
 | 资源 | 隔离粒度 | 原因 |
 |------|---------|------|
 | 数据源 | 租户 + 用户 + 用户组 + 行/列 | 数据泄露是安全事故 |
-| 知识库 | 租户 + public/private | 引用错误不影响数据安全 |
-| Skill | 租户（全局内置 + 租户定制） | 组织能力，不需要用户级 |
+| 知识库 | system + tenant + private | 平台、租户和用户知识必须分别授权 |
+| Skill | system + tenant + private | 平台能力、组织能力和个人扩展必须分别授权 |
+| MCP | system + tenant + private | 外部工具可能携带凭证和数据访问能力，必须同时隔离租户与用户 |
 
 **知识库 (ChromaDB) 隔离**：
 
-无论哪种知识类型（Schema 缓存 / 业务文档 / 指标口径 / 枚举值），都只分两档：
+无论哪种知识类型（Schema 缓存 / 业务文档 / 指标口径 / 枚举值），统一使用三档知识范围：
 
 | 可见性 | 谁可见 | 典型场景 |
 |--------|--------|---------|
-| `tenant`（默认） | 租户内所有人 | 官方数据字典、指标口径、自动缓存 |
-| `private` | 仅创建者 | 个人分析笔记、草稿规则 |
+| `system` | 所有租户和用户 | SQL 方言手册、分析方法、数据质量规则、产品文档 |
+| `tenant` | 当前租户所有人 | 数据源文档、官方数据字典、指标口径、业务规则 |
+| `private`（用户上传默认） | 仅创建者 | 个人分析笔记、术语别名、临时补充知识 |
 
-不需要 `restricted` 或列级/行级——知识库只提供 LLM 上下文，引用错误不会泄露真实数据。
+写权限强制为：`system` 仅 `super_admin` 或配置目录扫描任务；`tenant` 仅 `tenant_admin/super_admin`；`private` 为当前登录用户。`tenant_admin` 不得操作系统知识或其他租户知识。
 
-ChromaDB 写入统一注入 `metadata.tenant_id` + `metadata.visibility`，读取时 `where={"tenant_id": ..., "visibility": "tenant"}` 过滤。单租户模式 `tenant_id=1`，行为不变。
+ChromaDB 写入统一注入 `metadata.tenant_id`、`metadata.owner_user_id`、`metadata.visibility`。读取时分别检索 `system`、当前租户 `tenant`、当前用户 `private` 三个范围，再去重和重排；禁止用一次缺少所有者条件的宽查询替代。冲突权重为租户官方知识 > 个人补充 > 系统通用知识，个人知识不能静默覆盖租户指标口径。
 
-**Skill 隔离**：
+**Skill 与 MCP 统一作用域**：
 
-| 类型 | 目录 | 可见范围 | 说明 |
-|------|------|---------|------|
-| **内置 Skill** | `skills/` | 所有租户共享 | 通用能力（数据质量检查、报告生成） |
-| **租户定制 Skill** | `skills/{tenant_id}/` | 仅该租户 | 租户上传的自定义 Skill |
+| 作用域 | 可见范围 | Skill 存储 | MCP 来源 |
+|--------|----------|------------|----------|
+| `system` | 所有租户和用户 | `skills/` 及超级管理员配置的系统目录 | `config/mcp_servers.yaml` 或超级管理员登记的系统服务 |
+| `tenant` | 当前租户所有用户 | `data/skills/tenant/{tenant_id}/` | `mcp_servers.scope=tenant` 且匹配 `tenant_id` |
+| `private` | 当前租户的创建者 | `data/skills/private/{tenant_id}/{user_id}/` | `mcp_servers.scope=private` 且同时匹配 `tenant_id/owner_user_id` |
 
-SkillManager 加载时同时扫描两个目录。匹配顺序：租户专属优先于全局。不需要用户级 Skill——用户有个人需求直接在对话里描述即可。
+写权限强制为：`system` 仅 `super_admin` 或启动扫描任务；`tenant` 仅当前租户的
+`tenant_admin/super_admin`；`private` 仅当前登录用户。`tenant_admin` 不得管理系统资源、
+其他租户资源或其他用户的私有资源。
+
+运行时读取必须使用来自认证 `ContextVar` 的 `tenant_id/user_id/role`，禁止相信请求体中的所有者字段。
+同名资源不允许静默覆盖：内部标识使用 `(scope, tenant_id, owner_user_id, name)`，匹配优先级为
+`private > tenant > system`，但只有当前身份可见的候选才能参与优先级计算。
+
+Skill 包的作用域由受信任存储路径决定，不能由上传包的 YAML frontmatter 自行声明。MCP 工具在转换为
+LangChain Tool 前保存服务作用域，在每次请求调用 `get_all_tools(tenant_id, user_id)` 时过滤；后台无身份任务
+只允许系统工具。启停、删除、测试连接同样执行作用域和角色校验，不能只依赖前端隐藏菜单。
 
 ### 7.4 数据库版本与知识库调用策略
 

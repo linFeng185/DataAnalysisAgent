@@ -5,6 +5,9 @@
 
 from __future__ import annotations
 
+import asyncio
+import sys
+import warnings
 from datetime import datetime
 
 from src.config import get_settings
@@ -17,6 +20,32 @@ logger = get_logger(__name__)
 _pg_ctx = None
 _pg_checkpointer = None
 _mem_checkpointer = None
+
+
+def configure_asyncio_event_loop() -> None:
+    """在 Windows 上切换到 psycopg 异步兼容的 SelectorEventLoop。
+
+    Args:
+        无。
+
+    Returns:
+        无返回值。
+    """
+    logger.debug("配置异步事件循环入口", platform=sys.platform)
+    if sys.platform != "win32":
+        logger.info("非 Windows 环境保留默认事件循环", platform=sys.platform)
+        return
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", DeprecationWarning)
+        selector_policy = getattr(asyncio, "WindowsSelectorEventLoopPolicy", None)
+        proactor_policy = getattr(asyncio, "WindowsProactorEventLoopPolicy", None)
+        current_policy = asyncio.get_event_loop_policy()
+        if selector_policy and proactor_policy and isinstance(current_policy, proactor_policy):
+            asyncio.set_event_loop_policy(selector_policy())
+            logger.info("Windows 事件循环已切换为 Selector", previous=type(current_policy).__name__)
+        else:
+            logger.info("Windows 事件循环无需切换", current=type(current_policy).__name__)
 
 
 async def get_checkpointer():

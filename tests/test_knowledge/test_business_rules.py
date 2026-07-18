@@ -16,7 +16,7 @@ class TestBusinessRuleStore:
                 store = BusinessRuleStore(mock_coll, docs_dir=tmp)
                 await store.initialize()
                 assert store._initialized
-                assert mock_coll.add.called
+                assert mock_coll.upsert.called
         asyncio.run(go())
 
     def test_initialize_empty_directory(self):

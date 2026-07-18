@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import asyncio
+import inspect
 from pathlib import Path
 
 import yaml
@@ -67,27 +67,50 @@ class ExternalDataSourceProvider(DataSourceProvider):
         return sources
 
     async def register(self, req: "DataSourceCreateRequest") -> DataSourceConfig:  # noqa: F821
-        """2.3.2 注册新数据源: 加密凭证 → 后台预采集 Schema。"""
+        """注册新数据源并加密凭证。
+
+        Args:
+            req: 数据源创建请求。
+
+        Returns:
+            已持久在当前 Provider 中的数据源配置。
+        """
+        logger.debug("外部数据源注册入口", datasource=req.name, dialect=req.dialect)
         cred_mgr = CredentialManager()
+        database = req.database
+        if req.dialect == "sqlite":
+            database = getattr(req, "file_path", "") or req.database or ":memory:"
         ds = DataSourceConfig(
             name=req.name, mode="external", dialect=req.dialect,
             version=req.version,
             host=req.host, port=req.port or _DIALECT_DEFAULTS.get(req.dialect, 0),
-            database=req.database, username=req.username,
+            database=database, username=req.username,
             password=cred_mgr.encrypt(req.password),
             description=req.description, tags=req.tags, extra_params=req.extra_params,
         )
         self._register(ds)
-        asyncio.create_task(self._prefetch_schema(ds))
+        logger.info("外部数据源注册完成", datasource=ds.name, dialect=ds.dialect)
         return ds
 
     async def unregister(self, name: str) -> None:
-        """2.3.3 移除数据源，关闭连接池。"""
+        """移除数据源并兼容关闭同步/异步连接池。
+
+        Args:
+            name: 数据源名称。
+
+        Returns:
+            无返回值。
+        """
+        logger.debug("外部数据源注销入口", datasource=name)
         if name in self._sources:
             ds = self._sources.pop(name)
             if ds.engine:
-                await ds.engine.dispose()
+                dispose_result = ds.engine.dispose()
+                if inspect.isawaitable(dispose_result):
+                    await dispose_result
             logger.info("数据源已移除", name=name)
+        else:
+            logger.info("外部数据源注销跳过", datasource=name, reason="不存在")
 
     async def _prefetch_schema(self, ds: DataSourceConfig) -> None:
         """后台预采集 Schema。"""
@@ -116,13 +139,46 @@ class ExternalDataSourceProvider(DataSourceProvider):
         return list(self._sources.values())
 
     async def test_connection(self, ds: DataSourceConfig) -> bool:
-        """2.3.4 测试连通性。"""
+        """2.3.4 测试数据源连通性。
+
+        Args:
+            ds: 已创建 SQLAlchemy engine 的数据源配置。
+
+        Returns:
+            探针 SQL 成功返回 True，否则返回 False。
+        """
+        probe_sql = "SELECT 1 FROM DUAL" if ds.dialect == "oracle" else "SELECT 1"
+        logger.debug(
+            "数据源连通性探针入口",
+            datasource=ds.name,
+            dialect=ds.dialect,
+            probe_sql=probe_sql,
+        )
         try:
             import sqlalchemy as sa
-            async with ds.engine.connect() as conn:
-                await conn.execute(sa.text("SELECT 1"))
+            from sqlalchemy.ext.asyncio import AsyncEngine
+            if isinstance(ds.engine, AsyncEngine):
+                async with ds.engine.connect() as conn:
+                    await conn.execute(sa.text(probe_sql))
+            else:
+                with ds.engine.connect() as conn:
+                    conn.execute(sa.text(probe_sql))
+            logger.info(
+                "数据源连通性探针完成",
+                datasource=ds.name,
+                dialect=ds.dialect,
+                success=True,
+            )
             return True
-        except Exception:
+        except Exception as exc:
+            logger.error(
+                "数据源连通性探针失败",
+                datasource=ds.name,
+                dialect=ds.dialect,
+                probe_sql=probe_sql,
+                error=str(exc)[:500],
+                exc_info=True,
+            )
             return False
 
 
@@ -133,12 +189,32 @@ class DataSourceCreateRequest:
         self, name: str, dialect: str,
         host: str = "localhost", port: int = 0,
         database: str = "", username: str = "", password: str = "",
-        description: str = "",
+        description: str = "", version: str = "",
         tags: list[str] | None = None,
         extra_params: dict | None = None,
     ) -> None:
+        """初始化向后兼容的数据源注册请求。
+
+        Args:
+            name: 数据源名称。
+            dialect: 数据库方言。
+            host: 主机地址。
+            port: 端口。
+            database: 数据库名。
+            username: 用户名。
+            password: 密码。
+            description: 描述。
+            version: 数据库版本。
+            tags: 标签列表。
+            extra_params: 扩展连接参数。
+
+        Returns:
+            无返回值。
+        """
+        logger.debug("构建兼容注册请求入口", datasource=name, dialect=dialect)
         self.name = name
         self.dialect = dialect
+        self.version = version
         self.host = host
         self.port = port
         self.database = database
@@ -147,3 +223,4 @@ class DataSourceCreateRequest:
         self.description = description
         self.tags = tags or []
         self.extra_params = extra_params or {}
+        logger.info("构建兼容注册请求完成", datasource=name, dialect=dialect)

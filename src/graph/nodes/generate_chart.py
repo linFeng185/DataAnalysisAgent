@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import time
+from decimal import Decimal
 
 from src.graph.state import AnalysisState
 from src.logging_config import get_logger
 
 logger = get_logger(__name__)
+_NUMERIC_TYPES = (int, float, Decimal)
 
 
 async def generate_chart_node(state: AnalysisState) -> dict:
@@ -31,28 +33,41 @@ async def generate_chart_node(state: AnalysisState) -> dict:
     return {"chart_config": {"type": chart_type, "option": option}}
 
 
-# 支持的图表类型列表（LLM 只能从这里面选）
 _SUPPORTED_TYPES = ("bar", "line", "pie", "scatter", "table")
 
 
+# 根据分析推荐和数据列类型选择图表类型。
+# Args: analysis - 分析节点输出；data - 查询结果数据。
+# Returns: 受支持的 ECharts 图表类型。
 def _pick_type(analysis: dict, data: list[dict]) -> str:
-    """选择图表类型：LLM 推荐优先，仅做白名单校验。"""
     rec = analysis.get("recommended_chart_type", "")
+    logger.debug("图表类型选择入口", recommended=rec, data_rows=len(data))
     if rec in _SUPPORTED_TYPES:
+        logger.info("图表类型选择完成", chart_type=rec, source="analysis")
         return rec
-    # LLM 推荐不合法或为空 → 简单回退
     if not data:
+        logger.info("图表类型选择完成", chart_type="table", source="empty_data")
         return "table"
     cols = list(data[0].keys())
     if len(cols) >= 2:
-        v = list(data[0].values())[1]
-        if isinstance(v, (int, float)) and not isinstance(v, bool):
-            return "bar"
+        for i, col in enumerate(cols[1:], 1):
+            v = list(data[0].values())[i]
+            if isinstance(v, _NUMERIC_TYPES) and not isinstance(v, bool):
+                low = col.lower()
+                if any(w in low for w in ("phone", "tel", "mobile", "手机", "电话")):
+                    logger.info("图表数值列跳过", column=col, reason="联系方式")
+                    continue
+                if (any(w in low for w in ("id", "no", "编号", "序号"))
+                        and isinstance(v, int) and v > 999):
+                    logger.info("图表数值列跳过", column=col, reason="标识符")
+                    continue
+                logger.info("图表类型选择完成", chart_type="bar", source="numeric_column")
+                return "bar"
+    logger.info("图表类型选择完成", chart_type="table", source="no_numeric_column")
     return "table"
 
 
 def _build_echarts_option(rows: list[dict], chart_type: str) -> dict:
-    """从查询结果构建 ECharts option。"""
     if not rows:
         return {}
     keys = list(rows[0].keys())
@@ -64,7 +79,6 @@ def _build_echarts_option(rows: list[dict], chart_type: str) -> dict:
 
 
 def _pie_option(rows: list[dict], keys: list[str]) -> dict:
-    """饼图：第一列标签，第二列数值。"""
     name_col = keys[0]
     val_col = keys[1] if len(keys) > 1 else None
     if not val_col:
@@ -72,35 +86,84 @@ def _pie_option(rows: list[dict], keys: list[str]) -> dict:
     items = [{"name": str(r.get(name_col, "")), "value": _to_num(r.get(val_col))}
              for r in rows[:30]]
     return {
-        "title": {"text": "", "left": "center"},
         "tooltip": {"trigger": "item"},
         "series": [{"type": "pie", "radius": "60%", "data": items}],
     }
 
 
+# 构建坐标轴图表配置，并支持 Decimal 数值及交叉分组数据。
+# Args: rows - 查询结果行；keys - 数据列顺序；chart_type - 图表类型。
+# Returns: 可直接传给 ECharts 的 option；无数值列时返回空字典。
 def _axis_option(rows: list[dict], keys: list[str], chart_type: str) -> dict:
-    """柱状/折线/散点图：第一列 X 轴，其余列 Y 轴系列。"""
+    logger.debug("坐标轴配置构建入口", chart_type=chart_type, row_count=len(rows), columns=keys)
+    # 找数值列
+    numeric_col = None
+    for col in keys[1:]:
+        if col in rows[0]:
+            v = rows[0].get(col)
+            if isinstance(v, _NUMERIC_TYPES) and not isinstance(v, bool):
+                numeric_col = col
+                break
+    if not numeric_col:
+        logger.warning("坐标轴配置回退", reason="无数值列", columns=keys)
+        return {}
     x_col = keys[0]
-    y_cols = keys[1:] if len(keys) > 1 else [keys[0]]
-    categories = [str(r.get(x_col, "")) for r in rows[:50]]
-    series = []
-    for col in y_cols:
-        vals = [_to_num(r.get(col)) for r in rows[:50]]
-        if vals:
-            series.append({"name": col, "type": chart_type, "data": vals,
+
+    # 检测交叉透视：X 列值大量重复 → 应按第三列分组
+    x_vals = [str(r.get(x_col, "")) for r in rows]
+    uniq_x = len(set(x_vals))
+    is_cross = uniq_x < len(rows) * 0.6 and uniq_x > 1 and len(keys) >= 3
+    group_col = None
+    if is_cross:
+        for col in keys[1:]:
+            if col in rows[0] and col != numeric_col and isinstance(rows[0].get(col), str):
+                group_col = col
+                break
+
+    if is_cross and group_col:
+        # 交叉透视：按分组列拆多系列
+        group_vals = sorted(set(str(r.get(group_col, "")) for r in rows))
+        if len(group_vals) > 12:
+            group_vals = group_vals[:12]
+        categories = sorted(set(x_vals))
+        series = []
+        for gv in group_vals:
+            data_map = {}
+            for r in rows:
+                if str(r.get(group_col, "")) == gv:
+                    data_map[str(r.get(x_col, ""))] = _to_num(r.get(numeric_col))
+            vals = [data_map.get(c, 0) for c in categories]
+            series.append({"name": gv, "type": chart_type, "data": vals,
                            "smooth": chart_type == "line"})
-    return {
-        "title": {"text": "", "left": "center"},
+        option = {
+            "tooltip": {"trigger": "axis"},
+            "legend": {"data": group_vals, "bottom": 0},
+            "xAxis": {"type": "category", "data": categories,
+                       "axisLabel": {"rotate": len(categories) > 8 and 45 or 0}},
+            "yAxis": {"type": "value"},
+            "series": series,
+        }
+        logger.info("坐标轴配置构建完成", mode="cross", series_count=len(series), category_count=len(categories))
+        return option
+
+    # 普通模式
+    if len(rows) > 30:
+        rows = rows[:25]
+    categories = [str(r.get(x_col, "")) for r in rows]
+    vals = [_to_num(r.get(numeric_col)) for r in rows]
+    option = {
         "tooltip": {"trigger": "axis"},
         "xAxis": {"type": "category", "data": categories,
                    "axisLabel": {"rotate": len(categories) > 8 and 45 or 0}},
         "yAxis": {"type": "value"},
-        "series": series,
+        "series": [{"type": chart_type, "data": vals,
+                     "smooth": chart_type == "line"}],
     }
+    logger.info("坐标轴配置构建完成", mode="standard", series_count=1, category_count=len(categories))
+    return option
 
 
 def _to_num(val) -> float:
-    """安全转为数值。"""
     if val is None:
         return 0
     if isinstance(val, (int, float)) and not isinstance(val, bool):

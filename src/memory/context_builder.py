@@ -97,8 +97,8 @@ async def _summarize_turns_llm(turns: list[ConversationTurn]) -> str:
     确保摘要请求不会被 LangGraph astream_events 捕获并流式输出到前端。
     """
     from src.config import get_settings
-    from src.llm.client import is_llm_available
-    if not is_llm_available():
+    from src.llm.client import is_task_llm_available, resolve_llm_task_target
+    if not is_task_llm_available("context_summary"):
         return ""
 
     turns_text = "\n".join(
@@ -111,7 +111,17 @@ async def _summarize_turns_llm(turns: list[ConversationTurn]) -> str:
     try:
         import aiohttp
         s = get_settings()
-        summary_model = s.context_summary_model or s.cheap_llm_model or s.llm_model
+        target = resolve_llm_task_target("context_summary", settings=s)
+        if target == "local":
+            summary_model = s.context_summary_model or s.local_llm_model
+            base_url = s.local_llm_base_url
+            api_key = s.local_llm_api_key or "local"
+            timeout_seconds = s.local_llm_timeout
+        else:
+            summary_model = s.context_summary_model or s.cheap_llm_model or s.llm_model
+            base_url = s.openai_base_url
+            api_key = s.openai_api_key
+            timeout_seconds = min(s.llm_timeout, 15)
         payload = {
             "model": summary_model,
             "messages": [
@@ -123,13 +133,13 @@ async def _summarize_turns_llm(turns: list[ConversationTurn]) -> str:
             "stream": False,
         }
         headers = {
-            "Authorization": f"Bearer {s.openai_api_key}",
+            "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json",
         }
         async with aiohttp.ClientSession() as session:
             async with session.post(
-                f"{s.openai_base_url}/chat/completions", json=payload, headers=headers,
-                timeout=aiohttp.ClientTimeout(total=15),
+                f"{base_url.rstrip('/')}/chat/completions", json=payload, headers=headers,
+                timeout=aiohttp.ClientTimeout(total=timeout_seconds),
             ) as resp:
                 if resp.status == 200:
                     data = await resp.json()

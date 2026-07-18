@@ -4,6 +4,7 @@ async function request<T>(method: string, path: string, body?: Record<string, un
   const opts: RequestInit = {
     method,
     headers: { 'Content-Type': 'application/json' },
+    credentials: 'include',
   };
   if (body) opts.body = JSON.stringify(body);
   const res = await fetch(`${BASE}${path}`, opts);
@@ -24,6 +25,10 @@ export function post<T>(path: string, body: Record<string, unknown>): Promise<T>
 
 export function put<T>(path: string, body: Record<string, unknown>): Promise<T> {
   return request<T>('PUT', path, body);
+}
+
+export function patch<T>(path: string, body: Record<string, unknown>): Promise<T> {
+  return request<T>('PATCH', path, body);
 }
 
 export function del(path: string): Promise<void> {
@@ -73,6 +78,7 @@ export function streamChat(
   fetch(`${BASE}/chat`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
+    credentials: 'include',
     body: JSON.stringify({ query, datasource, datasources: datasources || [datasource], model_id: modelId || '', stream: true, session_id: sessionId }),
     signal: controller.signal,
   }).then(async (res) => {
