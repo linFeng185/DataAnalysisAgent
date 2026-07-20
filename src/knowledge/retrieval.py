@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 from typing import Any
@@ -238,7 +239,8 @@ async def search_knowledge(
         key=lambda item: item.scores.get("fused", item.scores.get("relevance", 0.0)),
         reverse=True,
     )
-    ordered = rerank_evidence(candidates, query, top_k=bounded_top_k)
+    logger.debug("知识证据重排切换线程池", candidates=len(candidates), top_k=bounded_top_k)
+    ordered = await asyncio.to_thread(rerank_evidence, candidates, query, bounded_top_k)
     logger.info(
         "安全知识检索完成",
         hits=len(ordered),

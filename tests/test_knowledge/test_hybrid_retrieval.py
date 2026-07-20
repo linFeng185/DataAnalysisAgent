@@ -66,3 +66,28 @@ class TestHybridRetrieval:
         # Assert
         store.search.assert_awaited_once_with("资料", top_k=3, filters=filters)
         store.get_by_filter.assert_awaited_once_with(filters, limit=60)
+
+    async def test_rerank_runs_off_event_loop(self, monkeypatch):
+        """重排应通过线程池执行，避免同步计算阻塞 async 检索。"""
+        import src.knowledge.retrieval as retrieval_module
+        from src.memory.vector_store import VectorSearchResult
+
+        monkeypatch.setattr(
+            retrieval_module,
+            "build_accessible_knowledge_filters",
+            lambda **kwargs: [{"visibility": "tenant"}],
+        )
+        store = SimpleNamespace(
+            search=AsyncMock(return_value=[VectorSearchResult(
+                id="doc", content="正文", metadata={}, score=0.8,
+            )]),
+        )
+        original_to_thread = retrieval_module.asyncio.to_thread
+        to_thread = AsyncMock(side_effect=lambda func, *args: func(*args))
+        monkeypatch.setattr(retrieval_module.asyncio, "to_thread", to_thread)
+
+        result = await retrieval_module.search_knowledge(store, "正文", top_k=1, hybrid=False)
+
+        assert result[0].source_id == "doc"
+        to_thread.assert_awaited_once()
+        monkeypatch.setattr(retrieval_module.asyncio, "to_thread", original_to_thread)

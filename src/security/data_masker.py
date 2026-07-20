@@ -81,6 +81,11 @@ def check_rate_limit(user_id: str | int | None = None) -> bool:
     window = now - 3600
     key = f"rate:{user_key}"
     with _rate_limit_lock:
+        for stale_key in [
+            candidate for candidate, timestamps in _rate_limits.items()
+            if not any(timestamp > window for timestamp in timestamps)
+        ]:
+            del _rate_limits[stale_key]
         _rate_limits.setdefault(key, [])
         _rate_limits[key] = [t for t in _rate_limits[key] if t > window]
         if len(_rate_limits[key]) < max_rph:

@@ -17,6 +17,16 @@ class KnowledgeScope(StrEnum):
     PRIVATE = "private"
 
 
+# 方法作用：统一角色的大小写和边界空白，确保应用层与 RLS 使用同一角色值。
+# Args: role - JWT、ContextVar 或数据库读取的原始角色。
+# Returns: 小写且去除空白的角色字符串，空值回退 anonymous。
+def normalize_role(role: str | None) -> str:
+    logger.debug("规范化角色入口", role=role)
+    result = str(role or "anonymous").strip().lower()
+    logger.info("规范化角色完成", role=result)
+    return result
+
+
 # 规范化并校验知识范围，未知值失败关闭。
 # Args: scope - 待校验的范围字符串或枚举。
 # Returns: 合法的 KnowledgeScope 枚举。
@@ -36,7 +46,7 @@ def normalize_knowledge_scope(scope: str | KnowledgeScope) -> KnowledgeScope:
 # Returns: 是超级管理员时返回 True。
 def is_super_admin(role: str) -> bool:
     logger.debug("检查超级管理员入口", role=role)
-    result = str(role).strip().lower() == "super_admin"
+    result = normalize_role(role) == "super_admin"
     logger.info("检查超级管理员完成", role=role, allowed=result)
     return result
 
@@ -46,7 +56,7 @@ def is_super_admin(role: str) -> bool:
 # Returns: 是租户管理员时返回 True。
 def is_tenant_admin(role: str) -> bool:
     logger.debug("检查租户管理员入口", role=role)
-    result = str(role).strip().lower() == "tenant_admin"
+    result = normalize_role(role) == "tenant_admin"
     logger.info("检查租户管理员完成", role=role, allowed=result)
     return result
 
@@ -75,7 +85,7 @@ def can_write_knowledge_scope(
     elif normalized is KnowledgeScope.TENANT:
         result = is_super_admin(role) or is_tenant_admin(role)
     else:
-        result = user_id > 0 or (not multi_tenant and role == "anonymous")
+        result = user_id > 0 or (not multi_tenant and normalize_role(role) == "anonymous")
     if not result:
         logger.warning(
             "知识范围写权限拒绝",

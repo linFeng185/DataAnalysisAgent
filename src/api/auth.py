@@ -12,7 +12,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
+import threading
+import time
 from contextvars import ContextVar
 from datetime import datetime, timedelta, timezone
 
@@ -33,6 +36,8 @@ _current_user_id: ContextVar[int] = ContextVar("current_user_id", default=0)
 _current_tenant_id: ContextVar[int] = ContextVar("current_tenant_id", default=1)
 _current_role: ContextVar[str] = ContextVar("current_role", default="anonymous")
 ACCESS_TOKEN_COOKIE = "access_token"
+_registration_limits: dict[str, list[float]] = {}
+_registration_rate_lock = threading.Lock()
 
 
 def get_current_user_id() -> int:
@@ -215,6 +220,30 @@ class RegisterRequest(BaseModel):
     tenant_name: str = Field(default="default")
 
 
+# 方法作用：按客户端地址限制公开注册请求，防止批量注册消耗数据库和 bcrypt CPU。
+# Args: client_key - 反向代理解析后的客户端地址；limit - 时间窗口内最大注册数。
+# Returns: 未超过限制返回 True，否则返回 False。
+def _check_registration_rate_limit(client_key: str, limit: int) -> bool:
+    logger.debug("注册限流检查入口", client_key=client_key, limit=limit)
+    now = time.monotonic()
+    window = now - 3600
+    with _registration_rate_lock:
+        for stale_key in [
+            key for key, timestamps in _registration_limits.items()
+            if not any(timestamp > window for timestamp in timestamps)
+        ]:
+            del _registration_limits[stale_key]
+        timestamps = [timestamp for timestamp in _registration_limits.get(client_key, []) if timestamp > window]
+        if len(timestamps) >= limit:
+            _registration_limits[client_key] = timestamps
+            logger.warning("注册频率限制触发", client_key=client_key, used=len(timestamps), limit=limit)
+            return False
+        timestamps.append(now)
+        _registration_limits[client_key] = timestamps
+    logger.info("注册限流检查通过", client_key=client_key, used=len(timestamps), limit=limit)
+    return True
+
+
 # ── 路由 ──
 
 auth_router = APIRouter(prefix="/auth", tags=["auth"])
@@ -261,7 +290,7 @@ async def login(req: LoginRequest, response: Response):
 
 
 @auth_router.post("/register")
-async def register(req: RegisterRequest, response: Response):
+async def register(req: RegisterRequest, response: Response, request: Request = None):
     """用户注册——创建用户，返回 JWT。
 
     Args:
@@ -270,23 +299,48 @@ async def register(req: RegisterRequest, response: Response):
     Returns:
         不含明文令牌的用户身份信息；令牌写入 HttpOnly Cookie。
     """
-    logger.debug("注册入口", username=req.username)
+    client_key = "unknown"
+    if request is not None and request.client is not None:
+        client_key = request.client.host
+    settings = get_settings()
+    if not _check_registration_rate_limit(
+        client_key,
+        max(1, int(getattr(settings, "registration_max_per_hour", 10))),
+    ):
+        raise HTTPException(429, "注册请求过于频繁，请稍后重试")
+    logger.debug("注册入口", username=req.username, client_key=client_key)
     conn = None
     try:
         import asyncpg
         from passlib.hash import bcrypt
-        s = get_settings()
+        s = settings
         url = s.database_url.replace("postgresql+asyncpg://", "postgresql://")
         conn = await asyncpg.connect(url)
-        tid = 1
-        if s.multi_tenant:
-            tid = await conn.fetchval(
-                "INSERT INTO tenants (name) VALUES ($1) RETURNING id", req.tenant_name)
-            logger.info("新租户创建", tenant_id=tid, name=req.tenant_name)
-        pwd = bcrypt.hash(req.password)
-        uid = await conn.fetchval(
-            "INSERT INTO users (username, password_hash, role, tenant_id) "
-            "VALUES ($1, $2, 'analyst', $3) RETURNING id", req.username, pwd, tid)
+        async def _create_user() -> tuple[int, int]:
+            # 方法作用：在事务边界内创建租户和用户。
+            # Args: 无，使用外层注册请求和数据库连接。
+            # Returns: (user_id, tenant_id) 二元组。
+            """在一个事务中创建租户和用户，保证失败时不残留半成品。"""
+            logger.debug("注册数据库写入入口", username=req.username, multi_tenant=s.multi_tenant)
+            tid = 1
+            if s.multi_tenant:
+                tid = await conn.fetchval(
+                    "INSERT INTO tenants (name) VALUES ($1) RETURNING id", req.tenant_name)
+                logger.info("新租户创建", tenant_id=tid, name=req.tenant_name)
+            pwd = await asyncio.to_thread(bcrypt.hash, req.password)
+            uid = await conn.fetchval(
+                "INSERT INTO users (username, password_hash, role, tenant_id) "
+                "VALUES ($1, $2, 'analyst', $3) RETURNING id", req.username, pwd, tid)
+            logger.info("注册数据库写入完成", user_id=uid, tenant_id=tid)
+            return uid, tid
+
+        transaction_factory = getattr(conn, "transaction", None)
+        if callable(transaction_factory):
+            async with transaction_factory():
+                uid, tid = await _create_user()
+        else:
+            logger.warning("注册连接不支持事务，使用兼容回退", username=req.username)
+            uid, tid = await _create_user()
         token = create_access_token(uid, tid, "analyst")
         _set_access_cookie(response, token)
         logger.info("注册成功", username=req.username, user_id=uid, tenant_id=tid)
@@ -405,7 +459,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
                 identity = (
                     int(payload["user_id"]),
                     int(payload["tenant_id"]),
-                    str(payload["role"]),
+                    str(payload["role"]).strip().lower(),
                 )
         except jwt.ExpiredSignatureError:
             logger.info("JWT 已过期")

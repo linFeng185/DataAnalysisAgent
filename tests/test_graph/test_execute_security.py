@@ -91,3 +91,65 @@ class TestExecuteSQLSecurity:
         final_response = result["final_response"]
         assert final_response["row_count"] == 1
         assert final_response["truncated"] is True
+
+    async def test_sync_engine_query_runs_without_blocking_path(self, monkeypatch):
+        """同步 Engine 也应通过线程池执行并返回结果。"""
+        from src.datasource.config import DataSourceConfig
+        from src.datasource.registry import DataSourceRegistry
+        from src.graph.nodes import execute_sql as execute_module
+        from src.security import data_masker
+        import src.config as config_module
+        import src.datasource.registry as registry_module
+
+        class Row:
+            _mapping = {"value": 1}
+
+        class Result:
+            def fetchmany(self, size):
+                return [Row()]
+
+            def close(self):
+                return None
+
+        class Connection:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def execution_options(self, **kwargs):
+                return self
+
+            def execute(self, statement):
+                return Result()
+
+        class Engine:
+            def connect(self):
+                return Connection()
+
+        settings = SimpleNamespace(
+            max_result_rows=10,
+            max_execution_time=30,
+            max_queries_per_hour=100,
+            multi_tenant=False,
+            database_url="",
+        )
+        monkeypatch.setattr(config_module, "get_settings", lambda: settings)
+        monkeypatch.setattr(execute_module, "get_settings", lambda: settings)
+        monkeypatch.setattr(data_masker, "get_settings", lambda: settings)
+        registry = DataSourceRegistry()
+        registry._cache["oracle"] = DataSourceConfig(  # noqa: SLF001
+            name="oracle", dialect="oracle", mode="external", engine=Engine(),
+        )
+        monkeypatch.setattr(registry_module, "_registry", registry)
+        data_masker._rate_limits.clear()  # noqa: SLF001
+
+        result = await execute_module.execute_sql_node({
+            "datasource": "oracle",
+            "dialect": "oracle",
+            "generated_sql": "SELECT 1 FROM dual",
+        })
+
+        assert result["execution_error"] == ""
+        assert result["query_result_sample"] == [{"value": 1}]

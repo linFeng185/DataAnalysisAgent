@@ -212,10 +212,13 @@ class CorrelationProcessor(DataProcessor):
     """相关性分析 — Pearson 相关系数。需两个数值列。"""
     name = "correlation"; intents = ["attribution"]; prefer_sql = False
 
+    # 方法作用：使用两个数值列计算 Pearson 相关系数。
+    # Args: self - 处理器实例；rows - 查询结果；params - 包含 col1/col2 的列参数。
+    # Returns: 相关系数和散点图数据的 ProcessorResult。
     def process(self, rows, params):
         c1, c2 = params.get("col1", ""), params.get("col2", "")
         if not c1 or not c2 or len(rows) < 3: return ProcessorResult("数据不足或缺少列", [], "table", rows, "low")
-        x = [self._f(r.get(c1)) for r in rows]; y = [self._f(r.get(c2)) for r in rows]
+        x = [float(self._f(r.get(c1))) for r in rows]; y = [float(self._f(r.get(c2))) for r in rows]
         n = len(x); sx, sy = sum(x), sum(y)
         sxy = sum(x[i] * y[i] for i in range(n)); sx2 = sum(v * v for v in x); sy2 = sum(v * v for v in y)
         denom = ((n * sx2 - sx * sx) * (n * sy2 - sy * sy)) ** 0.5

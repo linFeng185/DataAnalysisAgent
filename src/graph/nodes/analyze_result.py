@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 from datetime import date, datetime
@@ -85,12 +86,12 @@ async def analyze_result_node(state: AnalysisState) -> dict:
     processor_result = None
     try:
         from src.tools.data_processor import get_processor
-        proc = get_processor(intent)
+        proc = get_processor(intent, query=state.get("user_query", ""))
         if proc:
             nc = _find_numeric(rows)
-            params = {"value_col": nc[0] if nc else "", "group_col": _find_category_col(rows) or "",
-                      "time_col": _find_time_col(rows) or ""}
-            processor_result = proc.process(rows, params)
+            params = _build_processor_params(rows, proc.name, nc)
+            logger.debug("处理器参数准备完成", processor=proc.name, params=params)
+            processor_result = await asyncio.to_thread(proc.process, rows, params)
             logger.info("处理器完成", processor=proc.name, intent=intent,
                         confidence=processor_result.confidence)
     except Exception as e:
@@ -198,7 +199,8 @@ async def _llm_polish(summary: str, insights: list[str], data_sample: str) -> di
                                   HumanMessage(content=prompt)])
         content = resp.content.strip().removeprefix("```json").removesuffix("```").strip()
         return json.loads(content) if content.startswith("{") else None
-    except Exception:
+    except Exception as exc:
+        logger.error("LLM 润色异常", error=str(exc), exc_info=True)
         return None
 
 
@@ -388,7 +390,11 @@ async def _llm_analyze(
         resp = await llm.ainvoke([SystemMessage(content=DATA_ANALYSIS_SYSTEM), HumanMessage(content=user_msg)])
         adapter = get_adapter(get_settings().llm_model)
         parsed = adapter.parse_response(resp)
-        data = json.loads(resp.content.strip().removeprefix("```json").removesuffix("```").strip())
+        parsed_content = str(getattr(parsed, "content", "") or "").strip()
+        if not parsed_content:
+            logger.warning("适配器未返回正文，兼容原始响应", model=get_settings().llm_model)
+            parsed_content = str(getattr(resp, "content", "") or "").strip()
+        data = json.loads(parsed_content.removeprefix("```json").removesuffix("```").strip())
         result = {
             "summary": data.get("summary", ""),
             "insights": data.get("insights", []),
@@ -440,6 +446,94 @@ def _find_category_col(rows):
         if all(isinstance(r.get(k), str) for r in rows if r.get(k) is not None):
             return k
     return None
+
+
+# 方法作用：找出可作为分组、名称或交叉透视维度的文本列。
+# Args: rows - 查询结果行。
+# Returns: 按原始列顺序返回文本维度列名。
+def _find_category_cols(rows: list[dict]) -> list[str]:
+    logger.debug("分类列识别入口", row_count=len(rows))
+    if not rows:
+        return []
+    result = [
+        str(key) for key in rows[0]
+        if all(value is None or isinstance(value, str) for value in (row.get(key) for row in rows))
+    ]
+    logger.info("分类列识别完成", columns=result)
+    return result
+
+
+# 方法作用：根据列名语义从候选列中选择最符合目标角色的列。
+# Args: columns - 候选列名；keywords - 角色关键词。
+# Returns: 命中的列名，没有命中时返回空字符串。
+def _match_column(columns: list[str], keywords: tuple[str, ...]) -> str:
+    logger.debug("语义列匹配入口", columns=columns, keywords=keywords)
+    for column in columns:
+        normalized = column.lower()
+        if any(keyword in normalized for keyword in keywords):
+            logger.info("语义列匹配完成", column=column)
+            return column
+    logger.info("语义列匹配未命中", keywords=keywords)
+    return ""
+
+
+# 方法作用：为每种处理器构造所需的列参数，避免专用处理器收到通用参数而静默返回空结果。
+# Args: rows - 查询结果行；processor_name - 处理器名称；numeric_columns - 数值列名。
+# Returns: 处理器 process() 可直接消费的参数字典。
+def _build_processor_params(
+    rows: list[dict], processor_name: str, numeric_columns: list[str],
+) -> dict[str, str | int | float]:
+    logger.debug("构造处理器参数入口", processor=processor_name, numeric_columns=numeric_columns)
+    category_columns = _find_category_cols(rows)
+    time_column = _find_time_col(rows) or ""
+    params: dict[str, str | int | float] = {
+        "value_col": numeric_columns[0] if numeric_columns else "",
+        "group_col": category_columns[0] if category_columns else "",
+        "name_col": category_columns[0] if category_columns else "",
+        "time_col": time_column,
+    }
+
+    if processor_name == "correlation":
+        params.update({
+            "col1": numeric_columns[0] if len(numeric_columns) > 0 else "",
+            "col2": numeric_columns[1] if len(numeric_columns) > 1 else "",
+        })
+    elif processor_name == "rfm":
+        params.update({
+            "recency_col": _match_column(numeric_columns, ("recency", "recent", "r_"))
+            or (numeric_columns[0] if len(numeric_columns) > 0 else ""),
+            "frequency_col": _match_column(numeric_columns, ("frequency", "freq", "f_"))
+            or (numeric_columns[1] if len(numeric_columns) > 1 else ""),
+            "monetary_col": _match_column(numeric_columns, ("monetary", "money", "amount", "m_"))
+            or (numeric_columns[2] if len(numeric_columns) > 2 else ""),
+        })
+    elif processor_name == "budget_variance":
+        params.update({
+            "actual_col": _match_column(numeric_columns, ("actual", "real", "执行"))
+            or (numeric_columns[0] if numeric_columns else ""),
+            "budget_col": _match_column(numeric_columns, ("budget", "plan", "target", "预算"))
+            or (numeric_columns[1] if len(numeric_columns) > 1 else ""),
+        })
+    elif processor_name == "cross_pivot":
+        params.update({
+            "row_col": category_columns[0] if category_columns else "",
+            "col_col": category_columns[1] if len(category_columns) > 1 else "",
+        })
+    elif processor_name == "market_basket":
+        params.update({
+            "id_col": _match_column(category_columns, ("transaction", "order", "trade", "id"))
+            or (category_columns[0] if category_columns else ""),
+            "item_col": _match_column(category_columns, ("item", "product", "sku", "商品"))
+            or (category_columns[1] if len(category_columns) > 1 else ""),
+        })
+    elif processor_name == "funnel":
+        params["name_col"] = category_columns[0] if category_columns else ""
+    elif processor_name == "ab_test":
+        params["group_col"] = _match_column(category_columns, ("group", "variant", "version", "组")) \
+            or (category_columns[0] if category_columns else "")
+
+    logger.info("构造处理器参数完成", processor=processor_name, params=params)
+    return params
 
 
 def _find_time_col(rows):

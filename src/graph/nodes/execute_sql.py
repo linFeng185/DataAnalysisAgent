@@ -22,9 +22,6 @@ def _row_to_dict(row) -> dict:
             d[k] = v
     return d
 
-logger = get_logger(__name__)
-
-
 async def execute_sql_node(state: AnalysisState) -> dict:
     """Phase 2: registry → connector.execute()。Phase 1: 返回空数据 + 提示。"""
     _start = time.monotonic()
@@ -56,7 +53,6 @@ async def execute_sql_node(state: AnalysisState) -> dict:
                 "query_result_statistics": {"row_count": 0}}
 
     # 行列级权限（多租户时生效）
-    from src.config import get_settings
     if get_settings().multi_tenant:
         allowed = state.get("allowed_columns", []) or []
         rfilter = state.get("row_filter_sql", "") or ""
@@ -102,9 +98,7 @@ async def execute_sql_node(state: AnalysisState) -> dict:
                     有界结果行和是否截断。
                 """
                 if ds.dialect != "sqlite":
-                    settings = get_settings()
-                    from src.config import get_settings as _gs
-                    timeout_s = _gs().max_execution_time
+                    timeout_s = get_settings().max_execution_time
                     if ds.dialect == "clickhouse":
                         await conn.execute(sa.text(f"SET max_execution_time = {timeout_s}"))
                     elif ds.dialect == "mysql":
@@ -132,9 +126,7 @@ async def execute_sql_node(state: AnalysisState) -> dict:
                     有界结果行和是否截断。
                 """
                 if ds.dialect != "sqlite":
-                    settings = get_settings()
-                    from src.config import get_settings as _gs
-                    timeout_s = _gs().max_execution_time
+                    timeout_s = get_settings().max_execution_time
                     if ds.dialect == "clickhouse":
                         conn.execute(sa.text(f"SET max_execution_time = {timeout_s}"))
                     elif ds.dialect == "mysql":
@@ -152,8 +144,19 @@ async def execute_sql_node(state: AnalysisState) -> dict:
                 async with ds.engine.connect() as conn:
                     rows, truncated = await _run_async(conn)
             else:
-                with ds.engine.connect() as conn:
-                    rows, truncated = _run_sync(conn)
+                import asyncio
+
+                # 方法作用：在线程池中创建同步连接并执行查询。
+                # Args: 无，使用闭包中的数据源引擎和 SQL。
+                # Returns: 有界行列表和截断标志。
+                def _run_sync_with_connection() -> tuple[list[dict], bool]:
+                    """在线程池中创建同步连接并执行查询，避免阻塞事件循环。"""
+                    with ds.engine.connect() as conn:
+                        return _run_sync(conn)
+
+                logger.debug("同步数据源切换线程池", datasource=ds_name, dialect=ds.dialect)
+                rows, truncated = await asyncio.to_thread(_run_sync_with_connection)
+                logger.info("同步数据源线程池执行完成", datasource=ds_name, row_count=len(rows))
             elapsed = round((time.monotonic() - _start) * 1000)
             # 12.3.3 审计日志
             import asyncio

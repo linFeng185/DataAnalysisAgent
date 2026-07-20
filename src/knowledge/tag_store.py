@@ -169,6 +169,7 @@ class KnowledgeTagStore:
             from src.api.auth import (
                 get_current_role, get_current_tenant_id, get_current_user_id,
             )
+            from src.knowledge.governance import normalize_role
 
             await conn.execute(
                 "SELECT set_config('app.current_user_id', $1, false), "
@@ -176,12 +177,15 @@ class KnowledgeTagStore:
                 "set_config('app.current_role', $3, false)",
                 str(get_current_user_id()),
                 str(get_current_tenant_id()),
-                get_current_role(),
+                normalize_role(get_current_role()),
             )
             logger.info("知识标签数据库连接完成")
             return conn
         except Exception as exc:
             logger.error("知识标签数据库连接失败", error=str(exc), exc_info=True)
+            if conn is not None:
+                await conn.close()
+                logger.info("知识标签数据库连接已关闭", reason="身份注入失败")
             raise
 
     # 把数据库记录转换为标签模型。

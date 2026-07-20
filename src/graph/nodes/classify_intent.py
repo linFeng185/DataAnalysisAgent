@@ -30,6 +30,10 @@ async def classify_intent_node(state: AnalysisState) -> dict:
         intent = "metadata"
     elif any(w in q for w in ("上传", "文件", "csv", "excel")):
         intent = "file_analysis"
+    elif any(w in q for w in ("相关性", "相关系数", "相关关系", "异常值", "异常")):
+        intent = "attribution"
+    elif any(w in q for w in ("漏斗", "转化漏斗")):
+        intent = "aggregation"
     elif any(w in q for w in ("为什么", "原因", "归因")):
         intent = "attribution"
     elif any(w in q for w in ("趋势", "变化", "走势")):

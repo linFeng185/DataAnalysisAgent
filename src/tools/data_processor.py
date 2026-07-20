@@ -93,18 +93,79 @@ class DataProcessor(ABC):
 _registry: dict[str, DataProcessor] = {}
 
 
+# 方法作用：实例化并登记处理器类，避免注册阶段只保留类对象而丢失运行结果。
+# Args: p - 实现 DataProcessor 契约的处理器类。
+# Returns: 原处理器类，保持装饰器替换兼容。
 def register(p: DataProcessor) -> DataProcessor:
-    _registry[p.name] = p(); return p
+    """注册处理器类并保存单例实例，供分析节点复用。"""
+    logger.debug("注册数据处理器入口", processor=getattr(p, "name", ""))
+    instance = p()
+    _registry[instance.name] = instance
+    logger.info("注册数据处理器完成", processor=instance.name, total=len(_registry))
+    return p
 
 
-def get_processor(intent: str) -> DataProcessor | None:
-    """按意图匹配处理器——优先 script-first (prefer_sql=False)，同优先级按关键词匹配度排序。"""
-    # 分解 intent 中的关键词
-    intent_keywords = set(intent.lower().replace(",", " ").split())
+_QUERY_PROCESSOR_HINTS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("yoy", ("同比", "year-over-year", "yoy")),
+    ("mom", ("环比", "month-over-month", "mom")),
+    ("ab_test", ("a/b", "ab测试", "广告版本", "不同版本")),
+    ("correlation", ("相关性", "相关系数", "相关关系", "correlation")),
+    ("rfm", ("rfm", "最近消费", "频次和金额")),
+    ("funnel", ("漏斗", "转化漏斗", "转化率")),
+    ("market_basket", ("一起购买", "关联规则", "购物篮", "共现")),
+    ("budget_variance", ("预算", "预算执行", "预算偏差")),
+    ("geo_distribution", ("地域分布", "各省", "全国各省", "地区分布")),
+    ("cross_pivot", ("交叉分析", "交叉透视", "透视表")),
+    ("pareto", ("帕累托", "80/20", "贡献了80", "累计占比")),
+    ("retention", ("留存", "回访比例")),
+    ("contribution", ("贡献度", "贡献百分比", "贡献")),
+    ("seasonal", ("季节性", "季节规律", "季节分解")),
+    ("growth_rate", ("增长率", "复合增长", "cagr")),
+    ("prediction", ("预测", "预测未来", "外推")),
+    ("distribution", ("分布", "分桶", "区间")),
+    ("ranking", ("排名", "top", "最高的", "最低的")),
+    ("proportion", ("占比", "比例")),
+    ("anomaly", ("异常", "异常值", "离群")),
+    ("trend", ("趋势", "走势", "变化")),
+    ("aggregation", ("汇总", "统计", "合计", "总数", "平均")),
+)
+
+
+# 方法作用：按专用业务关键词和粗粒度意图选择确定性处理器。
+# Args: intent - classify_intent 输出的粗粒度意图；query - 原始用户问题。
+# Returns: 匹配的处理器实例；没有候选时返回 None。
+def get_processor(intent: str, *, query: str = "") -> DataProcessor | None:
+    """优先按用户问题选择专用处理器，再回退到 intent 的脚本优先策略。"""
+    normalized_intent = str(intent or "").strip().lower()
+    normalized_query = str(query or "").strip().lower()
+    logger.debug(
+        "获取数据处理器入口",
+        intent=normalized_intent,
+        query=normalized_query[:100],
+    )
+
+    if normalized_intent in _registry and not normalized_query:
+        result = _registry[normalized_intent]
+        logger.info("按处理器名称命中", processor=result.name)
+        return result
+
+    if normalized_query:
+        for processor_name, hints in _QUERY_PROCESSOR_HINTS:
+            if processor_name in _registry and any(hint in normalized_query for hint in hints):
+                result = _registry[processor_name]
+                logger.info(
+                    "按问题关键词命中处理器",
+                    processor=result.name,
+                    intent=normalized_intent,
+                )
+                return result
+
+    # 分解 intent 中的关键词，保留旧调用方的 script-first 回退行为。
+    intent_keywords = set(normalized_intent.replace(",", " ").split())
     candidates: list[tuple[int, DataProcessor]] = []
 
     for p in _registry.values():
-        if intent in p.intents:
+        if normalized_intent in p.intents:
             # 计算匹配得分：processor.intents 中与 intent 重叠的关键词数
             p_keywords = set()
             for pi in p.intents:
@@ -115,10 +176,13 @@ def get_processor(intent: str) -> DataProcessor | None:
             candidates.append((overlap + priority_bonus, p))
 
     if not candidates:
+        logger.info("获取数据处理器未命中", intent=normalized_intent)
         return None
     # 按得分降序排列，取最优
     candidates.sort(key=lambda x: x[0], reverse=True)
-    return candidates[0][1]
+    result = candidates[0][1]
+    logger.info("按意图回退处理器完成", processor=result.name, intent=normalized_intent)
+    return result
 
 
 def list_processors() -> list[dict]:

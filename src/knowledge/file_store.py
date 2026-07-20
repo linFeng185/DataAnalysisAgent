@@ -113,9 +113,10 @@ class FileStore:
             已设置身份上下文的连接；连接失败返回 None。
         """
         from src.api.auth import get_current_role
+        from src.knowledge.governance import normalize_role
 
         tenant_id, user_id = _current_identity()
-        role = get_current_role()
+        role = normalize_role(get_current_role())
         settings = get_settings()
         url = settings.database_url
         logger.debug("知识文件 PG 连接入口", tenant_id=tenant_id, user_id=user_id)
@@ -169,10 +170,11 @@ class FileStore:
             文件 ID；数据库不可用或保存失败返回 None。
         """
         from src.api.auth import get_current_role
+        from src.knowledge.governance import normalize_role
         from src.knowledge.governance import can_write_knowledge_scope, normalize_knowledge_scope
 
         tenant_id, user_id = _current_identity()
-        role = get_current_role()
+        role = normalize_role(get_current_role())
         normalized_scope = normalize_knowledge_scope(knowledge_scope).value
         logger.debug(
             "保存知识文件入口",
@@ -382,9 +384,10 @@ class FileStore:
             至少删除一条可见记录时返回 True。
         """
         from src.api.auth import get_current_role
+        from src.knowledge.governance import normalize_role
 
         tenant_id, user_id = _current_identity()
-        role = get_current_role()
+        role = normalize_role(get_current_role())
         logger.debug(
             "删除知识文件入口",
             filename=filename,
@@ -402,8 +405,7 @@ class FileStore:
             status = await conn.execute(
                 "DELETE FROM knowledge_files WHERE filename = $1 AND ("
                 "($4 = 'super_admin' AND knowledge_scope = 'system') OR "
-                "($4 = 'super_admin' AND knowledge_scope IN ('tenant', 'private')) OR "
-                "(knowledge_scope = 'tenant' AND tenant_id = $2 AND $4 = 'tenant_admin') OR "
+                "(($4 IN ('super_admin', 'tenant_admin')) AND knowledge_scope = 'tenant' AND tenant_id = $2) OR "
                 "(knowledge_scope = 'private' AND tenant_id = $2 AND user_id = $3)"
                 ") AND ($5 = '' OR knowledge_scope = $5)",
                 filename, tenant_id, user_id, role, knowledge_scope,

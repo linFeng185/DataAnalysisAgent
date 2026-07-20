@@ -84,7 +84,7 @@
 | 4.7.2 | 错误信息简洁化 | `src/graph/nodes/execute_sql.py:82-91` | 从 DB 原始错误提取错误码和消息 | 开发完成 | P1 |
 | 4.7.3 | 列名预检验证 (Layer 2) | `src/graph/nodes/execute_sql.py:_validate_column_references()` | sqlglot 解析列引用 → 对照 schema → 触发 retry | 开发完成 | P0 |
 | 4.7.4 | float→Decimal 精度 `[P1]` | 同上 `_row_to_dict()` | 查询结果 float 自动转 Decimal，从源头消除 IEEE 754 | 开发完成 |
-| 4.7.5 | sync/async 引擎兼容 `[P1]` | 同上 | 检测 AsyncEngine→async with，否则 sync with（Oracle/MSSQL支持） | 开发完成 |
+| 4.7.5 | sync/async 引擎兼容 `[P1]` | 同上 | 检测 AsyncEngine→async with，否则在线程池中执行 sync Engine（Oracle/MSSQL支持） | 单测完成 |
 
 ### 4.8 analyze_result Node
 
@@ -133,7 +133,7 @@
 | # | 功能 | 文件 | 描述 | 状态 |
 |---|------|------|------|------|
 | 4.12.1 | 全量数据投喂 `[P1]` | `src/graph/nodes/analyze_result.py` | 紧凑JSON优先全量，超限均匀抽取，上限可通过 ANALYSIS_DATA_MAX_CHARS 配置 | 开发完成 |
-| 4.12.2 | 处理器 Decimal 运算 `[P1]` | `src/tools/data_processor.py` | _f()/_pct()/_std() 全部使用 Decimal，消除浮点精度 | 开发完成 |
+| 4.12.2 | 处理器 Decimal 运算与专用路由 `[P1]` | `src/tools/data_processor.py`、`analyze_result.py`、`classify_intent.py` | 专用业务关键词选择 22 个处理器，按处理器契约构造列参数；确定性计算保留 Decimal 精度 | 单测完成 |
 
 ### 4.13 缺陷整改回归
 

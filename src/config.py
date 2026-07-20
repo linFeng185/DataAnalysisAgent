@@ -106,6 +106,7 @@ class Settings(BaseSettings):
 
     # ---- 限流 ----
     max_queries_per_hour: int = 100
+    registration_max_per_hour: int = 10
     max_scan_rows: int = 10_000_000
     max_execution_time: int = 30
     max_result_rows: int = 100_000

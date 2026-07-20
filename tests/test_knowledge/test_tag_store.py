@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
@@ -231,3 +232,29 @@ class TestKnowledgeTagStore:
                 "test_super_admin_search_can_include_all_private_tags 异常: %s", exc, exc_info=True,
             )
             raise
+
+    # 验证设置连接身份失败时，已建立的 PostgreSQL 连接仍会关闭。
+    # Args: self - 测试类实例；monkeypatch - pytest 补丁工具。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    async def test_connect_closes_connection_when_identity_setup_fails(self, monkeypatch) -> None:
+        import sys
+        from unittest.mock import AsyncMock
+
+        import src.knowledge.tag_store as tag_module
+
+        connection = SimpleNamespace(
+            execute=AsyncMock(side_effect=RuntimeError("set_config failed")),
+            close=AsyncMock(),
+        )
+        fake_asyncpg = SimpleNamespace(connect=AsyncMock(return_value=connection))
+        monkeypatch.setitem(sys.modules, "asyncpg", fake_asyncpg)
+        monkeypatch.setattr(tag_module, "get_settings", lambda: SimpleNamespace(
+            database_url="postgresql+asyncpg://test",
+        ))
+        store = tag_module.KnowledgeTagStore()
+        monkeypatch.setattr(store, "_ensure", AsyncMock())
+
+        with pytest.raises(RuntimeError, match="set_config failed"):
+            await store._connect()
+
+        connection.close.assert_awaited_once()
