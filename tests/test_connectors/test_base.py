@@ -183,8 +183,12 @@ class TestConnectionURL:
                 return None
 
         client = FakeClient()
+        import socket
+        from unittest.mock import MagicMock
+
         import clickhouse_connect
         monkeypatch.setattr(clickhouse_connect, "get_client", lambda **kwargs: client)
+        monkeypatch.setattr(socket, "create_connection", MagicMock(return_value=MagicMock()))
         connector = ClickHouseConnector(_ds(
             "clickhouse", host="ch.local", port=9000,
             database="default", username="reader", password="secret",

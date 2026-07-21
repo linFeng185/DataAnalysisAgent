@@ -7,13 +7,18 @@ from typing import Any
 import sqlalchemy as sa
 
 from src.connectors.base import ConnectorBase
+from src.connectors.registry import register_connector
 from src.logging_config import get_logger
 
 logger = get_logger(__name__)
 
 
+@register_connector("oracle")
 class OracleConnector(ConnectorBase):
     """使用同步 SQLAlchemy Engine 并在线程池中执行 Oracle 操作。"""
+
+    explain_template = "EXPLAIN PLAN FOR {sql}"
+    probe_sql = "SELECT 1 FROM DUAL"
 
     def _build_url(self) -> str:
         """构建 Oracle service name 连接 URL。
@@ -57,7 +62,8 @@ class OracleConnector(ConnectorBase):
 
         def _run():
             with self._engine.connect() as conn:
-                rows = conn.execute(sa.text(sql), params or {}).fetchall()
+                result = conn.execute(sa.text(sql), params or {})
+                rows = result.fetchall() if hasattr(result, "fetchall") else []
                 return [dict(row._mapping) for row in rows]
 
         try:

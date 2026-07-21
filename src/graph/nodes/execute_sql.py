@@ -143,79 +143,22 @@ async def execute_sql_node(state: AnalysisState) -> dict:
         registry = get_registry()
         ds = await registry.resolve_or_none(ds_name)
         if ds and ds.engine:
-            # 直接使用已注入的 engine 执行
-            import sqlalchemy as sa
-            from sqlalchemy.ext.asyncio import AsyncEngine
+            connector = ds.connector
+            if connector is None:
+                from src.connectors.registry import create_connector
 
-            async def _run_async(conn) -> tuple[list[dict], bool]:
-                """流式读取异步查询结果并限制内存占用。
-
-                Args:
-                    conn: SQLAlchemy AsyncConnection。
-
-                Returns:
-                    有界结果行和是否截断。
-                """
-                if ds.dialect != "sqlite":
-                    timeout_s = get_settings().max_execution_time
-                    if ds.dialect == "clickhouse":
-                        await conn.execute(sa.text(f"SET max_execution_time = {timeout_s}"))
-                    elif ds.dialect == "mysql":
-                        await conn.execute(sa.text(f"SET SESSION max_execution_time = {timeout_s * 1000}"))
-                    elif ds.dialect == "postgres":
-                        await conn.execute(sa.text(f"SET statement_timeout = '{timeout_s * 1000}ms'"))
-                max_rows = get_settings().max_result_rows
-                result = await conn.stream(sa.text(sql))
-                rows: list[dict] = []
-                async for row in result:
-                    rows.append(_row_to_dict(row))
-                    if len(rows) > max_rows:
-                        break
-                await result.close()
-                truncated = len(rows) > max_rows
-                return rows[:max_rows], truncated
-
-            def _run_sync(conn) -> tuple[list[dict], bool]:
-                """分批读取同步查询结果并限制内存占用。
-
-                Args:
-                    conn: SQLAlchemy Connection。
-
-                Returns:
-                    有界结果行和是否截断。
-                """
-                if ds.dialect != "sqlite":
-                    timeout_s = get_settings().max_execution_time
-                    if ds.dialect == "clickhouse":
-                        conn.execute(sa.text(f"SET max_execution_time = {timeout_s}"))
-                    elif ds.dialect == "mysql":
-                        conn.execute(sa.text(f"SET SESSION max_execution_time = {timeout_s * 1000}"))
-                    elif ds.dialect == "postgres":
-                        conn.execute(sa.text(f"SET statement_timeout = '{timeout_s * 1000}ms'"))
-                max_rows = get_settings().max_result_rows
-                result = conn.execution_options(stream_results=True).execute(sa.text(sql))
-                fetched = result.fetchmany(max_rows + 1)
-                result.close()
-                truncated = len(fetched) > max_rows
-                return [_row_to_dict(row) for row in fetched[:max_rows]], truncated
-
-            if isinstance(ds.engine, AsyncEngine):
-                async with ds.engine.connect() as conn:
-                    rows, truncated = await _run_async(conn)
-            else:
-                import asyncio
-
-                # 方法作用：在线程池中创建同步连接并执行查询。
-                # Args: 无，使用闭包中的数据源引擎和 SQL。
-                # Returns: 有界行列表和截断标志。
-                def _run_sync_with_connection() -> tuple[list[dict], bool]:
-                    """在线程池中创建同步连接并执行查询，避免阻塞事件循环。"""
-                    with ds.engine.connect() as conn:
-                        return _run_sync(conn)
-
-                logger.debug("同步数据源切换线程池", datasource=ds_name, dialect=ds.dialect)
-                rows, truncated = await asyncio.to_thread(_run_sync_with_connection)
-                logger.info("同步数据源线程池执行完成", datasource=ds_name, row_count=len(rows))
+                connector = create_connector(ds).attach_engine(ds.engine)
+                ds.connector = connector
+                logger.warning(
+                    "执行节点补建连接器",
+                    datasource=ds_name,
+                    dialect=ds.dialect,
+                    reason="旧缓存缺少 connector",
+                )
+            rows, truncated = await connector.execute_bounded(
+                sql,
+                get_settings().max_result_rows,
+            )
             elapsed = round((time.monotonic() - _start) * 1000)
             # 12.3.3 在返回前持久化审计，避免任务在请求结束时被取消。
             from src.security.data_masker import mask_sensitive_data

@@ -158,8 +158,13 @@ class LongTermMemoryStore:
         try:
             try:
                 await store.delete_by_ids([entry.id])
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.warning(
+                    "VectorStore 旧向量删除失败，继续幂等写入",
+                    entry_id=entry.id,
+                    error=str(exc),
+                    exc_info=True,
+                )
             from src.memory.vector_store import VectorEntry
             await store.upsert([VectorEntry(id=entry.id, content=entry.content, metadata=meta)])
         except Exception as e:
@@ -174,8 +179,13 @@ class LongTermMemoryStore:
                 "INSERT INTO pending_vector_sync (entry_id, created_at) VALUES ($1, $2)",
                 entry_id, datetime.now(),
             )
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.error(
+                "向量补偿任务记录失败",
+                entry_id=entry_id,
+                error=str(exc),
+                exc_info=True,
+            )
 
     # ── 记忆维护 ─────────────────────────────────────
 

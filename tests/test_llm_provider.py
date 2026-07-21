@@ -1,8 +1,13 @@
 """LLM Provider 单元测试。"""
 
+import logging
+
 import pytest
 from src.llm.adapters.base import SupportedFeatures
 from src.llm.provider import LLMProvider, LLMResponse, LLMStreamChunk
+
+
+logger = logging.getLogger(__name__)
 
 
 class FakeLLMProvider(LLMProvider):
@@ -23,6 +28,24 @@ class FakeLLMProvider(LLMProvider):
     async def astream(self, messages, temperature=None, max_tokens=None):
         for r in self.responses:
             yield LLMStreamChunk(content=r, reasoning="")
+
+    # 方法作用：返回测试用 ChatModel 占位对象以满足 Provider 契约。
+    # Args: temperature - 温度；max_tokens - 最大输出；stream - 是否流式；reasoning - 是否推理。
+    # Returns: 不执行真实模型调用的测试占位对象。
+    def get_chat_model(
+        self,
+        temperature=None,
+        max_tokens=None,
+        stream=True,
+        reasoning=True,
+    ):
+        logger.debug(
+            "FakeLLMProvider.get_chat_model 入口",
+            extra={"stream": stream, "reasoning": reasoning},
+        )
+        result = object()
+        logger.info("FakeLLMProvider.get_chat_model 完成")
+        return result
 
 
 class TestLLMProvider:

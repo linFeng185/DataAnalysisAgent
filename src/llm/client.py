@@ -59,24 +59,35 @@ def get_openai_llm(
 def get_anthropic_llm(model: str | None = None, temperature: float | None = None, max_tokens: int | None = None) -> BaseChatModel:
     """10.1.2 ChatAnthropic 工厂。"""
     s = get_settings()
-    from langchain_anthropic import ChatAnthropic
-    return ChatAnthropic(
-        model=model or "claude-sonnet-4-6",
-        temperature=temperature if temperature is not None else s.llm_temperature,
-        max_tokens=max_tokens or s.llm_max_tokens,
-        api_key=s.anthropic_api_key or None,
-        timeout=s.llm_timeout,
-        streaming=True,
+    from src.llm.provider_registry import create_provider_from_settings, get_default_model
+
+    model_name = model or get_default_model("anthropic")
+    provider = create_provider_from_settings("anthropic", model_name, s)
+    return provider.get_chat_model(
+        temperature=temperature,
+        max_tokens=max_tokens,
+        stream=True,
     )
 
 
 def get_llm(provider: str | None = None, model: str | None = None, temperature: float | None = None, reasoning: bool = True) -> BaseChatModel:
     """10.1.3 路由器。"""
     s = get_settings()
-    provider = provider or s.llm_provider
-    if provider == "anthropic":
-        return get_anthropic_llm(model=model, temperature=temperature)
-    return get_openai_llm(model=model, temperature=temperature, reasoning=reasoning)
+    provider_name = provider or s.llm_provider
+    from src.llm.provider_registry import create_provider_from_settings, get_default_model
+
+    if model:
+        model_name = model
+    elif provider_name == s.llm_provider:
+        model_name = s.llm_model
+    else:
+        model_name = get_default_model(provider_name)
+    provider_instance = create_provider_from_settings(provider_name, model_name, s)
+    return provider_instance.get_chat_model(
+        temperature=temperature,
+        stream=True,
+        reasoning=reasoning,
+    )
 
 
 def get_cheap_llm() -> BaseChatModel:
@@ -90,11 +101,9 @@ def get_cheap_llm() -> BaseChatModel:
 def _is_remote_available(settings) -> bool:
     """检查远程配置模型可用性，不触发任何网络请求。"""
     provider = getattr(settings, "llm_provider", "openai")
-    available = bool(
-        getattr(settings, "anthropic_api_key", "")
-        if provider == "anthropic"
-        else getattr(settings, "openai_api_key", "")
-    )
+    from src.llm.provider_registry import provider_has_credentials
+
+    available = provider_has_credentials(provider, settings)
     logger.debug("远程 LLM 可用性检查", provider=provider, available=available)
     return available
 
@@ -192,27 +201,26 @@ def get_task_llm(
 def get_provider(model_id: str | None = None) -> "LLMProvider":
     s = get_settings()
     mid = model_id or s.llm_model
+    logger.info("Provider 路由边界输入", model_id=mid)
     from src.llm.model_registry import get_model_registry
     info = get_model_registry().get(mid)
     if not info:
+        logger.error("Provider 路由失败", model_id=mid, reason="模型未注册")
         raise ValueError(f"未知模型: {mid}")
-    if info.provider == "openai":
-        if not s.openai_api_key:
-            raise ValueError(f"模型 {mid} 需要 OPENAI_API_KEY")
-        from src.llm.provider_openai import OpenAIProvider
-        return OpenAIProvider(mid, s.openai_base_url, s.openai_api_key)
-    raise ValueError(f"不支持的 Provider: {info.provider}")
+    logger.info("Provider 模型解析完成", model_id=mid, provider=info.provider)
+    from src.llm.provider_registry import create_provider_from_settings
+
+    provider = create_provider_from_settings(info.provider, mid, s)
+    logger.info("Provider 路由完成", model_id=mid, provider=info.provider)
+    return provider
 
 
 def is_llm_available() -> bool:
     """API Key 是否已配置。"""
     s = get_settings()
-    if s.llm_provider == "anthropic":
-        ok = bool(s.anthropic_api_key)
-        if not ok:
-            logger.warning("LLM 不可用: ANTHROPIC_API_KEY 未设置")
-    else:
-        ok = bool(s.openai_api_key)
-        if not ok:
-            logger.warning("LLM 不可用: OPENAI_API_KEY 未设置, 将使用模板回退")
+    from src.llm.provider_registry import provider_has_credentials
+
+    ok = provider_has_credentials(s.llm_provider, s)
+    if not ok:
+        logger.warning("LLM 不可用，将使用模板回退", provider=s.llm_provider)
     return ok

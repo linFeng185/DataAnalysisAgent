@@ -104,10 +104,14 @@ class ExternalDataSourceProvider(DataSourceProvider):
         logger.debug("外部数据源注销入口", datasource=name)
         if name in self._sources:
             ds = self._sources.pop(name)
-            if ds.engine:
+            if ds.connector:
+                await ds.connector.close()
+            elif ds.engine:
                 dispose_result = ds.engine.dispose()
                 if inspect.isawaitable(dispose_result):
                     await dispose_result
+            ds.engine = None
+            ds.connector = None
             logger.info("数据源已移除", name=name)
         else:
             logger.info("外部数据源注销跳过", datasource=name, reason="不存在")
@@ -147,7 +151,13 @@ class ExternalDataSourceProvider(DataSourceProvider):
         Returns:
             探针 SQL 成功返回 True，否则返回 False。
         """
-        probe_sql = "SELECT 1 FROM DUAL" if ds.dialect == "oracle" else "SELECT 1"
+        connector = ds.connector
+        if connector is None:
+            from src.connectors.registry import create_connector
+
+            connector = create_connector(ds)
+            connector.attach_engine(ds.engine)
+        probe_sql = connector.probe_sql
         logger.debug(
             "数据源连通性探针入口",
             datasource=ds.name,
@@ -155,14 +165,9 @@ class ExternalDataSourceProvider(DataSourceProvider):
             probe_sql=probe_sql,
         )
         try:
-            import sqlalchemy as sa
-            from sqlalchemy.ext.asyncio import AsyncEngine
-            if isinstance(ds.engine, AsyncEngine):
-                async with ds.engine.connect() as conn:
-                    await conn.execute(sa.text(probe_sql))
-            else:
-                with ds.engine.connect() as conn:
-                    conn.execute(sa.text(probe_sql))
+            healthy = await connector.health_check()
+            if not healthy:
+                raise ConnectionError(f"数据源 '{ds.name}' 探针失败")
             logger.info(
                 "数据源连通性探针完成",
                 datasource=ds.name,

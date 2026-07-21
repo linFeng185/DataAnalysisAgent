@@ -52,6 +52,12 @@ documents = [
     "PyPDF2>=3.0",
     "python-docx>=1.1",
 ]
+embedded = [
+    "django>=4.2,<5.1",
+]
+embeddings = [
+    "sentence-transformers>=3.0",
+]
 testdata = [
     "faker>=40.0",
 ]

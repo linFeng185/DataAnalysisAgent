@@ -88,6 +88,27 @@ class LLMProvider(ABC):
         """
         ...
 
+    @abstractmethod
+    def get_chat_model(
+        self,
+        temperature: float | None = None,
+        max_tokens: int | None = None,
+        stream: bool = True,
+        reasoning: bool = True,
+    ):
+        """创建供 LangGraph/LangChain 组合使用的 ChatModel。
+
+        Args:
+            temperature: 温度参数。
+            max_tokens: 最大输出 Token 数。
+            stream: 是否启用流式。
+            reasoning: 是否启用模型推理模式。
+
+        Returns:
+            LangChain BaseChatModel 实例。
+        """
+        ...
+
     @staticmethod
     def _to_lc_msg(m: dict):
         """将 dict 格式消息转为 LangChain Message 对象。

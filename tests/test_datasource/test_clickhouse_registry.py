@@ -14,7 +14,8 @@ logger = logging.getLogger(__name__)
 class TestClickHouseRegistryAdapter:
     """覆盖 clickhouse-connect 适配层。"""
 
-    def test_build_engine_without_sqlalchemy_clickhouse_dialect(self, monkeypatch):
+    @pytest.mark.asyncio
+    async def test_build_engine_without_sqlalchemy_clickhouse_dialect(self, monkeypatch):
         """Registry 应使用已声明的 clickhouse-connect，而不是缺失的 SQLAlchemy 方言。"""
         # Arrange
         import socket
@@ -63,7 +64,7 @@ class TestClickHouseRegistryAdapter:
         registry = DataSourceRegistry()
 
         # Act
-        engine = registry._build_engine(config, "secret", {"oracle", "mssql"})  # noqa: SLF001
+        engine = await registry._create_engine(config)  # noqa: SLF001
         with engine.connect() as connection:
             result = connection.execute(sa.text("SELECT 1"))
             rows = result.fetchall()
@@ -84,20 +85,17 @@ class TestClickHouseRegistryAdapter:
         # Arrange
         from unittest.mock import MagicMock
 
-        import src.datasource.registry as registry_module
         from src.datasource.config import DataSourceConfig
         from src.datasource.registry import DataSourceRegistry
 
-        create_engine = MagicMock()
-        monkeypatch.setattr(registry_module, "create_async_engine", create_engine)
         config = DataSourceConfig(name="warehouse", dialect="hive", mode="external")
 
         # Act / Assert
         with pytest.raises(ConnectionError, match="hive"):
             await DataSourceRegistry()._create_engine(config)  # noqa: SLF001
-        create_engine.assert_not_called()
 
-    def test_clickhouse_async_context_supports_schema_introspection(self, monkeypatch):
+    @pytest.mark.asyncio
+    async def test_clickhouse_async_context_supports_schema_introspection(self, monkeypatch):
         """ClickHouse 连接适配器应同时支持 Provider 的 async with 访问方式。"""
         # Arrange
         import socket
@@ -123,15 +121,12 @@ class TestClickHouseRegistryAdapter:
             name="clickhouse_test", dialect="clickhouse", mode="external",
             host="ch.local", port=8123, database="default",
         )
-        engine = DataSourceRegistry()._build_engine(config, "", {"oracle", "mssql"})  # noqa: SLF001
+        engine = await DataSourceRegistry()._create_engine(config)  # noqa: SLF001
 
         # Act
-        async def read_rows():
-            async with engine.connect() as connection:
-                result = await connection.execute(sa.text("SELECT name FROM system.tables"))
-                return result.fetchall()
-
-        rows = __import__("asyncio").run(read_rows())
+        async with engine.connect() as connection:
+            result = await connection.execute(sa.text("SELECT name FROM system.tables"))
+            rows = result.fetchall()
 
         # Assert
         assert rows[0]._mapping["name"] == "orders"

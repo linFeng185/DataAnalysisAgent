@@ -307,13 +307,21 @@ class StructuredAssetAdapter:
                 missing = pd.isna(value)
                 if isinstance(missing, bool) and missing:
                     return None
-            except (TypeError, ValueError):
-                pass
+            except (TypeError, ValueError) as exc:
+                logger.debug(
+                    "结构化值缺失检测跳过",
+                    value_type=type(value).__name__,
+                    error=str(exc),
+                )
         if hasattr(value, "isoformat") and not isinstance(value, (str, bytes)):
             return value.isoformat()
         if hasattr(value, "item"):
             try:
                 return value.item()
-            except (ValueError, TypeError):
-                pass
+            except (ValueError, TypeError) as exc:
+                logger.debug(
+                    "结构化标量提取跳过",
+                    value_type=type(value).__name__,
+                    error=str(exc),
+                )
         return value

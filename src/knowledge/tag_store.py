@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import re
 import unicodedata
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field
@@ -11,6 +13,7 @@ from pydantic import BaseModel, Field
 from src.config import get_settings
 from src.knowledge.governance import is_super_admin
 from src.logging_config import get_logger
+from src.memory.pg_pool import pg_connection
 
 logger = get_logger(__name__)
 
@@ -94,68 +97,56 @@ class KnowledgeTagStore:
         if not url or "postgres" not in url:
             logger.warning("知识标签表初始化跳过", reason="PostgreSQL 未配置")
             return
-        conn = None
         try:
-            import asyncpg
-
-            conn = await asyncpg.connect(url.replace("postgresql+asyncpg://", "postgresql://"))
-            # 初始化连接使用受信任的平台角色，以便 RLS 下幂等补齐预置标签。
-            await conn.execute(
-                "SELECT set_config('app.current_user_id', '0', false), "
-                "set_config('app.current_tenant_id', '1', false), "
-                "set_config('app.current_role', 'super_admin', false)"
-            )
-            await conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS knowledge_tags (
-                    id BIGSERIAL PRIMARY KEY,
-                    name VARCHAR(128) NOT NULL,
-                    slug VARCHAR(160) NOT NULL,
-                    tag_group VARCHAR(32) NOT NULL DEFAULT 'custom',
-                    aliases TEXT[] NOT NULL DEFAULT '{}',
-                    description TEXT NOT NULL DEFAULT '',
-                    scope VARCHAR(16) NOT NULL CHECK (scope IN ('global', 'private')),
-                    tenant_id INT NULL,
-                    owner_user_id INT NULL,
-                    is_active BOOLEAN NOT NULL DEFAULT TRUE,
-                    is_seed BOOLEAN NOT NULL DEFAULT FALSE,
-                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                    CHECK (
-                        (scope = 'global' AND tenant_id IS NULL AND owner_user_id IS NULL)
-                        OR (scope = 'private' AND tenant_id IS NOT NULL AND owner_user_id IS NOT NULL)
-                    )
-                )
-                """
-            )
-            await conn.execute(
-                "CREATE UNIQUE INDEX IF NOT EXISTS uq_knowledge_tags_global_slug "
-                "ON knowledge_tags (slug) WHERE scope = 'global'"
-            )
-            await conn.execute(
-                "CREATE UNIQUE INDEX IF NOT EXISTS uq_knowledge_tags_private_slug "
-                "ON knowledge_tags (tenant_id, owner_user_id, slug) WHERE scope = 'private'"
-            )
-            for tag in DEFAULT_GLOBAL_TAGS:
+            async with pg_connection(tenant_id=1, user_id=0, role="super_admin") as conn:
                 await conn.execute(
-                    "INSERT INTO knowledge_tags (name, slug, tag_group, scope, is_seed) "
-                    "VALUES ($1, $2, $3, 'global', TRUE) "
-                    "ON CONFLICT (slug) WHERE scope = 'global' DO NOTHING",
-                    tag["name"], normalize_tag_slug(tag["name"]), tag["tag_group"],
+                    """
+                    CREATE TABLE IF NOT EXISTS knowledge_tags (
+                        id BIGSERIAL PRIMARY KEY,
+                        name VARCHAR(128) NOT NULL,
+                        slug VARCHAR(160) NOT NULL,
+                        tag_group VARCHAR(32) NOT NULL DEFAULT 'custom',
+                        aliases TEXT[] NOT NULL DEFAULT '{}',
+                        description TEXT NOT NULL DEFAULT '',
+                        scope VARCHAR(16) NOT NULL CHECK (scope IN ('global', 'private')),
+                        tenant_id INT NULL,
+                        owner_user_id INT NULL,
+                        is_active BOOLEAN NOT NULL DEFAULT TRUE,
+                        is_seed BOOLEAN NOT NULL DEFAULT FALSE,
+                        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                        CHECK (
+                            (scope = 'global' AND tenant_id IS NULL AND owner_user_id IS NULL)
+                            OR (scope = 'private' AND tenant_id IS NOT NULL AND owner_user_id IS NOT NULL)
+                        )
+                    )
+                    """
                 )
+                await conn.execute(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS uq_knowledge_tags_global_slug "
+                    "ON knowledge_tags (slug) WHERE scope = 'global'"
+                )
+                await conn.execute(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS uq_knowledge_tags_private_slug "
+                    "ON knowledge_tags (tenant_id, owner_user_id, slug) WHERE scope = 'private'"
+                )
+                for tag in DEFAULT_GLOBAL_TAGS:
+                    await conn.execute(
+                        "INSERT INTO knowledge_tags (name, slug, tag_group, scope, is_seed) "
+                        "VALUES ($1, $2, $3, 'global', TRUE) "
+                        "ON CONFLICT (slug) WHERE scope = 'global' DO NOTHING",
+                        tag["name"], normalize_tag_slug(tag["name"]), tag["tag_group"],
+                    )
             self._ready = True
             logger.info("知识标签表初始化完成", seed_count=len(DEFAULT_GLOBAL_TAGS))
         except Exception as exc:
             logger.error("知识标签表初始化失败", error=str(exc), exc_info=True)
             raise
-        finally:
-            if conn is not None:
-                await conn.close()
-
     # 创建标签数据库连接。
     # Args: 无。
     # Returns: asyncpg 连接；配置缺失时抛出 RuntimeError。
-    async def _connect(self) -> Any:
+    @asynccontextmanager
+    async def _connect(self) -> AsyncIterator[Any]:
         logger.debug("知识标签数据库连接入口")
         await self._ensure()
         url = get_settings().database_url
@@ -163,29 +154,18 @@ class KnowledgeTagStore:
             logger.error("知识标签数据库连接失败", error="PostgreSQL 未配置")
             raise RuntimeError("知识标签需要 PostgreSQL 存储")
         try:
-            import asyncpg
-
-            conn = await asyncpg.connect(url.replace("postgresql+asyncpg://", "postgresql://"))
-            from src.api.auth import (
-                get_current_role, get_current_tenant_id, get_current_user_id,
-            )
+            from src.api.auth import get_current_role, get_current_tenant_id, get_current_user_id
             from src.knowledge.governance import normalize_role
 
-            await conn.execute(
-                "SELECT set_config('app.current_user_id', $1, false), "
-                "set_config('app.current_tenant_id', $2, false), "
-                "set_config('app.current_role', $3, false)",
-                str(get_current_user_id()),
-                str(get_current_tenant_id()),
-                normalize_role(get_current_role()),
-            )
+            async with pg_connection(
+                tenant_id=get_current_tenant_id(),
+                user_id=get_current_user_id(),
+                role=normalize_role(get_current_role()),
+            ) as conn:
+                yield conn
             logger.info("知识标签数据库连接完成")
-            return conn
         except Exception as exc:
             logger.error("知识标签数据库连接失败", error=str(exc), exc_info=True)
-            if conn is not None:
-                await conn.close()
-                logger.info("知识标签数据库连接已关闭", reason="身份注入失败")
             raise
 
     # 把数据库记录转换为标签模型。
@@ -219,34 +199,32 @@ class KnowledgeTagStore:
             limit=limit,
             include_all_private=include_all_private,
         )
-        conn = await self._connect()
         try:
-            pattern = f"%{query.strip()}%" if query.strip() else ""
-            rows = await conn.fetch(
-                """
-                SELECT id, name, slug, tag_group, aliases, description, scope,
-                       tenant_id, owner_user_id, is_active, is_seed
-                FROM knowledge_tags
-                WHERE ($3::boolean OR scope = 'global' OR (
-                    scope = 'private' AND tenant_id = $1 AND owner_user_id = $2
-                ))
-                  AND ($4::boolean OR is_active)
-                  AND ($5 = '' OR name ILIKE $5 OR slug ILIKE $5
-                       OR EXISTS (SELECT 1 FROM unnest(aliases) alias WHERE alias ILIKE $5))
-                ORDER BY CASE scope WHEN 'global' THEN 0 ELSE 1 END, name
-                LIMIT $6
-                """,
-                tenant_id, user_id, include_all_private, include_inactive, pattern,
-                min(max(limit, 1), 100),
-            )
-            result = [self._to_tag(row) for row in rows]
-            logger.info("搜索知识标签完成", count=len(result), tenant_id=tenant_id, user_id=user_id)
-            return result
+            async with self._connect() as conn:
+                pattern = f"%{query.strip()}%" if query.strip() else ""
+                rows = await conn.fetch(
+                    """
+                    SELECT id, name, slug, tag_group, aliases, description, scope,
+                           tenant_id, owner_user_id, is_active, is_seed
+                    FROM knowledge_tags
+                    WHERE ($3::boolean OR scope = 'global' OR (
+                        scope = 'private' AND tenant_id = $1 AND owner_user_id = $2
+                    ))
+                      AND ($4::boolean OR is_active)
+                      AND ($5 = '' OR name ILIKE $5 OR slug ILIKE $5
+                           OR EXISTS (SELECT 1 FROM unnest(aliases) alias WHERE alias ILIKE $5))
+                    ORDER BY CASE scope WHEN 'global' THEN 0 ELSE 1 END, name
+                    LIMIT $6
+                    """,
+                    tenant_id, user_id, include_all_private, include_inactive, pattern,
+                    min(max(limit, 1), 100),
+                )
+                result = [self._to_tag(row) for row in rows]
+                logger.info("搜索知识标签完成", count=len(result), tenant_id=tenant_id, user_id=user_id)
+                return result
         except Exception as exc:
             logger.error("搜索知识标签失败", error=str(exc), exc_info=True)
             raise
-        finally:
-            await conn.close()
 
     # 按 ID 解析当前用户可见且启用的标签。
     # Args: tag_ids - 待解析标签 ID；tenant_id - 当前租户；user_id - 当前用户。
@@ -268,29 +246,27 @@ class KnowledgeTagStore:
         if not unique_ids:
             logger.info("按 ID 解析可见知识标签完成", count=0)
             return []
-        conn = await self._connect()
         try:
-            rows = await conn.fetch(
-                """
-                SELECT id, name, slug, tag_group, aliases, description, scope,
-                       tenant_id, owner_user_id, is_active, is_seed
-                FROM knowledge_tags
-                WHERE id = ANY($1::bigint[]) AND is_active
-                  AND (scope = 'global' OR (
-                      scope = 'private' AND tenant_id = $2 AND owner_user_id = $3
-                  ))
-                """,
-                unique_ids, tenant_id, user_id,
-            )
-            by_id = {int(row["id"]): self._to_tag(row) for row in rows}
-            result = [by_id[tag_id] for tag_id in unique_ids if tag_id in by_id]
-            logger.info("按 ID 解析可见知识标签完成", count=len(result), requested=len(unique_ids))
-            return result
+            async with self._connect() as conn:
+                rows = await conn.fetch(
+                    """
+                    SELECT id, name, slug, tag_group, aliases, description, scope,
+                           tenant_id, owner_user_id, is_active, is_seed
+                    FROM knowledge_tags
+                    WHERE id = ANY($1::bigint[]) AND is_active
+                      AND (scope = 'global' OR (
+                          scope = 'private' AND tenant_id = $2 AND owner_user_id = $3
+                      ))
+                    """,
+                    unique_ids, tenant_id, user_id,
+                )
+                by_id = {int(row["id"]): self._to_tag(row) for row in rows}
+                result = [by_id[tag_id] for tag_id in unique_ids if tag_id in by_id]
+                logger.info("按 ID 解析可见知识标签完成", count=len(result), requested=len(unique_ids))
+                return result
         except Exception as exc:
             logger.error("按 ID 解析可见知识标签失败", error=str(exc), exc_info=True)
             raise
-        finally:
-            await conn.close()
 
     # 创建仅当前用户可见的自定义标签。
     # Args: name - 标签名称；tenant_id - 当前租户；user_id - 当前用户；
@@ -310,30 +286,28 @@ class KnowledgeTagStore:
         if not clean_name or user_id <= 0:
             logger.error("创建个人知识标签失败", name=name, user_id=user_id, error="身份或名称无效")
             raise ValueError("标签名称不能为空且用户必须已登录")
-        conn = await self._connect()
         try:
-            row = await conn.fetchrow(
-                """
-                INSERT INTO knowledge_tags (
-                    name, slug, tenant_id, owner_user_id, description, aliases, scope, is_active
-                ) VALUES ($1, $2, $3, $4, $5, $6, 'private', TRUE)
-                ON CONFLICT (tenant_id, owner_user_id, slug) WHERE scope = 'private'
-                DO UPDATE SET name = EXCLUDED.name, description = EXCLUDED.description,
-                              aliases = EXCLUDED.aliases, is_active = TRUE, updated_at = NOW()
-                RETURNING id, name, slug, tag_group, aliases, description, scope,
-                          tenant_id, owner_user_id, is_active, is_seed
-                """,
-                clean_name, normalize_tag_slug(clean_name), tenant_id, user_id,
-                description.strip(), aliases or [],
-            )
-            result = self._to_tag(row)
-            logger.info("创建个人知识标签完成", tag_id=result.id, tenant_id=tenant_id, user_id=user_id)
-            return result
+            async with self._connect() as conn:
+                row = await conn.fetchrow(
+                    """
+                    INSERT INTO knowledge_tags (
+                        name, slug, tenant_id, owner_user_id, description, aliases, scope, is_active
+                    ) VALUES ($1, $2, $3, $4, $5, $6, 'private', TRUE)
+                    ON CONFLICT (tenant_id, owner_user_id, slug) WHERE scope = 'private'
+                    DO UPDATE SET name = EXCLUDED.name, description = EXCLUDED.description,
+                                  aliases = EXCLUDED.aliases, is_active = TRUE, updated_at = NOW()
+                    RETURNING id, name, slug, tag_group, aliases, description, scope,
+                              tenant_id, owner_user_id, is_active, is_seed
+                    """,
+                    clean_name, normalize_tag_slug(clean_name), tenant_id, user_id,
+                    description.strip(), aliases or [],
+                )
+                result = self._to_tag(row)
+                logger.info("创建个人知识标签完成", tag_id=result.id, tenant_id=tenant_id, user_id=user_id)
+                return result
         except Exception as exc:
             logger.error("创建个人知识标签失败", error=str(exc), exc_info=True)
             raise
-        finally:
-            await conn.close()
 
     # 创建或重新启用平台全局标签。
     # Args: name - 标签名称；actor_role - 操作者角色；tag_group - 标签分组；
@@ -356,31 +330,29 @@ class KnowledgeTagStore:
         if not clean_name:
             logger.error("创建全局知识标签失败", error="标签名称为空")
             raise ValueError("标签名称不能为空")
-        conn = await self._connect()
         try:
-            row = await conn.fetchrow(
-                """
-                INSERT INTO knowledge_tags (
-                    name, slug, tag_group, description, aliases, scope, is_active
-                ) VALUES ($1, $2, $3, $4, $5, 'global', TRUE)
-                ON CONFLICT (slug) WHERE scope = 'global'
-                DO UPDATE SET name = EXCLUDED.name, tag_group = EXCLUDED.tag_group,
-                              description = EXCLUDED.description, aliases = EXCLUDED.aliases,
-                              is_active = TRUE, updated_at = NOW()
-                RETURNING id, name, slug, tag_group, aliases, description, scope,
-                          tenant_id, owner_user_id, is_active, is_seed
-                """,
-                clean_name, normalize_tag_slug(clean_name), tag_group.strip() or "custom",
-                description.strip(), aliases or [],
-            )
-            result = self._to_tag(row)
-            logger.info("创建全局知识标签完成", tag_id=result.id)
-            return result
+            async with self._connect() as conn:
+                row = await conn.fetchrow(
+                    """
+                    INSERT INTO knowledge_tags (
+                        name, slug, tag_group, description, aliases, scope, is_active
+                    ) VALUES ($1, $2, $3, $4, $5, 'global', TRUE)
+                    ON CONFLICT (slug) WHERE scope = 'global'
+                    DO UPDATE SET name = EXCLUDED.name, tag_group = EXCLUDED.tag_group,
+                                  description = EXCLUDED.description, aliases = EXCLUDED.aliases,
+                                  is_active = TRUE, updated_at = NOW()
+                    RETURNING id, name, slug, tag_group, aliases, description, scope,
+                              tenant_id, owner_user_id, is_active, is_seed
+                    """,
+                    clean_name, normalize_tag_slug(clean_name), tag_group.strip() or "custom",
+                    description.strip(), aliases or [],
+                )
+                result = self._to_tag(row)
+                logger.info("创建全局知识标签完成", tag_id=result.id)
+                return result
         except Exception as exc:
             logger.error("创建全局知识标签失败", error=str(exc), exc_info=True)
             raise
-        finally:
-            await conn.close()
 
     # 将个人标签复制提升为平台全局标签并停用原标签。
     # Args: tag_id - 待提升的个人标签 ID；actor_role - 操作者角色。
@@ -390,43 +362,41 @@ class KnowledgeTagStore:
         if not is_super_admin(actor_role):
             logger.warning("提升知识标签为全局拒绝", tag_id=tag_id, actor_role=actor_role)
             raise PermissionError("只有超级管理员可以提升全局标签")
-        conn = await self._connect()
         try:
-            source = await conn.fetchrow(
-                "SELECT name, tag_group, aliases, description FROM knowledge_tags "
-                "WHERE id = $1 AND scope = 'private'",
-                tag_id,
-            )
-            if source is None:
-                logger.warning("提升知识标签为全局失败", tag_id=tag_id, reason="个人标签不存在")
-                raise ValueError("待提升的个人标签不存在")
-            row = await conn.fetchrow(
-                """
-                INSERT INTO knowledge_tags (
-                    name, slug, tag_group, aliases, description, scope, is_active
-                ) VALUES ($1, $2, $3, $4, $5, 'global', TRUE)
-                ON CONFLICT (slug) WHERE scope = 'global'
-                DO UPDATE SET name = EXCLUDED.name, tag_group = EXCLUDED.tag_group,
-                              aliases = EXCLUDED.aliases, description = EXCLUDED.description,
-                              is_active = TRUE, updated_at = NOW()
-                RETURNING id, name, slug, tag_group, aliases, description, scope,
-                          tenant_id, owner_user_id, is_active, is_seed
-                """,
-                source["name"], normalize_tag_slug(source["name"]), source["tag_group"],
-                source["aliases"], source["description"],
-            )
-            await conn.execute(
-                "UPDATE knowledge_tags SET is_active = FALSE, updated_at = NOW() WHERE id = $1",
-                tag_id,
-            )
-            result = self._to_tag(row)
-            logger.info("提升知识标签为全局完成", source_tag_id=tag_id, global_tag_id=result.id)
-            return result
+            async with self._connect() as conn:
+                source = await conn.fetchrow(
+                    "SELECT name, tag_group, aliases, description FROM knowledge_tags "
+                    "WHERE id = $1 AND scope = 'private'",
+                    tag_id,
+                )
+                if source is None:
+                    logger.warning("提升知识标签为全局失败", tag_id=tag_id, reason="个人标签不存在")
+                    raise ValueError("待提升的个人标签不存在")
+                row = await conn.fetchrow(
+                    """
+                    INSERT INTO knowledge_tags (
+                        name, slug, tag_group, aliases, description, scope, is_active
+                    ) VALUES ($1, $2, $3, $4, $5, 'global', TRUE)
+                    ON CONFLICT (slug) WHERE scope = 'global'
+                    DO UPDATE SET name = EXCLUDED.name, tag_group = EXCLUDED.tag_group,
+                                  aliases = EXCLUDED.aliases, description = EXCLUDED.description,
+                                  is_active = TRUE, updated_at = NOW()
+                    RETURNING id, name, slug, tag_group, aliases, description, scope,
+                              tenant_id, owner_user_id, is_active, is_seed
+                    """,
+                    source["name"], normalize_tag_slug(source["name"]), source["tag_group"],
+                    source["aliases"], source["description"],
+                )
+                await conn.execute(
+                    "UPDATE knowledge_tags SET is_active = FALSE, updated_at = NOW() WHERE id = $1",
+                    tag_id,
+                )
+                result = self._to_tag(row)
+                logger.info("提升知识标签为全局完成", source_tag_id=tag_id, global_tag_id=result.id)
+                return result
         except Exception as exc:
             logger.error("提升知识标签为全局失败", tag_id=tag_id, error=str(exc), exc_info=True)
             raise
-        finally:
-            await conn.close()
 
     # 启用或停用全局标签或本人个人标签。
     # Args: tag_id - 标签 ID；is_active - 目标状态；actor_role - 操作者角色；
@@ -444,29 +414,27 @@ class KnowledgeTagStore:
         logger.debug(
             "更新知识标签状态入口", tag_id=tag_id, is_active=is_active, actor_role=actor_role,
         )
-        conn = await self._connect()
         try:
-            if is_super_admin(actor_role):
-                status = await conn.execute(
-                    "UPDATE knowledge_tags SET is_active = $2, updated_at = NOW() WHERE id = $1",
-                    tag_id, is_active,
-                )
-            else:
-                status = await conn.execute(
-                    "UPDATE knowledge_tags SET is_active = $2, updated_at = NOW() "
-                    "WHERE id = $1 AND scope = 'private' AND tenant_id = $3 AND owner_user_id = $4",
-                    tag_id, is_active, tenant_id, user_id,
-                )
-            result = not status.endswith(" 0")
-            if not result:
-                logger.warning("更新知识标签状态未命中", tag_id=tag_id, actor_role=actor_role)
-            logger.info("更新知识标签状态完成", tag_id=tag_id, updated=result)
-            return result
+            async with self._connect() as conn:
+                if is_super_admin(actor_role):
+                    status = await conn.execute(
+                        "UPDATE knowledge_tags SET is_active = $2, updated_at = NOW() WHERE id = $1",
+                        tag_id, is_active,
+                    )
+                else:
+                    status = await conn.execute(
+                        "UPDATE knowledge_tags SET is_active = $2, updated_at = NOW() "
+                        "WHERE id = $1 AND scope = 'private' AND tenant_id = $3 AND owner_user_id = $4",
+                        tag_id, is_active, tenant_id, user_id,
+                    )
+                result = not status.endswith(" 0")
+                if not result:
+                    logger.warning("更新知识标签状态未命中", tag_id=tag_id, actor_role=actor_role)
+                logger.info("更新知识标签状态完成", tag_id=tag_id, updated=result)
+                return result
         except Exception as exc:
             logger.error("更新知识标签状态失败", tag_id=tag_id, error=str(exc), exc_info=True)
             raise
-        finally:
-            await conn.close()
 
 
 _tag_store: KnowledgeTagStore | None = None

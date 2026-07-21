@@ -3,12 +3,23 @@
 from __future__ import annotations
 
 import logging
+from contextlib import asynccontextmanager
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
 
 logger = logging.getLogger(__name__)
+
+
+# 方法作用：把连接测试桩包装成异步事务上下文。
+# Args: connection - 测试使用的数据库连接桩。
+# Returns: 测试事务范围内的数据库连接。
+@asynccontextmanager
+async def _connection_context(connection):
+    logger.debug("_connection_context 入口")
+    yield connection
+    logger.info("_connection_context 完成")
 
 
 class TestKnowledgeTagDefinitions:
@@ -95,7 +106,7 @@ class TestKnowledgeTagStore:
             ]
             conn.close = AsyncMock()
             store = KnowledgeTagStore()
-            monkeypatch.setattr(store, "_connect", AsyncMock(return_value=conn))
+            monkeypatch.setattr(store, "_connect", lambda: _connection_context(conn))
 
             # Act：以租户 7 用户 9 搜索标签。
             result = await store.search("口径", tenant_id=7, user_id=9)
@@ -129,7 +140,7 @@ class TestKnowledgeTagStore:
             }
             conn.close = AsyncMock()
             store = KnowledgeTagStore()
-            monkeypatch.setattr(store, "_connect", AsyncMock(return_value=conn))
+            monkeypatch.setattr(store, "_connect", lambda: _connection_context(conn))
 
             # Act：创建自定义标签。
             result = await store.create_personal(" 临时口径 ", tenant_id=7, user_id=9)
@@ -187,7 +198,7 @@ class TestKnowledgeTagStore:
             }]
             conn.close = AsyncMock()
             store = KnowledgeTagStore()
-            monkeypatch.setattr(store, "_connect", AsyncMock(return_value=conn))
+            monkeypatch.setattr(store, "_connect", lambda: _connection_context(conn))
 
             # Act：请求一个全局标签和一个不可见标签。
             result = await store.get_visible_by_ids([1, 99], tenant_id=7, user_id=9)
@@ -216,7 +227,7 @@ class TestKnowledgeTagStore:
             conn.fetch.return_value = []
             conn.close = AsyncMock()
             store = KnowledgeTagStore()
-            monkeypatch.setattr(store, "_connect", AsyncMock(return_value=conn))
+            monkeypatch.setattr(store, "_connect", lambda: _connection_context(conn))
 
             # Act：启用全量个人标签治理开关。
             result = await store.search(
@@ -233,21 +244,22 @@ class TestKnowledgeTagStore:
             )
             raise
 
-    # 验证设置连接身份失败时，已建立的 PostgreSQL 连接仍会关闭。
+    # 验证设置事务身份失败时，异常会由存储边界向上传播。
     # Args: self - 测试类实例；monkeypatch - pytest 补丁工具。
     # Returns: 无返回值，断言失败时由 pytest 报告。
-    async def test_connect_closes_connection_when_identity_setup_fails(self, monkeypatch) -> None:
-        import sys
-        from unittest.mock import AsyncMock
-
+    async def test_connect_propagates_identity_setup_failure(self, monkeypatch) -> None:
         import src.knowledge.tag_store as tag_module
 
-        connection = SimpleNamespace(
-            execute=AsyncMock(side_effect=RuntimeError("set_config failed")),
-            close=AsyncMock(),
-        )
-        fake_asyncpg = SimpleNamespace(connect=AsyncMock(return_value=connection))
-        monkeypatch.setitem(sys.modules, "asyncpg", fake_asyncpg)
+        # 方法作用：模拟连接池在事务身份注入阶段失败。
+        # Args: kwargs - 被测代码传入的租户、用户和角色。
+        # Returns: 不返回连接，进入上下文时抛出异常。
+        @asynccontextmanager
+        async def failing_connection(**kwargs):
+            del kwargs
+            raise RuntimeError("set_config failed")
+            yield  # pragma: no cover
+
+        monkeypatch.setattr(tag_module, "pg_connection", failing_connection)
         monkeypatch.setattr(tag_module, "get_settings", lambda: SimpleNamespace(
             database_url="postgresql+asyncpg://test",
         ))
@@ -255,6 +267,5 @@ class TestKnowledgeTagStore:
         monkeypatch.setattr(store, "_ensure", AsyncMock())
 
         with pytest.raises(RuntimeError, match="set_config failed"):
-            await store._connect()
-
-        connection.close.assert_awaited_once()
+            async with store._connect():
+                pass

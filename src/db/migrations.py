@@ -6,6 +6,7 @@ import hashlib
 import re
 from pathlib import Path
 
+from src.db.utils import to_asyncpg_url
 from src.logging_config import get_logger
 
 logger = get_logger(__name__)
@@ -88,7 +89,7 @@ async def run_migrations(
 
     directory = Path(migrations_dir) if migrations_dir is not None else _PROJECT_ROOT / "migrations"
     migrations = _discover_migrations(directory)
-    pg_url = database_url.replace("postgresql+asyncpg://", "postgresql://")
+    pg_url = to_asyncpg_url(database_url)
     if not pg_url.startswith(("postgresql://", "postgres://")):
         logger.error("数据库迁移 URL 方言不受支持")
         raise MigrationError("迁移执行器仅支持 PostgreSQL")

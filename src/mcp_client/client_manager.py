@@ -148,17 +148,13 @@ class MCPClientManager:
         """启动时确保 mcp_servers 表、索引和 RLS 策略存在。"""
         logger.debug("初始化 MCP 数据库结构入口")
         try:
-            import asyncpg
-            from src.config import get_settings
+            from src.memory.pg_pool import get_pg_pool
 
             migration_path = Path(__file__).resolve().parents[2] / "migrations" / "004_resource_scopes.sql"
             migration_sql = migration_path.read_text(encoding="utf-8")
-            url = get_settings().database_url.replace("postgresql+asyncpg://", "postgresql://")
-            connection = await asyncpg.connect(url)
-            try:
+            pool = await get_pg_pool()
+            async with pool.acquire() as connection:
                 await connection.execute(migration_sql)
-            finally:
-                await connection.close()
             logger.info("初始化 MCP 数据库结构完成", migration=migration_path.name)
             return True
         except Exception as exc:
@@ -536,14 +532,14 @@ class MCPClientManager:
         """从 PG 加载全部或指定身份可访问的启用 MCP 配置并建立连接。"""
         logger.debug("从数据库重载 MCP 入口", tenant_id=tenant_id, user_id=user_id)
         try:
-            import asyncpg, json as _j
-            from src.config import get_settings
-            url = get_settings().database_url.replace("postgresql+asyncpg://", "postgresql://")
-            conn = await asyncpg.connect(url)
-            try:
-                await self._set_connection_identity(
-                    conn, tenant_id=tenant_id or 0, user_id=user_id or 0, role="analyst",
-                )
+            import json as _j
+            from src.memory.pg_pool import pg_connection
+
+            async with pg_connection(
+                tenant_id=tenant_id or 0,
+                user_id=user_id or 0,
+                role="analyst",
+            ) as conn:
                 if tenant_id is None:
                     rows = await conn.fetch(
                         "SELECT name, scope, tenant_id, owner_user_id, transport, command, args, "
@@ -557,8 +553,6 @@ class MCPClientManager:
                         "(scope='private' AND tenant_id=$1 AND owner_user_id=$2))",
                         tenant_id, user_id or 0,
                     )
-            finally:
-                await conn.close()
             count = 0
             for r in rows:
                 if not _is_managed_remote_config_allowed(r):
@@ -620,14 +614,14 @@ class MCPClientManager:
     async def _set_connection_identity(
         connection: Any, *, tenant_id: int, user_id: int, role: str,
     ) -> None:
-        """使用 set_config 设置连接级 RLS 身份，连接关闭后自动释放。"""
+        """使用事务局部 set_config 注入 RLS 身份。"""
         logger.debug(
             "注入 MCP 数据库身份入口", tenant_id=tenant_id, user_id=user_id, role=role,
         )
         await connection.execute(
-            "SELECT set_config('app.current_tenant_id', $1, false), "
-            "set_config('app.current_user_id', $2, false), "
-            "set_config('app.current_role', $3, false)",
+            "SELECT set_config('app.current_tenant_id', $1, true), "
+            "set_config('app.current_user_id', $2, true), "
+            "set_config('app.current_role', $3, true)",
             str(tenant_id), str(user_id), role,
         )
         logger.info("注入 MCP 数据库身份完成", tenant_id=tenant_id, user_id=user_id, role=role)

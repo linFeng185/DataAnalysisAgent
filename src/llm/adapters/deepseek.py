@@ -3,6 +3,10 @@
 from __future__ import annotations
 
 from src.llm.adapters.base import ModelAdapter, ParsedResponse, StreamChunk, SupportedFeatures
+from src.logging_config import get_logger
+
+
+logger = get_logger(__name__)
 
 
 class DeepSeekV4ProAdapter(ModelAdapter):
@@ -33,6 +37,11 @@ class DeepSeekV4ProAdapter(ModelAdapter):
                         rc = delta.get("reasoning_content", "") if isinstance(delta, dict) else getattr(delta, "reasoning_content", "")
                         if rc:
                             result.reasoning_content = rc if isinstance(rc, str) else str(rc)
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug(
+                    "DeepSeek 推理流兼容解析跳过",
+                    chunk_type=type(chunk).__name__,
+                    error=str(exc),
+                    exc_info=True,
+                )
         return result

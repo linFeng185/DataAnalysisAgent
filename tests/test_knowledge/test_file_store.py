@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -22,7 +23,15 @@ class TestFileStore:
         )
         store = file_module.FileStore()
         monkeypatch.setattr(store, "_ensure", AsyncMock())
-        monkeypatch.setattr(store, "_connect", AsyncMock(return_value=connection))
+
+        # 方法作用：提供 FileStore 池化连接测试上下文。
+        # Args: 无。
+        # Returns: 测试事务范围内的数据库连接。
+        @asynccontextmanager
+        async def scoped_connection():
+            yield connection
+
+        monkeypatch.setattr(store, "_connect", scoped_connection)
         monkeypatch.setattr(file_module, "_current_identity", lambda: (7, 9))
         monkeypatch.setattr(auth_module, "get_current_role", lambda: " SUPER_ADMIN ")
 
@@ -34,4 +43,3 @@ class TestFileStore:
         assert params[3] == "super_admin"
         assert "tenant_id = $2" in sql
         assert "knowledge_scope IN ('tenant', 'private')" not in sql
-        connection.close.assert_awaited_once()

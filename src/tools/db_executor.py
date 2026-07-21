@@ -26,34 +26,53 @@ class DBExecutorTool(BaseTool):
     )
     datasource: str = ""
 
+    # 方法作用：拒绝同步数据库执行，避免嵌套事件循环。
+    # Args: sql - 只读 SQL；datasource - 数据源名称；run_manager - LangChain 同步回调管理器。
+    # Returns: 指示调用方使用异步接口的失败结果。
     def _run(
         self,
         sql: str,
         datasource: str = "",
         run_manager: Any = None,
     ) -> dict:
+        """同步入口只返回明确指引，生产链路统一使用 `_arun()`。"""
         datasource = datasource or self.datasource
-        logger.info("DB 执行工具调用", datasource=datasource, sql=sql[:120])
+        logger.debug("DBExecutorTool._run 入口", datasource=datasource, sql=sql[:120])
+        result = {"success": False, "error": "DBExecutorTool 仅支持异步调用，请使用 ainvoke()"}
+        logger.warning("DBExecutorTool._run 拒绝", datasource=datasource, reason="仅支持异步调用")
+        return result
 
+    # 方法作用：通过连接器异步执行只读 SQL。
+    # Args: sql - 只读 SQL；datasource - 数据源名称；run_manager - LangChain 异步回调管理器。
+    # Returns: 包含结果行和行数的结构化结果。
+    async def _arun(
+        self,
+        sql: str,
+        datasource: str = "",
+        run_manager: Any = None,
+    ) -> dict:
+        """使用 DataSourceRegistry 和 Connector 原生异步接口执行 SQL。"""
+        datasource = datasource or self.datasource
+        logger.debug("DBExecutorTool._arun 入口", datasource=datasource, sql=sql[:120])
         try:
-            import asyncio
-
-            from src.connectors.base import create_connector
+            from src.connectors.registry import create_connector
             from src.datasource.registry import get_registry
             from src.tools.sqlglot_validator import validate_with_sqlglot
 
-            async def _exec():
-                ds = await get_registry().resolve(datasource)
-                if ds is None:
-                    return {"success": False, "error": f"数据源 '{datasource}' 未找到"}
-                connector = create_connector(ds)
-                rows = await connector.execute(sql)
-                return {"success": True, "data": rows, "row_count": len(rows)}
-
-            return asyncio.run(_exec())
-        except Exception as e:
-            logger.error("DB 执行失败", error=str(e))
-            return {"success": False, "error": str(e)}
+            validation = validate_with_sqlglot(sql, dialect="mysql")
+            if not validation.get("valid", False):
+                logger.warning("DBExecutorTool._arun 拒绝", datasource=datasource, reason="SQL 校验失败")
+                return {"success": False, "error": "SQL 校验失败", "details": validation.get("errors", [])}
+            ds = await get_registry().resolve(datasource)
+            connector = create_connector(ds)
+            connector._engine = ds.engine
+            rows = await connector.execute(sql)
+            result = {"success": True, "data": rows, "row_count": len(rows)}
+            logger.info("DBExecutorTool._arun 完成", datasource=datasource, row_count=len(rows))
+            return result
+        except Exception as exc:
+            logger.error("DBExecutorTool._arun 失败", error=str(exc), exc_info=True)
+            return {"success": False, "error": str(exc)}
 
 
 class DBExplainTool(BaseTool):
@@ -67,30 +86,45 @@ class DBExplainTool(BaseTool):
     )
     datasource: str = ""
 
+    # 方法作用：拒绝同步 EXPLAIN，避免嵌套事件循环。
+    # Args: sql - 待校验 SQL；datasource - 数据源名称；run_manager - LangChain 同步回调管理器。
+    # Returns: 指示调用方使用异步接口的失败结果。
     def _run(
         self,
         sql: str,
         datasource: str = "",
         run_manager: Any = None,
     ) -> dict:
+        """同步入口只返回明确指引，生产链路统一使用 `_arun()`。"""
         datasource = datasource or self.datasource
-        logger.info("EXPLAIN 工具调用", datasource=datasource, sql=sql[:120])
+        logger.debug("DBExplainTool._run 入口", datasource=datasource, sql=sql[:120])
+        result = {"success": False, "error": "DBExplainTool 仅支持异步调用，请使用 ainvoke()"}
+        logger.warning("DBExplainTool._run 拒绝", datasource=datasource, reason="仅支持异步调用")
+        return result
 
+    # 方法作用：通过连接器异步执行 EXPLAIN 校验。
+    # Args: sql - 待校验 SQL；datasource - 数据源名称；run_manager - LangChain 异步回调管理器。
+    # Returns: 包含 EXPLAIN 计划或错误的结构化结果。
+    async def _arun(
+        self,
+        sql: str,
+        datasource: str = "",
+        run_manager: Any = None,
+    ) -> dict:
+        """使用 DataSourceRegistry 和 Connector 原生异步接口执行 EXPLAIN。"""
+        datasource = datasource or self.datasource
+        logger.debug("DBExplainTool._arun 入口", datasource=datasource, sql=sql[:120])
         try:
-            import asyncio
-
-            from src.connectors.base import create_connector
+            from src.connectors.registry import create_connector
             from src.datasource.registry import get_registry
 
-            async def _explain():
-                ds = await get_registry().resolve(datasource)
-                if ds is None:
-                    return {"success": False, "error": f"数据源 '{datasource}' 未找到"}
-                connector = create_connector(ds)
-                plan = await connector.explain(sql)
-                return {"success": True, "explain_plan": plan}
-
-            return asyncio.run(_explain())
-        except Exception as e:
-            logger.error("EXPLAIN 执行失败", error=str(e))
-            return {"success": False, "error": str(e)}
+            ds = await get_registry().resolve(datasource)
+            connector = create_connector(ds)
+            connector._engine = ds.engine
+            plan = await connector.explain(sql)
+            result = {"success": bool(plan.get("valid")), "explain_plan": plan}
+            logger.info("DBExplainTool._arun 完成", datasource=datasource, valid=result["success"])
+            return result
+        except Exception as exc:
+            logger.error("DBExplainTool._arun 失败", error=str(exc), exc_info=True)
+            return {"success": False, "error": str(exc)}

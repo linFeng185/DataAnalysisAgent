@@ -52,8 +52,13 @@ async def retrieve_schema_node(state: AnalysisState) -> dict:
                         ds.schema = await introspect_database(ds, _exec)
                         schema = ds.schema
                         logger.info("Schema 从实时内省获取", tables=len(schema.tables))
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.warning(
+                    "Schema Registry 回退失败",
+                    datasource=datasource_name,
+                    error=str(exc),
+                    exc_info=True,
+                )
 
     # 从 Registry 获取当前数据源的方言
     # 注意：不信任 state 中缓存的旧 dialect（切换数据源时可能过时）
@@ -63,8 +68,13 @@ async def retrieve_schema_node(state: AnalysisState) -> dict:
         ds = await get_registry().resolve_or_none(datasource_name)
         if ds:
             dialect = ds.dialect
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.warning(
+            "数据源方言解析失败，使用状态回退",
+            datasource=datasource_name,
+            error=str(exc),
+            exc_info=True,
+        )
     if not dialect:
         dialect = state.get("dialect", "") or "clickhouse"
 

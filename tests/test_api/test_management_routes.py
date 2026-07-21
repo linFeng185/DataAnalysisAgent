@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import sys
+from contextlib import asynccontextmanager
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -156,10 +157,15 @@ class TestExtensionScopeAuthorization:
         connection = SimpleNamespace(
             fetchval=AsyncMock(return_value=None), execute=AsyncMock(), close=AsyncMock(),
         )
-        monkeypatch.setitem(
-            sys.modules, "asyncpg",
-            SimpleNamespace(connect=AsyncMock(return_value=connection)),
-        )
+
+        # 方法作用：为 MCP API 提供已完成身份注入的连接测试桩。
+        # Args: 无。
+        # Returns: 测试事务范围内的数据库连接。
+        @asynccontextmanager
+        async def scoped_connection():
+            yield connection
+
+        monkeypatch.setattr(routes, "_connect_scoped_mcp_db", scoped_connection)
         manager = SimpleNamespace(ensure_scoped_servers=AsyncMock(return_value=1))
         monkeypatch.setattr(mcp_module, "get_mcp_client_manager", lambda: manager)
         monkeypatch.setattr(auth, "get_current_role", lambda: "tenant_admin")

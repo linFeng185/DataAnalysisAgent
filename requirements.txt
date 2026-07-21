@@ -1,5 +1,4 @@
-# 由 pyproject.toml 生成: poetry export -f requirements.txt --output requirements.txt
-# 以下为解析后的依赖列表 (开发阶段手动维护)
+# 由 pyproject.toml 生成，请勿手工维护
 
 fastapi>=0.115.0
 uvicorn[standard]>=0.34.0
@@ -22,35 +21,10 @@ mcp>=1.0.0
 redis>=5.0
 sse-starlette>=2.0
 python-multipart>=0.0.20
-python-docx>=1.0
-PyPDF2>=3.0
-jinja2>=3.0
-django>=4.2,<5.1
-
-# 用户认证
 pyjwt>=2.0
-passlib[bcrypt]>=1.7
-
-# 嵌入模型 (VectorStore 通用)
-sentence-transformers>=3.0
-
-# HTTP 异步客户端
+passlib[bcrypt]>=1.7.4
 aiohttp>=3.9
-
-# 加密（独立于 pyjwt/passlib 的直接引用）
 cryptography>=41.0
-
-# 数据库驱动
 asyncpg>=0.30.0
 langgraph-checkpoint-postgres>=3.0
-
-# 会话摘要 HTTP 客户端
-aiohttp>=3.9
-
-# 可选依赖
-# clickhouse-connect>=0.8.0
-# aiomysql>=0.2.0
-
-# 向量库切换 (二选一，对应 VECTOR_STORE_TYPE)
-# pymilvus>=2.4
-# pgvector>=0.3
+typing-extensions>=4.12

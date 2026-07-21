@@ -513,6 +513,80 @@ def _normalize_single_row_numeric_metrics(
     return rows
 
 
+# 方法作用：把成功数据源的 SQL 和样本组装为跨源分析上下文。
+# Args: query - 用户问题；results - 成功的数据源结果。
+# Returns: 供 LLM 综合分析的文本上下文。
+def _build_merge_context(query: str, results: list[dict]) -> str:
+    logger.debug("构建跨源分析上下文入口", source_count=len(results))
+    parts = [f"## 用户问题\n{query}\n"]
+    for result in results:
+        parts.append(
+            f"### 数据源: {result['datasource']} ({result.get('dialect', '')})",
+        )
+        parts.append(f"SQL: {result.get('sql', '')[:300]}")
+        parts.append(f"数据 (前3行): {result.get('data', [])[:3]}")
+        parts.append(f"总行数: {len(result.get('data', []))}")
+    context = "\n\n".join(parts)
+    logger.info("构建跨源分析上下文完成", source_count=len(results), chars=len(context))
+    return context
+
+
+# 方法作用：按精确对齐、规范批次或原始结果的优先级生成统一跨源数据行。
+# Args: results - 成功的数据源结果；normalized_rows - 单行指标对齐结果；normalized_batches - 批次对齐结果。
+# Returns: 带 `_datasource` 来源字段的统一数据行。
+def _collect_merged_rows(
+    results: list[dict],
+    normalized_rows: list[dict] | None,
+    normalized_batches: list[list[dict]] | None,
+) -> list[dict]:
+    logger.debug(
+        "收集跨源结果行入口",
+        source_count=len(results),
+        has_rows=normalized_rows is not None,
+        has_batches=normalized_batches is not None,
+    )
+    if normalized_rows is not None:
+        rows = [
+            {"_datasource": result["datasource"], **dict(row)}
+            for result, row in zip(results, normalized_rows, strict=True)
+        ]
+    elif normalized_batches is not None:
+        rows = []
+        for result, batch in zip(results, normalized_batches, strict=True):
+            rows.extend(
+                {"_datasource": result["datasource"], **dict(row)}
+                for row in batch[:30]
+            )
+    else:
+        rows = [
+            {"_datasource": result["datasource"], **dict(row)}
+            for result in results
+            for row in result.get("data", [])[:30]
+        ]
+    logger.info("收集跨源结果行完成", rows=len(rows))
+    return rows
+
+
+# 方法作用：在最终分析摘要中补充所有失败数据源，避免下游分析覆盖告警。
+# Args: analysis - 当前分析结果；failed_results - 失败数据源结果。
+# Returns: 已补充失败来源说明的分析结果。
+def _append_source_failures(analysis: dict, failed_results: list[dict]) -> dict:
+    logger.debug("补充跨源失败摘要入口", failed=len(failed_results))
+    if not failed_results:
+        logger.info("补充跨源失败摘要完成", changed=False)
+        return analysis
+    failed_names = ", ".join(
+        str(result.get("datasource", "未知来源")) for result in failed_results
+    )
+    failure_note = f"{len(failed_results)} 个数据源查询失败: {failed_names}。"
+    current_summary = str(analysis.get("summary", "")).strip()
+    result = analysis
+    if failure_note not in current_summary:
+        result = {**analysis, "summary": f"{current_summary} {failure_note}".strip()}
+    logger.info("补充跨源失败摘要完成", changed=result is not analysis)
+    return result
+
+
 async def merge_results_node(state: AnalysisState) -> dict:
     """多数据源结果合并节点——用 LLM 综合分析所有源的结果。
 
@@ -545,14 +619,7 @@ async def merge_results_node(state: AnalysisState) -> dict:
         },
     )
 
-    # 组装跨源分析上下文
-    parts = [f"## 用户问题\n{query}\n"]
-    for r in ok:
-        parts.append(f"### 数据源: {r['datasource']} ({r.get('dialect','')})")
-        parts.append(f"SQL: {r.get('sql', '')[:300]}")
-        parts.append(f"数据 (前3行): {r.get('data', [])[:3]}")
-        parts.append(f"总行数: {len(r.get('data', []))}")
-    ctx = "\n\n".join(parts)
+    ctx = _build_merge_context(query, ok)
 
     # 基础摘要（LLM 不可用时使用）
     summary = f"已从 {len(ok)} 个数据源获取数据。"
@@ -592,23 +659,7 @@ async def merge_results_node(state: AnalysisState) -> dict:
         "recommended_chart_type": "table",
     }
     chart = {"type": "table", "option": {}}
-    all_data = []
-    if normalized_rows is not None:
-        all_data = [
-            {"_datasource": result["datasource"], **dict(row)}
-            for result, row in zip(ok, normalized_rows, strict=True)
-        ]
-    elif normalized_batches is not None:
-        for result, rows in zip(ok, normalized_batches, strict=True):
-            all_data.extend(
-                {"_datasource": result["datasource"], **dict(row)}
-                for row in rows[:30]
-            )
-    else:
-        for r in ok:
-            for d in r.get("data", [])[:30]:
-                d_copy = {"_datasource": r["datasource"], **dict(d)}
-                all_data.append(d_copy)
+    all_data = _collect_merged_rows(ok, normalized_rows, normalized_batches)
 
     if all_data:
         try:
@@ -628,12 +679,7 @@ async def merge_results_node(state: AnalysisState) -> dict:
             logger.warning("跨源分析/图表生成失败", error=str(e))
 
     # 分析节点可能覆盖初始摘要，最终出口必须恢复失败来源信息。
-    if fail:
-        failed_names = ", ".join(str(r.get("datasource", "未知来源")) for r in fail)
-        failure_note = f"{len(fail)} 个数据源查询失败: {failed_names}。"
-        current_summary = str(analysis.get("summary", "")).strip()
-        if failure_note not in current_summary:
-            analysis = {**analysis, "summary": f"{current_summary} {failure_note}".strip()}
+    analysis = _append_source_failures(analysis, fail)
 
     logger.info(
         "多源结果合并完成",

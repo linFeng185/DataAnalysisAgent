@@ -124,7 +124,7 @@ class TestExternalProviderInterface:
             def __init__(self):
                 self.statements: list[str] = []
 
-            def execute(self, statement):
+            def execute(self, statement, params=None):
                 sql = str(statement)
                 self.statements.append(sql)
                 if sql.strip().upper() == "SELECT 1":

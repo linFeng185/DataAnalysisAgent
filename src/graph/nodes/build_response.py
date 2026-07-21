@@ -209,8 +209,13 @@ async def build_response_node(state: AnalysisState) -> dict:
                 row_count=row_count,
                 final_result=final_result,
             )
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.error(
+                "查询历史写入调度失败",
+                session_id=state.get("session_id", "") or "",
+                error=str(exc),
+                exc_info=True,
+            )
 
     logger.info("节点完成", node="build_response", elapsed_ms=round((time.monotonic() - _start) * 1000))
     from src.graph.nodes.prepare_turn import build_turn_snapshot

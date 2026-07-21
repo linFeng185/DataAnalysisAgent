@@ -426,8 +426,13 @@ async def _llm_generate(
                 explanation_chars=len(explanation),
             )
             return sql, reasoning_text, explanation
-        except json.JSONDecodeError:
-            pass
+        except json.JSONDecodeError as exc:
+            logger.debug(
+                "LLM SQL JSON 解析回退",
+                error=str(exc),
+                text_chars=len(text),
+                exc_info=True,
+            )
 
         if "SELECT" in text.upper():
             match = re.search(r"SELECT[\s\S]*?(?:;|$)", text, re.IGNORECASE)
@@ -542,18 +547,54 @@ def _check_table_hallucination(sql: str, tables: list[dict]) -> list[str]:
     使用 sqlglot 提取 FROM/JOIN 子句中的表引用，与已知表名比对，拦截 LLM 幻觉。
     """
     if not tables:
+        logger.info("表名幻觉校验跳过", reason="Schema 表为空")
         return []
     known = {t["name"].lower() for t in tables if t.get("name")}
-    unknown = []
+    known_bases = {name.rsplit(".", 1)[-1] for name in known}
+    unknown: list[str] = []
+    logger.info(
+        "表名幻觉校验边界输入",
+        known_tables=sorted(known),
+        sql=sql,
+    )
     try:
         import sqlglot
-        for node in sqlglot.parse(sql).walk():
-            if hasattr(node, 'name') and hasattr(node, 'alias_or_name'):
-                table_name = str(node.alias_or_name).lower()
-                if table_name and table_name not in known and table_name not in unknown:
+        from sqlglot import exp
+
+        parsed = sqlglot.parse(sql)
+        logger.info(
+            "表名幻觉校验解析完成",
+            parsed_type=type(parsed).__name__,
+            statement_count=len(parsed),
+            has_walk=hasattr(parsed, "walk"),
+        )
+        for statement in parsed:
+            cte_names = {
+                str(cte.alias_or_name).lower()
+                for cte in statement.find_all(exp.CTE)
+                if cte.alias_or_name
+            }
+            for table in statement.find_all(exp.Table):
+                table_name = str(table.name or "").lower()
+                qualified_name = ".".join(
+                    str(part).lower()
+                    for part in (table.catalog, table.db, table.name)
+                    if part
+                )
+                if not table_name or table_name in cte_names:
+                    continue
+                if table_name in known_bases or qualified_name in known:
+                    continue
+                if table_name not in unknown:
                     unknown.append(table_name)
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.error(
+            "表名幻觉校验异常",
+            error=str(exc),
+            parsed_input_tables=sorted(known),
+            exc_info=True,
+        )
+    logger.info("表名幻觉校验完成", unknown_tables=unknown, unknown_count=len(unknown))
     return unknown
 
 

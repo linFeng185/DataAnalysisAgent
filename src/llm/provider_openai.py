@@ -13,11 +13,18 @@ import time
 from src.config import get_settings
 from src.llm.adapters.registry import get_adapter
 from src.llm.provider import LLMProvider, LLMResponse, LLMStreamChunk
+from src.llm.provider_registry import register_provider
 from src.logging_config import get_logger
 
 logger = get_logger(__name__)
 
 
+@register_provider(
+    "openai",
+    api_key_setting="openai_api_key",
+    base_url_setting="openai_base_url",
+    default_model="gpt-4o",
+)
 class OpenAIProvider(LLMProvider):
     """OpenAI 兼容协议的 LLM Provider。
 
@@ -95,7 +102,42 @@ class OpenAIProvider(LLMProvider):
             p = self._adapter.parse_stream_chunk(chunk)
             yield LLMStreamChunk(content=p.content, reasoning=p.reasoning_content)
 
-    def _get_llm(self, temperature: float, max_tokens: int, stream: bool):
+    # 方法作用：创建供 LangGraph 使用的 OpenAI-compatible ChatModel。
+    # Args: temperature - 温度；max_tokens - 输出上限；stream - 是否流式；reasoning - 是否启用推理参数。
+    # Returns: ReasoningChatOpenAI 实例。
+    def get_chat_model(
+        self,
+        temperature: float | None = None,
+        max_tokens: int | None = None,
+        stream: bool = True,
+        reasoning: bool = True,
+    ):
+        """通过 Provider 统一暴露现有 ReasoningChatOpenAI 工厂。"""
+        settings = get_settings()
+        resolved_temperature = temperature if temperature is not None else settings.llm_temperature
+        resolved_max_tokens = max_tokens or settings.llm_max_tokens
+        logger.debug(
+            "OpenAIProvider.get_chat_model 入口",
+            model=self._model_id,
+            stream=stream,
+            reasoning=reasoning,
+        )
+        model = self._get_llm(
+            resolved_temperature,
+            resolved_max_tokens,
+            stream,
+            reasoning=reasoning,
+        )
+        logger.info("OpenAIProvider.get_chat_model 完成", model=self._model_id, stream=stream)
+        return model
+
+    def _get_llm(
+        self,
+        temperature: float,
+        max_tokens: int,
+        stream: bool,
+        reasoning: bool = True,
+    ):
         """获取 ChatOpenAI 实例。
 
         流式调用每次创建新实例（streaming 属性会改变实例行为），
@@ -109,19 +151,34 @@ class OpenAIProvider(LLMProvider):
         Returns: ReasoningChatOpenAI 实例
         """
         from src.llm.reasoning_chat_openai import ReasoningChatOpenAI
+        adapter_kwargs = self._adapter.get_chat_openai_kwargs()
+        if not reasoning:
+            adapter_kwargs.pop("reasoning_effort", None)
+            adapter_kwargs.pop("extra_body", None)
         if stream:
             # 流式不缓存——每次创建新实例，防止并发覆盖 streaming 属性
             return ReasoningChatOpenAI(
                 model=self._model_id, temperature=temperature, max_tokens=max_tokens,
                 api_key=self._api_key or None, base_url=self._base_url or None,
                 timeout=get_settings().llm_timeout, streaming=True,
-                **(self._adapter.get_chat_openai_kwargs()))
+                **adapter_kwargs)
+        if not reasoning:
+            return ReasoningChatOpenAI(
+                model=self._model_id,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                api_key=self._api_key or None,
+                base_url=self._base_url or None,
+                timeout=get_settings().llm_timeout,
+                streaming=False,
+                **adapter_kwargs,
+            )
         # 非流式复用实例
         if self._cached_llm is None:
             self._cached_llm = ReasoningChatOpenAI(
                 model=self._model_id, api_key=self._api_key or None,
                 base_url=self._base_url or None, timeout=get_settings().llm_timeout,
-                streaming=False, **(self._adapter.get_chat_openai_kwargs()))
+                streaming=False, **adapter_kwargs)
         self._cached_llm.temperature = temperature
         self._cached_llm.max_tokens = max_tokens
         return self._cached_llm

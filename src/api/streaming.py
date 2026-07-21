@@ -88,18 +88,11 @@ def _json_serialize(obj):
         return obj.decode("utf-8", errors="replace")
     raise TypeError(f"Type {type(obj)} not serializable")
 
-# 需要推送 progress 事件的关键节点及其描述
-_PROGRESS_MAP: dict[str, str] = {
-    "classify_intent": "正在分析问题意图...",
-    "retrieve_schema": "正在检索数据库表结构...",
-    "generate_sql": "正在生成 SQL 查询...",
-    "layer3_validate": "正在校验 SQL 安全性...",
-    "layer4_explain": "正在模拟执行 SQL...",
-    "execute_sql": "正在执行查询...",
-    "analyze_result": "正在分析查询结果...",
-    "generate_chart": "正在生成图表...",
-    "build_response": "正在组装响应...",
-}
+from src.graph.node_registry import get_progress_map
+
+
+# 需要推送 progress 事件的节点文案由工作流节点目录统一生成。
+_PROGRESS_MAP: dict[str, str] = get_progress_map()
 
 
 # 提取 LangChain 事件的稳定模型调用标识。
@@ -169,15 +162,25 @@ async def stream_analysis(user_query: str, datasource: str, session_id: str = ""
         import asyncio as _asyncio
         try:
             _asyncio.create_task(_save_session_meta(effective_id, datasource, user_query))
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.error(
+                "新会话元数据任务创建失败",
+                session_id=effective_id[:20],
+                error=str(exc),
+                exc_info=True,
+            )
     else:
         logger.info("会话续用", session_id=session_id[:20])
         import asyncio as _asyncio
         try:
             _asyncio.create_task(_touch_session_meta(effective_id, datasource, user_query))
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.error(
+                "会话活跃时间任务创建失败",
+                session_id=effective_id[:20],
+                error=str(exc),
+                exc_info=True,
+            )
 
     stats = {"chain_start": 0, "chain_end": 0, "chat_model_stream": 0, "chat_model_start": 0,
              "thinking_events": 0, "token_events": 0}
@@ -338,7 +341,7 @@ async def _save_session_meta(session_id: str, datasource: str, first_query: str)
         from src.memory.session_store import get_session_store
         await get_session_store().create(session_id, datasource, first_query)
     except Exception as e:
-        logger.debug("会话元数据保存失败（非致命）", error=str(e))
+        logger.warning("会话元数据保存失败（非致命）", error=str(e), exc_info=True)
 
 
 async def _touch_session_meta(session_id: str, datasource: str = "", first_query: str = "") -> None:
@@ -347,4 +350,4 @@ async def _touch_session_meta(session_id: str, datasource: str = "", first_query
         from src.memory.session_store import get_session_store
         await get_session_store().touch(session_id, datasource, first_query)
     except Exception as e:
-        logger.debug("会话元数据更新失败（非致命）", error=str(e))
+        logger.warning("会话元数据更新失败（非致命）", error=str(e), exc_info=True)

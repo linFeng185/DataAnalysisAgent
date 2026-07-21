@@ -139,8 +139,13 @@ def validate_with_sqlglot(sql: str, dialect: str) -> dict:
             result["transpiled_sql"] = sqlglot.transpile(
                 sql, read="mysql", write=dialect
             )[0]
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning(
+                "SQL 方言转译失败，保留原始校验结果",
+                dialect=dialect,
+                error=str(exc),
+                exc_info=True,
+            )
 
     return result
 

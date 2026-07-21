@@ -429,12 +429,11 @@ class TestLayer4Explain:
             import src.datasource.registry as registry_module
             import src.graph.nodes.layer4_explain as explain_module
 
+            connector = SimpleNamespace(explain=AsyncMock(return_value={"valid": True, "errors": []}))
             registry = SimpleNamespace(resolve_or_none=AsyncMock(return_value=SimpleNamespace(
-                engine=object(), dialect="postgres", name="postgres-test",
+                engine=object(), connector=connector, dialect="postgres", name="postgres-test",
             )))
-            execute_explain = AsyncMock(return_value=None)
             monkeypatch.setattr(registry_module, "get_registry", lambda: registry)
-            monkeypatch.setattr(explain_module, "_execute_explain", execute_explain)
             original_sql = (
                 "SELECT category_name, ROUND(SUM(subtotal), 2) AS total_spent "
                 "FROM order_items GROUP BY category_name"
@@ -448,7 +447,7 @@ class TestLayer4Explain:
             })
 
             # Assert：EXPLAIN 和状态写回都使用带 DECIMAL CAST 的处理后 SQL。
-            explain_sql = execute_explain.await_args.args[1]
+            explain_sql = connector.explain.await_args.args[0]
             assert "CAST" in explain_sql.upper()
             assert "DECIMAL" in explain_sql.upper()
             assert result["generated_sql"] != original_sql

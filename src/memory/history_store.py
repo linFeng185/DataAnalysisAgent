@@ -7,11 +7,15 @@ from __future__ import annotations
 
 import json
 import uuid
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from copy import deepcopy
 from datetime import datetime, timezone
+from typing import Any
 
 from src.config import get_settings
 from src.logging_config import get_logger
+from src.memory.pg_pool import pg_connection
 
 logger = get_logger(__name__)
 
@@ -41,38 +45,35 @@ class HistoryStore:
             self._pg_ready = False
             return False
         try:
-            import asyncpg
-            pg_url = url.replace("postgresql+asyncpg://", "postgresql://")
-            conn = await asyncpg.connect(pg_url)
-            await conn.execute("""
-                CREATE TABLE IF NOT EXISTS query_history (
-                    id TEXT PRIMARY KEY,
-                    query TEXT NOT NULL,
-                    sql TEXT DEFAULT '',
-                    datasource TEXT DEFAULT '',
-                    session_id TEXT DEFAULT '',
-                    user_id INT NOT NULL DEFAULT 0,
-                    tenant_id INT NOT NULL DEFAULT 1,
-                    success BOOLEAN DEFAULT TRUE,
-                    row_count INT DEFAULT 0,
-                    final_result JSONB NOT NULL DEFAULT '{}'::jsonb,
-                    created_at TIMESTAMPTZ DEFAULT NOW()
+            async with pg_connection(tenant_id=1, user_id=0, role="super_admin") as conn:
+                await conn.execute("""
+                    CREATE TABLE IF NOT EXISTS query_history (
+                        id TEXT PRIMARY KEY,
+                        query TEXT NOT NULL,
+                        sql TEXT DEFAULT '',
+                        datasource TEXT DEFAULT '',
+                        session_id TEXT DEFAULT '',
+                        user_id INT NOT NULL DEFAULT 0,
+                        tenant_id INT NOT NULL DEFAULT 1,
+                        success BOOLEAN DEFAULT TRUE,
+                        row_count INT DEFAULT 0,
+                        final_result JSONB NOT NULL DEFAULT '{}'::jsonb,
+                        created_at TIMESTAMPTZ DEFAULT NOW()
+                    )
+                """)
+                await conn.execute("""
+                    CREATE INDEX IF NOT EXISTS idx_query_history_created
+                    ON query_history (created_at DESC)
+                """)
+                await conn.execute("ALTER TABLE query_history ADD COLUMN IF NOT EXISTS user_id INT NOT NULL DEFAULT 0")
+                await conn.execute("ALTER TABLE query_history ADD COLUMN IF NOT EXISTS tenant_id INT NOT NULL DEFAULT 1")
+                await conn.execute(
+                    "ALTER TABLE query_history ADD COLUMN IF NOT EXISTS "
+                    "final_result JSONB NOT NULL DEFAULT '{}'::jsonb"
                 )
-            """)
-            await conn.execute("""
-                CREATE INDEX IF NOT EXISTS idx_query_history_created
-                ON query_history (created_at DESC)
-            """)
-            await conn.execute("ALTER TABLE query_history ADD COLUMN IF NOT EXISTS user_id INT NOT NULL DEFAULT 0")
-            await conn.execute("ALTER TABLE query_history ADD COLUMN IF NOT EXISTS tenant_id INT NOT NULL DEFAULT 1")
-            await conn.execute(
-                "ALTER TABLE query_history ADD COLUMN IF NOT EXISTS "
-                "final_result JSONB NOT NULL DEFAULT '{}'::jsonb"
-            )
-            await conn.execute(
-                "CREATE INDEX IF NOT EXISTS idx_query_history_identity_created "
-                "ON query_history (tenant_id, user_id, created_at DESC)")
-            await conn.close()
+                await conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_query_history_identity_created "
+                    "ON query_history (tenant_id, user_id, created_at DESC)")
             self._pg_ready = True
             logger.info("query_history 表已就绪")
             return True
@@ -81,33 +82,31 @@ class HistoryStore:
             self._pg_ready = False
             return False
 
-    async def _pg_conn(self):
+    @asynccontextmanager
+    async def _pg_conn(self) -> AsyncIterator[Any]:
         """获取注入当前身份参数的 PG 连接。
 
         Returns:
             可用的 asyncpg 连接；不可用返回 None。
         """
-        from src.api.auth import get_current_tenant_id, get_current_user_id
+        from src.api.auth import get_current_role, get_current_tenant_id, get_current_user_id
 
         user_id = get_current_user_id()
         tenant_id = get_current_tenant_id()
-        logger.debug("历史 PG 连接入口", user_id=user_id, tenant_id=tenant_id)
-        s = get_settings()
-        url = s.database_url
+        role = get_current_role()
+        logger.debug("历史 PG 连接入口", user_id=user_id, tenant_id=tenant_id, role=role)
+        logger.info("历史 PG 连接参数准备", user_id=user_id, tenant_id=tenant_id, role=role)
         try:
-            import asyncpg
-            pg_url = url.replace("postgresql+asyncpg://", "postgresql://")
-            conn = await asyncpg.connect(pg_url)
-            await conn.execute(
-                "SELECT set_config('app.current_user_id', $1, false), "
-                "set_config('app.current_tenant_id', $2, false)",
-                str(user_id), str(tenant_id),
-            )
+            async with pg_connection(
+                tenant_id=tenant_id,
+                user_id=user_id,
+                role=role,
+            ) as conn:
+                yield conn
             logger.info("历史 PG 连接完成", user_id=user_id, tenant_id=tenant_id)
-            return conn
         except Exception as exc:
             logger.error("历史 PG 连接失败", error=str(exc), exc_info=True)
-            return None
+            raise
 
     def add(self, user_query: str, datasource: str, session_id: str,
             generated_sql: str = "", success: bool = True, row_count: int = 0,
@@ -160,31 +159,27 @@ class HistoryStore:
         """将条目写入 PG。"""
         if not await self._ensure_pg():
             return
-        conn = await self._pg_conn()
-        if not conn:
-            return
         try:
-            from src.api.streaming import _PrecisionEncoder, _json_serialize
+            async with self._pg_conn() as conn:
+                from src.api.streaming import _PrecisionEncoder, _json_serialize
 
-            await conn.execute(
-                "INSERT INTO query_history "
-                "(id, query, sql, datasource, session_id, user_id, tenant_id, success, "
-                "row_count, final_result, created_at) "
-                "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11) "
-                "ON CONFLICT (id) DO NOTHING",
-                item["id"], item["query"], item["sql"], item["datasource"],
-                item["session_id"], item["user_id"], item["tenant_id"],
-                item["success"], item["row_count"],
-                json.dumps(
-                    item["final_result"], cls=_PrecisionEncoder,
-                    default=_json_serialize, ensure_ascii=False,
-                ),
-                datetime.now(timezone.utc),
-            )
+                await conn.execute(
+                    "INSERT INTO query_history "
+                    "(id, query, sql, datasource, session_id, user_id, tenant_id, success, "
+                    "row_count, final_result, created_at) "
+                    "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11) "
+                    "ON CONFLICT (id) DO NOTHING",
+                    item["id"], item["query"], item["sql"], item["datasource"],
+                    item["session_id"], item["user_id"], item["tenant_id"],
+                    item["success"], item["row_count"],
+                    json.dumps(
+                        item["final_result"], cls=_PrecisionEncoder,
+                        default=_json_serialize, ensure_ascii=False,
+                    ),
+                    datetime.now(timezone.utc),
+                )
         except Exception as exc:
             logger.error("PG 历史写入失败", error=str(exc), exc_info=True)
-        finally:
-            await conn.close()
 
     async def list_session(
         self, session_id: str, before: int | None = None, limit: int = 20,
@@ -209,9 +204,8 @@ class HistoryStore:
         )
         items: list[dict] = []
         if await self._ensure_pg():
-            conn = await self._pg_conn()
-            if conn:
-                try:
+            try:
+                async with self._pg_conn() as conn:
                     rows = await conn.fetch(
                         "SELECT id, query, sql, datasource, session_id, success, row_count, "
                         "final_result, created_at "
@@ -224,10 +218,8 @@ class HistoryStore:
                         "按会话读取历史完成", source="postgres",
                         session_id=session_id[:20], count=len(items),
                     )
-                except Exception as exc:
-                    logger.error("按会话读取历史失败", error=str(exc), exc_info=True)
-                finally:
-                    await conn.close()
+            except Exception as exc:
+                logger.error("按会话读取历史失败", error=str(exc), exc_info=True)
 
         memory_items = [
             dict(item) for item in self._items
@@ -295,9 +287,8 @@ class HistoryStore:
         ]
         deleted = len(self._items) < original_count
         if await self._ensure_pg():
-            conn = await self._pg_conn()
-            if conn is not None:
-                try:
+            try:
+                async with self._pg_conn() as conn:
                     status = await conn.execute(
                         "DELETE FROM query_history "
                         "WHERE session_id = $1 AND tenant_id = $2 AND user_id = $3",
@@ -306,16 +297,14 @@ class HistoryStore:
                         user_id,
                     )
                     deleted = deleted or not status.endswith(" 0")
-                except Exception as exc:
-                    logger.error(
-                        "按会话删除 PG 历史失败",
-                        session_id=session_id[:20],
-                        error=str(exc),
-                        exc_info=True,
-                    )
-                    raise
-                finally:
-                    await conn.close()
+            except Exception as exc:
+                logger.error(
+                    "按会话删除 PG 历史失败",
+                    session_id=session_id[:20],
+                    error=str(exc),
+                    exc_info=True,
+                )
+                raise
         logger.info(
             "按会话删除历史完成",
             session_id=session_id[:20],
@@ -367,48 +356,44 @@ class HistoryStore:
     async def _pg_list(self, datasource: str | None, search: str | None,
                        page: int, page_size: int) -> dict | None:
         """从 PG 分页查询历史。"""
-        conn = await self._pg_conn()
-        if not conn:
-            return None
         try:
-            from src.api.auth import get_current_tenant_id, get_current_user_id
+            async with self._pg_conn() as conn:
+                from src.api.auth import get_current_tenant_id, get_current_user_id
 
-            conditions: list[str] = ["tenant_id = $1", "user_id = $2"]
-            params: list = [get_current_tenant_id(), get_current_user_id()]
-            idx = 3
+                conditions: list[str] = ["tenant_id = $1", "user_id = $2"]
+                params: list = [get_current_tenant_id(), get_current_user_id()]
+                idx = 3
 
-            if datasource:
-                conditions.append(f"datasource = ${idx}")
-                params.append(datasource)
-                idx += 1
-            if search:
-                q = f"%{search}%"
-                conditions.append(f"(query ILIKE ${idx} OR sql ILIKE ${idx})")
-                params.append(q)
-                idx += 1
+                if datasource:
+                    conditions.append(f"datasource = ${idx}")
+                    params.append(datasource)
+                    idx += 1
+                if search:
+                    q = f"%{search}%"
+                    conditions.append(f"(query ILIKE ${idx} OR sql ILIKE ${idx})")
+                    params.append(q)
+                    idx += 1
 
-            where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+                where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
 
-            count_row = await conn.fetchrow(
-                f"SELECT COUNT(*) FROM query_history {where}", *params)
-            total = count_row[0] if count_row else 0
+                count_row = await conn.fetchrow(
+                    f"SELECT COUNT(*) FROM query_history {where}", *params)
+                total = count_row[0] if count_row else 0
 
-            offset = (page - 1) * page_size
-            params.extend([page_size, offset])
-            rows = await conn.fetch(
-                f"SELECT id, query, sql, datasource, session_id, success, row_count, "
-                f"final_result, created_at "
-                f"FROM query_history {where} ORDER BY created_at DESC LIMIT ${idx} OFFSET ${idx + 1}",
-                *params)
+                offset = (page - 1) * page_size
+                params.extend([page_size, offset])
+                rows = await conn.fetch(
+                    f"SELECT id, query, sql, datasource, session_id, success, row_count, "
+                    f"final_result, created_at "
+                    f"FROM query_history {where} ORDER BY created_at DESC LIMIT ${idx} OFFSET ${idx + 1}",
+                    *params)
 
-            history = [_pg_row_to_dict(r) for r in rows]
-            logger.info("列出历史完成", source="postgres", count=len(history), user_id=params[1])
-            return {"history": history, "total": total, "page": page, "page_size": page_size}
+                history = [_pg_row_to_dict(r) for r in rows]
+                logger.info("列出历史完成", source="postgres", count=len(history), user_id=params[1])
+                return {"history": history, "total": total, "page": page, "page_size": page_size}
         except Exception as exc:
             logger.error("PG 历史查询失败", error=str(exc), exc_info=True)
             return None
-        finally:
-            await conn.close()
 
 
 def _pg_row_to_dict(row) -> dict:

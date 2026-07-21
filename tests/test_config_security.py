@@ -4,9 +4,46 @@ from __future__ import annotations
 
 import logging
 from logging.handlers import TimedRotatingFileHandler
+from pathlib import Path
 from unittest.mock import AsyncMock
 
 import pytest
+
+
+logger = logging.getLogger(__name__)
+
+
+class TestEnvExample:
+    """覆盖功能 1.2.2：环境变量模板必须保持单一键定义。"""
+
+    # 方法作用：验证环境变量模板中的活动键没有重复定义。
+    # Args: self - pytest 测试类实例。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    def test_active_environment_keys_are_unique(self) -> None:
+        """复制模板后不应因后置同名键覆盖前面的配置。"""
+        logger.debug("test_active_environment_keys_are_unique 入口")
+        try:
+            # Arrange
+            lines = Path(".env.example").read_text(encoding="utf-8").splitlines()
+            keys = [
+                line.split("=", maxsplit=1)[0].strip()
+                for line in lines
+                if line.strip() and not line.lstrip().startswith("#") and "=" in line
+            ]
+
+            # Act
+            duplicates = sorted({key for key in keys if keys.count(key) > 1})
+
+            # Assert
+            assert duplicates == []
+            logger.info("test_active_environment_keys_are_unique 完成", extra={"key_count": len(keys)})
+        except Exception as exc:
+            logger.error(
+                "test_active_environment_keys_are_unique 异常: %s",
+                exc,
+                exc_info=True,
+            )
+            raise
 
 
 class TestProductionSettings:

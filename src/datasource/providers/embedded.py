@@ -133,8 +133,12 @@ class EmbeddedDataSourceProvider(DataSourceProvider):
             for model in apps.get_models():
                 table = model._meta.db_table
                 models.setdefault(table, []).append(model)
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug(
+                "Django ORM Model 扫描跳过",
+                error=str(exc),
+                exc_info=True,
+            )
 
         # SQLAlchemy
         try:
@@ -147,8 +151,12 @@ class EmbeddedDataSourceProvider(DataSourceProvider):
                     if hasattr(model, "__tablename__"):
                         table = model.__tablename__
                         models.setdefault(table, []).append(model)
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug(
+                "SQLAlchemy ORM Model 扫描跳过",
+                error=str(exc),
+                exc_info=True,
+            )
 
         return models
 
@@ -161,8 +169,13 @@ class EmbeddedDataSourceProvider(DataSourceProvider):
             table_args = getattr(model, "__table_args__", None)
             if isinstance(table_args, dict) and "comment" in table_args:
                 return table_args["comment"]
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug(
+                "ORM Model 表注释读取跳过",
+                model=getattr(model, "__name__", ""),
+                error=str(exc),
+                exc_info=True,
+            )
         # Django: Meta.verbose_name
         if hasattr(model, "_meta") and hasattr(model._meta, "verbose_name"):
             return str(model._meta.verbose_name)

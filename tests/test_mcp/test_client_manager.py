@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import logging
 import sys
+from contextlib import asynccontextmanager
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 
 logger = logging.getLogger(__name__)
@@ -138,6 +139,7 @@ class TestMCPScopedLifecycle:
         """system、当前租户和本人 private 配置应被加载，元数据不得丢失。"""
         logger.debug("test_reload_from_db_connects_visible_scopes 入口")
         import src.config as config_module
+        import src.memory.pg_pool as pool_module
         from src.mcp_client.client_manager import MCPClientManager
 
         rows = [
@@ -154,16 +156,18 @@ class TestMCPScopedLifecycle:
         connection = SimpleNamespace(
             fetch=AsyncMock(return_value=rows), execute=AsyncMock(), close=AsyncMock(),
         )
-        monkeypatch.setitem(
-            sys.modules, "asyncpg",
-            SimpleNamespace(connect=AsyncMock(return_value=connection)),
-        )
+        # 方法作用：提供带事务身份的 MCP 数据库测试连接。
+        # Args: kwargs - 被测代码传入的租户、用户和角色。
+        # Returns: 测试事务范围内的数据库连接。
+        @asynccontextmanager
+        async def scoped_connection(**kwargs):
+            del kwargs
+            yield connection
+
+        monkeypatch.setattr(pool_module, "pg_connection", scoped_connection)
         monkeypatch.setattr(
             config_module, "get_settings",
-            lambda: SimpleNamespace(
-                database_url="postgresql+asyncpg://test:test@db/test",
-                mcp_remote_host_allowlist="system,tenant,private",
-            ),
+            lambda: SimpleNamespace(mcp_remote_host_allowlist="system,tenant,private"),
         )
         manager = MCPClientManager()
         connect = AsyncMock(return_value=[])
@@ -184,6 +188,7 @@ class TestMCPScopedLifecycle:
         """旧数据不能绕过新 API 校验重新形成进程执行或 SSRF。"""
         # Arrange
         import src.config as config_module
+        import src.memory.pg_pool as pool_module
         from src.mcp_client.client_manager import MCPClientManager
 
         rows = [
@@ -200,10 +205,15 @@ class TestMCPScopedLifecycle:
         connection = SimpleNamespace(
             fetch=AsyncMock(return_value=rows), execute=AsyncMock(), close=AsyncMock(),
         )
-        monkeypatch.setitem(
-            sys.modules, "asyncpg",
-            SimpleNamespace(connect=AsyncMock(return_value=connection)),
-        )
+        # 方法作用：提供带事务身份的 MCP 数据库测试连接。
+        # Args: kwargs - 被测代码传入的租户、用户和角色。
+        # Returns: 测试事务范围内的数据库连接。
+        @asynccontextmanager
+        async def scoped_connection(**kwargs):
+            del kwargs
+            yield connection
+
+        monkeypatch.setattr(pool_module, "pg_connection", scoped_connection)
         monkeypatch.setattr(
             config_module,
             "get_settings",
@@ -250,18 +260,16 @@ class TestMCPScopedLifecycle:
     async def test_ensure_schema_executes_resource_scope_migration(self, monkeypatch):
         """新环境不依赖手工先执行旧迁移，也能创建 MCP 三级作用域表。"""
         logger.debug("test_ensure_schema_executes_resource_scope_migration 入口")
-        import src.config as config_module
+        import src.memory.pg_pool as pool_module
         from src.mcp_client.client_manager import MCPClientManager
 
         connection = SimpleNamespace(execute=AsyncMock(), close=AsyncMock())
-        monkeypatch.setitem(
-            sys.modules, "asyncpg",
-            SimpleNamespace(connect=AsyncMock(return_value=connection)),
-        )
-        monkeypatch.setattr(
-            config_module, "get_settings",
-            lambda: SimpleNamespace(database_url="postgresql+asyncpg://test:test@db/test"),
-        )
+        acquire = MagicMock()
+        acquire.__aenter__ = AsyncMock(return_value=connection)
+        acquire.__aexit__ = AsyncMock(return_value=None)
+        pool = MagicMock()
+        pool.acquire.return_value = acquire
+        monkeypatch.setattr(pool_module, "get_pg_pool", AsyncMock(return_value=pool))
 
         result = await MCPClientManager().ensure_schema()
 
@@ -269,7 +277,7 @@ class TestMCPScopedLifecycle:
         migration_sql = connection.execute.await_args.args[0]
         assert "CREATE TABLE IF NOT EXISTS mcp_servers" in migration_sql
         assert "owner_user_id" in migration_sql
-        connection.close.assert_awaited_once()
+        acquire.__aexit__.assert_awaited_once()
         logger.info("test_ensure_schema_executes_resource_scope_migration 完成")
 
 

@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import logging
+from contextlib import asynccontextmanager
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -14,6 +15,44 @@ logger = logging.getLogger(__name__)
 
 class TestMemoryTenantIsolation:
     """覆盖内存回退路径的用户与租户隔离。"""
+
+    # 方法作用：验证历史存储向池化连接完整传递当前身份。
+    # Args: self - pytest 测试类实例；monkeypatch - pytest 补丁工具。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    async def test_history_pg_connection_receives_current_identity(self, monkeypatch):
+        """连接上下文必须包含租户、用户和角色，避免启动预热回退内存。"""
+        logger.debug("test_history_pg_connection_receives_current_identity 入口")
+        # Arrange
+        import src.api.auth as auth
+        import src.memory.history_store as history_module
+
+        connection = SimpleNamespace()
+        connection_context = MagicMock()
+        connection_context.__aenter__ = AsyncMock(return_value=connection)
+        connection_context.__aexit__ = AsyncMock(return_value=False)
+        pool_connection = MagicMock(return_value=connection_context)
+        monkeypatch.setattr(history_module, "pg_connection", pool_connection)
+        store = history_module.HistoryStore()
+        user_token = auth._current_user_id.set(101)  # noqa: SLF001
+        tenant_token = auth._current_tenant_id.set(11)  # noqa: SLF001
+        role_token = auth._current_role.set("analyst")  # noqa: SLF001
+
+        try:
+            # Act
+            async with store._pg_conn() as resolved_connection:  # noqa: SLF001
+                assert resolved_connection is connection
+        finally:
+            auth._current_user_id.reset(user_token)  # noqa: SLF001
+            auth._current_tenant_id.reset(tenant_token)  # noqa: SLF001
+            auth._current_role.reset(role_token)  # noqa: SLF001
+
+        # Assert
+        pool_connection.assert_called_once_with(
+            tenant_id=11,
+            user_id=101,
+            role="analyst",
+        )
+        logger.info("test_history_pg_connection_receives_current_identity 完成")
 
     async def test_sessions_are_invisible_to_another_identity(self, monkeypatch):
         """一个用户创建的会话不得被其他用户读取或删除。"""
@@ -147,8 +186,6 @@ class TestFileStoreTenantIsolation:
     async def test_file_queries_include_tenant_and_user(self, monkeypatch):
         """文件查询必须分离系统、当前租户和当前用户三种可见范围。"""
         # Arrange
-        import asyncpg
-
         import src.api.auth as auth
         import src.knowledge.file_store as file_module
 
@@ -158,12 +195,20 @@ class TestFileStoreTenantIsolation:
             execute=AsyncMock(return_value="DELETE 0"),
             close=AsyncMock(),
         )
-        monkeypatch.setattr(asyncpg, "connect", AsyncMock(return_value=connection))
         monkeypatch.setattr(file_module, "get_settings", lambda: SimpleNamespace(
             database_url="postgresql+asyncpg://test",
         ))
         store = file_module.FileStore()
         store._ready = True  # noqa: SLF001
+
+        # 方法作用：提供 FileStore 池化连接测试上下文。
+        # Args: 无。
+        # Returns: 测试事务范围内的数据库连接。
+        @asynccontextmanager
+        async def scoped_connection():
+            yield connection
+
+        monkeypatch.setattr(store, "_connect", scoped_connection)
         user_token = auth._current_user_id.set(101)  # noqa: SLF001
         tenant_token = auth._current_tenant_id.set(11)  # noqa: SLF001
         role_token = auth._current_role.set("analyst")  # noqa: SLF001
@@ -407,7 +452,15 @@ class TestSessionStorePagination:
         )
         store = session_module.SessionStore()
         monkeypatch.setattr(store, "_ensure_pg", AsyncMock(return_value=True))
-        monkeypatch.setattr(store, "_pg_conn", AsyncMock(return_value=connection))
+
+        # 方法作用：提供 SessionStore 池化连接测试上下文。
+        # Args: 无。
+        # Returns: 测试事务范围内的数据库连接。
+        @asynccontextmanager
+        async def scoped_connection():
+            yield connection
+
+        monkeypatch.setattr(store, "_pg_conn", scoped_connection)
         cursor = "2026-07-13T13:12:34.377239+00:00"
 
         # Act

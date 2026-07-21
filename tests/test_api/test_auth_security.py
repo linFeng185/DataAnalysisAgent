@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from starlette.requests import Request
@@ -16,22 +16,24 @@ class TestCookieAuthentication:
     async def test_login_sets_httponly_cookie_without_returning_token(self, monkeypatch):
         """登录应把 JWT 写入 HttpOnly Cookie，响应体不得暴露令牌。"""
         # Arrange
-        import asyncpg
         from passlib.hash import bcrypt
 
         import src.api.auth as auth
 
-        connection = SimpleNamespace(
-            fetchrow=AsyncMock(return_value={
-                "id": 7,
-                "tenant_id": 3,
-                "role": "analyst",
-                "password_hash": "test-hash",
-            }),
-            close=AsyncMock(),
-        )
+        connection = MagicMock()
+        connection.fetchrow = AsyncMock(return_value={
+            "id": 7,
+            "tenant_id": 3,
+            "role": "analyst",
+            "password_hash": "test-hash",
+        })
+        acquire = MagicMock()
+        acquire.__aenter__ = AsyncMock(return_value=connection)
+        acquire.__aexit__ = AsyncMock(return_value=None)
+        pool = MagicMock()
+        pool.acquire.return_value = acquire
         monkeypatch.setattr(bcrypt, "verify", lambda password, password_hash: True)
-        monkeypatch.setattr(asyncpg, "connect", AsyncMock(return_value=connection))
+        monkeypatch.setattr(auth, "get_pg_pool", AsyncMock(return_value=pool))
         monkeypatch.setattr(auth, "get_settings", lambda: SimpleNamespace(
             database_url="postgresql+asyncpg://test",
             jwt_secret="x" * 32,
@@ -57,17 +59,23 @@ class TestCookieAuthentication:
     async def test_register_sets_httponly_cookie_without_returning_token(self, monkeypatch):
         """注册成功后应直接建立 Cookie 会话且不暴露 JWT。"""
         # Arrange
-        import asyncpg
         from passlib.hash import bcrypt
 
         import src.api.auth as auth
 
-        connection = SimpleNamespace(
-            fetchval=AsyncMock(return_value=8),
-            close=AsyncMock(),
-        )
+        connection = MagicMock()
+        connection.fetchval = AsyncMock(return_value=8)
+        transaction = MagicMock()
+        transaction.__aenter__ = AsyncMock(return_value=None)
+        transaction.__aexit__ = AsyncMock(return_value=None)
+        connection.transaction.return_value = transaction
+        acquire = MagicMock()
+        acquire.__aenter__ = AsyncMock(return_value=connection)
+        acquire.__aexit__ = AsyncMock(return_value=None)
+        pool = MagicMock()
+        pool.acquire.return_value = acquire
         monkeypatch.setattr(bcrypt, "hash", lambda password: "test-hash")
-        monkeypatch.setattr(asyncpg, "connect", AsyncMock(return_value=connection))
+        monkeypatch.setattr(auth, "get_pg_pool", AsyncMock(return_value=pool))
         monkeypatch.setattr(auth, "get_settings", lambda: SimpleNamespace(
             database_url="postgresql+asyncpg://test",
             multi_tenant=False,

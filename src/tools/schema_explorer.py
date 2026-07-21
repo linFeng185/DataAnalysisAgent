@@ -26,26 +26,47 @@ class SchemaExplorerTool(BaseTool):
     )
     datasource: str = ""
 
+    # 方法作用：拒绝同步调用，避免在异步应用中创建嵌套事件循环。
+    # Args: datasource - 数据源名称；query - 用户查询；run_manager - LangChain 同步回调管理器。
+    # Returns: 指示调用方使用异步接口的错误文本。
     def _run(
         self,
         datasource: str = "",
         query: str = "",
         run_manager: Any = None,
     ) -> str:
+        """同步入口只返回明确指引，生产链路统一使用 `_arun()`。"""
         datasource = datasource or self.datasource
-        logger.info("Schema 探索工具调用", datasource=datasource, query=query[:80])
+        logger.debug("SchemaExplorerTool._run 入口", datasource=datasource, query=query[:80])
+        result = "SchemaExplorerTool 仅支持异步调用，请使用 ainvoke()"
+        logger.warning("SchemaExplorerTool._run 拒绝", datasource=datasource, reason="仅支持异步调用")
+        return result
 
+    # 方法作用：异步获取指定数据源的 Schema 文本。
+    # Args: datasource - 数据源名称；query - 用户查询；run_manager - LangChain 异步回调管理器。
+    # Returns: Schema 的 Prompt 文本或明确错误信息。
+    async def _arun(
+        self,
+        datasource: str = "",
+        query: str = "",
+        run_manager: Any = None,
+    ) -> str:
+        """通过 SchemaManager 原生异步接口探索表结构。"""
+        datasource = datasource or self.datasource
+        logger.debug("SchemaExplorerTool._arun 入口", datasource=datasource, query=query[:80])
         try:
             from src.knowledge.schema_manager import get_schema_manager
 
             manager = get_schema_manager()
-            import asyncio
-            schema = asyncio.run(manager.get_or_fetch_schema(
+            schema = await manager.get_or_fetch_schema(
                 datasource, user_query=query,
-            ))
+            )
             if schema and schema.tables:
-                return schema.to_prompt_text()
-            return "未找到表结构信息"
-        except Exception as e:
-            logger.error("Schema 探索失败", error=str(e))
-            return f"获取表结构失败: {e}"
+                result = schema.to_prompt_text()
+            else:
+                result = "未找到表结构信息"
+            logger.info("SchemaExplorerTool._arun 完成", datasource=datasource, result_chars=len(result))
+            return result
+        except Exception as exc:
+            logger.error("SchemaExplorerTool._arun 失败", error=str(exc), exc_info=True)
+            return f"获取表结构失败: {exc}"

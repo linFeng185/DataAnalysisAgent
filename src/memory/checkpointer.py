@@ -11,6 +11,7 @@ import warnings
 from datetime import datetime
 
 from src.config import get_settings
+from src.db.utils import to_asyncpg_url
 from src.logging_config import get_logger
 from src.memory.models import ConversationTurn, SessionContext
 
@@ -69,13 +70,13 @@ async def get_checkpointer():
             import asyncpg
             from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
             from urllib.parse import urlparse, urlunparse
-            # SQLAlchemy 格式 → asyncpg 格式
-            pg_url = url.replace("postgresql+asyncpg://", "postgresql://")
+            pg_url = to_asyncpg_url(url)
             # 自动创建目标数据库（如不存在）
             parsed = urlparse(pg_url)
             db_name = parsed.path.lstrip("/")
             if db_name and db_name != "postgres":
                 base_url = urlunparse(parsed._replace(path="/postgres"))
+                sys_conn = None
                 try:
                     sys_conn = await asyncpg.connect(base_url)
                     exists = await sys_conn.fetchval(
@@ -83,9 +84,24 @@ async def get_checkpointer():
                     if not exists:
                         await sys_conn.execute(f"CREATE DATABASE {db_name} ENCODING 'UTF8'")
                         logger.info("数据库已自动创建", database=db_name)
-                    await sys_conn.close()
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logger.warning(
+                        "目标数据库自动创建跳过",
+                        database=db_name,
+                        error=str(exc),
+                        exc_info=True,
+                    )
+                finally:
+                    if sys_conn is not None:
+                        try:
+                            await sys_conn.close()
+                        except Exception as close_exc:
+                            logger.error(
+                                "系统数据库连接关闭失败",
+                                database=db_name,
+                                error=str(close_exc),
+                                exc_info=True,
+                            )
             # ctx 必须保持在模块级防 GC 关闭连接池
             _pg_ctx = AsyncPostgresSaver.from_conn_string(pg_url)
             _pg_checkpointer = await _pg_ctx.__aenter__()

@@ -20,6 +20,7 @@ class DataSourceConfig:
     password: str = ""
 
     engine: object = None  # SQLAlchemy AsyncEngine, resolve() 时注入
+    connector: object = None  # ConnectorBase, resolve() 时注入
     schema: object = None  # SchemaSnapshot, resolve() 时注入
 
     description: str = ""

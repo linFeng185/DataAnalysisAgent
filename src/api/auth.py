@@ -27,6 +27,7 @@ from starlette.responses import JSONResponse
 
 from src.config import get_settings
 from src.logging_config import get_logger
+from src.memory.pg_pool import get_pg_pool
 
 logger = get_logger(__name__)
 
@@ -312,14 +313,13 @@ async def login(req: LoginRequest, response: Response, request: Request = None):
     ):
         raise HTTPException(429, "登录尝试过于频繁，请稍后重试")
     logger.debug("登录入口", username=req.username, client_key=client_key)
-    conn = None
     try:
-        import asyncpg
-        s = settings
-        url = s.database_url.replace("postgresql+asyncpg://", "postgresql://")
-        conn = await asyncpg.connect(url)
-        row = await conn.fetchrow(
-            "SELECT id, tenant_id, role, password_hash FROM users WHERE username=$1", req.username)
+        pool = await get_pg_pool()
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT id, tenant_id, role, password_hash FROM users WHERE username=$1",
+                req.username,
+            )
         if not row:
             logger.warning("登录失败：用户不存在", username=req.username)
             raise HTTPException(401, "用户名或密码错误")
@@ -336,9 +336,6 @@ async def login(req: LoginRequest, response: Response, request: Request = None):
     except Exception as exc:
         logger.error("登录异常", error=str(exc), exc_info=True)
         raise HTTPException(500, "登录服务暂不可用") from exc
-    finally:
-        if conn is not None:
-            await conn.close()
 
 
 @auth_router.post("/register")
@@ -361,38 +358,36 @@ async def register(req: RegisterRequest, response: Response, request: Request = 
     ):
         raise HTTPException(429, "注册请求过于频繁，请稍后重试")
     logger.debug("注册入口", username=req.username, client_key=client_key)
-    conn = None
     try:
-        import asyncpg
         from passlib.hash import bcrypt
         s = settings
-        url = s.database_url.replace("postgresql+asyncpg://", "postgresql://")
-        conn = await asyncpg.connect(url)
-        async def _create_user() -> tuple[int, int]:
+        pool = await get_pg_pool()
+        async with pool.acquire() as conn:
             # 方法作用：在事务边界内创建租户和用户。
             # Args: 无，使用外层注册请求和数据库连接。
             # Returns: (user_id, tenant_id) 二元组。
-            """在一个事务中创建租户和用户，保证失败时不残留半成品。"""
-            logger.debug("注册数据库写入入口", username=req.username, multi_tenant=s.multi_tenant)
-            tid = 1
-            if s.multi_tenant:
-                tid = await conn.fetchval(
-                    "INSERT INTO tenants (name) VALUES ($1) RETURNING id", req.tenant_name)
-                logger.info("新租户创建", tenant_id=tid, name=req.tenant_name)
-            pwd = await asyncio.to_thread(bcrypt.hash, req.password)
-            uid = await conn.fetchval(
-                "INSERT INTO users (username, password_hash, role, tenant_id) "
-                "VALUES ($1, $2, 'analyst', $3) RETURNING id", req.username, pwd, tid)
-            logger.info("注册数据库写入完成", user_id=uid, tenant_id=tid)
-            return uid, tid
+            async def _create_user() -> tuple[int, int]:
+                """在一个事务中创建租户和用户，保证失败时不残留半成品。"""
+                logger.debug("注册数据库写入入口", username=req.username, multi_tenant=s.multi_tenant)
+                tid = 1
+                if s.multi_tenant:
+                    tid = await conn.fetchval(
+                        "INSERT INTO tenants (name) VALUES ($1) RETURNING id", req.tenant_name)
+                    logger.info("新租户创建", tenant_id=tid, name=req.tenant_name)
+                pwd = await asyncio.to_thread(bcrypt.hash, req.password)
+                uid = await conn.fetchval(
+                    "INSERT INTO users (username, password_hash, role, tenant_id) "
+                    "VALUES ($1, $2, 'analyst', $3) RETURNING id", req.username, pwd, tid)
+                logger.info("注册数据库写入完成", user_id=uid, tenant_id=tid)
+                return uid, tid
 
-        transaction_factory = getattr(conn, "transaction", None)
-        if callable(transaction_factory):
-            async with transaction_factory():
+            transaction_factory = getattr(conn, "transaction", None)
+            if callable(transaction_factory):
+                async with transaction_factory():
+                    uid, tid = await _create_user()
+            else:
+                logger.warning("注册连接不支持事务，使用兼容回退", username=req.username)
                 uid, tid = await _create_user()
-        else:
-            logger.warning("注册连接不支持事务，使用兼容回退", username=req.username)
-            uid, tid = await _create_user()
         token = create_access_token(uid, tid, "analyst")
         _set_access_cookie(response, token)
         logger.info("注册成功", username=req.username, user_id=uid, tenant_id=tid)
@@ -400,9 +395,6 @@ async def register(req: RegisterRequest, response: Response, request: Request = 
     except Exception as exc:
         logger.error("注册异常", error=str(exc), exc_info=True)
         raise HTTPException(500, "注册服务暂不可用") from exc
-    finally:
-        if conn is not None:
-            await conn.close()
 
 
 @auth_router.post("/logout")
