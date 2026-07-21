@@ -8,10 +8,10 @@ from pydantic import BaseModel, Field
 
 
 class ChatRequest(BaseModel):
-    query: str = Field(..., examples=["过去7天各品类销售额"])
-    session_id: str = ""
-    datasource: str = "demo"
-    datasources: list[str] = []
+    query: str = Field(..., min_length=1, max_length=20_000, examples=["过去7天各品类销售额"])
+    session_id: str = Field(default="", max_length=128)
+    datasource: str = Field(default="", max_length=64)
+    datasources: list[str] = Field(default_factory=list, max_length=20)
     stream: bool = False
 
 
@@ -37,7 +37,7 @@ class ErrorResponse(BaseModel):
 
 class DataSourceCreateRequest(BaseModel):
     name: str = Field(..., min_length=1, max_length=64)
-    dialect: str = Field(..., pattern="^(clickhouse|mysql|postgres|presto|hive|oracle|mssql|sqlite)$")
+    dialect: str = Field(..., pattern="^(clickhouse|mysql|postgres|oracle|mssql|sqlite)$")
     host: str = "localhost"
     port: int = 0
     database: str = ""
@@ -81,7 +81,7 @@ class MCPServerCreate(BaseModel):
 
     name: str = Field(..., min_length=1, max_length=64)
     scope: str = Field(default="private", pattern="^(system|tenant|private)$")
-    transport: str = "stdio"
+    transport: str = "sse"
     command: str = ""
     args: str = ""
     url: str = ""

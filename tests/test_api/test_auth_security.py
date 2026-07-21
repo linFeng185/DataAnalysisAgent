@@ -217,6 +217,89 @@ class TestAuthContextIsolation:
         # Assert
         assert response.status_code == 200
 
+    # 方法作用：验证 ADMIN_API_KEY 不再阻断普通业务 POST 请求。
+    # Args: self - pytest 测试类实例；monkeypatch - pytest 补丁工具；path - 业务路径。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    @pytest.mark.parametrize("path", ["/api/v1/chat", "/api/v1/knowledge/docs/upload"])
+    async def test_admin_api_key_does_not_gate_business_posts(self, monkeypatch, path: str):
+        """已认证用户调用聊天和个人资源写入时不需要平台管理 Key。"""
+        # Arrange
+        import src.api.auth as auth
+
+        settings = SimpleNamespace(
+            multi_tenant=True,
+            admin_api_key="a" * 32,
+            jwt_secret="z" * 32,
+            jwt_access_token_expire_hours=24,
+            env="test",
+        )
+        monkeypatch.setattr(auth, "get_settings", lambda: settings)
+        monkeypatch.setattr(auth, "_secret_cache", None)
+        token = auth.create_access_token(9, 4, "analyst")
+        scope = {
+            "type": "http", "http_version": "1.1", "method": "POST",
+            "scheme": "http", "path": path, "raw_path": path.encode("ascii"),
+            "query_string": b"", "headers": [(b"authorization", f"Bearer {token}".encode("ascii"))],
+            "client": ("127.0.0.1", 1234), "server": ("test", 80),
+        }
+
+        # Act
+        response = await auth.AuthMiddleware(AsyncMock()).dispatch(
+            Request(scope), AsyncMock(return_value=Response("ok")),
+        )
+
+        # Assert
+        assert response.status_code == 200
+
+    # 方法作用：验证平台管理写端点仍然强制 ADMIN_API_KEY。
+    # Args: self - pytest 测试类实例；monkeypatch - pytest 补丁工具。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    async def test_admin_api_key_still_gates_platform_management(self, monkeypatch):
+        """数据源注册属于平台管理操作，只有 JWT 仍不足以放行。"""
+        # Arrange
+        import src.api.auth as auth
+
+        settings = SimpleNamespace(
+            multi_tenant=True,
+            admin_api_key="a" * 32,
+            jwt_secret="z" * 32,
+            jwt_access_token_expire_hours=24,
+            env="test",
+        )
+        monkeypatch.setattr(auth, "get_settings", lambda: settings)
+        monkeypatch.setattr(auth, "_secret_cache", None)
+        token = auth.create_access_token(9, 4, "super_admin")
+        path = "/api/v1/datasources"
+        base_scope = {
+            "type": "http", "http_version": "1.1", "method": "POST",
+            "scheme": "http", "path": path, "raw_path": path.encode("ascii"),
+            "query_string": b"", "client": ("127.0.0.1", 1234), "server": ("test", 80),
+        }
+        middleware = auth.AuthMiddleware(AsyncMock())
+
+        # Act
+        denied_scope = {
+            **base_scope,
+            "headers": [(b"authorization", f"Bearer {token}".encode("ascii"))],
+        }
+        allowed_scope = {
+            **base_scope,
+            "headers": [
+                (b"authorization", f"Bearer {token}".encode("ascii")),
+                (b"x-admin-key", settings.admin_api_key.encode("ascii")),
+            ],
+        }
+        denied = await middleware.dispatch(
+            Request(denied_scope), AsyncMock(return_value=Response("ok")),
+        )
+        allowed = await middleware.dispatch(
+            Request(allowed_scope), AsyncMock(return_value=Response("ok")),
+        )
+
+        # Assert
+        assert denied.status_code == 401
+        assert allowed.status_code == 200
+
     async def test_current_user_reports_auth_requirement(self, monkeypatch):
         """身份查询应返回当前上下文及服务端认证开关。"""
         # Arrange

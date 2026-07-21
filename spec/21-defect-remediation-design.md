@@ -26,6 +26,14 @@
    保存 SQL hash，不保存明文 SQL。
 5. Word 内容转 HTML 时对文本进行转义，上传文件限制大小；默认 MCP 配置不执行未锁版本
    的远程 `npx` 包。
+6. 未显式选择数据源时允许模型自动路由，但模型候选必须先按当前 `tenant_id/user_id/role`
+   解析；数据源列表、单源和多源执行复用同一授权快照，权限服务异常失败关闭。
+7. 数据库受管 MCP 仅允许管理员创建远程 SSE 配置，禁用 `stdio/command/args/env_vars`，
+   且目标主机必须命中部署方精确 allowlist；静态可信 YAML 仍可使用 stdio。
+8. Chat 限流在权限、Schema 和 LLM 前执行且每个请求只计一次；登录按客户端地址与规范化
+   用户名组合限流；文档和 Skill 上传同时限制文件数、单文件与请求累计字节。
+9. 查询审计在响应前写入 `query_audit_log`，成功和失败均记录；普通日志中的用户问题、SQL
+   和疑似 PII 只保留 SHA-256 与长度。
 
 ## 核心正确性
 
@@ -42,6 +50,8 @@
 1. 所有数据库密码来自环境变量，Docker Compose 不保存明文密码。
 2. 日志使用 `TimedRotatingFileHandler`，每天轮转并保留 7 天，同时保留控制台输出。
 3. 生产配置验证在 `create_app`/启动生命周期中执行，测试环境可通过显式配置关闭外部依赖。
+4. SQL 迁移按编号执行，以 `schema_migrations` 保存版本和 checksum；advisory lock 防止多实例
+   并发，单文件失败回滚，生产启动遇到迁移错误时停止服务。
 
 ## 测试与验收
 

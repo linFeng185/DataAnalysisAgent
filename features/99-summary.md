@@ -134,7 +134,7 @@ Phase 3 关键依赖:
 
 [^2]: **1.3.7 全局异常中间件 / 2.3.7~9 外挂 API 路由** — 原因: 依赖 FastAPI 路由体系，当前 `api/` 仅占位。条件: `api/routes.py` + `api/schemas.py` 创建时。时机: Phase 2(模块 11)。
 
-[^3]: **2.1.4 DataSourceConfigStore** — 原因: PostgreSQL `datasource_configs` 表未创建，迁移文件(17.2.1)待开发。条件: `migrations/001_initial.py` 执行后。时机: Phase 3(模块 17)。
+[^3]: **2.1.4 DataSourceConfigStore** — 原因: 通用迁移执行器已完成，但 `datasource_configs` 的凭证加密字段和租户唯一键设计尚未落地。条件: 完成 17.1.5 表结构设计与迁移后。时机: Phase 3，多实例部署前。
 
 [^4]: **2.4.3 KMS 集成** — 原因: 需 Vault/AWS KMS/Azure Key Vault 等外部基础设施，当前 AES 本地加密已覆盖 MVP。条件: 生产环境 KMS 就绪。时机: Phase 4。
 

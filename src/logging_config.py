@@ -2,13 +2,44 @@
 
 from __future__ import annotations
 
+import hashlib
 import logging
+import re
 from logging.handlers import TimedRotatingFileHandler
 from pathlib import Path
 
 import structlog
 
 from src.config import get_settings
+
+
+# 方法作用：在日志渲染前把 SQL、用户查询和疑似 PII 字符串替换为 hash 与长度。
+# Args: logger - structlog 日志器；method_name - 日志级别；event_dict - 结构化日志字段。
+# Returns: 不含查询原文和敏感标识符的日志字段。
+def _redact_sensitive_fields(logger, method_name: str, event_dict: dict) -> dict:
+    del logger, method_name
+    sensitive_names = {"query", "query_preview", "user_query", "sql_preview"}
+    sql_pattern = re.compile(r"\b(select|insert|update|delete|merge|call|with|explain|show|describe)\b", re.I)
+    pii_pattern = re.compile(
+        r"(?:1[3-9]\d{9})|(?:\d{17}[\dXx])|(?:[\w.+-]+@[\w.-]+\.[A-Za-z]{2,})"
+    )
+    redacted = dict(event_dict)
+    for key, value in list(event_dict.items()):
+        if key == "event" or not isinstance(value, str):
+            continue
+        normalized_key = key.lower()
+        named_sensitive = (
+            normalized_key in sensitive_names
+            or ("sql" in normalized_key and not normalized_key.endswith("_hash"))
+        )
+        content_sensitive = bool(sql_pattern.search(value) or pii_pattern.search(value))
+        if not named_sensitive and not content_sensitive:
+            continue
+        digest = hashlib.sha256(value.encode("utf-8")).hexdigest()
+        redacted.pop(key, None)
+        redacted[f"{key}_hash"] = digest
+        redacted[f"{key}_chars"] = len(value)
+    return redacted
 
 
 def setup_logging() -> None:
@@ -28,6 +59,7 @@ def setup_logging() -> None:
         structlog.stdlib.add_logger_name,
         structlog.processors.TimeStamper(fmt="iso", utc=False),
         structlog.stdlib.PositionalArgumentsFormatter(),
+        _redact_sensitive_fields,
         structlog.processors.UnicodeDecoder(),
     ]
 
@@ -78,8 +110,7 @@ def setup_logging() -> None:
 
     logging.getLogger("httpx").setLevel(logging.WARNING)
     logging.getLogger("chromadb").setLevel(logging.WARNING)
-    sqlalchemy_log_level = logging.INFO if settings.env == "dev" else logging.WARNING
-    logging.getLogger("sqlalchemy.engine").setLevel(sqlalchemy_log_level)
+    logging.getLogger("sqlalchemy.engine").setLevel(logging.WARNING)
     # 移除 SQLAlchemy 自带的 handler，防止与 structlog handler 重复输出
     logging.getLogger("sqlalchemy.engine").handlers.clear()
     logging.getLogger("sqlalchemy.engine").propagate = True

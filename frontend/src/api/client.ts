@@ -104,7 +104,12 @@ export function streamChat(
           }
         }
       }
-    } catch { /* stream interrupted */ }
+    } catch (error) {
+      if (!controller.signal.aborted) {
+        onError(error instanceof Error ? error.message : '流式读取失败');
+      }
+      return;
+    }
     onDone();
   }).catch((e) => {
     if (e.name !== 'AbortError') onError(e.message);

@@ -35,6 +35,124 @@ def _registry():
     return get_registry()
 
 
+# 方法作用：规范化聊天请求中用户显式选择的数据源顺序并去重。
+# Args: req - 聊天请求模型。
+# Returns: 用户显式选择的数据源列表；空列表表示进入授权候选自动发现。
+def _requested_chat_datasources(req: ChatRequest) -> list[str]:
+    logger.debug(
+        "规范化聊天数据源入口",
+        datasource=req.datasource,
+        datasource_count=len(req.datasources),
+    )
+    raw = req.datasources if req.datasources else ([req.datasource] if req.datasource else [])
+    result = list(dict.fromkeys(str(name).strip() for name in raw if str(name).strip()))
+    logger.info("规范化聊天数据源完成", selected_count=len(result), discovery=not result)
+    return result
+
+
+# 方法作用：在任何权限、Schema 或 LLM 工作前校验聊天资源预算并计入用户配额。
+# Args: req - 聊天请求模型。
+# Returns: 校验通过时返回 None；超限时抛出 HTTP 413/429。
+def _enforce_chat_request_quota(req: ChatRequest) -> None:
+    from src.api.auth import get_current_user_id
+    from src.config import get_settings
+    from src.security.data_masker import check_rate_limit
+
+    settings = get_settings()
+    requested = _requested_chat_datasources(req)
+    query_length = len(req.query)
+    max_query_chars = max(1, int(getattr(settings, "max_query_chars", 8_000)))
+    max_datasources = max(1, int(getattr(settings, "max_datasources_per_query", 5)))
+    logger.debug(
+        "校验聊天请求配额入口",
+        user_id=get_current_user_id(),
+        query_length=query_length,
+        datasource_count=len(requested),
+    )
+    if query_length > max_query_chars:
+        logger.warning(
+            "聊天请求字符数超限",
+            query_length=query_length,
+            limit=max_query_chars,
+        )
+        raise HTTPException(413, f"查询内容不能超过 {max_query_chars} 个字符")
+    if len(requested) > max_datasources:
+        logger.warning(
+            "聊天请求数据源数超限",
+            datasource_count=len(requested),
+            limit=max_datasources,
+        )
+        raise HTTPException(413, f"单次查询最多选择 {max_datasources} 个数据源")
+    if not check_rate_limit(user_id=get_current_user_id()):
+        logger.warning("聊天请求频率超限", user_id=get_current_user_id())
+        raise HTTPException(429, "请求频率超限，请稍后重试")
+    logger.info(
+        "校验聊天请求配额完成",
+        user_id=get_current_user_id(),
+        query_length=query_length,
+        datasource_count=len(requested),
+    )
+
+
+# 方法作用：在进入 LangGraph 前解析当前身份可访问的数据源和行列权限。
+# Args: req - 聊天请求模型。
+# Returns: 以数据源名为键的授权快照；空候选或越权时抛出 HTTP 403。
+async def _resolve_chat_access(req: ChatRequest) -> dict[str, dict]:
+    """显式选择和自动发现共用同一授权边界。
+
+    Args:
+        req: 当前聊天请求。
+
+    Returns:
+        当前用户可以交给模型和 SQL 工作流的数据源权限映射。
+    """
+    from src.api.auth import get_current_role, get_current_tenant_id, get_current_user_id
+    from src.config import get_settings
+    from src.security.permission_check import resolve_datasource_access
+
+    settings = get_settings()
+    requested = _requested_chat_datasources(req)
+    logger.debug(
+        "解析聊天数据源权限入口",
+        tenant_id=get_current_tenant_id(),
+        user_id=get_current_user_id(),
+        requested_count=len(requested),
+        multi_tenant=settings.multi_tenant,
+    )
+    if not settings.multi_tenant and requested:
+        result = {
+            name: {
+                "name": name,
+                "description": "",
+                "allowed_columns": [],
+                "row_filter_sql": "",
+                "access_level": "read",
+            }
+            for name in requested
+        }
+        logger.info("解析聊天数据源权限完成", authorized_count=len(result), mode="single_tenant")
+        return result
+    try:
+        available = await _registry().list_all()
+        result = await resolve_datasource_access(
+            available,
+            requested,
+            tenant_id=get_current_tenant_id(),
+            user_id=get_current_user_id(),
+            role=get_current_role(),
+            multi_tenant=settings.multi_tenant,
+        )
+        logger.info(
+            "解析聊天数据源权限完成",
+            authorized_count=len(result),
+            discovery=not requested,
+        )
+        return result
+    except PermissionError as exc:
+        logger.warning("解析聊天数据源权限拒绝", error=str(exc))
+        raise HTTPException(403, str(exc)) from exc
+
+
 def _schema_manager():
     """获取全局 SchemaManager 实例。
 
@@ -75,10 +193,10 @@ def _knowledge_where(extra: dict | None = None, owner_only: bool = False) -> dic
 @router.post("/chat")
 async def chat(req: ChatRequest):
     """统一 chat 端点：stream=False 返回 JSON，stream=True 返回 SSE 流式。"""
-    selected_datasources = (
-        req.datasources if req.datasources and len(req.datasources) > 1
-        else [req.datasource]
-    )
+    _enforce_chat_request_quota(req)
+    selected_datasources = _requested_chat_datasources(req)
+    datasource_access = await _resolve_chat_access(req)
+    primary_access = datasource_access.get(req.datasource, {}) if req.datasource else {}
     logger.debug(
         "Chat 请求入口",
         datasource=req.datasource,
@@ -100,6 +218,8 @@ async def chat(req: ChatRequest):
                 tenant_id=get_current_tenant_id(),
                 user_id=get_current_user_id(),
                 user_role=get_current_role(),
+                datasource_access=datasource_access,
+                request_rate_limit_checked=True,
             ),
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
@@ -124,15 +244,17 @@ async def chat(req: ChatRequest):
         "datasource": req.datasource,
         "session_id": sid,
         "selected_datasources": selected_datasources,
-        "allowed_columns": [],
-        "row_filter_sql": "",
+        "datasource_access": datasource_access,
+        "allowed_columns": list(primary_access.get("allowed_columns", []) or []),
+        "row_filter_sql": str(primary_access.get("row_filter_sql", "") or ""),
         "tenant_id": get_current_tenant_id(),
         "user_id": get_current_user_id(),
         "user_role": get_current_role(),
+        "request_rate_limit_checked": True,
     }, cfg)
     f = result.get("final_response", {})
     return ChatResponse(
-        success=f.get("success", True), session_id=sid[:8],
+        success=f.get("success", True), session_id=sid,
         user_query=req.query,
         sql=f.get("sql", result.get("generated_sql", "")),
         sql_statements=f.get("sql_statements", []),
@@ -147,6 +269,7 @@ async def chat(req: ChatRequest):
 @router.post("/chat/stream")
 async def chat_stream(req: ChatRequest):
     """（保留向后兼容）独立流式端点，等价于 /chat + stream=True。"""
+    _enforce_chat_request_quota(req)
     logger.debug(
         "兼容流式 Chat 入口",
         datasource=req.datasource,
@@ -155,6 +278,7 @@ async def chat_stream(req: ChatRequest):
     from fastapi.responses import StreamingResponse
     from src.api.streaming import stream_analysis
     from src.api.auth import get_current_role, get_current_tenant_id, get_current_user_id
+    datasource_access = await _resolve_chat_access(req)
     logger.info("兼容流式 Chat 响应已创建", datasource=req.datasource)
     return StreamingResponse(
         stream_analysis(
@@ -165,6 +289,8 @@ async def chat_stream(req: ChatRequest):
             tenant_id=get_current_tenant_id(),
             user_id=get_current_user_id(),
             user_role=get_current_role(),
+            datasource_access=datasource_access,
+            request_rate_limit_checked=True,
         ),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
@@ -322,11 +448,54 @@ async def delete_datasource(name: str):
 
 
 @router.get("/datasources")
+# 方法作用：按当前身份的数据源授权分页返回可见摘要。
+# Args: page - 页码；page_size - 每页数量。
+# Returns: 不包含行列权限细节的数据源分页结果。
 async def list_datasources(page: int = Query(default=1, ge=1), page_size: int = Query(default=20, ge=1, le=100)):
+    from src.api.auth import get_current_role, get_current_tenant_id, get_current_user_id
+    from src.config import get_settings
+    from src.security.permission_check import resolve_datasource_access
+
     items = await _registry().list_all()
+    logger.debug(
+        "数据源列表授权入口",
+        available_count=len(items),
+        tenant_id=get_current_tenant_id(),
+        user_id=get_current_user_id(),
+    )
+    if get_settings().multi_tenant:
+        try:
+            authorized = await resolve_datasource_access(
+                items,
+                [],
+                tenant_id=get_current_tenant_id(),
+                user_id=get_current_user_id(),
+                role=get_current_role(),
+                multi_tenant=True,
+            )
+            authorized_names = set(authorized)
+            items = [item for item in items if str(item.get("name", "")) in authorized_names]
+        except PermissionError as exc:
+            if str(exc) == "没有可访问的数据源":
+                logger.info(
+                    "数据源列表授权为空",
+                    tenant_id=get_current_tenant_id(),
+                    user_id=get_current_user_id(),
+                )
+                items = []
+            else:
+                logger.error("数据源列表授权失败", error=str(exc), exc_info=True)
+                raise HTTPException(503, "数据源权限服务不可用") from exc
     total = len(items)
     start = (page - 1) * page_size
-    return {"datasources": items[start:start+page_size], "total": total, "page": page, "page_size": page_size}
+    result = {
+        "datasources": items[start:start + page_size],
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+    }
+    logger.info("数据源列表授权完成", total=total, returned=len(result["datasources"]))
+    return result
 
 
 # ---- MCP Server 管理 ----
@@ -397,6 +566,54 @@ def _mcp_owner_fields(scope: str, tenant_id: int, user_id: int) -> tuple[int | N
         owner_user_id=result[1],
     )
     return result
+
+
+# 方法作用：校验数据库受管 MCP 的角色、传输方式和远程主机边界。
+# Args: req - MCP 创建请求；scope - 已规范化作用域；role - 当前角色。
+# Returns: 校验通过时返回 None，否则抛出 HTTP 400/403。
+def _validate_managed_mcp_request(req: MCPServerCreate, scope: str, role: str) -> None:
+    """阻断受管配置中的本地进程执行和任意 URL 访问。
+
+    Args:
+        req: MCP Server 配置请求。
+        scope: system/tenant/private 作用域。
+        role: 当前认证角色。
+
+    Returns:
+        校验通过时返回 None。
+    """
+    from urllib.parse import urlparse
+
+    from src.config import get_settings
+    from src.knowledge.governance import is_super_admin, is_tenant_admin
+
+    logger.debug("校验受管 MCP 请求入口", name=req.name, scope=scope, transport=req.transport, role=role)
+    if scope == "system" and not is_super_admin(role):
+        logger.warning("受管 MCP 请求拒绝", reason="system 需要超级管理员", role=role)
+        raise HTTPException(403, "system MCP 需要超级管理员权限")
+    if scope in {"tenant", "private"} and not (is_super_admin(role) or is_tenant_admin(role)):
+        logger.warning("受管 MCP 请求拒绝", reason="需要租户管理员", role=role)
+        raise HTTPException(403, "受管 MCP 需要租户管理员权限")
+    if str(req.transport or "").strip().lower() != "sse":
+        logger.warning("受管 MCP 请求拒绝", reason="禁止 stdio", transport=req.transport)
+        raise HTTPException(400, "受管 MCP 仅允许 SSE transport，禁止 stdio")
+    if req.command.strip() or req.args.strip() or req.env_vars:
+        logger.warning("受管 MCP 请求拒绝", reason="SSE 配置包含进程参数", name=req.name)
+        raise HTTPException(400, "SSE MCP 不允许 command、args 或 env_vars")
+    parsed = urlparse(req.url.strip())
+    host = (parsed.hostname or "").strip().lower()
+    if parsed.scheme not in {"http", "https"} or not host or parsed.username or parsed.password:
+        logger.warning("受管 MCP 请求拒绝", reason="URL 格式非法", url_preview=req.url[:120])
+        raise HTTPException(400, "MCP SSE URL 必须是无认证信息的 HTTP/HTTPS 地址")
+    allowlist = {
+        value.strip().lower()
+        for value in getattr(get_settings(), "mcp_remote_host_allowlist", "").split(",")
+        if value.strip()
+    }
+    if host not in allowlist:
+        logger.warning("受管 MCP 请求拒绝", reason="host 不在 allowlist", host=host)
+        raise HTTPException(400, f"MCP SSE host '{host}' 不在 allowlist")
+    logger.info("校验受管 MCP 请求完成", name=req.name, scope=scope, host=host)
 
 
 # 方法作用：创建已注入当前认证身份的 asyncpg 连接供 MCP RLS 查询使用。
@@ -501,7 +718,10 @@ async def list_mcp_servers(scope: str | None = None):
 async def create_mcp_server(req: MCPServerCreate):
     """按当前身份创建或更新 system/tenant/private MCP Server。"""
     logger.debug("创建 MCP Server 入口", name=req.name, scope=req.scope)
+    from src.api.auth import get_current_role
+
     normalized_scope, tenant_id, user_id, _ = _authorize_extension_scope(req.scope)
+    _validate_managed_mcp_request(req, normalized_scope, get_current_role())
     resource_tenant_id, owner_user_id = _mcp_owner_fields(
         normalized_scope, tenant_id, user_id,
     )
@@ -799,11 +1019,27 @@ async def test_model(req: dict):
 
 @router.delete("/sessions/{session_id}")
 async def delete_session(session_id: str):
-    """删除会话记录（不删除 Checkpointer 中的 state）。"""
+    """删除当前身份拥有的会话元数据、历史和 Checkpointer state。"""
+    from src.api.auth import scope_thread_id
+    from src.memory.checkpointer import get_checkpointer
+    from src.memory.history_store import get_history_store
     from src.memory.session_store import get_session_store
-    ok = await get_session_store().delete(session_id)
+
+    logger.debug("删除会话路由入口", session_id=session_id[:20])
+    session_store = get_session_store()
+    if await session_store.get(session_id) is None:
+        logger.warning("删除会话目标不可见", session_id=session_id[:20])
+        raise HTTPException(404, "会话不存在")
+    await get_history_store().delete_session(session_id)
+    checkpointer = await get_checkpointer()
+    scoped_thread_id = scope_thread_id(session_id)
+    await checkpointer.adelete_thread(scoped_thread_id)
+    await checkpointer.adelete_thread(session_id)
+    ok = await session_store.delete(session_id)
     if not ok:
+        logger.error("删除会话元数据失败", session_id=session_id[:20])
         raise HTTPException(500, "删除失败")
+    logger.info("删除会话路由完成", session_id=session_id[:20])
     return {"status": "ok", "session_id": session_id}
 
 
@@ -1283,11 +1519,12 @@ async def upload_skills(
     role = get_current_role()
     tenant_id = get_current_tenant_id()
     user_id = get_current_user_id()
+    settings = get_settings()
     if not can_write_knowledge_scope(
         normalized_scope,
         role=role,
         user_id=user_id,
-        multi_tenant=get_settings().multi_tenant,
+        multi_tenant=settings.multi_tenant,
     ):
         logger.warning(
             "Skill 上传权限拒绝",
@@ -1297,6 +1534,44 @@ async def upload_skills(
             user_id=user_id,
         )
         raise HTTPException(403, f"当前角色无权写入 {normalized_scope} Skill")
+    max_upload_bytes = max(1, int(getattr(settings, "max_upload_bytes", 20 * 1024 * 1024)))
+    max_upload_files = max(1, int(getattr(settings, "max_upload_files", 20)))
+    max_upload_total_bytes = max(
+        max_upload_bytes,
+        int(getattr(settings, "max_upload_total_bytes", 100 * 1024 * 1024)),
+    )
+    if len(files) > max_upload_files:
+        logger.warning("Skill 上传文件数超限", file_count=len(files), limit=max_upload_files)
+        raise HTTPException(413, f"单次最多上传 {max_upload_files} 个文件")
+
+    prepared_contents: dict[int, bytes] = {}
+    total_upload_bytes = 0
+    for uploaded_file in files:
+        if not uploaded_file.filename:
+            continue
+        raw_content = await uploaded_file.read(max_upload_bytes + 1)
+        if len(raw_content) > max_upload_bytes:
+            logger.warning(
+                "Skill 上传单文件超限",
+                filename=uploaded_file.filename,
+                size=len(raw_content),
+                limit=max_upload_bytes,
+            )
+            raise HTTPException(413, f"文件 '{uploaded_file.filename}' 超过大小限制")
+        total_upload_bytes += len(raw_content)
+        if total_upload_bytes > max_upload_total_bytes:
+            logger.warning(
+                "Skill 上传累计大小超限",
+                total_bytes=total_upload_bytes,
+                limit=max_upload_total_bytes,
+            )
+            raise HTTPException(413, "上传文件累计大小超过限制")
+        prepared_contents[id(uploaded_file)] = raw_content
+    logger.info(
+        "Skill 上传预检完成",
+        file_count=len(files),
+        total_bytes=total_upload_bytes,
+    )
     mgr = get_skill_manager()
     skills_dir = str(mgr.get_upload_dir(
         normalized_scope, tenant_id=tenant_id, user_id=user_id,
@@ -1315,7 +1590,7 @@ async def upload_skills(
             skipped.append(f.filename)
             continue
         try:
-            content = (await f.read()).decode("utf-8")
+            content = prepared_contents[id(f)].decode("utf-8")
         except Exception as e:
             errors.append({"file": f.filename, "error": str(e)})
             continue
@@ -1596,7 +1871,15 @@ async def upload_knowledge_docs(
     from src.knowledge.governance import can_write_knowledge_scope, normalize_knowledge_scope
 
     settings = get_settings()
-    max_upload_bytes = settings.max_upload_bytes
+    max_upload_bytes = max(1, int(settings.max_upload_bytes))
+    max_upload_files = max(1, int(getattr(settings, "max_upload_files", 20)))
+    max_upload_total_bytes = max(
+        max_upload_bytes,
+        int(getattr(settings, "max_upload_total_bytes", 100 * 1024 * 1024)),
+    )
+    if len(files) > max_upload_files:
+        logger.warning("知识文件上传数量超限", file_count=len(files), limit=max_upload_files)
+        raise HTTPException(413, f"单次最多上传 {max_upload_files} 个文件")
     try:
         normalized_scope = normalize_knowledge_scope(knowledge_scope).value
     except ValueError as exc:
@@ -1668,11 +1951,44 @@ async def upload_knowledge_docs(
     )
 
     supported_exts = {".md", ".txt", ".pdf", ".docx", ".doc", ".markdown", ".csv"}
+    prepared_files: list[tuple[UploadFile, bytes]] = []
+    errors: list[dict] = []
+    total_upload_bytes = 0
+    for uploaded_file in files:
+        if not uploaded_file.filename:
+            continue
+        ext = os.path.splitext(uploaded_file.filename)[1].lower()
+        if ext not in supported_exts:
+            errors.append({"file": uploaded_file.filename, "error": f"不支持的文件格式: {ext}"})
+            continue
+        content = await uploaded_file.read(max_upload_bytes + 1)
+        if len(content) > max_upload_bytes:
+            logger.warning(
+                "知识文件超过大小限制",
+                filename=uploaded_file.filename,
+                size=len(content),
+                limit=max_upload_bytes,
+            )
+            raise HTTPException(413, f"文件 '{uploaded_file.filename}' 超过大小限制")
+        total_upload_bytes += len(content)
+        if total_upload_bytes > max_upload_total_bytes:
+            logger.warning(
+                "知识文件累计大小超限",
+                total_bytes=total_upload_bytes,
+                limit=max_upload_total_bytes,
+            )
+            raise HTTPException(413, "上传文件累计大小超过限制")
+        prepared_files.append((uploaded_file, content))
+    logger.info(
+        "知识文件上传预检完成",
+        accepted_count=len(prepared_files),
+        total_bytes=total_upload_bytes,
+    )
+
     from src.knowledge.doc_parser import ChunkConfig, ChunkStrategy
     from src.knowledge.upload_manager import get_upload_manager
     mgr = get_upload_manager()
     tasks_result: list[dict] = []
-    errors: list[dict] = []
 
     try:
         strat = ChunkStrategy(strategy)
@@ -1680,18 +1996,8 @@ async def upload_knowledge_docs(
         strat = ChunkStrategy.AUTO
     config = ChunkConfig(strategy=strat, chunk_size=chunk_size, chunk_overlap=chunk_overlap)
 
-    for f in files:
-        if not f.filename:
-            continue
-        ext = os.path.splitext(f.filename)[1].lower()
-        if ext not in supported_exts:
-            errors.append({"file": f.filename, "error": f"不支持的文件格式: {ext}"})
-            continue
+    for f, content in prepared_files:
         try:
-            content = await f.read(max_upload_bytes + 1)
-            if len(content) > max_upload_bytes:
-                logger.warning("知识文件超过大小限制", filename=f.filename, size=len(content))
-                raise HTTPException(413, f"文件 '{f.filename}' 超过大小限制")
             # 保存原始文件到 PostgreSQL
             from src.knowledge.file_store import get_file_store
             file_id = await get_file_store().save(

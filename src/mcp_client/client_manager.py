@@ -21,6 +21,46 @@ logger = get_logger(__name__)
 _MAX_RECONNECT_RETRIES = 5
 
 
+# 方法作用：验证数据库受管 MCP 配置只能连接 allowlist 中的远程 SSE 主机。
+# Args: config - mcp_servers 数据库行或等价映射。
+# Returns: 配置安全时返回 True；stdio、非法 URL 或未授权主机返回 False。
+def _is_managed_remote_config_allowed(config: Any) -> bool:
+    """静态 YAML 仍可使用受信任 stdio，数据库动态配置必须限制为远程 SSE。
+
+    Args:
+        config: 数据库读取的 MCP 配置。
+
+    Returns:
+        是否允许加载该受管配置。
+    """
+    from urllib.parse import urlparse
+
+    from src.config import get_settings
+
+    transport = str(config["transport"] or "").strip().lower()
+    url = str(config["url"] or "").strip()
+    parsed = urlparse(url)
+    host = (parsed.hostname or "").strip().lower()
+    allowlist = {
+        value.strip().lower()
+        for value in getattr(get_settings(), "mcp_remote_host_allowlist", "").split(",")
+        if value.strip()
+    }
+    logger.debug("校验受管 MCP 数据库配置入口", transport=transport, host=host)
+    allowed = bool(
+        transport == "sse"
+        and parsed.scheme in {"http", "https"}
+        and host
+        and not parsed.username
+        and not parsed.password
+        and host in allowlist
+    )
+    if not allowed:
+        logger.warning("受管 MCP 数据库配置跳过", transport=transport, host=host)
+    logger.info("校验受管 MCP 数据库配置完成", allowed=allowed, host=host)
+    return allowed
+
+
 class MCPClientManager:
     """8.1.1 管理 MCP Client 连接生命周期。
 
@@ -521,6 +561,8 @@ class MCPClientManager:
                 await conn.close()
             count = 0
             for r in rows:
+                if not _is_managed_remote_config_allowed(r):
+                    continue
                 scope = str(r["scope"] or "tenant")
                 row_tenant = int(r["tenant_id"] or 0)
                 row_owner = int(r["owner_user_id"] or 0)

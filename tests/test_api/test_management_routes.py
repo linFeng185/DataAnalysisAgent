@@ -65,11 +65,34 @@ class TestExtensionScopeAuthorization:
             await routes.create_mcp_server(request)
         assert caught.value.status_code == 403
 
+    # 方法作用：验证普通分析师也不能创建可外发数据的私有 MCP 连接。
+    # Args: self - pytest 测试类实例；monkeypatch - pytest 补丁工具。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    async def test_analyst_cannot_create_private_mcp_server(self, monkeypatch):
+        """private 只限制可见性，不应降低创建外部工具连接所需的管理员角色。"""
+        # Arrange
+        import src.api.auth as auth
+        import src.api.routes as routes
+        from src.api.schemas import MCPServerCreate
+
+        monkeypatch.setattr(auth, "get_current_role", lambda: "analyst")
+        monkeypatch.setattr(auth, "get_current_tenant_id", lambda: 4)
+        monkeypatch.setattr(auth, "get_current_user_id", lambda: 7)
+        request = MCPServerCreate(
+            name="personal-docs", transport="sse", url="https://mcp.example.com/sse",
+            scope="private",
+        )
+
+        # Act / Assert
+        with pytest.raises(HTTPException) as caught:
+            await routes.create_mcp_server(request)
+        assert caught.value.status_code == 403
+
     # 方法作用：验证 MCP 请求模型保留显式作用域。
     # Args: self - pytest 测试类实例。
     # Returns: 无返回值，断言失败时由 pytest 报告。
     def test_mcp_create_schema_defaults_to_private_scope(self):
-        """未指定作用域的 MCP 配置默认仅当前用户可见。"""
+        """未指定作用域的 MCP 配置默认私有且仅允许远程 SSE。"""
         # Arrange / Act
         from src.api.schemas import MCPServerCreate
 
@@ -77,6 +100,7 @@ class TestExtensionScopeAuthorization:
 
         # Assert
         assert request.scope == "private"
+        assert request.transport == "sse"
 
     # 方法作用：验证普通用户上传 Skill 默认进入本人私有目录并注入可见缓存。
     # Args: self - pytest 测试类实例；monkeypatch - pytest 补丁工具；tmp_path - 临时目录。
@@ -121,7 +145,7 @@ class TestExtensionScopeAuthorization:
     # Args: self - pytest 测试类实例；monkeypatch - pytest 补丁工具。
     # Returns: 无返回值，断言失败时由 pytest 报告。
     async def test_private_mcp_create_uses_current_identity(self, monkeypatch):
-        """API 不接受请求体中的所有者，数据库参数必须来自认证上下文。"""
+        """租户管理员创建私有远程 MCP 时，所有者必须来自认证上下文。"""
         # Arrange
         import src.api.auth as auth
         import src.api.routes as routes
@@ -138,13 +162,14 @@ class TestExtensionScopeAuthorization:
         )
         manager = SimpleNamespace(ensure_scoped_servers=AsyncMock(return_value=1))
         monkeypatch.setattr(mcp_module, "get_mcp_client_manager", lambda: manager)
-        monkeypatch.setattr(auth, "get_current_role", lambda: "analyst")
+        monkeypatch.setattr(auth, "get_current_role", lambda: "tenant_admin")
         monkeypatch.setattr(auth, "get_current_tenant_id", lambda: 4)
         monkeypatch.setattr(auth, "get_current_user_id", lambda: 7)
         monkeypatch.setattr(
             config_module, "get_settings",
             lambda: SimpleNamespace(
                 multi_tenant=True, database_url="postgresql+asyncpg://test:test@db/test",
+                mcp_remote_host_allowlist="127.0.0.1",
             ),
         )
         request = MCPServerCreate(
@@ -160,6 +185,61 @@ class TestExtensionScopeAuthorization:
         insert_args = connection.execute.await_args.args
         assert insert_args[3:5] == (4, 7)
         manager.ensure_scoped_servers.assert_awaited_once_with(4, 7, force=True)
+
+    # 方法作用：验证受管 MCP API 拒绝可启动本地进程的 stdio transport。
+    # Args: self - pytest 测试类实例；monkeypatch - pytest 补丁工具。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    async def test_managed_mcp_rejects_stdio_command(self, monkeypatch):
+        """数据库受管配置不得把请求参数交给服务端进程启动器。"""
+        # Arrange
+        import src.api.auth as auth
+        import src.api.routes as routes
+        from src.api.schemas import MCPServerCreate
+
+        monkeypatch.setattr(auth, "get_current_role", lambda: "super_admin")
+        request = MCPServerCreate(
+            name="local-process",
+            scope="system",
+            transport="stdio",
+            command="python",
+            args="-c import os",
+        )
+
+        # Act / Assert
+        with pytest.raises(HTTPException) as caught:
+            await routes.create_mcp_server(request)
+        assert caught.value.status_code == 400
+        assert "stdio" in caught.value.detail
+
+    # 方法作用：验证远程 MCP 主机必须显式进入服务端 allowlist。
+    # Args: self - pytest 测试类实例；monkeypatch - pytest 补丁工具。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    async def test_managed_mcp_rejects_host_outside_allowlist(self, monkeypatch):
+        """任意内网或公网 URL 都不能绕过部署方配置的远程主机边界。"""
+        # Arrange
+        import src.api.auth as auth
+        import src.api.routes as routes
+        import src.config as config_module
+        from src.api.schemas import MCPServerCreate
+
+        monkeypatch.setattr(auth, "get_current_role", lambda: "tenant_admin")
+        monkeypatch.setattr(auth, "get_current_tenant_id", lambda: 4)
+        monkeypatch.setattr(auth, "get_current_user_id", lambda: 7)
+        monkeypatch.setattr(
+            config_module,
+            "get_settings",
+            lambda: SimpleNamespace(multi_tenant=True, mcp_remote_host_allowlist="mcp.example.com"),
+        )
+        request = MCPServerCreate(
+            name="internal", scope="private", transport="sse",
+            url="http://127.0.0.1:9000/sse",
+        )
+
+        # Act / Assert
+        with pytest.raises(HTTPException) as caught:
+            await routes.create_mcp_server(request)
+        assert caught.value.status_code == 400
+        assert "allowlist" in caught.value.detail
 
 
 class TestDatasourceLifecycle:
@@ -313,6 +393,57 @@ class TestKnowledgeUploadSafety:
         with pytest.raises(HTTPException) as caught:
             await routes.upload_knowledge_docs(
                 [upload], strategy="auto", chunk_size=800, chunk_overlap=100, category="",
+            )
+        assert caught.value.status_code == 413
+
+    # 方法作用：验证文档上传限制单次请求的文件总数。
+    # Args: self - pytest 测试类实例；monkeypatch - pytest 补丁工具。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    async def test_upload_rejects_too_many_files(self, monkeypatch):
+        """文件数量超限时应在读取任何文件前返回 413。"""
+        # Arrange
+        import src.api.routes as routes
+        import src.config as config_module
+
+        monkeypatch.setattr(config_module, "get_settings", lambda: SimpleNamespace(
+            max_upload_bytes=10, max_upload_files=1, max_upload_total_bytes=10,
+            multi_tenant=False,
+        ))
+        uploads = [
+            UploadFile(filename="one.txt", file=io.BytesIO(b"1")),
+            UploadFile(filename="two.txt", file=io.BytesIO(b"2")),
+        ]
+
+        # Act / Assert
+        with pytest.raises(HTTPException) as caught:
+            await routes.upload_knowledge_docs(
+                uploads, strategy="auto", chunk_size=800, chunk_overlap=100, category="",
+            )
+        assert caught.value.status_code == 413
+        assert uploads[0].file.tell() == 0
+
+    # 方法作用：验证多文件分别未超限但累计大小超限时整批拒绝。
+    # Args: self - pytest 测试类实例；monkeypatch - pytest 补丁工具。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    async def test_upload_rejects_total_request_bytes(self, monkeypatch):
+        """累计大小超限时不得保存任意一个文件。"""
+        # Arrange
+        import src.api.routes as routes
+        import src.config as config_module
+
+        monkeypatch.setattr(config_module, "get_settings", lambda: SimpleNamespace(
+            max_upload_bytes=4, max_upload_files=2, max_upload_total_bytes=5,
+            multi_tenant=False,
+        ))
+        uploads = [
+            UploadFile(filename="one.txt", file=io.BytesIO(b"123")),
+            UploadFile(filename="two.txt", file=io.BytesIO(b"456")),
+        ]
+
+        # Act / Assert
+        with pytest.raises(HTTPException) as caught:
+            await routes.upload_knowledge_docs(
+                uploads, strategy="auto", chunk_size=800, chunk_overlap=100, category="",
             )
         assert caught.value.status_code == 413
 

@@ -22,17 +22,42 @@ class TestSchemas:
 
     def test_chat_request(self):
         from src.api.schemas import ChatRequest
-        assert ChatRequest(query="q").datasource == "demo"
+        assert ChatRequest(query="q").datasource == ""
 
     def test_chat_request_requires_query(self):
         from src.api.schemas import ChatRequest
         with pytest.raises(Exception):
             ChatRequest()
 
+    # 方法作用：验证聊天请求模型限制超长输入和过多数据源。
+    # Args: self - pytest 测试类实例。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    def test_chat_request_rejects_static_resource_extremes(self):
+        """协议层必须在进入应用前拒绝明显异常的查询体。"""
+        # Arrange
+        from src.api.schemas import ChatRequest
+
+        # Act / Assert
+        with pytest.raises(Exception):
+            ChatRequest(query="x" * 20_001)
+        with pytest.raises(Exception):
+            ChatRequest(query="q", datasources=[f"source_{index}" for index in range(21)])
+
     def test_datasource_create(self):
         from src.api.schemas import DataSourceCreateRequest
         r = DataSourceCreateRequest(name="ch", dialect="clickhouse")
         assert r.name == "ch"
+
+    # 方法作用：验证 API 不接受尚无连接器实现的 Presto/Hive 方言。
+    # Args: self - pytest 测试类实例。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    def test_datasource_create_rejects_unimplemented_dialects(self):
+        """未实现方言必须显式拒绝，不能回退 PostgreSQL 驱动。"""
+        from src.api.schemas import DataSourceCreateRequest
+
+        for dialect in ("presto", "hive"):
+            with pytest.raises(Exception):
+                DataSourceCreateRequest(name="unsupported", dialect=dialect)
 
     def test_health_response(self):
         from src.api.schemas import HealthResponse
@@ -106,6 +131,103 @@ class TestEndpoints:
         monkeypatch.setattr(routes, "_app", lambda: workflow)
         r = await client.post("/api/v1/chat", json={"query": "test", "datasource": "ch"})
         assert r.status_code == 200
+
+    # 方法作用：验证聊天限流在工作流和授权解析之前执行。
+    # Args: self - pytest 测试类实例；client - ASGI 客户端；monkeypatch - pytest 补丁工具。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    async def test_chat_rate_limit_rejects_before_workflow(self, client, monkeypatch):
+        """被限流请求不得触发 LLM、Schema 或数据源权限读取。"""
+        # Arrange
+        from unittest.mock import AsyncMock
+
+        import src.api.routes as routes
+        import src.security.data_masker as masker
+
+        access = AsyncMock(side_effect=AssertionError("限流后不应解析数据源"))
+        monkeypatch.setattr(routes, "_resolve_chat_access", access, raising=False)
+        monkeypatch.setattr(masker, "check_rate_limit", lambda user_id=None: False)
+
+        # Act
+        response = await client.post("/api/v1/chat", json={
+            "query": "统计销售额", "datasource": "sales",
+        })
+
+        # Assert
+        assert response.status_code == 429
+        access.assert_not_awaited()
+
+    # 方法作用：验证非流式聊天把统一授权结果写入工作流状态。
+    # Args: self - pytest 测试类实例；client - ASGI 客户端；monkeypatch - pytest 补丁工具。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    async def test_chat_passes_resolved_datasource_access_into_workflow(
+        self, client, monkeypatch,
+    ):
+        """流式和非流式必须消费同一个服务端权限快照。"""
+        # Arrange
+        from types import SimpleNamespace
+        from unittest.mock import AsyncMock
+
+        import src.api.routes as routes
+
+        access = {
+            "sales": {
+                "name": "sales",
+                "description": "销售订单",
+                "allowed_columns": ["order_id", "amount"],
+                "row_filter_sql": "org_id = 9",
+                "access_level": "read",
+            },
+        }
+        workflow = SimpleNamespace(ainvoke=AsyncMock(return_value={
+            "final_response": {"success": True},
+        }))
+        monkeypatch.setattr(routes, "_app", lambda: workflow)
+        monkeypatch.setattr(routes, "_resolve_chat_access", AsyncMock(return_value=access), raising=False)
+
+        # Act
+        response = await client.post("/api/v1/chat", json={
+            "query": "统计销售额", "datasource": "sales", "stream": False,
+        })
+
+        # Assert
+        assert response.status_code == 200
+        state = workflow.ainvoke.await_args.args[0]
+        assert state["datasource_access"] == access
+        assert state["allowed_columns"] == ["order_id", "amount"]
+        assert state["row_filter_sql"] == "org_id = 9"
+
+    # 方法作用：验证未选择数据源时把授权候选交给工作流而非默认全部执行。
+    # Args: self - pytest 测试类实例；client - ASGI 客户端；monkeypatch - pytest 补丁工具。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    async def test_chat_without_datasource_passes_authorized_candidates(
+        self, client, monkeypatch,
+    ):
+        """自动发现模式应保留空主数据源，让分类节点在授权候选中选择。"""
+        # Arrange
+        from types import SimpleNamespace
+        from unittest.mock import AsyncMock
+
+        import src.api.routes as routes
+
+        access = {
+            "sales": {"name": "sales", "allowed_columns": [], "row_filter_sql": ""},
+            "warehouse": {"name": "warehouse", "allowed_columns": ["sku"], "row_filter_sql": ""},
+        }
+        workflow = SimpleNamespace(ainvoke=AsyncMock(return_value={
+            "final_response": {"success": True},
+        }))
+        monkeypatch.setattr(routes, "_app", lambda: workflow)
+        monkeypatch.setattr(routes, "_resolve_chat_access", AsyncMock(return_value=access), raising=False)
+
+        # Act
+        response = await client.post("/api/v1/chat", json={"query": "库存还有多少"})
+
+        # Assert
+        assert response.status_code == 200
+        state = workflow.ainvoke.await_args.args[0]
+        assert state["datasource"] == ""
+        assert state["selected_datasources"] == []
+        assert list(state["datasource_access"]) == ["sales", "warehouse"]
 
     # 方法作用：验证非流式 API 使用 build_response 中的最终执行 SQL 契约。
     # Args: self - pytest 测试类实例；client - ASGI 客户端；monkeypatch - pytest 补丁工具。
@@ -183,6 +305,7 @@ class TestEndpoints:
         assert response.status_code == 200
         workflow.ainvoke.assert_awaited_once()
         assert workflow.ainvoke.await_args.args[0]["session_id"] == "session-fixed"
+        assert response.json()["session_id"] == "session-fixed"
 
     # 验证非流式聊天与 SSE 使用相同的多数据源状态字段。
     # Args: self - pytest 测试类实例；client - HTTP 测试客户端；monkeypatch - pytest 补丁工具。
@@ -238,6 +361,75 @@ class TestEndpoints:
     async def test_list_datasources(self, client):
         r = await client.get("/api/v1/datasources")
         assert r.status_code == 200
+
+    # 方法作用：验证多租户数据源列表仅返回服务端授权后的条目。
+    # Args: self - pytest 测试类实例；monkeypatch - pytest 补丁工具。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    async def test_list_datasources_filters_by_current_identity(self, monkeypatch):
+        """列表接口不能泄露其他用户的数据源名称和描述。"""
+        # Arrange
+        from types import SimpleNamespace
+        from unittest.mock import AsyncMock
+
+        import src.api.auth as auth
+        import src.api.routes as routes
+        import src.config as config_module
+        import src.security.permission_check as permission_module
+
+        items = [
+            {"name": "sales", "description": "销售", "dialect": "postgres"},
+            {"name": "payroll", "description": "薪资", "dialect": "postgres"},
+        ]
+        resolver = AsyncMock(return_value={"sales": {**items[0], "row_filter_sql": "tenant_id=3"}})
+        monkeypatch.setattr(routes, "_registry", lambda: SimpleNamespace(list_all=AsyncMock(return_value=items)))
+        monkeypatch.setattr(config_module, "get_settings", lambda: SimpleNamespace(multi_tenant=True))
+        monkeypatch.setattr(auth, "get_current_tenant_id", lambda: 3)
+        monkeypatch.setattr(auth, "get_current_user_id", lambda: 7)
+        monkeypatch.setattr(auth, "get_current_role", lambda: "analyst")
+        monkeypatch.setattr(permission_module, "resolve_datasource_access", resolver)
+
+        # Act
+        result = await routes.list_datasources(page=1, page_size=20)
+
+        # Assert
+        assert [item["name"] for item in result["datasources"]] == ["sales"]
+        assert "row_filter_sql" not in result["datasources"][0]
+        resolver.assert_awaited_once()
+
+    # 方法作用：验证删除会话会同步清理历史和新旧 Checkpointer 线程。
+    # Args: self - pytest 测试类实例；monkeypatch - pytest 补丁工具。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    async def test_delete_session_cleans_all_persistence_layers(self, monkeypatch):
+        """删除后不得从 checkpoint 或 query_history 恢复已删除会话。"""
+        # Arrange
+        from types import SimpleNamespace
+        from unittest.mock import AsyncMock, call
+
+        import src.api.auth as auth
+        import src.api.routes as routes
+        import src.memory.checkpointer as checkpointer_module
+        import src.memory.history_store as history_module
+        import src.memory.session_store as session_module
+
+        store = SimpleNamespace(
+            get=AsyncMock(return_value={"session_id": "session-fixed"}),
+            delete=AsyncMock(return_value=True),
+        )
+        history = SimpleNamespace(delete_session=AsyncMock(return_value=True))
+        checkpointer = SimpleNamespace(adelete_thread=AsyncMock())
+        monkeypatch.setattr(session_module, "get_session_store", lambda: store)
+        monkeypatch.setattr(history_module, "get_history_store", lambda: history)
+        monkeypatch.setattr(checkpointer_module, "get_checkpointer", AsyncMock(return_value=checkpointer))
+
+        # Act
+        result = await routes.delete_session("session-fixed")
+
+        # Assert
+        scoped_id = auth.scope_thread_id("session-fixed")
+        assert result["status"] == "ok"
+        history.delete_session.assert_awaited_once_with("session-fixed")
+        assert checkpointer.adelete_thread.await_args_list == [call(scoped_id), call("session-fixed")]
+        store.delete.assert_awaited_once_with("session-fixed")
 
     async def test_create_datasource(self, client):
         r = await client.post("/api/v1/datasources", json={

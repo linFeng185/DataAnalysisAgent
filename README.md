@@ -17,7 +17,7 @@
 
 ### 环境要求
 
-- Python 3.10+
+- Python 3.12+
 - PostgreSQL 16+（可选，会话持久化）
 - Node.js 18+（前端开发）
 

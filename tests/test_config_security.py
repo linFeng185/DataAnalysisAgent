@@ -70,6 +70,31 @@ class TestLoggingRetention:
         assert handlers[0].backupCount == 7
         assert handlers[0].when == "D"
 
+    # 方法作用：验证普通应用日志中的查询和 SQL 字段会被哈希替换。
+    # Args: self - pytest 测试类实例。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    def test_sensitive_query_fields_are_redacted(self):
+        """日志处理链不得输出用户问题或 SQL 原文。"""
+        # Arrange
+        from src import logging_config
+
+        event = {
+            "event": "执行",
+            "query": "查询身份证 110101199001011234",
+            "sql_preview": "SELECT id_card FROM users",
+            "datasource": "prod",
+        }
+
+        # Act
+        redacted = logging_config._redact_sensitive_fields(None, "info", event)  # noqa: SLF001
+
+        # Assert
+        assert "query" not in redacted
+        assert "sql_preview" not in redacted
+        assert len(redacted["query_hash"]) == 64
+        assert len(redacted["sql_preview_hash"]) == 64
+        assert redacted["datasource"] == "prod"
+
 
 class TestMCPStartupSafety:
     """覆盖默认 MCP 服务禁用行为。"""

@@ -93,6 +93,20 @@ async def _analyze_one(datasource: str, state: AnalysisState) -> dict | None:
         from src.graph.nodes.retrieve_schema import retrieve_schema_node
         s1 = dict(state)
         s1["datasource"] = datasource
+        datasource_access = state.get("datasource_access", {}) or {}
+        if datasource_access:
+            permission = datasource_access.get(datasource)
+            if permission is None:
+                logger.warning("单源分析权限拒绝", datasource=datasource)
+                return {"datasource": datasource, "success": False, "error": "无权访问数据源"}
+            s1["allowed_columns"] = list(permission.get("allowed_columns", []) or [])
+            s1["row_filter_sql"] = str(permission.get("row_filter_sql", "") or "")
+            logger.info(
+                "单源分析权限已注入",
+                datasource=datasource,
+                allowed_columns=len(s1["allowed_columns"]),
+                has_row_filter=bool(s1["row_filter_sql"]),
+            )
         s1["resolved_schema"] = resolved.schema
         s1["dialect"] = resolved.dialect
         r1 = await retrieve_schema_node(s1)

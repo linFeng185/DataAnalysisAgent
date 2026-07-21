@@ -38,6 +38,8 @@ _current_role: ContextVar[str] = ContextVar("current_role", default="anonymous")
 ACCESS_TOKEN_COOKIE = "access_token"
 _registration_limits: dict[str, list[float]] = {}
 _registration_rate_lock = threading.Lock()
+_login_limits: dict[tuple[str, str], list[float]] = {}
+_login_rate_lock = threading.Lock()
 
 
 def get_current_user_id() -> int:
@@ -244,13 +246,51 @@ def _check_registration_rate_limit(client_key: str, limit: int) -> bool:
     return True
 
 
+# 方法作用：按客户端地址和规范化用户名限制登录尝试，减缓撞库与密码猜测。
+# Args: client_key - 客户端地址；username - 登录用户名；limit - 一小时最大尝试数。
+# Returns: 未超过限制返回 True，否则返回 False。
+def _check_login_rate_limit(client_key: str, username: str, limit: int) -> bool:
+    normalized_username = username.strip().casefold()
+    key = (client_key, normalized_username)
+    now = time.monotonic()
+    window = now - 3600
+    logger.debug("登录限流检查入口", client_key=client_key, username=normalized_username, limit=limit)
+    with _login_rate_lock:
+        for stale_key in [
+            candidate for candidate, timestamps in _login_limits.items()
+            if not any(timestamp > window for timestamp in timestamps)
+        ]:
+            del _login_limits[stale_key]
+        timestamps = [timestamp for timestamp in _login_limits.get(key, []) if timestamp > window]
+        if len(timestamps) >= max(1, limit):
+            _login_limits[key] = timestamps
+            logger.warning(
+                "登录频率限制触发",
+                client_key=client_key,
+                username=normalized_username,
+                used=len(timestamps),
+                limit=max(1, limit),
+            )
+            return False
+        timestamps.append(now)
+        _login_limits[key] = timestamps
+    logger.info(
+        "登录限流检查通过",
+        client_key=client_key,
+        username=normalized_username,
+        used=len(timestamps),
+        limit=max(1, limit),
+    )
+    return True
+
+
 # ── 路由 ──
 
 auth_router = APIRouter(prefix="/auth", tags=["auth"])
 
 
 @auth_router.post("/login")
-async def login(req: LoginRequest, response: Response):
+async def login(req: LoginRequest, response: Response, request: Request = None):
     """用户登录——验证密码，返回 JWT。
 
     Args:
@@ -259,11 +299,23 @@ async def login(req: LoginRequest, response: Response):
     Returns:
         不含明文令牌的用户身份信息；令牌写入 HttpOnly Cookie。
     """
-    logger.debug("登录入口", username=req.username)
+    client_key = (
+        request.client.host
+        if request is not None and request.client is not None
+        else "unknown"
+    )
+    settings = get_settings()
+    if not _check_login_rate_limit(
+        client_key,
+        req.username,
+        max(1, int(getattr(settings, "login_max_per_hour", 20))),
+    ):
+        raise HTTPException(429, "登录尝试过于频繁，请稍后重试")
+    logger.debug("登录入口", username=req.username, client_key=client_key)
     conn = None
     try:
         import asyncpg
-        s = get_settings()
+        s = settings
         url = s.database_url.replace("postgresql+asyncpg://", "postgresql://")
         conn = await asyncpg.connect(url)
         row = await conn.fetchrow(
@@ -404,7 +456,32 @@ PUBLIC_PATHS = {
     "/api/v1/auth/register",
     "/api/v1/auth/logout",
 }
-_MGMT_METHODS = {"POST", "PUT", "DELETE", "PATCH"}
+_ADMIN_KEY_EXACT_ROUTES = {
+    ("POST", "/api/v1/datasources"),
+    ("POST", "/api/v1/schema/refresh"),
+    ("POST", "/api/v1/models/test"),
+}
+
+
+# 方法作用：判断请求是否属于需要平台 ADMIN_API_KEY 的管理写操作。
+# Args: path - 请求路径；method - HTTP 方法。
+# Returns: 数据源、Schema 或模型探测管理操作返回 True。
+def _requires_admin_api_key(path: str, method: str) -> bool:
+    logger.debug("判断平台管理 Key 入口", path=path, method=method)
+    normalized_method = str(method or "").upper()
+    exact = (normalized_method, path) in _ADMIN_KEY_EXACT_ROUTES
+    prefixed = (
+        (normalized_method == "DELETE" and path.startswith("/api/v1/datasources/"))
+        or (
+            normalized_method == "PUT"
+            and path.startswith("/api/v1/schema/tables/")
+            and "/columns/" in path
+            and path.endswith("/comment")
+        )
+    )
+    result = exact or prefixed
+    logger.info("判断平台管理 Key 完成", path=path, method=normalized_method, required=result)
+    return result
 
 
 class AuthMiddleware(BaseHTTPMiddleware):
@@ -434,10 +511,12 @@ class AuthMiddleware(BaseHTTPMiddleware):
 
         s = get_settings()
 
-        # 管理端点保护 — 在 token 校验之前执行，确保单租户模式也生效
+        # 平台管理端点保护 — 仅保护明确的基础设施写操作。
         admin_api_key = getattr(s, "admin_api_key", "")
-        if admin_api_key and request.method in _MGMT_METHODS:
-            if request.headers.get("X-Admin-Key", "") != admin_api_key:
+        if admin_api_key and _requires_admin_api_key(request.url.path, request.method):
+            import hmac
+
+            if not hmac.compare_digest(request.headers.get("X-Admin-Key", ""), admin_api_key):
                 logger.warning("管理端点认证失败", path=request.url.path)
                 return _unauthorized("管理端点需要 X-Admin-Key")
 

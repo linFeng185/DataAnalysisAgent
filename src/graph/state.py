@@ -42,6 +42,9 @@ class AnalysisState(TypedDict, total=False):
     user_role: str
     """认证中间件注入的角色，不接受用户请求体覆盖。"""
 
+    request_rate_limit_checked: bool
+    """API 入口已完成用户级配额计数，执行节点不得对同一请求重复计数。"""
+
     intent: str
     """意图分类结果（query/trend/aggregation/attribution/metadata/file_analysis/chat）。
     —— classify_intent 写，route_by_intent / analyze_result 读"""
@@ -59,6 +62,8 @@ class AnalysisState(TypedDict, total=False):
 
     selected_datasources: list[str]
     multi_source_results: list[dict]
+    datasource_access: dict[str, dict[str, Any]]
+    """API 完成授权后的候选数据源及各自行列权限，模型只能在这些候选中选择。"""
     allowed_columns: list[str]
     row_filter_sql: str
 

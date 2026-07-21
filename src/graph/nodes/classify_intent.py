@@ -56,6 +56,30 @@ async def classify_intent_node(state: AnalysisState) -> dict:
     else:
         intent = await _llm_classify(q) or "chat"
 
+    datasource_update: dict = {}
+    datasource_access = state.get("datasource_access", {}) or {}
+    if (
+        intent not in {"chat", "file_analysis", "meta"}
+        and not str(state.get("datasource", "") or "").strip()
+        and datasource_access
+    ):
+        selected_datasource = await _select_authorized_datasource(
+            state["user_query"], datasource_access,
+        )
+        permission = datasource_access[selected_datasource]
+        datasource_update = {
+            "datasource": selected_datasource,
+            "selected_datasources": [selected_datasource],
+            "allowed_columns": list(permission.get("allowed_columns", []) or []),
+            "row_filter_sql": str(permission.get("row_filter_sql", "") or ""),
+        }
+        logger.info(
+            "授权候选数据源选择完成",
+            datasource=selected_datasource,
+            candidate_count=len(datasource_access),
+            intent=intent,
+        )
+
     activated_skills = []
     skill_prompt = ""
     skill_tools = []
@@ -82,7 +106,74 @@ async def classify_intent_node(state: AnalysisState) -> dict:
         "activated_skills": [s.name for s in activated_skills],
         "skill_prompt_override": skill_prompt,
         "skill_tools": skill_tools,
+        **datasource_update,
     }
+
+
+# 方法作用：使用 SQL 任务模型从服务端授权候选中选择最相关的数据源。
+# Args: query - 用户问题；datasource_access - 已授权数据源描述和权限快照。
+# Returns: 必定属于授权候选的数据源名称。
+async def _select_authorized_datasource(
+    query: str,
+    datasource_access: dict[str, dict],
+) -> str:
+    """模型只接收授权候选；不可用或输出越界时执行确定性回退。
+
+    Args:
+        query: 用户的自然语言问题。
+        datasource_access: API 解析完成的授权候选映射。
+
+    Returns:
+        选中的授权数据源名称。
+    """
+    candidates = list(datasource_access)
+    logger.debug("授权候选数据源选择入口", candidate_count=len(candidates), query=query[:80])
+    if not candidates:
+        logger.error("授权候选数据源选择失败", reason="候选为空")
+        raise PermissionError("没有可访问的数据源")
+    if len(candidates) == 1:
+        logger.info("授权候选数据源单项命中", datasource=candidates[0])
+        return candidates[0]
+    try:
+        from langchain_core.messages import HumanMessage, SystemMessage
+        from src.llm.client import get_task_llm, is_task_llm_available
+
+        if is_task_llm_available("generate_sql"):
+            catalog = "\n".join(
+                f"- {name}: {str(datasource_access[name].get('description', '') or '')}"
+                for name in candidates
+            )
+            llm = get_task_llm("generate_sql", temperature=0, reasoning=False)
+            response = await llm.ainvoke([
+                SystemMessage(content=(
+                    "你是数据源路由器。只能从候选名称中选择一个最适合回答问题的数据源，"
+                    "只输出数据源名称，不输出解释。"
+                )),
+                HumanMessage(content=f"问题：{query}\n授权候选：\n{catalog}"),
+            ])
+            selected = str(response.content or "").strip().strip("`\"'")
+            if selected in datasource_access:
+                logger.info("授权候选数据源模型命中", datasource=selected)
+                return selected
+            logger.warning("授权候选数据源模型越界", selected=selected[:80])
+    except Exception as exc:
+        logger.error("授权候选数据源模型选择失败", error=str(exc), exc_info=True)
+
+    normalized_query = query.lower()
+    selected = candidates[0]
+    best_rank = (-1, 0)
+    for index, name in enumerate(candidates):
+        description = str(datasource_access[name].get("description", "") or "").strip().lower()
+        score = int(name.lower() in normalized_query) + int(
+            bool(description) and description in normalized_query
+        )
+        rank = (score, -index)
+        logger.debug("授权候选数据源回退评分", datasource=name, score=score)
+        if rank > best_rank:
+            selected = name
+            best_rank = rank
+    logger.info("授权候选数据源确定性回退", datasource=selected)
+    return selected
 
 
 async def _llm_classify(query: str) -> str | None:

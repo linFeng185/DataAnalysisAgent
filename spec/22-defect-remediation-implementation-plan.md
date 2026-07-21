@@ -171,3 +171,19 @@
 - [x] 检查 `git diff --check`、高风险密钥格式扫描和最终工作树差异。
 
 > 验收备注：当前工作区未运行 Docker；数据库服务通过 `192.168.195.133` 提供。ClickHouse 使用已声明的 `clickhouse-connect` HTTP 客户端，配置 `CLICKHOUSE_PASSWORD` 后可用；生产环境仍需按 `features/16-testing.md` 与 `features/17-ops.md` 中的条件完成后续专项。
+
+### 任务 7：权限、入口资源预算、审计与迁移闭环
+
+**范围：**
+- Chat 在进入工作流前解析当前身份可访问的数据源；未选择时只允许模型在授权候选中路由。
+- 数据源列表按身份过滤；多源 worker 使用各自列权限和行过滤条件。
+- 受管 MCP 禁止 stdio 和任意远程主机，ADMIN_API_KEY 仅保护平台基础设施写操作。
+- Chat/登录/上传增加入口限流与资源预算；查询审计同步写入 PostgreSQL，日志统一脱敏。
+- 新增 `src/db/migrations.py`，提供顺序、checksum、advisory lock 和事务回滚。
+- 会话响应保留完整 ID，删除时清理 SessionStore、HistoryStore 和新旧 Checkpointer 线程。
+- API 拒绝尚无连接器的 Presto/Hive，前端升级 ECharts 并正确报告 SSE 读取失败。
+
+- [x] 先增加权限绕过、MCP RCE/SSRF、限流、上传、审计、迁移、会话、方言和 SSE 失败测试。
+- [x] 按边界日志定位数据消失层并实施最小修复。
+- [x] 定向组合回归通过（162 passed），前端依赖审计 0 vulnerabilities。
+- [x] 全量非 live pytest（662 passed, 1 skipped）、前端 build、compileall、pip check 与差异检查通过。

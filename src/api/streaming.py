@@ -119,12 +119,14 @@ def _event_stream_id(event: dict) -> str:
 
 
 # 方法作用：执行 LangGraph 并通过 SSE 推送节点进度、模型事件和最终结果。
-# Args: user_query - 用户问题；datasource - 主数据源；session_id - 会话；datasources - 多数据源；tenant_id/user_id/user_role - 认证身份。
+# Args: user_query - 用户问题；datasource - 主数据源；session_id - 会话；datasources - 多数据源；tenant_id/user_id/user_role - 认证身份；datasource_access - API 授权快照；request_rate_limit_checked - API 是否已计入配额。
 # Returns: SSE 事件异步生成器。
 async def stream_analysis(user_query: str, datasource: str, session_id: str = "",
                           datasources: list[str] | None = None,
                           tenant_id: int | None = None, user_id: int | None = None,
-                          user_role: str | None = None):
+                          user_role: str | None = None,
+                          datasource_access: dict[str, dict] | None = None,
+                          request_rate_limit_checked: bool = False):
     """SSE: 逐 Node 推送进度 + LLM token + 关键结果。
 
     每个 thinking / token 事件均携带 node 和 stream_id 字段，
@@ -140,6 +142,25 @@ async def stream_analysis(user_query: str, datasource: str, session_id: str = ""
     tenant_id = get_current_tenant_id() if tenant_id is None else tenant_id
     user_id = get_current_user_id() if user_id is None else user_id
     user_role = get_current_role() if user_role is None else user_role
+    selected_datasources = list(dict.fromkeys(
+        str(name).strip() for name in (datasources or ([datasource] if datasource else []))
+        if str(name).strip()
+    ))
+    if datasource_access is None:
+        if get_settings().multi_tenant:
+            logger.error("流式权限快照缺失", tenant_id=tenant_id, user_id=user_id)
+            raise PermissionError("数据源权限快照缺失")
+        datasource_access = {
+            name: {"name": name, "allowed_columns": [], "row_filter_sql": ""}
+            for name in selected_datasources
+        }
+    primary_access = datasource_access.get(datasource, {}) if datasource else {}
+    logger.info(
+        "流式权限快照就绪",
+        authorized_count=len(datasource_access),
+        selected_count=len(selected_datasources),
+        discovery=not selected_datasources,
+    )
     config = {"configurable": {"thread_id": scope_thread_id(effective_id)}}
     is_new = not session_id
     if is_new:
@@ -167,25 +188,13 @@ async def stream_analysis(user_query: str, datasource: str, session_id: str = ""
     try:
         input_state = {"user_query": user_query, "datasource": datasource,
                        "session_id": effective_id,
-                       "selected_datasources": datasources if datasources and len(datasources) > 1 else [datasource],
-                       "allowed_columns": [], "row_filter_sql": "",
+                       "selected_datasources": selected_datasources,
+                       "datasource_access": datasource_access,
+                       "allowed_columns": list(primary_access.get("allowed_columns", []) or []),
+                       "row_filter_sql": str(primary_access.get("row_filter_sql", "") or ""),
                        "tenant_id": tenant_id, "user_id": user_id,
-                       "user_role": user_role}
-        if get_settings().multi_tenant:
-            try:
-                from src.api.auth import get_current_tenant_id
-                import asyncpg as _apg
-                url = get_settings().database_url.replace("postgresql+asyncpg://", "postgresql://")
-                c = await _apg.connect(url)
-                r = await c.fetchrow(
-                    "SELECT allowed_columns, row_filter_sql FROM datasource_permissions "
-                    "WHERE datasource_name=$1 AND tenant_id=$2", datasource, get_current_tenant_id())
-                await c.close()
-                if r:
-                    input_state["allowed_columns"] = r["allowed_columns"] or []
-                    input_state["row_filter_sql"] = r["row_filter_sql"] or ""
-            except Exception:
-                pass
+                       "user_role": user_role,
+                       "request_rate_limit_checked": request_rate_limit_checked}
         async for event in app.astream_events(input_state, config, version="v2"
         ):
             kind = event["event"]

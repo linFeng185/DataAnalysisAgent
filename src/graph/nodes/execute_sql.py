@@ -22,6 +22,52 @@ def _row_to_dict(row) -> dict:
             d[k] = v
     return d
 
+
+# 方法作用：用显式状态身份同步记录一次 SQL 尝试，避免后台任务或 ContextVar 清理导致审计丢失。
+# Args: state - 当前分析状态；datasource - 数据源名；sql - SQL 原文；started_at - 执行起点；success - 是否成功；row_count - 返回行数；error_message - 失败摘要。
+# Returns: 无返回值；审计存储异常由 log_audit 内部记录，不影响查询响应。
+async def _record_query_audit(
+    state: AnalysisState,
+    datasource: str,
+    sql: str,
+    started_at: float,
+    *,
+    success: bool,
+    row_count: int = 0,
+    error_message: str = "",
+) -> None:
+    from src.api.auth import get_current_tenant_id, get_current_user_id
+    from src.security.data_masker import log_audit
+
+    user_id = state.get("user_id")
+    tenant_id = state.get("tenant_id")
+    effective_user_id = get_current_user_id() if user_id is None else int(user_id)
+    effective_tenant_id = get_current_tenant_id() if tenant_id is None else int(tenant_id)
+    elapsed_ms = round((time.monotonic() - started_at) * 1000)
+    logger.debug(
+        "记录查询审计入口",
+        user_id=effective_user_id,
+        tenant_id=effective_tenant_id,
+        datasource=datasource,
+        success=success,
+    )
+    await log_audit(
+        user_id=effective_user_id,
+        tenant_id=effective_tenant_id,
+        datasource=datasource,
+        sql=sql,
+        row_count=row_count,
+        elapsed_ms=elapsed_ms,
+        success=success,
+        error_message=error_message,
+    )
+    logger.info(
+        "记录查询审计完成",
+        datasource=datasource,
+        success=success,
+        elapsed_ms=elapsed_ms,
+    )
+
 async def execute_sql_node(state: AnalysisState) -> dict:
     """Phase 2: registry → connector.execute()。Phase 1: 返回空数据 + 提示。"""
     _start = time.monotonic()
@@ -44,13 +90,20 @@ async def execute_sql_node(state: AnalysisState) -> dict:
                 "execution_error": "", "execution_error_type": "",
                 "execution_retry_count": 0}
 
-    # 12.2.1 频率限制检查
-    from src.security.data_masker import check_rate_limit
-    if not check_rate_limit():
-        return {"execution_error": "请求频率超限",
-                "execution_error_type": "rate_limit",
-                "query_result_sample": [], "query_result_full_count": 0,
-                "query_result_statistics": {"row_count": 0}}
+    # 12.2.1 非 API 调用保留节点级兜底，API 请求不得重复计数。
+    if not state.get("request_rate_limit_checked", False):
+        from src.security.data_masker import check_rate_limit
+        if not check_rate_limit(state.get("user_id")):
+            logger.warning("SQL 执行节点频率超限", user_id=state.get("user_id"))
+            await _record_query_audit(
+                state, ds_name, sql, _start, success=False, error_message="rate_limit",
+            )
+            return {"execution_error": "请求频率超限",
+                    "execution_error_type": "rate_limit",
+                    "query_result_sample": [], "query_result_full_count": 0,
+                    "query_result_statistics": {"row_count": 0}}
+    else:
+        logger.info("SQL 执行节点复用入口配额检查", user_id=state.get("user_id"))
 
     # 行列级权限（多租户时生效）
     if get_settings().multi_tenant:
@@ -61,6 +114,9 @@ async def execute_sql_node(state: AnalysisState) -> dict:
             col_err_perm = check_column_whitelist(sql, allowed)
             if col_err_perm:
                 logger.warning("列权限拦截", datasource=ds_name, error=col_err_perm)
+                await _record_query_audit(
+                    state, ds_name, sql, _start, success=False, error_message=col_err_perm,
+                )
                 return {"query_result_sample": [], "query_result_full_count": 0,
                         "query_result_statistics": {"row_count": 0},
                         "generated_sql": sql, "execution_error": col_err_perm,
@@ -73,6 +129,9 @@ async def execute_sql_node(state: AnalysisState) -> dict:
     col_err = _validate_column_references(sql, state.get("relevant_tables", []))
     if col_err:
         logger.warning("列名验证失败，触发重试", datasource=ds_name, error=col_err)
+        await _record_query_audit(
+            state, ds_name, sql, _start, success=False, error_message=col_err,
+        )
         return {"query_result_sample": [], "query_result_full_count": 0,
                 "query_result_statistics": {"row_count": 0},
                 "generated_sql": sql, "execution_error": col_err,
@@ -158,14 +217,11 @@ async def execute_sql_node(state: AnalysisState) -> dict:
                 rows, truncated = await asyncio.to_thread(_run_sync_with_connection)
                 logger.info("同步数据源线程池执行完成", datasource=ds_name, row_count=len(rows))
             elapsed = round((time.monotonic() - _start) * 1000)
-            # 12.3.3 审计日志
-            import asyncio
-            from src.api.auth import get_current_tenant_id, get_current_user_id
-            from src.security.data_masker import log_audit, mask_sensitive_data
-            asyncio.create_task(log_audit(
-                get_current_user_id(), get_current_tenant_id(), ds_name,
-                sql, len(rows), elapsed, True,
-            ))
+            # 12.3.3 在返回前持久化审计，避免任务在请求结束时被取消。
+            from src.security.data_masker import mask_sensitive_data
+            await _record_query_audit(
+                state, ds_name, sql, _start, success=True, row_count=len(rows),
+            )
             masked_rows = mask_sensitive_data(rows)
             logger.info("节点完成", node="execute_sql", elapsed_ms=elapsed)
             return {
@@ -195,6 +251,9 @@ async def execute_sql_node(state: AnalysisState) -> dict:
         execution_retry_count = state.get("execution_retry_count", 0)
         if error_type == "transient":
             execution_retry_count += 1
+        await _record_query_audit(
+            state, ds_name, sql, _start, success=False, error_message=err_msg,
+        )
         return {
             "query_result_sample": [],
             "query_result_full_count": 0,
@@ -206,6 +265,9 @@ async def execute_sql_node(state: AnalysisState) -> dict:
         }
 
     logger.error("execute_sql 未预期路径", datasource=ds_name)
+    await _record_query_audit(
+        state, ds_name, sql, _start, success=False, error_message="datasource unavailable",
+    )
     return {"query_result_sample": [], "query_result_full_count": 0,
             "query_result_statistics": {"row_count": 0},
             "generated_sql": sql,

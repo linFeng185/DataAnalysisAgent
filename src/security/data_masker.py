@@ -122,6 +122,10 @@ def build_audit_entry(
         与 query_audit_log 表字段一致的审计字典。
     """
     logger.debug("审计条目构建入口", user_id=user_id, tenant_id=tenant_id, datasource=datasource)
+    safe_error = ""
+    if error_message:
+        error_digest = hashlib.sha256(error_message.encode("utf-8")).hexdigest()
+        safe_error = f"sha256:{error_digest};chars:{len(error_message)}"
     entry = {
         "timestamp": datetime.now().isoformat(),
         "user_id": user_id,
@@ -131,7 +135,7 @@ def build_audit_entry(
         "row_count": row_count,
         "duration_ms": elapsed_ms,
         "success": success,
-        "error_message": error_message[:500],
+        "error_message": safe_error,
     }
     logger.info("审计条目构建完成", user_id=user_id, tenant_id=tenant_id, sql_hash=entry["sql_hash"][:12])
     return entry
@@ -163,15 +167,28 @@ async def log_audit(
         user_id, tenant_id, datasource, sql, row_count, elapsed_ms, success, error_message,
     )
     logger.info("查询审计", **entry)
-    if pg_pool:
-        try:
-            await pg_pool.execute(
+    try:
+        effective_pool = pg_pool
+        if effective_pool is None:
+            database_url = str(getattr(get_settings(), "database_url", "") or "")
+            if not database_url or "postgres" not in database_url:
+                logger.warning("查询审计跳过 PG 写入", reason="未配置 PostgreSQL")
+                return
+            from src.memory.pg_pool import get_pg_pool
+
+            effective_pool = await get_pg_pool()
+        await effective_pool.execute(
                 "INSERT INTO query_audit_log "
                 "(user_id,tenant_id,datasource,sql_hash,row_count,duration_ms,success,error_message,created_at) "
                 "VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)",
                 user_id, tenant_id, datasource, entry["sql_hash"], row_count,
-                elapsed_ms, success, error_message[:500], datetime.now(),
+                elapsed_ms, success, entry["error_message"], datetime.now(),
             )
-            logger.info("查询审计写入完成", sql_hash=entry["sql_hash"][:12])
-        except Exception as exc:
-            logger.error("审计日志写入失败", error=str(exc), exc_info=True)
+        logger.info("查询审计写入完成", sql_hash=entry["sql_hash"][:12])
+    except Exception as exc:
+        logger.error(
+            "审计日志写入失败",
+            exception_type=type(exc).__name__,
+            error=str(exc),
+            exc_info=True,
+        )

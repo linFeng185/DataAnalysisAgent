@@ -173,3 +173,163 @@ class TestAuditSanitization:
         assert len(entry["sql_hash"]) == 64
         assert "sql" not in entry
         assert sql not in str(entry)
+
+    # 方法作用：验证未显式传入连接池时审计函数仍使用全局 PG 池持久化。
+    # Args: self - pytest 测试类实例；monkeypatch - pytest 补丁工具。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    async def test_log_audit_uses_global_pool_by_default(self, monkeypatch):
+        """生产调用不得因调用方省略 pg_pool 而退化为普通日志。"""
+        # Arrange
+        from types import SimpleNamespace
+        from unittest.mock import AsyncMock
+
+        import src.config as config_module
+        import src.memory.pg_pool as pool_module
+        from src.security import data_masker
+
+        pool = SimpleNamespace(execute=AsyncMock())
+        get_pool = AsyncMock(return_value=pool)
+        monkeypatch.setattr(config_module, "get_settings", lambda: SimpleNamespace(
+            database_url="postgresql+asyncpg://audit:test@db/app",
+        ))
+        monkeypatch.setattr(pool_module, "get_pg_pool", get_pool)
+
+        # Act
+        await data_masker.log_audit(
+            user_id=7,
+            tenant_id=3,
+            datasource="prod",
+            sql="SELECT secret FROM users",
+            row_count=0,
+            elapsed_ms=12,
+            success=False,
+            error_message="permission denied",
+        )
+
+        # Assert
+        get_pool.assert_awaited_once()
+        pool.execute.assert_awaited_once()
+        assert "SELECT secret" not in str(pool.execute.await_args)
+
+
+class TestDatasourceAuthorization:
+    """覆盖数据源候选发现和显式访问授权。"""
+
+    # 方法作用：验证自动发现只返回当前用户有权访问的数据源。
+    # Args: self - pytest 测试类实例；monkeypatch - pytest 补丁工具。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    async def test_discovery_returns_only_authorized_datasources(self, monkeypatch):
+        """未显式选择数据源时，私有和租户权限必须先于模型选择生效。"""
+        # Arrange
+        from types import SimpleNamespace
+        from unittest.mock import AsyncMock, MagicMock
+
+        import src.security.permission_check as permission_module
+
+        connection = SimpleNamespace(fetch=AsyncMock(return_value=[
+            {
+                "datasource_name": "sales",
+                "owner_user_id": 7,
+                "visibility": "private",
+                "access_level": "read",
+                "allowed_columns": ["order_id", "amount"],
+                "row_filter_sql": "org_id = 9",
+            },
+            {
+                "datasource_name": "finance",
+                "owner_user_id": 8,
+                "visibility": "private",
+                "access_level": "read",
+                "allowed_columns": [],
+                "row_filter_sql": "",
+            },
+            {
+                "datasource_name": "warehouse",
+                "owner_user_id": 8,
+                "visibility": "tenant",
+                "access_level": "read",
+                "allowed_columns": ["sku"],
+                "row_filter_sql": "tenant_id = 4",
+            },
+        ]))
+        acquire = MagicMock()
+        acquire.return_value.__aenter__ = AsyncMock(return_value=connection)
+        acquire.return_value.__aexit__ = AsyncMock(return_value=False)
+        pool = SimpleNamespace(acquire=acquire)
+        monkeypatch.setattr(permission_module, "get_pg_pool", AsyncMock(return_value=pool), raising=False)
+
+        # Act
+        result = await permission_module.resolve_datasource_access(
+            [
+                {"name": "sales", "description": "销售订单"},
+                {"name": "finance", "description": "财务"},
+                {"name": "warehouse", "description": "库存"},
+            ],
+            [],
+            tenant_id=4,
+            user_id=7,
+            role="analyst",
+            multi_tenant=True,
+        )
+
+        # Assert
+        assert list(result) == ["sales", "warehouse"]
+        assert result["sales"]["allowed_columns"] == ["order_id", "amount"]
+        assert result["warehouse"]["row_filter_sql"] == "tenant_id = 4"
+
+    # 方法作用：验证显式选择无权数据源时失败关闭。
+    # Args: self - pytest 测试类实例；monkeypatch - pytest 补丁工具。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    async def test_explicit_unauthorized_datasource_is_rejected(self, monkeypatch):
+        """显式请求存在但无权限的数据源必须返回授权错误。"""
+        # Arrange
+        from types import SimpleNamespace
+        from unittest.mock import AsyncMock, MagicMock
+
+        import src.security.permission_check as permission_module
+
+        connection = SimpleNamespace(fetch=AsyncMock(return_value=[]))
+        acquire = MagicMock()
+        acquire.return_value.__aenter__ = AsyncMock(return_value=connection)
+        acquire.return_value.__aexit__ = AsyncMock(return_value=False)
+        pool = SimpleNamespace(acquire=acquire)
+        monkeypatch.setattr(permission_module, "get_pg_pool", AsyncMock(return_value=pool), raising=False)
+
+        # Act / Assert
+        with pytest.raises(PermissionError, match="无权访问数据源"):
+            await permission_module.resolve_datasource_access(
+                [{"name": "finance", "description": "财务"}],
+                ["finance"],
+                tenant_id=4,
+                user_id=7,
+                role="analyst",
+                multi_tenant=True,
+            )
+
+    # 方法作用：验证权限存储异常时多租户访问失败关闭。
+    # Args: self - pytest 测试类实例；monkeypatch - pytest 补丁工具。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    async def test_permission_store_failure_is_closed(self, monkeypatch):
+        """权限数据库不可用时不得回退为全数据源访问。"""
+        # Arrange
+        from unittest.mock import AsyncMock
+
+        import src.security.permission_check as permission_module
+
+        monkeypatch.setattr(
+            permission_module,
+            "get_pg_pool",
+            AsyncMock(side_effect=RuntimeError("permission db down")),
+            raising=False,
+        )
+
+        # Act / Assert
+        with pytest.raises(PermissionError, match="权限服务不可用"):
+            await permission_module.resolve_datasource_access(
+                [{"name": "sales", "description": "销售"}],
+                [],
+                tenant_id=4,
+                user_id=7,
+                role="analyst",
+                multi_tenant=True,
+            )

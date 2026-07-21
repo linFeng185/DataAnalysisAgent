@@ -14,7 +14,7 @@
 | 11.1.6 | GET /history | `src/api/routes.py` | `GET /api/v1/history` | 查询历史列表，支持 datasource + search 过滤 | 开发完成 | P1 |
 | 11.1.7 | POST /datasources | `src/api/routes.py` | 注册数据源 | 单测完成 (2.3.7) | P1 |
 | 11.1.8 | DELETE /datasources/{name} | `src/api/routes.py` | 删除数据源 | 单测完成 (2.3.8) | P1 |
-| 11.1.9 | GET /datasources | `src/api/routes.py` | 列出数据源 (分页) | 单测完成 (2.3.9) | P1 |
+| 11.1.9 | GET /datasources | `src/api/routes.py` | 按当前身份授权过滤后列出数据源 (分页) | 单测完成 (2.3.9) | P1 |
 | 11.1.10 | GET /health | `src/api/routes.py` | 健康检查 | 单测完成 | P0 |
 | 11.1.11 | PUT /schema/.../comment | `src/api/routes.py` | 手动标注字段 | 单测完成 | P1 |
 | 11.1.12 | POST /mcp/{name}/reset | `src/api/routes.py` | Phase 2: MCP reset (依赖模块 8) | 待开发[^8] | P1 |
@@ -37,12 +37,14 @@
 | 11.1.29 | POST /auth/logout | `src/api/auth.py` | 清除访问 Cookie | 单测完成 | P0 |
 | 11.1.30 | GET /auth/me | `src/api/auth.py` | 返回当前身份、认证状态和认证开关 | 单测完成 | P0 |
 | 11.1.31 | 数据源管理生命周期 | `src/api/routes.py` | 注册后可见、删除后不可见、重复删除返回 404 | 集成测试完成 | P1 |
-| 11.1.32 | 知识上传安全边界 | `src/api/routes.py` | 上传前后执行大小限制，Word 文本安全转义 | 单测完成 | P1 |
+| 11.1.32 | 知识上传安全边界 | `src/api/routes.py` | 写入前限制文件数、单文件和累计字节，Word 文本安全转义 | 单测完成 | P1 |
 | 11.1.33 | POST /assets/profile | `src/api/routes.py` | CSV/Excel/Parquet 列级 profile 和质量摘要 | 单测完成 | P1 |
 | 11.1.34 | POST /assets/query | `src/api/routes.py` | 上传结构化文件执行 DuckDB 只读 SQL，返回结果和截断状态 | 单测完成 | P1 |
 | 11.1.35 | 知识范围 API | `src/api/routes.py` | 知识列表/文档上传/删除支持 system、tenant、private 范围与角色授权 | 集成测试完成 | P1 |
 | 11.1.36 | 知识标签 API | `src/api/routes.py` | 标签搜索、个人标签创建、超级管理员维护与提升全局标签 | 集成测试完成 | P1 |
 | 11.1.37 | POST /auth/register 注册保护 | `src/api/auth.py` | 公开注册按客户端地址限流，bcrypt 在线程池执行，多租户创建在事务内完成 | 单测完成 | P0 |
+| 11.1.38 | 授权数据源发现 `[P0]` | `src/api/routes.py` | 显式选择先鉴权；未选择时把当前身份授权候选交给工作流 | 单测完成 | P0 |
+| 11.1.39 | 会话完整删除 `[P0]` | `src/api/routes.py`、`src/memory/history_store.py` | 返回完整 session_id；删除同步清理历史和新旧 Checkpointer 线程 | 单测完成 | P0 |
 
 ### 11.2 分页增强
 
@@ -79,7 +81,7 @@
 
 ### 模块收尾
 
-模块功能点共 51 项，已完成 49 项，待开发 2 项。
+模块功能点共 53 项，已完成 51 项，待开发 2 项。
 
 | 功能点 | 不开发原因 | 可开发条件 | 预计开发时机 |
 |--------|------------|------------|--------------|

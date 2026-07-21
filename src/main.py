@@ -43,6 +43,19 @@ async def lifespan(app: FastAPI):
                  api_key_set=bool(s.openai_api_key))
     logger.info("=" * 50)
 
+    # 在任何依赖表的组件初始化前完成版本化迁移。
+    if s.run_migrations_on_startup:
+        try:
+            from src.db.migrations import run_migrations
+
+            applied_migrations = await run_migrations(s.database_url)
+            logger.info("启动迁移完成", applied_count=len(applied_migrations))
+        except Exception as exc:
+            logger.error("启动迁移失败", error=str(exc), exc_info=True)
+            if s.env == "prod":
+                raise
+            logger.warning("非生产环境降级跳过迁移", env=s.env)
+
     # 初始化 LangGraph 工作流（含 Checkpointer）
     from src.graph.workflow import init_app
     await init_app()

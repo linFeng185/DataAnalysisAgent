@@ -76,6 +76,34 @@ class TestMemoryTenantIsolation:
         assert result["history"] == []
         assert result["total"] == 0
 
+    # 方法作用：验证按会话删除历史只影响当前租户和用户。
+    # Args: self - pytest 测试类实例；monkeypatch - pytest 补丁工具。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    async def test_history_delete_session_keeps_other_identity(self, monkeypatch):
+        """相同 session_id 在不同身份下不得互相删除。"""
+        # Arrange
+        import src.api.auth as auth
+        import src.memory.history_store as history_module
+
+        monkeypatch.setattr(history_module, "get_settings", lambda: SimpleNamespace(database_url=""))
+        store = history_module.HistoryStore()
+        store._items = [  # noqa: SLF001
+            {"session_id": "same", "tenant_id": 11, "user_id": 101},
+            {"session_id": "same", "tenant_id": 22, "user_id": 202},
+        ]
+        user_token = auth._current_user_id.set(101)  # noqa: SLF001
+        tenant_token = auth._current_tenant_id.set(11)  # noqa: SLF001
+        try:
+            # Act
+            deleted = await store.delete_session("same")
+        finally:
+            auth._current_user_id.reset(user_token)  # noqa: SLF001
+            auth._current_tenant_id.reset(tenant_token)  # noqa: SLF001
+
+        # Assert
+        assert deleted is True
+        assert store._items == [{"session_id": "same", "tenant_id": 22, "user_id": 202}]  # noqa: SLF001
+
     # 方法作用：验证查询历史内存回退完整保存每轮结构化响应。
     # Args: self - pytest 测试类实例；monkeypatch - pytest 补丁工具。
     # Returns: 无返回值，断言失败时由 pytest 报告。

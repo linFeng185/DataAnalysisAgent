@@ -160,7 +160,10 @@ class TestMCPScopedLifecycle:
         )
         monkeypatch.setattr(
             config_module, "get_settings",
-            lambda: SimpleNamespace(database_url="postgresql+asyncpg://test:test@db/test"),
+            lambda: SimpleNamespace(
+                database_url="postgresql+asyncpg://test:test@db/test",
+                mcp_remote_host_allowlist="system,tenant,private",
+            ),
         )
         manager = MCPClientManager()
         connect = AsyncMock(return_value=[])
@@ -173,6 +176,53 @@ class TestMCPScopedLifecycle:
         assert manager._server_owners["private_4_7_my-files"] == 7
         assert connect.await_count == 3
         logger.info("test_reload_from_db_connects_visible_scopes 完成")
+
+    # 方法作用：验证数据库历史配置中的 stdio 和未授权主机不会被重新加载执行。
+    # Args: self - pytest 测试类实例；monkeypatch - pytest 补丁工具。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    async def test_reload_from_db_skips_unsafe_managed_servers(self, monkeypatch):
+        """旧数据不能绕过新 API 校验重新形成进程执行或 SSRF。"""
+        # Arrange
+        import src.config as config_module
+        from src.mcp_client.client_manager import MCPClientManager
+
+        rows = [
+            {"name": "legacy-process", "scope": "private", "tenant_id": 4,
+             "owner_user_id": 7, "transport": "stdio", "command": "python", "args": "-c pass",
+             "url": "", "env_vars": {}},
+            {"name": "blocked-host", "scope": "private", "tenant_id": 4,
+             "owner_user_id": 7, "transport": "sse", "command": "", "args": "",
+             "url": "http://127.0.0.1:9000/sse", "env_vars": {}},
+            {"name": "approved", "scope": "private", "tenant_id": 4,
+             "owner_user_id": 7, "transport": "sse", "command": "", "args": "",
+             "url": "https://mcp.example.com/sse", "env_vars": {}},
+        ]
+        connection = SimpleNamespace(
+            fetch=AsyncMock(return_value=rows), execute=AsyncMock(), close=AsyncMock(),
+        )
+        monkeypatch.setitem(
+            sys.modules, "asyncpg",
+            SimpleNamespace(connect=AsyncMock(return_value=connection)),
+        )
+        monkeypatch.setattr(
+            config_module,
+            "get_settings",
+            lambda: SimpleNamespace(
+                database_url="postgresql+asyncpg://test:test@db/test",
+                mcp_remote_host_allowlist="mcp.example.com",
+            ),
+        )
+        manager = MCPClientManager()
+        connect = AsyncMock(return_value=[])
+        monkeypatch.setattr(manager, "_connect_single", connect)
+
+        # Act
+        count = await manager.reload_from_db(tenant_id=4, user_id=7)
+
+        # Assert
+        assert count == 1
+        assert connect.await_count == 1
+        assert connect.await_args.args[0].endswith("approved")
 
     # 方法作用：验证同一身份的 MCP 配置只惰性加载一次。
     # Args: self - pytest 测试类实例；monkeypatch - pytest 补丁工具。

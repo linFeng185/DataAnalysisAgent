@@ -60,6 +60,7 @@ class Settings(BaseSettings):
     # ---- 数据库 (智能体自身的状态存储) ----
     database_url: str = "postgresql+asyncpg://postgres:postgres@localhost:5432/data_agent"
     database_readonly_url: str = ""  # 只读账号，配了就用它执行用户 SQL
+    run_migrations_on_startup: bool = True
 
     # ---- 向量存储 ----
     vector_store_type: str = "chroma"
@@ -106,12 +107,17 @@ class Settings(BaseSettings):
 
     # ---- 限流 ----
     max_queries_per_hour: int = 100
+    login_max_per_hour: int = 20
     registration_max_per_hour: int = 10
+    max_query_chars: int = 8_000
+    max_datasources_per_query: int = 5
     max_scan_rows: int = 10_000_000
     max_execution_time: int = 30
     max_result_rows: int = 100_000
     max_stats_rows: int = 500_000
     max_upload_bytes: int = 20 * 1024 * 1024
+    max_upload_files: int = 20
+    max_upload_total_bytes: int = 100 * 1024 * 1024
 
     # ---- SQL 安全 ----
     explain_skip_dialects: list[str] = ["snowflake"]
@@ -122,6 +128,8 @@ class Settings(BaseSettings):
 
     # ---- MCP ----
     mcp_config_path: str = "config/mcp_servers.yaml"
+    mcp_remote_host_allowlist: str = ""
+    """数据库受管 SSE MCP 的精确主机 allowlist，逗号分隔。"""
 
     # ---- Skills ----
     skills_dir: str = "skills"
@@ -170,6 +178,8 @@ def validate_production_settings(settings: Settings) -> None:
         errors.append("CREDENTIAL_ENCRYPTION_KEY 至少需要 32 字符")
     if not settings.database_readonly_url:
         errors.append("DATABASE_READONLY_URL 必须配置")
+    if not settings.run_migrations_on_startup:
+        errors.append("RUN_MIGRATIONS_ON_STARTUP 必须为 true")
 
     if errors:
         message = "生产配置无效: " + "; ".join(errors)

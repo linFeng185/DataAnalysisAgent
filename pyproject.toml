@@ -26,6 +26,14 @@ dependencies = [
     "redis>=5.0",
     "sse-starlette>=2.0",
     "passlib[bcrypt]>=1.7.4",
+    "python-dotenv>=1.0",
+    "pyjwt>=2.0",
+    "cryptography>=41.0",
+    "asyncpg>=0.30.0",
+    "python-multipart>=0.0.20",
+    "langgraph-checkpoint-postgres>=3.0",
+    "aiohttp>=3.9",
+    "typing-extensions>=4.12",
 ]
 
 [project.optional-dependencies]
@@ -50,7 +58,6 @@ testdata = [
 clickhouse = ["clickhouse-connect>=0.8.0"]
 sqlite = ["aiosqlite>=0.20.0"]
 mysql = ["aiomysql>=0.2.0"]
-postgres = ["asyncpg>=0.30.0"]
 
 [build-system]
 requires = ["setuptools>=75.0"]

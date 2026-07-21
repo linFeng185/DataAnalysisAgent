@@ -269,6 +269,61 @@ class HistoryStore:
         )
         return result
 
+    # 方法作用：删除当前身份指定会话的全部查询历史。
+    # Args: session_id - 对外会话 ID。
+    # Returns: 内存或 PostgreSQL 中至少删除一条记录时返回 True。
+    async def delete_session(self, session_id: str) -> bool:
+        """会话删除必须同时清理内存回退与持久化逐轮结果。"""
+        from src.api.auth import get_current_tenant_id, get_current_user_id
+
+        user_id = get_current_user_id()
+        tenant_id = get_current_tenant_id()
+        logger.debug(
+            "按会话删除历史入口",
+            session_id=session_id[:20],
+            user_id=user_id,
+            tenant_id=tenant_id,
+        )
+        original_count = len(self._items)
+        self._items = [
+            item for item in self._items
+            if not (
+                item.get("session_id") == session_id
+                and item.get("tenant_id") == tenant_id
+                and item.get("user_id") == user_id
+            )
+        ]
+        deleted = len(self._items) < original_count
+        if await self._ensure_pg():
+            conn = await self._pg_conn()
+            if conn is not None:
+                try:
+                    status = await conn.execute(
+                        "DELETE FROM query_history "
+                        "WHERE session_id = $1 AND tenant_id = $2 AND user_id = $3",
+                        session_id,
+                        tenant_id,
+                        user_id,
+                    )
+                    deleted = deleted or not status.endswith(" 0")
+                except Exception as exc:
+                    logger.error(
+                        "按会话删除 PG 历史失败",
+                        session_id=session_id[:20],
+                        error=str(exc),
+                        exc_info=True,
+                    )
+                    raise
+                finally:
+                    await conn.close()
+        logger.info(
+            "按会话删除历史完成",
+            session_id=session_id[:20],
+            user_id=user_id,
+            deleted=deleted,
+        )
+        return deleted
+
     async def list(self, datasource: str | None = None, search: str | None = None,
                    page: int = 1, page_size: int = 50) -> dict:
         """分页列出查询历史，PG 优先、内存回退。

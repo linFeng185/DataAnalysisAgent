@@ -153,3 +153,50 @@ class TestExecuteSQLSecurity:
 
         assert result["execution_error"] == ""
         assert result["query_result_sample"] == [{"value": 1}]
+
+    # 方法作用：验证数据源执行异常也会写入失败审计。
+    # Args: self - pytest 测试类实例；monkeypatch - pytest 补丁工具。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    async def test_failed_query_is_audited(self, monkeypatch):
+        """执行失败不能绕过 query_audit_log。"""
+        # Arrange
+        from types import SimpleNamespace
+        from unittest.mock import AsyncMock
+
+        import src.config as config_module
+        import src.datasource.registry as registry_module
+        from src.graph.nodes import execute_sql as execute_module
+        from src.security import data_masker
+
+        settings = SimpleNamespace(
+            max_result_rows=10,
+            max_execution_time=30,
+            max_queries_per_hour=100,
+            multi_tenant=False,
+            database_url="",
+        )
+        registry = SimpleNamespace(resolve_or_none=AsyncMock(side_effect=RuntimeError("database unavailable")))
+        audit = AsyncMock()
+        monkeypatch.setattr(config_module, "get_settings", lambda: settings)
+        monkeypatch.setattr(execute_module, "get_settings", lambda: settings)
+        monkeypatch.setattr(data_masker, "get_settings", lambda: settings)
+        monkeypatch.setattr(data_masker, "log_audit", audit)
+        monkeypatch.setattr(registry_module, "get_registry", lambda: registry)
+        data_masker._rate_limits.clear()  # noqa: SLF001
+
+        # Act
+        result = await execute_module.execute_sql_node({
+            "datasource": "prod",
+            "dialect": "postgres",
+            "generated_sql": "SELECT 1",
+            "user_id": 7,
+            "tenant_id": 3,
+            "request_rate_limit_checked": True,
+        })
+
+        # Assert
+        assert result["execution_error"] == "database unavailable"
+        audit.assert_awaited_once()
+        assert audit.await_args.kwargs["success"] is False
+        assert audit.await_args.kwargs["user_id"] == 7
+        assert audit.await_args.kwargs["tenant_id"] == 3

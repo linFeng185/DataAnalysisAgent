@@ -515,12 +515,27 @@ class TestLayer4Explain:
 
         result = await multi_source_module._analyze_one(
             "sqlite-test",
-            {"user_query": "统计订单数", "selected_datasources": ["sqlite-test", "other"]},
+            {
+                "user_query": "统计订单数",
+                "selected_datasources": ["sqlite-test", "other"],
+                "datasource_access": {
+                    "sqlite-test": {
+                        "allowed_columns": ["order_id"],
+                        "row_filter_sql": "org_id = 9",
+                    },
+                    "other": {
+                        "allowed_columns": ["customer_id"],
+                        "row_filter_sql": "org_id = 10",
+                    },
+                },
+            },
         )
 
         assert result["success"] is True
         assert result["sql"] == "SELECT 1 /* rewritten */"
         assert execute_mock.await_args.args[0]["generated_sql"] == "SELECT 1 /* explain rewritten */"
+        assert execute_mock.await_args.args[0]["allowed_columns"] == ["order_id"]
+        assert execute_mock.await_args.args[0]["row_filter_sql"] == "org_id = 9"
         explain_mock.assert_awaited_once()
         logger.info("test_multi_source_worker_runs_explain_before_execute 完成")
 
@@ -644,3 +659,61 @@ class TestIntentPrecision:
         assert result["intent"] in {"query", "aggregation"}
         assert "data-quality-check" in result["activated_skills"]
         logger.info("test_quality_query_activates_quality_skill 完成")
+
+    # 方法作用：验证未指定数据源时模型只能从授权候选中选择。
+    # Args: self - pytest 测试类实例；monkeypatch - pytest 补丁工具。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    async def test_missing_datasource_selects_from_authorized_candidates(self, monkeypatch):
+        """自动选择结果必须同步写回主数据源和对应行列权限。"""
+        # Arrange
+        from unittest.mock import AsyncMock
+
+        import src.graph.nodes.classify_intent as classify_module
+
+        selector = AsyncMock(return_value="warehouse")
+        monkeypatch.setattr(classify_module, "_select_authorized_datasource", selector, raising=False)
+        access = {
+            "sales": {"name": "sales", "allowed_columns": [], "row_filter_sql": ""},
+            "warehouse": {
+                "name": "warehouse",
+                "description": "库存",
+                "allowed_columns": ["sku", "stock"],
+                "row_filter_sql": "org_id = 9",
+            },
+        }
+
+        # Act
+        result = await classify_module.classify_intent_node({
+            "user_query": "库存还有多少",
+            "datasource": "",
+            "selected_datasources": [],
+            "datasource_access": access,
+        })
+
+        # Assert
+        assert result["datasource"] == "warehouse"
+        assert result["selected_datasources"] == ["warehouse"]
+        assert result["allowed_columns"] == ["sku", "stock"]
+        assert result["row_filter_sql"] == "org_id = 9"
+        selector.assert_awaited_once()
+
+    # 方法作用：验证空描述不会在确定性回退中被当作查询命中。
+    # Args: self - pytest 测试类实例；monkeypatch - pytest 补丁工具。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    async def test_datasource_fallback_ignores_empty_description(self, monkeypatch):
+        """空字符串是任意文本子串，不能因此让首个候选获得虚假分数。"""
+        # Arrange
+        import src.graph.nodes.classify_intent as classify_module
+        import src.llm.client as llm_module
+
+        monkeypatch.setattr(llm_module, "is_task_llm_available", lambda task: False)
+        access = {
+            "sales": {"name": "sales", "description": ""},
+            "warehouse": {"name": "warehouse", "description": "库存"},
+        }
+
+        # Act
+        selected = await classify_module._select_authorized_datasource("库存还有多少", access)
+
+        # Assert
+        assert selected == "warehouse"

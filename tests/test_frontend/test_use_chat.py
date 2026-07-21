@@ -72,3 +72,55 @@ process.stdout.write(JSON.stringify({
             exc_info=True,
         )
         raise
+
+
+# 方法作用：验证 SSE 读取异常进入错误回调且不会被当作正常完成。
+# Args: 无。
+# Returns: 无返回值，断言失败时由 pytest 报告。
+def test_stream_chat_read_failure_reports_error_in_catch() -> None:
+    """reader.read() 抛错时必须调用 onError，不能继续调用 onDone。"""
+    # Arrange：通过 TypeScript AST 检查 streamChat 内部 catch 分支调用。
+    source_path = Path("frontend/src/api/client.ts").resolve()
+    inspect_script = r"""
+const fs = require('fs');
+const ts = require('./frontend/node_modules/typescript');
+const sourcePath = process.argv[1];
+const sourceText = fs.readFileSync(sourcePath, 'utf8');
+const source = ts.createSourceFile(sourcePath, sourceText, ts.ScriptTarget.Latest, true);
+let streamChat = null;
+function find(node) {
+  if (ts.isFunctionDeclaration(node) && node.name?.text === 'streamChat') streamChat = node;
+  ts.forEachChild(node, find);
+}
+find(source);
+if (!streamChat) throw new Error('streamChat not found');
+const catches = [];
+function inspect(node) {
+  if (ts.isCatchClause(node)) {
+    const calls = [];
+    function collect(child) {
+      if (ts.isCallExpression(child)) calls.push(child.expression.getText(source));
+      ts.forEachChild(child, collect);
+    }
+    collect(node.block);
+    catches.push(calls);
+  }
+  ts.forEachChild(node, inspect);
+}
+inspect(streamChat);
+process.stdout.write(JSON.stringify(catches));
+"""
+
+    # Act
+    completed = subprocess.run(
+        ["node", "-e", inspect_script, str(source_path)],
+        check=True,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+    )
+    catch_calls = json.loads(completed.stdout)
+
+    # Assert：至少一个读取 catch 报错，任何 catch 都不能报告正常完成。
+    assert any("onError" in calls for calls in catch_calls)
+    assert all("onDone" not in calls for calls in catch_calls)

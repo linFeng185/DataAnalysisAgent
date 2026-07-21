@@ -368,7 +368,10 @@ class DataSourceRegistry:
             "mysql": "mysql+aiomysql",
             "postgres": "postgresql+asyncpg",
         }
-        scheme = scheme_map.get(ds.dialect, "postgresql+asyncpg")
+        scheme = scheme_map.get(ds.dialect)
+        if scheme is None:
+            logger.error("数据源方言未实现", datasource=ds.name, dialect=ds.dialect)
+            raise ValueError(f"unsupported datasource dialect: {ds.dialect}")
         # MySQL 需要 charset=utf8mb4 参数
         extra = "?charset=utf8mb4" if ds.dialect == "mysql" else ""
         url = f"{scheme}://{ds.username}:{pwd}@{ds.host}:{ds.port}/{ds.database}{extra}"
