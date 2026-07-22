@@ -179,7 +179,7 @@ async def generate_sql_node(state: AnalysisState, config: RunnableConfig) -> dic
         return result
 
     # 12.1.6 LLM 输出二次校验 — 拦截表名幻觉
-    if not sql.startswith("-- "):  # 跳过错误占位符
+    if sql.strip() and not sql.startswith("-- "):  # 跳过空回退和错误占位符
         hallucination = _check_table_hallucination(sql, tables)
         if hallucination:
             logger.warning("LLM 幻觉拦截", sql=sql[:200], unknown_tables=hallucination)
@@ -594,6 +594,7 @@ def _check_table_hallucination(sql: str, tables: list[dict]) -> list[str]:
             parsed_input_tables=sorted(known),
             exc_info=True,
         )
+        unknown.append("SQL 解析失败，已阻断执行")
     logger.info("表名幻觉校验完成", unknown_tables=unknown, unknown_count=len(unknown))
     return unknown
 

@@ -16,26 +16,39 @@ import asyncio
 import os
 import threading
 import time
-from contextvars import ContextVar
+from contextvars import ContextVar, Token
 from datetime import datetime, timedelta, timezone
 
 import jwt
 from fastapi import APIRouter, HTTPException, Request, Response
 from pydantic import BaseModel, Field
-from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import JSONResponse
+from starlette.types import ASGIApp, Receive, Scope, Send
 
+from src.app_context import get_tenant_policy
 from src.config import get_settings
 from src.logging_config import get_logger
 from src.memory.pg_pool import get_pg_pool
+from src.security.tenant_policy import (
+    ANONYMOUS_ROLE,
+    ANONYMOUS_USER_ID,
+    DEFAULT_TENANT_ID,
+    RequestIdentity,
+)
 
 logger = get_logger(__name__)
 
 # ── ContextVar: 协程级用户上下文 ──
 
-_current_user_id: ContextVar[int] = ContextVar("current_user_id", default=0)
-_current_tenant_id: ContextVar[int] = ContextVar("current_tenant_id", default=1)
-_current_role: ContextVar[str] = ContextVar("current_role", default="anonymous")
+_current_user_id: ContextVar[int] = ContextVar(
+    "current_user_id",
+    default=ANONYMOUS_USER_ID,
+)
+_current_tenant_id: ContextVar[int] = ContextVar(
+    "current_tenant_id",
+    default=DEFAULT_TENANT_ID,
+)
+_current_role: ContextVar[str] = ContextVar("current_role", default=ANONYMOUS_ROLE)
 ACCESS_TOKEN_COOKIE = "access_token"
 _registration_limits: dict[str, list[float]] = {}
 _registration_rate_lock = threading.Lock()
@@ -51,7 +64,10 @@ def get_current_user_id() -> int:
 
     Returns: 用户 ID
     """
-    return _current_user_id.get()
+    logger.debug("获取当前用户 ID 入口")
+    result = _current_user_id.get()
+    logger.info("获取当前用户 ID 完成", user_id=result)
+    return result
 
 
 def get_current_tenant_id() -> int:
@@ -61,7 +77,10 @@ def get_current_tenant_id() -> int:
 
     Returns: 租户 ID
     """
-    return _current_tenant_id.get()
+    logger.debug("获取当前租户 ID 入口")
+    result = _current_tenant_id.get()
+    logger.info("获取当前租户 ID 完成", tenant_id=result)
+    return result
 
 
 def get_current_role() -> str:
@@ -70,7 +89,29 @@ def get_current_role() -> str:
     Returns:
         当前角色；匿名请求返回 anonymous。
     """
-    return _current_role.get()
+    logger.debug("获取当前角色入口")
+    result = _current_role.get()
+    logger.info("获取当前角色完成", role=result)
+    return result
+
+
+# 方法作用：把三个认证 ContextVar 统一组装为租户策略身份快照。
+# Args: 无。
+# Returns: 当前请求的 RequestIdentity。
+def get_current_identity() -> RequestIdentity:
+    logger.debug("获取当前请求身份入口")
+    result = RequestIdentity(
+        tenant_id=get_current_tenant_id(),
+        user_id=get_current_user_id(),
+        role=get_current_role(),
+    )
+    logger.info(
+        "获取当前请求身份完成",
+        tenant_id=result.tenant_id,
+        user_id=result.user_id,
+        role=result.role,
+    )
+    return result
 
 
 # 要求当前身份具备平台超级管理员权限。
@@ -126,20 +167,24 @@ _secret_cache: str | None = None
 def _secret() -> str:
     """获取 JWT 签名密钥。优先环境变量 JWT_SECRET，回退 config。
 
-    未配置时自动生成临时密钥（仅开发模式），打印生产警告。
+    未配置时仅开发和测试模式生成临时密钥，生产模式直接阻断。
     """
     global _secret_cache
     if _secret_cache is not None:
         return _secret_cache
 
     env_key = os.getenv("JWT_SECRET", "")
-    cfg_key = get_settings().jwt_secret
+    settings = get_settings()
+    cfg_key = settings.jwt_secret
     key = env_key or cfg_key
 
     if not key:
+        if getattr(settings, "env", "prod") == "prod":
+            logger.error("JWT_SECRET 未配置，生产签名已阻断")
+            raise RuntimeError("生产环境必须配置 JWT_SECRET")
         import secrets
         key = secrets.token_hex(32)
-        logger.warning("JWT_SECRET 未配置！已生成临时密钥（服务重启后所有 Token 失效）。生产环境必须设置 JWT_SECRET。")
+        logger.warning("JWT_SECRET 未配置，已为非生产环境生成临时密钥")
 
     if key == "dev-secret-change-in-production" or len(key) < 16:
         logger.warning("JWT_SECRET 强度不足！生产环境请使用至少 32 字节的随机密钥。")
@@ -360,7 +405,7 @@ async def register(req: RegisterRequest, response: Response, request: Request = 
     logger.debug("注册入口", username=req.username, client_key=client_key)
     try:
         from passlib.hash import bcrypt
-        s = settings
+        policy = get_tenant_policy()
         pool = await get_pg_pool()
         async with pool.acquire() as conn:
             # 方法作用：在事务边界内创建租户和用户。
@@ -368,9 +413,14 @@ async def register(req: RegisterRequest, response: Response, request: Request = 
             # Returns: (user_id, tenant_id) 二元组。
             async def _create_user() -> tuple[int, int]:
                 """在一个事务中创建租户和用户，保证失败时不残留半成品。"""
-                logger.debug("注册数据库写入入口", username=req.username, multi_tenant=s.multi_tenant)
-                tid = 1
-                if s.multi_tenant:
+                isolation_enabled = policy.datasource_isolation_enabled
+                logger.debug(
+                    "注册数据库写入入口",
+                    username=req.username,
+                    tenant_isolation=isolation_enabled,
+                )
+                tid = DEFAULT_TENANT_ID
+                if isolation_enabled:
                     tid = await conn.fetchval(
                         "INSERT INTO tenants (name) VALUES ($1) RETURNING id", req.tenant_name)
                     logger.info("新租户创建", tenant_id=tid, name=req.tenant_name)
@@ -431,7 +481,7 @@ async def current_user() -> dict:
     user_id = get_current_user_id()
     result = {
         "authenticated": user_id > 0,
-        "auth_required": get_settings().multi_tenant,
+        "auth_required": get_tenant_policy().requires_authentication(),
         "user_id": user_id,
         "tenant_id": get_current_tenant_id(),
         "role": get_current_role(),
@@ -476,7 +526,7 @@ def _requires_admin_api_key(path: str, method: str) -> bool:
     return result
 
 
-class AuthMiddleware(BaseHTTPMiddleware):
+class AuthMiddleware:
     """JWT 认证中间件。
 
     每个请求进入时：
@@ -486,8 +536,58 @@ class AuthMiddleware(BaseHTTPMiddleware):
     4. Token 过期/无效 → 401
     """
 
+    # 方法作用：保存下游 ASGI 应用，供每个请求完成认证后调用。
+    # Args: app - 下游 ASGI 应用。
+    # Returns: 无返回值。
+    def __init__(self, app: ASGIApp) -> None:
+        """初始化纯 ASGI 认证中间件。"""
+        logger.debug("认证中间件初始化入口")
+        self.app = app
+        logger.info("认证中间件初始化完成")
+
+    # 方法作用：以纯 ASGI 协议认证 HTTP 请求并保持流式响应上下文。
+    # Args: scope - ASGI 请求作用域；receive - 接收通道；send - 发送通道。
+    # Returns: 无返回值。
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        """处理 HTTP 请求，非 HTTP 协议直接交给下游应用。"""
+        scope_type = scope.get("type", "")
+        logger.debug("认证 ASGI 调用入口", scope_type=scope_type, path=scope.get("path", ""))
+        if scope_type != "http":
+            await self.app(scope, receive, send)
+            logger.info("认证 ASGI 调用完成", scope_type=scope_type, mode="passthrough")
+            return
+
+        request = Request(scope, receive=receive)
+        identity, denial = self._authenticate_request(request)
+        if denial is not None:
+            await denial(scope, receive, send)
+            logger.info("认证 ASGI 调用完成", path=request.url.path, mode="denied")
+            return
+        if identity is None:
+            await self.app(scope, receive, send)
+            logger.info("认证 ASGI 调用完成", path=request.url.path, mode="public")
+            return
+
+        contexts = self._set_identity(identity)
+        try:
+            await self.app(scope, receive, send)
+            logger.info("认证 ASGI 调用完成", path=request.url.path, user_id=identity[0])
+        except Exception as exc:
+            logger.error(
+                "认证后 ASGI 请求异常",
+                path=request.url.path,
+                error=str(exc),
+                exc_info=True,
+            )
+            raise
+        finally:
+            self._reset_identity(contexts, request.url.path)
+
+    # 方法作用：兼容既有单元测试直接调用，并复用纯 ASGI 的认证决策。
+    # Args: request - FastAPI Request；call_next - 测试或兼容调用链。
+    # Returns: 下游响应或认证失败响应。
     async def dispatch(self, request: Request, call_next):
-        """处理每个 HTTP 请求。
+        """执行与生产 ASGI 路径一致的认证和上下文清理。
 
         Args:
             request: FastAPI Request
@@ -495,22 +595,50 @@ class AuthMiddleware(BaseHTTPMiddleware):
 
         Returns: Response
         """
-        logger.debug("认证中间件入口", path=request.url.path, method=request.method)
-        if request.url.path in PUBLIC_PATHS:
+        logger.debug("认证兼容调用入口", path=request.url.path, method=request.method)
+        identity, denial = self._authenticate_request(request)
+        if denial is not None:
+            logger.info("认证兼容调用完成", path=request.url.path, mode="denied")
+            return denial
+        if identity is None:
             response = await call_next(request)
-            logger.info("认证中间件完成", path=request.url.path, mode="public")
+            logger.info("认证兼容调用完成", path=request.url.path, mode="public")
             return response
 
-        s = get_settings()
+        contexts = self._set_identity(identity)
+        try:
+            response = await call_next(request)
+            logger.info("认证兼容调用完成", path=request.url.path, user_id=identity[0])
+            return response
+        except Exception as exc:
+            logger.error("认证后请求异常", path=request.url.path, error=str(exc), exc_info=True)
+            raise
+        finally:
+            self._reset_identity(contexts, request.url.path)
 
+    # 方法作用：验证管理 Key 和 JWT，并返回身份或拒绝响应。
+    # Args: request - 当前 HTTP 请求。
+    # Returns: 公开请求返回空身份；拒绝时返回 401；成功时返回身份元组。
+    def _authenticate_request(
+        self,
+        request: Request,
+    ) -> tuple[tuple[int, int, str] | None, JSONResponse | None]:
+        """执行不消费请求体的同步认证决策。"""
+        logger.debug("认证决策入口", path=request.url.path, method=request.method)
+        if request.url.path in PUBLIC_PATHS:
+            logger.info("认证决策完成", path=request.url.path, mode="public")
+            return None, None
+
+        settings = get_settings()
+        policy = get_tenant_policy()
         # 平台管理端点保护 — 仅保护明确的基础设施写操作。
-        admin_api_key = getattr(s, "admin_api_key", "")
+        admin_api_key = getattr(settings, "admin_api_key", "")
         if admin_api_key and _requires_admin_api_key(request.url.path, request.method):
             import hmac
 
             if not hmac.compare_digest(request.headers.get("X-Admin-Key", ""), admin_api_key):
                 logger.warning("管理端点认证失败", path=request.url.path)
-                return _unauthorized("管理端点需要 X-Admin-Key")
+                return None, _unauthorized("管理端点需要 X-Admin-Key")
 
         authorization = request.headers.get("Authorization", "")
         bearer_token = authorization[7:].strip() if authorization.startswith("Bearer ") else ""
@@ -518,12 +646,12 @@ class AuthMiddleware(BaseHTTPMiddleware):
         is_auth_probe = request.url.path == "/api/v1/auth/me"
 
         if not token:
-            if s.multi_tenant and not is_auth_probe:
+            if policy.requires_authentication(is_probe=is_auth_probe):
                 logger.warning("认证令牌缺失", path=request.url.path)
-                return _unauthorized("未提供认证令牌")
+                return None, _unauthorized("未提供认证令牌")
             logger.info("认证中间件匿名回退", path=request.url.path, probe=is_auth_probe)
 
-        identity = (0, 1, "anonymous")
+        identity = (ANONYMOUS_USER_ID, DEFAULT_TENANT_ID, ANONYMOUS_ROLE)
         try:
             if token:
                 payload = jwt.decode(token, _secret(), algorithms=["HS256"])
@@ -534,24 +662,59 @@ class AuthMiddleware(BaseHTTPMiddleware):
                 )
         except jwt.ExpiredSignatureError:
             logger.info("JWT 已过期")
-            return _unauthorized("令牌已过期")
+            return None, _unauthorized("令牌已过期")
         except (jwt.PyJWTError, KeyError, TypeError, ValueError) as exc:
             logger.warning("JWT 无效", error=str(exc))
-            return _unauthorized("令牌无效")
+            return None, _unauthorized("令牌无效")
 
+        try:
+            policy.validate_identity(
+                RequestIdentity(
+                    user_id=identity[0],
+                    tenant_id=identity[1],
+                    role=identity[2],
+                ),
+            )
+        except PermissionError as exc:
+            logger.warning("JWT 身份不满足租户策略", error=str(exc))
+            return None, _unauthorized("令牌身份无效")
+
+        logger.info(
+            "认证决策完成",
+            path=request.url.path,
+            user_id=identity[0],
+            tenant_id=identity[1],
+            role=identity[2],
+        )
+        return identity, None
+
+    # 方法作用：把认证身份写入当前协程 ContextVar。
+    # Args: identity - user_id、tenant_id、role 身份元组。
+    # Returns: 用于后续精确 reset 的三个 ContextVar Token。
+    def _set_identity(
+        self,
+        identity: tuple[int, int, str],
+    ) -> tuple[Token[int], Token[int], Token[str]]:
+        """注入请求身份并返回上下文令牌。"""
+        logger.debug("请求身份注入入口", user_id=identity[0], tenant_id=identity[1])
         user_context = _current_user_id.set(identity[0])
         tenant_context = _current_tenant_id.set(identity[1])
         role_context = _current_role.set(identity[2])
         logger.info("请求身份已注入", user_id=identity[0], tenant_id=identity[1], role=identity[2])
-        try:
-            response = await call_next(request)
-            logger.info("认证中间件完成", path=request.url.path, user_id=identity[0])
-            return response
-        except Exception as exc:
-            logger.error("认证后请求异常", path=request.url.path, error=str(exc), exc_info=True)
-            raise
-        finally:
-            _current_user_id.reset(user_context)
-            _current_tenant_id.reset(tenant_context)
-            _current_role.reset(role_context)
-            logger.info("请求身份已清理", path=request.url.path)
+        return user_context, tenant_context, role_context
+
+    # 方法作用：使用请求进入时的 Token 精确恢复三个身份 ContextVar。
+    # Args: contexts - 三个 ContextVar Token；path - 当前请求路径。
+    # Returns: 无返回值。
+    def _reset_identity(
+        self,
+        contexts: tuple[Token[int], Token[int], Token[str]],
+        path: str,
+    ) -> None:
+        """清理请求身份，防止连接复用或并发请求间污染。"""
+        logger.debug("请求身份清理入口", path=path)
+        user_context, tenant_context, role_context = contexts
+        _current_user_id.reset(user_context)
+        _current_tenant_id.reset(tenant_context)
+        _current_role.reset(role_context)
+        logger.info("请求身份已清理", path=path)

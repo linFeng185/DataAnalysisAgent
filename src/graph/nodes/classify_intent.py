@@ -176,11 +176,16 @@ async def _select_authorized_datasource(
     return selected
 
 
+# 方法作用：在规则未命中时使用任务模型识别意图，并在模型故障时安全降级。
+# Args: query - 用户原始问题。
+# Returns: 合法意图名称；模型不可用、输出无效或调用失败时返回 None。
 async def _llm_classify(query: str) -> str | None:
     """LLM 意图分类——规则未命中时回退。"""
+    logger.debug("LLM 意图分类入口", query=query[:80])
     try:
         from src.llm.client import get_task_llm, is_task_llm_available
         if not is_task_llm_available("classify_intent"):
+            logger.info("LLM 意图分类回退", reason="任务模型不可用")
             return None
         llm = get_task_llm("classify_intent", temperature=0, reasoning=False)
         from langchain_core.messages import SystemMessage, HumanMessage
@@ -191,7 +196,10 @@ async def _llm_classify(query: str) -> str | None:
         valid = {"query", "aggregation", "trend", "attribution", "metadata", "chat", "file_analysis"}
         for w in text.split():
             if w in valid:
+                logger.info("LLM 意图分类完成", intent=w)
                 return w
+        logger.warning("LLM 意图分类回退", reason="模型输出不在合法集合", output=text[:80])
         return None
-    except Exception:
+    except Exception as exc:
+        logger.error("LLM 意图分类失败，回退规则分类", error=str(exc), exc_info=True)
         return None

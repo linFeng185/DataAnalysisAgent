@@ -47,7 +47,7 @@
 
 | # | 功能 | 文件 | 描述 | 状态 |
 |---|------|------|------|------|
-| 8.4.1 | MCP 作用域管理 API `[P0]` | `src/api/routes.py` + `migrations/004_resource_scopes.sql` | system 仅超管、tenant 仅租户管理员、private 仅本人管理 | 单测完成 |
+| 8.4.1 | MCP 作用域管理 API `[P0]` | `src/api/routes.py` + `migrations/004_resource_scopes.sql` | 三级权限管理；配置库故障返回 503，不以 HTTP 200 空列表掩盖 | 单测完成 |
 | 8.4.2 | 受管 MCP 进程与网络边界 `[P0]` | `src/api/routes.py` + `src/mcp_client/client_manager.py` | 数据库配置仅允许管理员创建 SSE；禁用 stdio/进程参数并按精确主机 allowlist 加载 | 单测完成 |
 
 ### 模块收尾

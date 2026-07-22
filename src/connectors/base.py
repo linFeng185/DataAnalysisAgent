@@ -94,7 +94,7 @@ class ConnectorBase(ABC):
         return None
 
     @abstractmethod
-    def _build_url(self) -> str:
+    def _build_url(self) -> sa.URL | str:
         """构建方言特定连接 URL。
 
         Args:

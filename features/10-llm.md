@@ -9,7 +9,7 @@
 | 10.1.1 | ChatOpenAI 工厂 | `src/llm/client.py` | get_openai_llm() — ChatOpenAI 实例 | 单测完成 | P0 |
 | 10.1.2 | ChatAnthropic 工厂 | 同上 | get_anthropic_llm() — ChatAnthropic 实例 | 单测完成 | P0 |
 | 10.1.3 | LLM 路由器 | 同上 | get_llm() — provider 自动路由 | 单测完成 | P0 |
-| 10.1.4 | cheap_llm 工厂 | 同上 | get_cheap_llm() — gpt-4o-mini | 单测完成 | P0 |
+| 10.1.4 | cheap_llm 工厂 | 同上 | get_cheap_llm() 使用配置的 Provider 与 cheap_llm_model，不硬编码 OpenAI | 单测完成 | P0 |
 | 10.1.5 | is_llm_available() | 同上 | API Key 可用性检测 | 单测完成 | P0 |
 | 10.1.6 | 节点级模型路由 `[P1]` | 同上 | resolve_llm_task_target() 在 local/remote/none 间确定性选择 | 单测完成 |
 | 10.1.7 | 本地模型优先 `[P1]` | 同上 + `src/config.py` | 轻量节点默认 LOCAL_LLM_*，未配置时规则回退，不隐式等待远程 | 单测完成 |

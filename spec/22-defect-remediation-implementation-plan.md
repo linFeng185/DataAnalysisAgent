@@ -187,3 +187,20 @@
 - [x] 按边界日志定位数据消失层并实施最小修复。
 - [x] 定向组合回归通过（162 passed），前端依赖审计 0 vulnerabilities。
 - [x] 全量非 live pytest（662 passed, 1 skipped）、前端 build、compileall、pip check 与差异检查通过。
+
+### 任务 8：生产安全审查返修
+
+**范围：**
+- 凭证加密改为每次生成随机 salt 的版本化密文，并兼容历史固定 salt token。
+- 生产环境拒绝默认数据库凭证、默认凭证主密钥和临时 JWT 密钥。
+- SQL 副作用、表名幻觉、列引用、自动建库和枚举采样全部失败关闭或安全引用。
+- Milvus 候选表达式转义后追加 metadata 精确过滤，删除与计数使用相同语义。
+- 上传任务、外部动作审计和幂等记录有界；查询历史写入由工作流等待完成。
+- 管理模型请求、MCP/会话错误、知识路径与错误响应、生产 OpenAPI 暴露完成收口。
+- Connector URL、SQLite 方言、本地嵌入模型路径、首行空值图表和 cheap LLM Provider 修复。
+
+- [x] 先编写随机盐、生产配置、SQL、Milvus、任务生命周期和故障可见性失败测试。
+- [x] 根据探针日志定位各边界并实施最小修复。
+- [x] 第一批安全测试通过（68 passed），第二批知识与执行测试通过（57 passed）。
+- [x] 剩余 Critical/High/Medium 定向组合测试通过（93 passed）。
+- [x] 运行全量非 live pytest（721 passed）、compileall 与差异检查。

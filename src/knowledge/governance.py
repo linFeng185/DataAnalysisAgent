@@ -5,6 +5,7 @@ from __future__ import annotations
 from enum import StrEnum
 
 from src.logging_config import get_logger
+from src.security.tenant_policy import DEFAULT_TENANT_ID, RequestIdentity, TenantPolicy
 
 logger = get_logger(__name__)
 
@@ -80,12 +81,14 @@ def can_write_knowledge_scope(
         multi_tenant=multi_tenant,
     )
     normalized = normalize_knowledge_scope(scope)
-    if normalized is KnowledgeScope.SYSTEM:
-        result = is_super_admin(role)
-    elif normalized is KnowledgeScope.TENANT:
-        result = is_super_admin(role) or is_tenant_admin(role)
-    else:
-        result = user_id > 0 or (not multi_tenant and normalize_role(role) == "anonymous")
+    result = TenantPolicy(multi_tenant=multi_tenant).can_write_scope(
+        normalized.value,
+        RequestIdentity(
+            tenant_id=DEFAULT_TENANT_ID,
+            user_id=user_id,
+            role=role,
+        ),
+    )
     if not result:
         logger.warning(
             "知识范围写权限拒绝",

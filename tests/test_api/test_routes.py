@@ -373,8 +373,8 @@ class TestEndpoints:
 
         import src.api.auth as auth
         import src.api.routes as routes
-        import src.config as config_module
         import src.security.permission_check as permission_module
+        from src.app_context import AppContext, use_app_context
 
         items = [
             {"name": "sales", "description": "销售", "dialect": "postgres"},
@@ -382,14 +382,15 @@ class TestEndpoints:
         ]
         resolver = AsyncMock(return_value={"sales": {**items[0], "row_filter_sql": "tenant_id=3"}})
         monkeypatch.setattr(routes, "_registry", lambda: SimpleNamespace(list_all=AsyncMock(return_value=items)))
-        monkeypatch.setattr(config_module, "get_settings", lambda: SimpleNamespace(multi_tenant=True))
+        settings = SimpleNamespace(multi_tenant=True)
         monkeypatch.setattr(auth, "get_current_tenant_id", lambda: 3)
         monkeypatch.setattr(auth, "get_current_user_id", lambda: 7)
         monkeypatch.setattr(auth, "get_current_role", lambda: "analyst")
         monkeypatch.setattr(permission_module, "resolve_datasource_access", resolver)
 
         # Act
-        result = await routes.list_datasources(page=1, page_size=20)
+        with use_app_context(AppContext(settings)):
+            result = await routes.list_datasources(page=1, page_size=20)
 
         # Assert
         assert [item["name"] for item in result["datasources"]] == ["sales"]

@@ -7,6 +7,11 @@ import random
 import datetime
 from faker import Faker
 
+from src.logging_config import get_logger
+
+
+logger = get_logger(__name__)
+
 fake = Faker('zh_CN')
 
 # ============ 配置参数，可按需修改 ============
@@ -22,12 +27,22 @@ END_DATE   = datetime.date(2028, 6, 30)
 OUTPUT_FILE = 'test_data.sql'  # 输出文件名
 # =============================================
 
+# 方法作用：生成给定日期闭区间内的随机日期。
+# Args: start - 起始日期；end - 结束日期。
+# Returns: 闭区间内的随机日期。
 def random_date(start, end):
     """生成 start~end 之间的随机日期"""
+    logger.debug("生成随机日期入口", start=str(start), end=str(end))
     delta = end - start
-    return start + datetime.timedelta(days=random.randint(0, delta.days))
+    result = start + datetime.timedelta(days=random.randint(0, delta.days))
+    logger.debug("生成随机日期完成", result=str(result))
+    return result
 
+# 方法作用：按配置数量生成多数据库兼容的电商测试 SQL 文件。
+# Args: 无，使用模块级数量和输出路径配置。
+# Returns: 无返回值。
 def main():
+    logger.debug("生成测试数据入口", output=OUTPUT_FILE)
     random.seed(42)
     fake.seed_instance(42)
 
@@ -128,7 +143,7 @@ def main():
             new = random.randint(old+1, 3) if old < 3 else old
             f.write(f"INSERT INTO user_level_log (log_id, user_id, old_level, new_level, change_date) VALUES ({i}, {user_id}, {old}, {new}, '{change_date.isoformat()}');\n")
 
-    print(f"生成完成：{OUTPUT_FILE}")
+    logger.info("生成测试数据完成", output=OUTPUT_FILE)
 
 if __name__ == '__main__':
     main()

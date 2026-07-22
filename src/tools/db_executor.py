@@ -57,12 +57,18 @@ class DBExecutorTool(BaseTool):
         try:
             from src.connectors.registry import create_connector
             from src.datasource.registry import get_registry
+            from src.graph.nodes.layer3_validate import validate_readonly_sql
             from src.tools.sqlglot_validator import validate_with_sqlglot
 
             validation = validate_with_sqlglot(sql, dialect="mysql")
-            if not validation.get("valid", False):
+            readonly_errors = validate_readonly_sql(sql, "mysql")
+            if not validation.get("valid", False) or readonly_errors:
                 logger.warning("DBExecutorTool._arun 拒绝", datasource=datasource, reason="SQL 校验失败")
-                return {"success": False, "error": "SQL 校验失败", "details": validation.get("errors", [])}
+                return {
+                    "success": False,
+                    "error": "SQL 校验失败",
+                    "details": validation.get("errors", []) + readonly_errors,
+                }
             ds = await get_registry().resolve(datasource)
             connector = create_connector(ds)
             connector._engine = ds.engine

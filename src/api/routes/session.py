@@ -365,9 +365,14 @@ async def _load_latest_state(session_id: str) -> dict | None:
             "error_message": cv.get("execution_error", "") or "",
             "sql_reasoning_content": cv.get("sql_reasoning_content", "") or "",
         }
-    except Exception as e:
-        logger.warning("最新状态加载失败", session_id=session_id[:20], error=str(e))
-        return None
+    except Exception as exc:
+        logger.error(
+            "最新状态加载失败",
+            session_id=session_id[:20],
+            error=str(exc),
+            exc_info=True,
+        )
+        raise
 
 
 # 方法作用：把 checkpoint 中的结构化历史、消息或当前输入转换为统一轮次。
@@ -601,6 +606,11 @@ async def _load_session_turns(session_id: str, before: int | None = None, limit:
             rich_turns=sum(1 for turn in result if turn.get("final_result")),
         )
         return result
-    except Exception as e:
-        logger.warning("会话轮次加载失败", session_id=session_id[:20], error=str(e))
-        return []
+    except Exception as exc:
+        logger.error(
+            "会话轮次加载失败",
+            session_id=session_id[:20],
+            error=str(exc),
+            exc_info=True,
+        )
+        raise

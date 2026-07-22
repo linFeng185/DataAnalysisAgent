@@ -166,11 +166,15 @@ async def retrieve_schema_node(state: AnalysisState) -> dict:
     return result
 
 
+# 方法作用：从知识向量存储加载数据源字段枚举，并在增强数据故障时降级为空字典。
+# Args: datasource - 数据源名称；tables - 当前相关表列表。
+# Returns: 表字段到枚举值列表的映射，检索故障时返回空字典。
 async def _load_enum_dictionary(datasource: str, tables: list) -> dict[str, list[str]]:
     """从知识库加载每列的合法枚举值列表。
 
     用户上传的知识库文档中可定义: status: paid|refunded|cancelled
     """
+    logger.debug("枚举值字典加载入口", datasource=datasource, table_count=len(tables))
     try:
         from src.memory.vector_store import get_vector_store
         from src.knowledge.retrieval import build_knowledge_filters
@@ -190,10 +194,15 @@ async def _load_enum_dictionary(datasource: str, tables: list) -> dict[str, list
                     values = [value.strip() for value in values.split("|") if value.strip()]
                 if column and values:
                     enum_dict[f"{table}.{column}" if table else column] = [str(value) for value in values]
-        if enum_dict:
-            logger.info("枚举值字典加载", datasource=datasource, columns=len(enum_dict))
+        logger.info("枚举值字典加载完成", datasource=datasource, columns=len(enum_dict))
         return enum_dict
-    except Exception:
+    except Exception as exc:
+        logger.error(
+            "枚举值字典加载失败，降级为空字典",
+            datasource=datasource,
+            error=str(exc),
+            exc_info=True,
+        )
         return {}
 
 
@@ -241,5 +250,5 @@ async def _load_knowledge_context(datasource: str, query: str) -> str:
                     total=total, query=query[:60] if query else "")
         return ""
     except Exception as e:
-        logger.warning("知识库检索失败", error=str(e))
+        logger.error("知识库检索失败", error=str(e), exc_info=True)
         return ""

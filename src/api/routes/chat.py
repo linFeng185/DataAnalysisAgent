@@ -2,26 +2,12 @@
 
 from __future__ import annotations
 
-import io
-import html
-import json
-import os
 import time
-import uuid
-from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
 
-from fastapi import APIRouter, Body, File, HTTPException, Query, UploadFile
+from fastapi import APIRouter, HTTPException
 
-from src.api.schemas import (
-    ChatRequest, ChatResponse, ColumnCommentRequest,
-    DataSourceCreateRequest, DataSourceInfo, HealthResponse, KnowledgeTagCreateRequest,
-    KnowledgeTagStatusRequest, MCPServerCreate, TableInfo,
-)
-from src.exceptions import DataSourceNotFoundError
-from src.llm.client import is_llm_available
+from src.api.schemas import ChatRequest, ChatResponse
 from src.logging_config import get_logger
-from src.api.routes._helpers import _app, _authorize_extension_scope, _registry
 
 logger = get_logger(__name__)
 router = APIRouter()
@@ -100,19 +86,20 @@ async def _resolve_chat_access(req: ChatRequest) -> dict[str, dict]:
         当前用户可以交给模型和 SQL 工作流的数据源权限映射。
     """
     from src.api.auth import get_current_role, get_current_tenant_id, get_current_user_id
-    from src.config import get_settings
+    from src.app_context import get_tenant_policy
     from src.security.permission_check import resolve_datasource_access
 
-    settings = get_settings()
+    policy = get_tenant_policy()
+    isolation_enabled = policy.datasource_isolation_enabled
     requested = _requested_chat_datasources(req)
     logger.debug(
         "解析聊天数据源权限入口",
         tenant_id=get_current_tenant_id(),
         user_id=get_current_user_id(),
         requested_count=len(requested),
-        multi_tenant=settings.multi_tenant,
+        tenant_isolation=isolation_enabled,
     )
-    if not settings.multi_tenant and requested:
+    if not isolation_enabled and requested:
         result = {
             name: {
                 "name": name,
@@ -135,7 +122,7 @@ async def _resolve_chat_access(req: ChatRequest) -> dict[str, dict]:
             tenant_id=get_current_tenant_id(),
             user_id=get_current_user_id(),
             role=get_current_role(),
-            multi_tenant=settings.multi_tenant,
+            tenant_policy=policy,
         )
         logger.info(
             "解析聊天数据源权限完成",
@@ -189,13 +176,21 @@ async def chat(req: ChatRequest):
     import uuid as _uuid
     sid = req.session_id or str(_uuid.uuid4())
     # 非流式也保存会话元数据
-    import asyncio as _asyncio
+    from src.api.background_tasks import create_background_task
     try:
         from src.memory.session_store import get_session_store
         if req.session_id:
-            _asyncio.create_task(get_session_store().touch(sid, req.datasource, req.query))
+            create_background_task(
+                get_session_store().touch(sid, req.datasource, req.query),
+                name="touch-chat-session",
+                context={"session_id": sid[:20]},
+            )
         else:
-            _asyncio.create_task(get_session_store().create(sid, req.datasource, req.query))
+            create_background_task(
+                get_session_store().create(sid, req.datasource, req.query),
+                name="create-chat-session",
+                context={"session_id": sid[:20]},
+            )
     except Exception as exc:
         logger.error(
             "非流式会话元数据任务创建失败",

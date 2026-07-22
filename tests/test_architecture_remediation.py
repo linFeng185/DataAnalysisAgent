@@ -44,6 +44,44 @@ class TestArchitectureRemediation:
         assert offenders == []
         logger.info("test_no_exception_handler_contains_only_pass 完成")
 
+    # 方法作用：验证所有返回回退值的宽泛异常处理都记录完整堆栈。
+    # Args: self - pytest 测试类实例。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    def test_exception_fallbacks_log_traceback(self) -> None:
+        """可恢复异常允许回退，但必须能与真实空数据区分。"""
+        logger.debug("test_exception_fallbacks_log_traceback 入口")
+        offenders: list[str] = []
+        for path, tree in _source_trees():
+            for handler in ast.walk(tree):
+                if not isinstance(handler, ast.ExceptHandler):
+                    continue
+                if not (
+                    isinstance(handler.type, ast.Name)
+                    and handler.type.id == "Exception"
+                ):
+                    continue
+                if not any(isinstance(node, ast.Return) for node in ast.walk(handler)):
+                    continue
+                traceback_logged = False
+                for node in ast.walk(handler):
+                    if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
+                        continue
+                    if node.func.attr == "exception":
+                        traceback_logged = True
+                        break
+                    traceback_logged = any(
+                        keyword.arg == "exc_info"
+                        and isinstance(keyword.value, ast.Constant)
+                        and keyword.value.value is True
+                        for keyword in node.keywords
+                    )
+                    if traceback_logged:
+                        break
+                if not traceback_logged:
+                    offenders.append(f"{path.relative_to(ROOT)}:{handler.lineno}")
+        assert offenders == []
+        logger.info("test_exception_fallbacks_log_traceback 完成")
+
     # 方法作用：验证遗留 LangChain Tool 不再创建嵌套事件循环。
     # Args: self - pytest 测试类实例。
     # Returns: 无返回值，断言失败时由 pytest 报告。

@@ -10,7 +10,6 @@ from typing import Any
 
 import sqlglot
 from sqlglot import exp
-from sqlglot.errors import ParseError
 from langchain_core.tools import BaseTool
 
 from src.logging_config import get_logger
@@ -62,7 +61,16 @@ def _get_dialect_functions(dialect: str) -> set[str]:
     try:
         import importlib
         dialect_mod = importlib.import_module(f"sqlglot.dialects.{dialect}")
-    except Exception:
+    except ModuleNotFoundError:
+        logger.warning("sqlglot 方言模块不存在", dialect=dialect)
+        return set()
+    except Exception as exc:
+        logger.error(
+            "sqlglot 方言模块加载失败",
+            dialect=dialect,
+            error=str(exc),
+            exc_info=True,
+        )
         return set()
     try:
         for attr_name in dir(dialect_mod):
@@ -75,7 +83,13 @@ def _get_dialect_functions(dialect: str) -> set[str]:
                     funcs.update(k.lower() for k in vars(exp.Func))
                     return funcs
         return set()
-    except Exception:
+    except Exception as exc:
+        logger.error(
+            "sqlglot 方言函数读取失败",
+            dialect=dialect,
+            error=str(exc),
+            exc_info=True,
+        )
         return set()
 
 

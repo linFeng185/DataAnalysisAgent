@@ -12,12 +12,12 @@ from __future__ import annotations
 import math
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from decimal import Decimal
-D = Decimal
+from decimal import Decimal, InvalidOperation
 
 from src.logging_config import get_logger
 
 logger = get_logger(__name__)
+D = Decimal
 
 
 @dataclass
@@ -62,7 +62,8 @@ class DataProcessor(ABC):
             return D(str(val))
         try:
             return D(str(val))
-        except Exception:
+        except (InvalidOperation, TypeError, ValueError) as exc:
+            logger.warning("数值转换失败，回退为零", value_type=type(val).__name__, error=str(exc))
             return D(0)
 
     @staticmethod
@@ -72,20 +73,24 @@ class DataProcessor(ABC):
     def _group(rows, kc, vc) -> dict[str, list[Decimal]]:
         g: dict[str, list[Decimal]] = {}
         for r in rows:
-            k = DataProcessor._s(r.get(kc)); v = DataProcessor._f(r.get(vc))
-            if k: g.setdefault(k, []).append(v)
+            k = DataProcessor._s(r.get(kc))
+            v = DataProcessor._f(r.get(vc))
+            if k:
+                g.setdefault(k, []).append(v)
         return g
 
     @staticmethod
     def _pct(sv, p):
-        if not sv: return D(0)
+        if not sv:
+            return D(0)
         sv_sorted = sorted(sv)
         idx = int(len(sv_sorted) * p)
         return sv_sorted[min(idx, len(sv_sorted) - 1)]
 
     @staticmethod
     def _std(vals):
-        if len(vals) < 2: return D(0)
+        if len(vals) < 2:
+            return D(0)
         m = sum(vals) / len(vals)
         return D(str(math.sqrt(float(sum((v - m) ** 2 for v in vals)) / len(vals))))
 

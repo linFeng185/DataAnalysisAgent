@@ -15,7 +15,6 @@ Schema 缓存管理器 — 三级回退获取表结构。
 
 from __future__ import annotations
 
-import asyncio
 from dataclasses import replace
 from datetime import datetime, timezone
 from typing import Any
@@ -30,16 +29,6 @@ from src.knowledge.models import (
 from src.logging_config import get_logger
 
 logger = get_logger(__name__)
-
-
-_schema_singleton = None
-
-
-def get_schema_manager():
-    global _schema_singleton
-    if _schema_singleton is None:
-        _schema_singleton = SchemaManager()
-    return _schema_singleton
 
 
 class SchemaManager:
@@ -446,7 +435,8 @@ class SchemaManager:
                 "datasource": datasource_name,
                 "visibility": "tenant",
             }
-            if get_settings().multi_tenant:
+            from src.app_context import get_tenant_policy
+            if get_tenant_policy().knowledge_isolation_enabled:
                 from src.api.auth import get_current_tenant_id
                 filters["tenant_id"] = get_current_tenant_id()
             results = await store.get_by_filter(
@@ -585,7 +575,7 @@ class SchemaManager:
                 if datasource_name in (e.tags or []) or datasource_name in (e.metadata.get("tables", []) or [])
             ]
         except Exception as e:
-            logger.warning("文档加载失败", error=str(e))
+            logger.error("文档加载失败", error=str(e), exc_info=True)
             return []
 
 
@@ -645,8 +635,13 @@ class SchemaManager:
                 entries=len(entries),
             )
             return entries
-        except Exception as e:
-            logger.error("DB 内省失败", datasource=datasource_name, error=str(e))
+        except Exception as exc:
+            logger.error(
+                "DB 内省失败",
+                datasource=datasource_name,
+                error=str(exc),
+                exc_info=True,
+            )
             return []
 
     def _snapshot_to_entries(
@@ -725,11 +720,12 @@ class SchemaManager:
         Returns:
             当前租户 ID；无请求上下文时返回 1。
         """
-        try:
-            from src.api.auth import get_current_tenant_id
-            return get_current_tenant_id()
-        except Exception:
-            return 1
+        logger.debug("读取 Schema 当前租户入口")
+        from src.api.auth import get_current_tenant_id
+
+        result = get_current_tenant_id()
+        logger.info("读取 Schema 当前租户完成", tenant_id=result)
+        return result
 
     @staticmethod
     def _current_user_id() -> int:
@@ -738,11 +734,12 @@ class SchemaManager:
         Returns:
             当前用户 ID；无请求上下文时返回 0。
         """
-        try:
-            from src.api.auth import get_current_user_id
-            return get_current_user_id()
-        except Exception:
-            return 0
+        logger.debug("读取 Schema 当前用户入口")
+        from src.api.auth import get_current_user_id
+
+        result = get_current_user_id()
+        logger.info("读取 Schema 当前用户完成", user_id=result)
+        return result
 
     # ── 私有：缓存写入 ──────────────────────────────────
 
@@ -769,8 +766,8 @@ class SchemaManager:
                 ))
             await store.upsert(vec_entries)
             logger.info("向量存储缓存写入完成", count=len(entries))
-        except Exception as e:
-            logger.error("向量存储缓存写入失败", error=str(e))
+        except Exception as exc:
+            logger.error("向量存储缓存写入失败", error=str(exc), exc_info=True)
 
     # ── 私有：条目合并 ──────────────────────────────────
 
@@ -924,6 +921,7 @@ class SchemaManager:
             table_count=len(tables),
         )
         try:
+            from src.app_context import get_tenant_policy
             from src.memory.vector_store import get_vector_store
             store = await get_vector_store()
             results = await store.search(
@@ -933,7 +931,11 @@ class SchemaManager:
                     "category": "table",
                     "datasource": datasource_name,
                     "visibility": "tenant",
-                    **({"tenant_id": self._current_tenant_id()} if get_settings().multi_tenant else {}),
+                    **(
+                        {"tenant_id": self._current_tenant_id()}
+                        if get_tenant_policy().knowledge_isolation_enabled
+                        else {}
+                    ),
                 },
             )
             if not results:
@@ -953,8 +955,12 @@ class SchemaManager:
             logger.info("语义搜索匹配", query=user_query[:60],
                         candidates=len(matched), selected=len(selected))
             return selected
-        except Exception as e:
-            logger.warning("语义搜索失败，回退到全部表", error=str(e))
+        except Exception as exc:
+            logger.warning(
+                "语义搜索失败，回退到全部表",
+                error=str(exc),
+                exc_info=True,
+            )
             return {t.name.lower() for t in tables}
 
     # ── 格式化辅助 ─────────────────────────────────────
@@ -1006,19 +1012,24 @@ class SchemaManager:
                 collection=settings.chroma_collection_name,
                 model_path=settings.embedding_model_path,
             )
-        except Exception as e:
-            logger.error("ChromaDB 初始化失败", error=str(e))
+        except Exception as exc:
+            logger.error("ChromaDB 初始化失败", error=str(exc), exc_info=True)
             raise
 
     @staticmethod
     def _create_embedding_function(settings):
         """创建嵌入函数。
 
-        优先 EMBEDDING_MODEL_PATH 本地路径，未配置则从 HuggingFace 自动下载（首次 ~80MB）。
+        Args:
+            settings: 包含 embedding_model_path 的运行配置。
+
+        Returns:
+            使用本地目录或默认缓存的 ChromaDB 嵌入函数。
         """
         from pathlib import Path
 
         model_dir = settings.embedding_model_path
+        logger.debug("创建嵌入函数入口", configured=bool(model_dir))
         if model_dir:
             model_path = Path(model_dir)
             if not model_path.exists():
@@ -1031,21 +1042,25 @@ class SchemaManager:
             if missing:
                 raise FileNotFoundError(f"嵌入模型目录缺少文件: {missing}")
             from chromadb.utils.embedding_functions import ONNXMiniLM_L6_V2
-            return ONNXMiniLM_L6_V2(preferred_providers=["CPUExecutionProvider"])
+
+            class _LocalModelEmbeddingFunction(ONNXMiniLM_L6_V2):
+                """把 ChromaDB ONNX 模型读取目录固定到已校验的本地路径。"""
+
+                DOWNLOAD_PATH = str(model_path)
+                EXTRACTED_FOLDER_NAME = "onnx" if onnx_dir.exists() else ""
+
+            result = _LocalModelEmbeddingFunction(
+                preferred_providers=["CPUExecutionProvider"],
+            )
+            logger.info("嵌入模型加载成功", model_dir=str(model_path))
+            return result
 
         # 未配置 → HuggingFace 自动下载
         logger.info("EMBEDDING_MODEL_PATH 未配置，从 HuggingFace 自动下载 all-MiniLM-L6-v2")
         from chromadb.utils.embedding_functions import ONNXMiniLM_L6_V2
-        return ONNXMiniLM_L6_V2(preferred_providers=["CPUExecutionProvider"])
-
-        from chromadb.utils.embedding_functions.onnx_mini_lm_l6_v2 import ONNXMiniLM_L6_V2
-
-        class _LocalModelEmbeddingFunction(ONNXMiniLM_L6_V2):
-            DOWNLOAD_PATH = str(model_path)
-            EXTRACTED_FOLDER_NAME = "onnx" if onnx_dir.exists() else ""
-
-        logger.info("嵌入模型加载成功", model_dir=str(model_path))
-        return _LocalModelEmbeddingFunction()
+        result = ONNXMiniLM_L6_V2(preferred_providers=["CPUExecutionProvider"])
+        logger.info("默认嵌入模型加载成功")
+        return result
 
     def _row_to_entry(
         self, entry_id: str, content: str, metadata: dict
@@ -1068,14 +1083,18 @@ class SchemaManager:
         logger.info("关闭 SchemaManager 完成")
 
 
-# ── 单例 ──────────────────────────────────────────────
-
-_manager: SchemaManager | None = None
-
-
+# 方法作用：从当前 AppContext 获取 SchemaManager。
+# Args: 无。
+# Returns: 当前应用独享的 SchemaManager 实例。
 def get_schema_manager() -> SchemaManager:
-    """获取 SchemaManager 全局单例。"""
-    global _manager
-    if _manager is None:
-        _manager = SchemaManager()
-    return _manager
+    """获取当前应用的 SchemaManager。"""
+    from src.app_context import get_app_context
+
+    logger.debug("获取 SchemaManager 入口")
+    result = get_app_context().get_or_create(
+        "schema_manager",
+        SchemaManager,
+        closer=SchemaManager.close,
+    )
+    logger.info("获取 SchemaManager 完成")
+    return result

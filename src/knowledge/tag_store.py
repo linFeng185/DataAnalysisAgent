@@ -437,16 +437,13 @@ class KnowledgeTagStore:
             raise
 
 
-_tag_store: KnowledgeTagStore | None = None
-
-
-# 获取知识标签存储单例。
+# 获取当前 AppContext 的知识标签存储。
 # Args: 无。
-# Returns: KnowledgeTagStore 单例。
+# Returns: 当前应用独享的 KnowledgeTagStore 实例。
 def get_knowledge_tag_store() -> KnowledgeTagStore:
-    logger.debug("获取知识标签存储单例入口")
-    global _tag_store
-    if _tag_store is None:
-        _tag_store = KnowledgeTagStore()
-    logger.info("获取知识标签存储单例完成")
-    return _tag_store
+    from src.app_context import get_app_context
+
+    logger.debug("获取知识标签存储入口")
+    result = get_app_context().get_or_create("knowledge_tag_store", KnowledgeTagStore)
+    logger.info("获取知识标签存储完成")
+    return result

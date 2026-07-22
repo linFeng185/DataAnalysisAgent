@@ -26,6 +26,38 @@ class TestLLMFactory:
         from src.llm.client import get_cheap_llm
         assert get_cheap_llm() is not None
 
+    # 方法作用：验证低成本模型沿用已配置 Provider 而非硬编码 OpenAI 工厂。
+    # Args: self - pytest 测试类实例；monkeypatch - pytest 补丁工具。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    def test_cheap_llm_uses_configured_provider(self, monkeypatch):
+        """Anthropic 等 Provider 的 cheap model 必须走统一路由。"""
+        from types import SimpleNamespace
+
+        import src.llm.client as client_module
+
+        captured = {}
+        expected = object()
+        monkeypatch.setattr(
+            client_module,
+            "get_settings",
+            lambda: SimpleNamespace(llm_provider="anthropic", cheap_llm_model="claude-haiku"),
+        )
+
+        # 方法作用：捕获低成本模型路由参数。
+        # Args: kwargs - get_llm 接收的模型路由参数。
+        # Returns: 预设模型对象。
+        def fake_get_llm(**kwargs):
+            captured.update(kwargs)
+            return expected
+
+        monkeypatch.setattr(client_module, "get_llm", fake_get_llm)
+
+        result = client_module.get_cheap_llm()
+
+        assert result is expected
+        assert captured["provider"] == "anthropic"
+        assert captured["model"] == "claude-haiku"
+
     def test_not_available_no_key(self, monkeypatch):
         monkeypatch.setenv("OPENAI_API_KEY", "")
         monkeypatch.setenv("LLM_PROVIDER", "openai")

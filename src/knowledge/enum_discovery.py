@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from src.knowledge.models import AUTO_TTL_SECONDS, KnowledgeEntry, KnowledgeSource
+from src.knowledge.models import KnowledgeEntry, KnowledgeSource
 from src.logging_config import get_logger
 
 logger = get_logger(__name__)
@@ -22,6 +22,27 @@ MAX_ROWS_FOR_SAMPLING = 10_000_000  # 不采样行数超过 1000 万的表
 MAX_DISTINCT_VALUES = 50            # 最多返回 50 个唯一值
 MAX_EXECUTION_SECONDS = 5           # 超时 5 秒
 LOW_CARDINALITY_THRESHOLD = 20      # 唯一值 <= 20 即判定为枚举候选
+
+
+def _quote_qualified_identifier(dialect, identifier: str) -> str:
+    """按 SQLAlchemy 方言安全引用可限定的 SQL 标识符。
+
+    Args:
+        dialect: SQLAlchemy 数据库方言。
+        identifier: 表名或列名，可包含 schema 前缀。
+
+    Returns:
+        各层级均已安全引用的标识符。
+    """
+    logger.debug("引用枚举采样标识符入口", identifier_length=len(identifier))
+    parts = identifier.split(".")
+    if not parts or any(not part or "\x00" in part for part in parts):
+        logger.error("引用枚举采样标识符失败", error="标识符层级为空或包含 NUL")
+        raise ValueError("SQL 标识符无效")
+    preparer = dialect.identifier_preparer
+    result = ".".join(preparer.quote_identifier(part) for part in parts)
+    logger.info("引用枚举采样标识符完成", part_count=len(parts))
+    return result
 
 
 async def auto_discover_enum_values(
@@ -74,7 +95,13 @@ async def auto_discover_enum_values(
         logger.info("枚举值发现完成", column=entry.id, values_count=len(values))
         return entry
     except Exception as e:
-        logger.warning("枚举值采样失败", table=table, column=column, error=str(e))
+        logger.error(
+            "枚举值采样失败",
+            table=table,
+            column=column,
+            error=str(e),
+            exc_info=True,
+        )
         return None
 
 
@@ -86,17 +113,41 @@ def is_low_cardinality_candidate(
 
 
 async def _sample_distinct(ds, table: str, column: str, limit: int) -> list[str] | None:
-    """执行 SELECT DISTINCT col LIMIT N。"""
+    """执行安全引用标识符的 SELECT DISTINCT 采样。
+
+    Args:
+        ds: 已解析的数据源。
+        table: 待采样表名。
+        column: 待采样列名。
+        limit: 最大返回值数量。
+
+    Returns:
+        非空唯一值列表；失败时返回 None。
+    """
     import sqlalchemy as sa
 
-    sql = f"SELECT DISTINCT {column} FROM {table} LIMIT {limit}"
+    logger.debug("枚举 DISTINCT 查询入口", table=table, column=column, limit=limit)
     try:
+        safe_limit = max(1, min(int(limit), MAX_DISTINCT_VALUES))
+        quoted_table = _quote_qualified_identifier(ds.engine.dialect, table)
+        quoted_column = _quote_qualified_identifier(ds.engine.dialect, column)
+        sql = sa.text(
+            f"SELECT DISTINCT {quoted_column} FROM {quoted_table} LIMIT :sample_limit"
+        )
         async with ds.engine.connect() as conn:
-            result = await conn.execute(sa.text(sql))
+            result = await conn.execute(sql, {"sample_limit": safe_limit})
             rows = result.fetchall()
-            return [str(r[0]) for r in rows if r[0] is not None]
-    except Exception as e:
-        logger.warning("DISTINCT 查询失败", sql=sql[:100], error=str(e))
+            values = [str(r[0]) for r in rows if r[0] is not None]
+            logger.info("枚举 DISTINCT 查询完成", value_count=len(values))
+            return values
+    except Exception as exc:
+        logger.error(
+            "枚举 DISTINCT 查询失败",
+            table=table,
+            column=column,
+            error=str(exc),
+            exc_info=True,
+        )
         return None
 
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
@@ -57,12 +58,37 @@ class ExternalActionRegistry:
     # 方法作用：初始化动作注册表、幂等记录和审计日志。
     # Args: self - 动作注册表。
     # Returns: 无返回值。
-    def __init__(self) -> None:
-        logger.debug("初始化外部动作注册表入口")
+    def __init__(
+        self,
+        max_idempotency_keys: int = 10000,
+        audit_max_entries: int = 10000,
+    ) -> None:
+        """初始化有界动作注册表。
+
+        Args:
+            max_idempotency_keys: 最多保留的成功幂等键数量。
+            audit_max_entries: 最多保留的内存审计记录数量。
+
+        Returns:
+            无返回值。
+        """
+        logger.debug(
+            "初始化外部动作注册表入口",
+            max_idempotency_keys=max_idempotency_keys,
+            audit_max_entries=audit_max_entries,
+        )
+        if max_idempotency_keys <= 0 or audit_max_entries <= 0:
+            logger.error("初始化外部动作注册表失败", error="容量必须大于 0")
+            raise ValueError("外部动作记录容量必须大于 0")
         self._actions: dict[str, ExternalAction] = {}
         self._executed: dict[str, ActionResult] = {}
-        self._audit: list[dict[str, Any]] = []
-        logger.info("初始化外部动作注册表完成")
+        self._audit: deque[dict[str, Any]] = deque(maxlen=audit_max_entries)
+        self._max_idempotency_keys = max_idempotency_keys
+        logger.info(
+            "初始化外部动作注册表完成",
+            max_idempotency_keys=max_idempotency_keys,
+            audit_max_entries=audit_max_entries,
+        )
 
     # 方法作用：注册一个允许被人工确认后调用的动作。
     # Args: self - 动作注册表；action - 动作实现。
@@ -110,6 +136,16 @@ class ExternalActionRegistry:
             result = ActionResult("rejected", name, key, message="动作未注册")
             self._record_audit(request, result)
             logger.warning("外部动作被拒绝", action=name, reason="unregistered")
+            return result
+        if len(self._executed) >= self._max_idempotency_keys:
+            result = ActionResult("rejected", name, key, message="幂等记录容量已满")
+            self._record_audit(request, result)
+            logger.error(
+                "外部动作被拒绝",
+                action=name,
+                reason="idempotency_capacity_full",
+                max_idempotency_keys=self._max_idempotency_keys,
+            )
             return result
         try:
             output = await action.execute(request)

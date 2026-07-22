@@ -8,7 +8,7 @@ import re
 from typing import Any
 
 from src.api.auth import get_current_tenant_id, get_current_user_id
-from src.config import get_settings
+from src.app_context import get_tenant_policy
 from src.knowledge.asset_models import Evidence
 from src.logging_config import get_logger
 
@@ -34,13 +34,12 @@ def build_knowledge_filters(
         owner_only=owner_only,
     )
     filters: dict[str, Any] = {"visibility": "tenant"}
-    settings = get_settings()
-    if settings.multi_tenant:
-        filters["tenant_id"] = tenant_id if tenant_id is not None else get_current_tenant_id()
+    policy = get_tenant_policy()
+    effective_tenant_id = tenant_id if tenant_id is not None else get_current_tenant_id()
+    if policy.tenant_filter(effective_tenant_id, explicit=tenant_id is not None):
+        filters["tenant_id"] = effective_tenant_id
         if owner_only:
             filters["owner_user_id"] = get_current_user_id()
-    elif tenant_id is not None:
-        filters["tenant_id"] = tenant_id
     if datasource:
         filters["datasource"] = datasource
     if category:
@@ -70,7 +69,7 @@ def build_accessible_knowledge_filters(
         tenant_id=tenant_id,
         user_id=user_id,
     )
-    settings = get_settings()
+    policy = get_tenant_policy()
     current_tenant_id = tenant_id if tenant_id is not None else get_current_tenant_id()
     current_user_id = user_id if user_id is not None else get_current_user_id()
     shared: dict[str, Any] = {}
@@ -84,7 +83,7 @@ def build_accessible_knowledge_filters(
     filters: list[dict[str, Any]] = [{"visibility": "system", **shared}]
     tenant_filter: dict[str, Any] = {"visibility": "tenant", **shared}
     private_filter: dict[str, Any] = {"visibility": "private", **shared}
-    if settings.multi_tenant or tenant_id is not None:
+    if policy.tenant_filter(current_tenant_id, explicit=tenant_id is not None):
         tenant_filter["tenant_id"] = current_tenant_id
         private_filter["tenant_id"] = current_tenant_id
     private_filter["owner_user_id"] = current_user_id

@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import asyncio
-from urllib.parse import quote_plus
 
 import sqlalchemy as sa
+from sqlalchemy import URL
 
 from src.connectors.base import ConnectorBase
 from src.connectors.registry import register_connector
@@ -24,13 +24,16 @@ class SQLServerConnector(ConnectorBase):
     # 方法作用：构建 pymssql SQLAlchemy URL。
     # Args: 无，使用当前数据源配置。
     # Returns: SQL Server 连接 URL。
-    def _build_url(self) -> str:
-        """对密码进行 URL 编码后生成连接串。"""
+    def _build_url(self) -> URL:
+        """构建密码安全且日志默认脱敏的 SQL Server URL。"""
         logger.debug("SQL Server URL 构建入口", datasource=self.config.name)
-        password = quote_plus(self.config.password) if self.config.password else ""
-        result = (
-            f"mssql+pymssql://{self.config.username}:{password}"
-            f"@{self.config.host}:{self.config.port}/{self.config.database}"
+        result = URL.create(
+            "mssql+pymssql",
+            username=self.config.username or None,
+            password=self.config.password or None,
+            host=self.config.host or None,
+            port=self.config.port or None,
+            database=self.config.database or None,
         )
         logger.info("SQL Server URL 构建完成", datasource=self.config.name)
         return result

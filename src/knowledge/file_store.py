@@ -154,8 +154,9 @@ class FileStore:
             文件 ID；数据库不可用或保存失败返回 None。
         """
         from src.api.auth import get_current_role
-        from src.knowledge.governance import normalize_role
-        from src.knowledge.governance import can_write_knowledge_scope, normalize_knowledge_scope
+        from src.app_context import get_tenant_policy
+        from src.knowledge.governance import normalize_knowledge_scope, normalize_role
+        from src.security.tenant_policy import RequestIdentity
 
         tenant_id, user_id = _current_identity()
         role = normalize_role(get_current_role())
@@ -168,11 +169,9 @@ class FileStore:
             role=role,
             knowledge_scope=normalized_scope,
         )
-        if not can_write_knowledge_scope(
+        if not get_tenant_policy().can_write_scope(
             normalized_scope,
-            role=role,
-            user_id=user_id,
-            multi_tenant=getattr(get_settings(), "multi_tenant", False),
+            RequestIdentity(tenant_id=tenant_id, user_id=user_id, role=role),
         ):
             logger.warning(
                 "保存知识文件权限拒绝",
@@ -436,16 +435,18 @@ def _disk_list() -> list[dict]:
     return docs
 
 
-_store: FileStore | None = None
-
-
+# 方法作用：从当前 AppContext 获取知识文件存储。
+# Args: 无。
+# Returns: 当前应用独享的 FileStore 实例。
 def get_file_store() -> FileStore:
-    """获取 FileStore 单例。
+    """获取当前应用的 FileStore。
 
     Returns:
-        模块级 FileStore 实例。
+        当前 AppContext 的 FileStore 实例。
     """
-    global _store
-    if _store is None:
-        _store = FileStore()
-    return _store
+    from src.app_context import get_app_context
+
+    logger.debug("获取 FileStore 入口")
+    result = get_app_context().get_or_create("file_store", FileStore)
+    logger.info("获取 FileStore 完成")
+    return result

@@ -84,6 +84,63 @@ class TestReadonlySQLValidation:
             logger.error("test_mssql_alias_is_validated_as_tsql 异常: %s", exc, exc_info=True)
             raise
 
+    # 方法作用：验证 PostgreSQL 与 SQL Server 的 SELECT INTO 写表语法被阻断。
+    # Args: self - pytest 测试类实例；dialect - SQL 方言。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    @pytest.mark.parametrize("dialect", ["postgres", "mssql"])
+    def test_select_into_is_rejected(self, dialect):
+        """SELECT 外观不得掩盖 INTO 创建表副作用。"""
+        logger.debug("test_select_into_is_rejected 入口", extra={"dialect": dialect})
+        try:
+            # Arrange
+            from src.graph.nodes.layer3_validate import validate_readonly_sql
+
+            # Act
+            errors = validate_readonly_sql(
+                "SELECT * INTO backup_orders FROM orders",
+                dialect,
+            )
+
+            # Assert
+            assert errors
+            assert errors[0]["type"] == "security_block"
+            logger.info("test_select_into_is_rejected 完成", extra={"dialect": dialect})
+        except Exception as exc:
+            logger.error("test_select_into_is_rejected 异常: %s", exc, exc_info=True)
+            raise
+
+    # 方法作用：验证 PostgreSQL 具有状态副作用的序列函数被阻断。
+    # Args: self - pytest 测试类实例；function_sql - 待验证函数表达式。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    @pytest.mark.parametrize(
+        "function_sql",
+        ["setval('order_id_seq', 1, false)", "nextval('order_id_seq')"],
+    )
+    def test_postgres_state_mutating_functions_are_rejected(self, function_sql):
+        """可在 SELECT 中改变数据库状态的函数不得执行。"""
+        logger.debug(
+            "test_postgres_state_mutating_functions_are_rejected 入口",
+            extra={"function_sql": function_sql},
+        )
+        try:
+            # Arrange
+            from src.graph.nodes.layer3_validate import validate_readonly_sql
+
+            # Act
+            errors = validate_readonly_sql(f"SELECT {function_sql}", "postgres")
+
+            # Assert
+            assert errors
+            assert errors[0]["type"] == "security_block"
+            logger.info("test_postgres_state_mutating_functions_are_rejected 完成")
+        except Exception as exc:
+            logger.error(
+                "test_postgres_state_mutating_functions_are_rejected 异常: %s",
+                exc,
+                exc_info=True,
+            )
+            raise
+
 
 class TestPermissionFailureClosed:
     """覆盖列权限与行过滤失败关闭。"""

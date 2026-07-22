@@ -49,7 +49,7 @@ class LongTermMemoryStore:
                 m.touch()
             return memories
         except Exception as e:
-            logger.warning("长期记忆检索失败", error=str(e))
+            logger.error("长期记忆检索失败", error=str(e), exc_info=True)
             return []
 
     # ── 写入 ─────────────────────────────────────────
@@ -98,6 +98,7 @@ class LongTermMemoryStore:
 
     async def get_preferences(self, user_id: str) -> dict[str, Any]:
         """7.3.8 获取用户所有偏好 (PG 精确查询 + ChromaDB 回退)。"""
+        logger.debug("用户偏好查询入口", user_id=user_id)
         if self._pg:
             try:
                 rows = await self._pg.fetch(
@@ -105,15 +106,23 @@ class LongTermMemoryStore:
                     "WHERE memory_type = $1 AND scope = $2",
                     MemoryType.USER_PREFERENCE.value, f"user:{user_id}",
                 )
-                return {
+                result = {
                     r["payload"]["preference"]: r["payload"]["value"]
                     for r in rows if "payload" in r
                 }
+                logger.info("用户偏好查询完成", user_id=user_id, backend="postgres", count=len(result))
+                return result
             except Exception as e:
-                logger.warning("PG 偏好查询失败，降级 ChromaDB", error=str(e))
-        return await self._get_prefs_from_chroma(user_id)
+                logger.warning("PG 偏好查询失败，降级 ChromaDB", error=str(e), exc_info=True)
+        result = await self._get_prefs_from_chroma(user_id)
+        logger.info("用户偏好查询完成", user_id=user_id, backend="vector", count=len(result))
+        return result
 
+    # 方法作用：从向量存储加载用户偏好，并在可恢复存储故障时降级为空字典。
+    # Args: user_id - 当前用户标识。
+    # Returns: 用户偏好映射，向量存储不可用时返回空字典。
     async def _get_prefs_from_chroma(self, user_id: str) -> dict[str, Any]:
+        logger.debug("向量用户偏好查询入口", user_id=user_id)
         try:
             from src.memory.vector_store import get_vector_store
             store = await get_vector_store()
@@ -123,9 +132,17 @@ class LongTermMemoryStore:
             prefs: dict[str, Any] = {}
             for r in results:
                 p = r.metadata.get("payload", {})
-                if "preference" in p: prefs[p["preference"]] = p["value"]
+                if "preference" in p:
+                    prefs[p["preference"]] = p["value"]
+            logger.info("向量用户偏好查询完成", user_id=user_id, count=len(prefs))
             return prefs
-        except Exception:
+        except Exception as exc:
+            logger.error(
+                "向量用户偏好查询失败，降级为空字典",
+                user_id=user_id,
+                error=str(exc),
+                exc_info=True,
+            )
             return {}
 
     # ── 写入底层 ─────────────────────────────────────
@@ -202,7 +219,7 @@ class LongTermMemoryStore:
             )
             return int(str(result).split()[-1]) if result else 0
         except Exception as e:
-            logger.warning("记忆衰减失败", error=str(e))
+            logger.error("记忆衰减失败", error=str(e), exc_info=True)
             return 0
 
     async def prune_low_confidence(self) -> int:
@@ -217,7 +234,7 @@ class LongTermMemoryStore:
             )
             return int(str(result).split()[-1]) if result else 0
         except Exception as e:
-            logger.warning("记忆清理失败", error=str(e))
+            logger.error("记忆清理失败", error=str(e), exc_info=True)
             return 0
 
 

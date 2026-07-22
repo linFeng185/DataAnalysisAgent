@@ -97,7 +97,7 @@ class TestMemoryTenantIsolation:
         user_token = auth._current_user_id.set(101)  # noqa: SLF001
         tenant_token = auth._current_tenant_id.set(11)  # noqa: SLF001
         try:
-            store.add("查询订单", "demo", "session-a")
+            await store.add("查询订单", "demo", "session-a")
         finally:
             auth._current_user_id.reset(user_token)  # noqa: SLF001
             auth._current_tenant_id.reset(tenant_token)  # noqa: SLF001
@@ -168,7 +168,7 @@ class TestMemoryTenantIsolation:
         }
 
         # Act
-        store.add(
+        await store.add(
             "查询一", "demo", "session-rich",
             generated_sql="SELECT 1", final_result=final_result,
         )

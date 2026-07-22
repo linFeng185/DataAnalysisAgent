@@ -2,26 +2,14 @@
 
 from __future__ import annotations
 
-import io
-import html
-import json
-import os
 import time
-import uuid
-from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
 
-from fastapi import APIRouter, Body, File, HTTPException, Query, UploadFile
+from fastapi import APIRouter, HTTPException, Query
 
 from src.api.schemas import (
-    ChatRequest, ChatResponse, ColumnCommentRequest,
-    DataSourceCreateRequest, DataSourceInfo, HealthResponse, KnowledgeTagCreateRequest,
-    KnowledgeTagStatusRequest, MCPServerCreate, TableInfo,
+    DataSourceCreateRequest, DataSourceInfo,
 )
-from src.exceptions import DataSourceNotFoundError
-from src.llm.client import is_llm_available
 from src.logging_config import get_logger
-from src.api.routes._helpers import _app, _authorize_extension_scope, _registry
 
 logger = get_logger(__name__)
 router = APIRouter()
@@ -82,7 +70,7 @@ async def delete_datasource(name: str):
 # Returns: 不包含行列权限细节的数据源分页结果。
 async def list_datasources(page: int = Query(default=1, ge=1), page_size: int = Query(default=20, ge=1, le=100)):
     from src.api.auth import get_current_role, get_current_tenant_id, get_current_user_id
-    from src.config import get_settings
+    from src.app_context import get_tenant_policy
     from src.security.permission_check import resolve_datasource_access
 
     import src.api.routes as routes_package
@@ -94,7 +82,8 @@ async def list_datasources(page: int = Query(default=1, ge=1), page_size: int = 
         tenant_id=get_current_tenant_id(),
         user_id=get_current_user_id(),
     )
-    if get_settings().multi_tenant:
+    policy = get_tenant_policy()
+    if policy.datasource_isolation_enabled:
         try:
             authorized = await resolve_datasource_access(
                 items,
@@ -102,7 +91,7 @@ async def list_datasources(page: int = Query(default=1, ge=1), page_size: int = 
                 tenant_id=get_current_tenant_id(),
                 user_id=get_current_user_id(),
                 role=get_current_role(),
-                multi_tenant=True,
+                tenant_policy=policy,
             )
             authorized_names = set(authorized)
             items = [item for item in items if str(item.get("name", "")) in authorized_names]

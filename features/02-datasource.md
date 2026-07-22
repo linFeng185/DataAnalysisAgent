@@ -46,7 +46,7 @@
 
 | # | 功能 | 文件 | 描述 | 状态 |
 |---|------|------|------|------|
-| 2.4.1 | CredentialManager | `src/datasource/credential_manager.py` | encrypt() / decrypt() — AES-256 加密 | 单测完成 | P0 |
+| 2.4.1 | CredentialManager | `src/datasource/credential_manager.py` | 每次加密生成随机 salt，保存 `v2:salt:token` 并兼容历史固定 salt token | 单测完成 | P0 |
 | 2.4.2 | 环境变量凭证引用 | 同上 | resolve_env_ref() — 解析 ${VAR_NAME} 占位符 | 单测完成 | P0 |
 | 2.4.3 | KMS 集成 (远期) | 同上 | 对接 Vault / AWS KMS / Azure Key Vault | 待开发[^4] | P3 |
 

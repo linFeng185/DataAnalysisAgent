@@ -7,25 +7,40 @@ import html
 import json
 import os
 import time
-import uuid
-from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
 
-from fastapi import APIRouter, Body, File, HTTPException, Query, UploadFile
+from fastapi import APIRouter, File, HTTPException, Query, UploadFile
 
 from src.api.schemas import (
-    ChatRequest, ChatResponse, ColumnCommentRequest,
-    DataSourceCreateRequest, DataSourceInfo, HealthResponse, KnowledgeTagCreateRequest,
-    KnowledgeTagStatusRequest, MCPServerCreate, TableInfo,
+    KnowledgeTagCreateRequest,
+    KnowledgeTagStatusRequest,
 )
-from src.exceptions import DataSourceNotFoundError
-from src.llm.client import is_llm_available
 from src.logging_config import get_logger
-from src.api.routes._helpers import _app, _authorize_extension_scope, _registry
 
 logger = get_logger(__name__)
 router = APIRouter()
 _started_at = time.time()
+
+
+def _is_path_within(base_dir: str, target_path: str) -> bool:
+    """判断目标真实路径是否位于指定根目录内。
+
+    Args:
+        base_dir: 允许访问的根目录。
+        target_path: 待验证的目标路径。
+
+    Returns:
+        目标位于根目录内时返回 True。
+    """
+    logger.debug("知识文档路径校验入口", base_dir=base_dir, target_path=target_path)
+    try:
+        base_real = os.path.realpath(base_dir)
+        target_real = os.path.realpath(target_path)
+        result = os.path.commonpath([base_real, target_real]) == base_real
+        logger.info("知识文档路径校验完成", allowed=result)
+        return result
+    except (OSError, ValueError) as exc:
+        logger.error("知识文档路径校验失败", error=str(exc), exc_info=True)
+        return False
 
 
 
@@ -39,10 +54,10 @@ def _knowledge_where(extra: dict | None = None, owner_only: bool = False) -> dic
     Returns:
         ChromaDB where 条件；单租户且无额外条件时返回 None。
     """
-    from src.config import get_settings
+    from src.app_context import get_tenant_policy
 
     conditions = [{key: value} for key, value in (extra or {}).items()]
-    if get_settings().multi_tenant:
+    if get_tenant_policy().knowledge_isolation_enabled:
         from src.api.auth import get_current_tenant_id, get_current_user_id
         conditions.append({"tenant_id": get_current_tenant_id()})
         if owner_only:
@@ -203,7 +218,6 @@ async def _schedule_knowledge_uploads(
     config,
     category: str,
 ) -> tuple[list[dict], list[dict]]:
-    import asyncio
     from src.knowledge.file_store import get_file_store
     from src.knowledge.upload_manager import get_upload_manager
 
@@ -228,7 +242,13 @@ async def _schedule_knowledge_uploads(
                 datasource=datasource,
             )
             tasks.append({"task_id": task.id, "file_name": uploaded_file.filename, "file_id": file_id})
-            asyncio.create_task(manager.process(task, content, config, category))
+            from src.api.background_tasks import create_background_task
+
+            create_background_task(
+                manager.process(task, content, config, category),
+                name="process-knowledge-upload",
+                context={"task_id": task.id},
+            )
         except HTTPException:
             raise
         except Exception as exc:
@@ -297,7 +317,7 @@ async def upload_knowledge_docs(
     from src.api.auth import (
         get_current_role, get_current_tenant_id, get_current_user_id,
     )
-    from src.knowledge.governance import can_write_knowledge_scope, normalize_knowledge_scope
+    from src.knowledge.governance import normalize_knowledge_scope
 
     settings = get_settings()
     max_upload_bytes = max(1, int(settings.max_upload_bytes))
@@ -316,11 +336,16 @@ async def upload_knowledge_docs(
         raise HTTPException(400, str(exc)) from exc
     role = get_current_role()
     user_id = get_current_user_id()
-    if not can_write_knowledge_scope(
+    from src.app_context import get_tenant_policy
+    from src.security.tenant_policy import RequestIdentity
+
+    if not get_tenant_policy().can_write_scope(
         normalized_scope,
-        role=role,
-        user_id=user_id,
-        multi_tenant=getattr(settings, "multi_tenant", False),
+        RequestIdentity(
+            tenant_id=get_current_tenant_id(),
+            user_id=user_id,
+            role=role,
+        ),
     ):
         logger.warning(
             "知识文件上传权限拒绝",
@@ -565,7 +590,6 @@ async def test_knowledge_search(q: str = Query(default=""), datasource: str = Qu
         from src.memory.vector_store import get_vector_store
         from src.knowledge.retrieval import build_knowledge_filters, search_knowledge
         store = await get_vector_store()
-        from src.api.auth import get_current_tenant_id
         if q:
             evidence = await search_knowledge(store, q, datasource=datasource, top_k=10)
             items = [{"rank": i + 1, "id": e.source_id, "content": e.content[:200],
@@ -576,8 +600,9 @@ async def test_knowledge_search(q: str = Query(default=""), datasource: str = Qu
             filters = build_knowledge_filters(datasource=datasource)
             results = await store.get_by_filter(filters, limit=1000)
             return {"total": len(results), "ids": [r.id for r in results]}
-    except Exception as e:
-        raise HTTPException(500, f"知识库检索测试失败: {e}")
+    except Exception as exc:
+        logger.error("知识库检索测试失败", error=str(exc), exc_info=True)
+        raise HTTPException(500, "知识库检索测试失败") from exc
 
 
 @router.get("/knowledge/docs")
@@ -619,7 +644,7 @@ async def get_doc_content(doc_name: str, knowledge_scope: str = ""):
         # 磁盘回退仅用于系统内置目录。
         base_dir = os.path.realpath(os.path.join(os.path.dirname(__file__), "..", "..", "docs", "metrics"))
         doc_path = os.path.realpath(os.path.join(base_dir, os.path.basename(doc_name)))
-        if not doc_path.startswith(base_dir):
+        if not _is_path_within(base_dir, doc_path):
             raise HTTPException(403, "禁止访问")
         if not os.path.isfile(doc_path):
             raise HTTPException(404, f"文档 '{doc_name}' 未找到")
@@ -659,7 +684,7 @@ async def get_doc_raw(doc_name: str, knowledge_scope: str = ""):
     from fastapi.responses import FileResponse
     base_dir = os.path.realpath(os.path.join(os.path.dirname(__file__), "..", "..", "docs", "metrics"))
     doc_path = os.path.realpath(os.path.join(base_dir, os.path.basename(doc_name)))
-    if not doc_path.startswith(base_dir):
+    if not _is_path_within(base_dir, doc_path):
         raise HTTPException(403, "禁止访问")
     if not os.path.isfile(doc_path):
         raise HTTPException(404, f"文档 '{doc_name}' 未找到")
@@ -763,9 +788,9 @@ async def delete_knowledge_entry(entry_id: str):
         return result
     except HTTPException:
         raise
-    except Exception as e:
-        logger.error("删除知识条目 API 失败", entry_id=entry_id, error=str(e), exc_info=True)
-        raise HTTPException(500, str(e))
+    except Exception as exc:
+        logger.error("删除知识条目 API 失败", entry_id=entry_id, error=str(exc), exc_info=True)
+        raise HTTPException(500, "删除知识条目失败") from exc
 
 
 @router.delete("/knowledge/docs/{doc_name}")
@@ -820,7 +845,7 @@ async def delete_knowledge_doc(doc_name: str, knowledge_scope: str = ""):
     # docs/metrics 仅包含内置文档，禁止通过管理 API 删除。
     base_dir = os.path.realpath(os.path.join(os.path.dirname(__file__), "..", "..", "docs", "metrics"))
     doc_path = os.path.realpath(os.path.join(base_dir, os.path.basename(doc_name)))
-    if not doc_path.startswith(base_dir):
+    if not _is_path_within(base_dir, doc_path):
         raise HTTPException(403, "禁止访问")
     if os.path.isfile(doc_path):
         raise HTTPException(403, f"内置文档 '{doc_name}' 不可删除")

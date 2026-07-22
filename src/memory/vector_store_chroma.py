@@ -112,7 +112,9 @@ class ChromaVectorStore(VectorStore):
             return 0
         ids, docs, metas, embs = [], [], [], []
         for e in entries:
-            ids.append(e.id); docs.append(e.content); metas.append(e.metadata)
+            ids.append(e.id)
+            docs.append(e.content)
+            metas.append(e.metadata)
             if e.embedding:
                 embs.append(e.embedding)
         if embs and len(embs) != len(ids):
@@ -172,10 +174,17 @@ class ChromaVectorStore(VectorStore):
 
         Returns: True 表示可用
         """
+        logger.debug("ChromaVectorStore 健康检查入口")
         try:
             self._col.count()
+            logger.info("ChromaVectorStore 健康检查完成", healthy=True)
             return True
-        except Exception:
+        except Exception as exc:
+            logger.error(
+                "ChromaVectorStore 健康检查失败",
+                error=str(exc),
+                exc_info=True,
+            )
             return False
 
 

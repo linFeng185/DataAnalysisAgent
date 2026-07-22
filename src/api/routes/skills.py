@@ -2,26 +2,12 @@
 
 from __future__ import annotations
 
-import io
-import html
-import json
 import os
 import time
-import uuid
-from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
 
-from fastapi import APIRouter, Body, File, HTTPException, Query, UploadFile
+from fastapi import APIRouter, File, HTTPException, Query, UploadFile
 
-from src.api.schemas import (
-    ChatRequest, ChatResponse, ColumnCommentRequest,
-    DataSourceCreateRequest, DataSourceInfo, HealthResponse, KnowledgeTagCreateRequest,
-    KnowledgeTagStatusRequest, MCPServerCreate, TableInfo,
-)
-from src.exceptions import DataSourceNotFoundError
-from src.llm.client import is_llm_available
 from src.logging_config import get_logger
-from src.api.routes._helpers import _app, _authorize_extension_scope, _registry
 
 logger = get_logger(__name__)
 router = APIRouter()
@@ -174,8 +160,12 @@ def _write_uploaded_skill(
         return None, True, None
     try:
         content = prepared[id(uploaded_file)].decode("utf-8")
-    except Exception as exc:
-        logger.warning("写入单个 Skill 解码失败", filename=uploaded_file.filename)
+    except UnicodeDecodeError as exc:
+        logger.warning(
+            "写入单个 Skill 解码失败",
+            filename=uploaded_file.filename,
+            error=str(exc),
+        )
         return None, False, {"file": uploaded_file.filename, "error": str(exc)}
     match = re.match(r"^---\s*\n(.*?)\n---", content, re.DOTALL)
     skill_name = None
@@ -227,8 +217,10 @@ async def upload_skills(
     from src.api.auth import (
         get_current_role, get_current_tenant_id, get_current_user_id,
     )
+    from src.app_context import get_tenant_policy
     from src.config import get_settings
-    from src.knowledge.governance import can_write_knowledge_scope, normalize_knowledge_scope
+    from src.knowledge.governance import normalize_knowledge_scope
+    from src.security.tenant_policy import RequestIdentity
     from src.skill_manager import get_skill_manager
 
     logger.debug("Skill 上传入口", skill_scope=skill_scope, file_count=len(files))
@@ -240,11 +232,9 @@ async def upload_skills(
     tenant_id = get_current_tenant_id()
     user_id = get_current_user_id()
     settings = get_settings()
-    if not can_write_knowledge_scope(
+    if not get_tenant_policy().can_write_scope(
         normalized_scope,
-        role=role,
-        user_id=user_id,
-        multi_tenant=settings.multi_tenant,
+        RequestIdentity(tenant_id=tenant_id, user_id=user_id, role=role),
     ):
         logger.warning(
             "Skill 上传权限拒绝",

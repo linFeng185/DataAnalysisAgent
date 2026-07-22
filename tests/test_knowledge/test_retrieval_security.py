@@ -19,23 +19,20 @@ class TestKnowledgeFilters:
         """构造过滤条件时不能只依赖向量相似度。"""
         logger.debug("test_build_filters_requires_tenant_and_scope 入口")
         import src.knowledge.retrieval as retrieval_module
+        from src.app_context import AppContext, use_app_context
 
-        monkeypatch.setattr(
-            retrieval_module,
-            "get_settings",
-            lambda: SimpleNamespace(multi_tenant=True),
-        )
         monkeypatch.setattr(
             retrieval_module,
             "get_current_tenant_id",
             lambda: 9,
         )
 
-        filters = retrieval_module.build_knowledge_filters(
-            datasource="orders",
-            category="business_rule",
-            asset_id="asset-1",
-        )
+        with use_app_context(AppContext(SimpleNamespace(multi_tenant=True))):
+            filters = retrieval_module.build_knowledge_filters(
+                datasource="orders",
+                category="business_rule",
+                asset_id="asset-1",
+            )
 
         assert filters == {
             "tenant_id": 9,
@@ -53,19 +50,16 @@ class TestKnowledgeFilters:
         """三范围必须分别查询，private 过滤必须包含 owner_user_id。"""
         logger.debug("test_build_accessible_filters_contains_three_scopes 入口")
         import src.knowledge.retrieval as retrieval_module
+        from src.app_context import AppContext, use_app_context
 
-        monkeypatch.setattr(
-            retrieval_module,
-            "get_settings",
-            lambda: SimpleNamespace(multi_tenant=True),
-        )
         monkeypatch.setattr(retrieval_module, "get_current_tenant_id", lambda: 9)
         monkeypatch.setattr(retrieval_module, "get_current_user_id", lambda: 4)
 
-        filters = retrieval_module.build_accessible_knowledge_filters(
-            datasource="orders",
-            category="business_rule",
-        )
+        with use_app_context(AppContext(SimpleNamespace(multi_tenant=True))):
+            filters = retrieval_module.build_accessible_knowledge_filters(
+                datasource="orders",
+                category="business_rule",
+            )
 
         assert filters == [
             {"visibility": "system", "datasource": "orders", "category": "business_rule"},

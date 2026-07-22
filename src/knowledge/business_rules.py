@@ -4,7 +4,7 @@
 
 from __future__ import annotations
 
-from src.knowledge.models import KnowledgeEntry, KnowledgeSource
+from src.knowledge.models import KnowledgeEntry
 from src.knowledge.doc_loader import DocLoader
 from src.logging_config import get_logger
 
@@ -67,15 +67,15 @@ class BusinessRuleStore:
         """
         try:
             filters = {"category": "business_rule"}
-            from src.config import get_settings
-            if get_settings().multi_tenant:
+            from src.app_context import get_tenant_policy
+            if get_tenant_policy().knowledge_isolation_enabled:
                 from src.api.auth import get_current_tenant_id
                 filters["tenant_id"] = get_current_tenant_id()
             results = await self._store.get_by_filter(filters, limit=top_k)
             return [KnowledgeEntry.from_dict({"id": r.id, "content": r.content, **r.metadata})
                     for r in results]
         except Exception as e:
-            logger.warning("业务规则检索失败", error=str(e))
+            logger.error("业务规则检索失败", error=str(e), exc_info=True)
             return []
 
     async def _upsert_rules(self, entries: list[KnowledgeEntry]) -> None:

@@ -71,3 +71,25 @@ class TestGenerateSQLHallucination:
 
         assert result == ["missing_a", "missing_b"]
         logger.info("test_multiple_statements_collect_unknown_tables 完成")
+
+    # 方法作用：验证 SQL AST 解析失败时表名校验默认阻断执行。
+    # Args: self - pytest 测试类实例；monkeypatch - pytest 补丁工具。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    def test_parser_failure_is_closed(self, monkeypatch) -> None:
+        """解析器异常不得被当作无幻觉表名而放行。"""
+        logger.debug("test_parser_failure_is_closed 入口")
+        import sqlglot
+
+        monkeypatch.setattr(
+            sqlglot,
+            "parse",
+            lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("parse failed")),
+        )
+        result = _check_table_hallucination(
+            "SELECT id FROM orders",
+            [{"name": "orders", "columns": [{"name": "id"}]}],
+        )
+
+        assert result
+        assert "解析失败" in result[0]
+        logger.info("test_parser_failure_is_closed 完成")

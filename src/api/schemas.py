@@ -21,11 +21,11 @@ class ChatResponse(BaseModel):
     user_query: str = ""
     sql: str = ""
     sql_statements: list[dict] = Field(default_factory=list)
-    data: list[dict] = []
+    data: list[dict] = Field(default_factory=list)
     row_count: int = 0
     truncated: bool = False
-    analysis: dict = {}
-    chart: dict = {}
+    analysis: dict = Field(default_factory=dict)
+    chart: dict = Field(default_factory=dict)
 
 
 class ErrorResponse(BaseModel):
@@ -50,12 +50,23 @@ class DataSourceCreateRequest(BaseModel):
     service_name: str = ""
     instance: str = ""
     file_path: str = ""
-    tags: list[str] = []
-    extra_params: dict[str, Any] = {}
+    tags: list[str] = Field(default_factory=list)
+    extra_params: dict[str, Any] = Field(default_factory=dict)
 
 
 class ColumnCommentRequest(BaseModel):
     comment: str = Field(..., min_length=1, max_length=500)
+
+
+class ModelTestRequest(BaseModel):
+    """模型连通性测试请求。"""
+
+    model_id: str = Field(
+        ...,
+        min_length=1,
+        max_length=128,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9._:/-]*$",
+    )
 
 
 class DataSourceInfo(BaseModel):
@@ -72,7 +83,7 @@ class DataSourceInfo(BaseModel):
 class TableInfo(BaseModel):
     name: str
     description: str = ""
-    columns: list[dict] = []
+    columns: list[dict] = Field(default_factory=list)
     row_count_estimate: int = 0
 
 
@@ -85,7 +96,7 @@ class MCPServerCreate(BaseModel):
     command: str = ""
     args: str = ""
     url: str = ""
-    env_vars: dict = {}
+    env_vars: dict = Field(default_factory=dict)
     description: str = ""
     enabled: bool = True
 

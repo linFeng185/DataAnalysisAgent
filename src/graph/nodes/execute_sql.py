@@ -5,6 +5,7 @@ from __future__ import annotations
 import time
 from decimal import Decimal
 
+from src.app_context import get_tenant_policy
 from src.config import get_settings
 from src.graph.state import AnalysisState
 from src.logging_config import get_logger
@@ -106,7 +107,7 @@ async def execute_sql_node(state: AnalysisState) -> dict:
         logger.info("SQL 执行节点复用入口配额检查", user_id=state.get("user_id"))
 
     # 行列级权限（多租户时生效）
-    if get_settings().multi_tenant:
+    if get_tenant_policy().datasource_isolation_enabled:
         allowed = state.get("allowed_columns", []) or []
         rfilter = state.get("row_filter_sql", "") or ""
         if allowed:
@@ -126,7 +127,11 @@ async def execute_sql_node(state: AnalysisState) -> dict:
             sql = inject_row_filter(sql, rfilter)
 
     # Layer 2: 列名验证
-    col_err = _validate_column_references(sql, state.get("relevant_tables", []))
+    col_err = _validate_column_references(
+        sql,
+        state.get("relevant_tables", []),
+        dialect,
+    )
     if col_err:
         logger.warning("列名验证失败，触发重试", datasource=ds_name, error=col_err)
         await _record_query_audit(
@@ -178,7 +183,12 @@ async def execute_sql_node(state: AnalysisState) -> dict:
                 "execution_retry_count": 0,
             }
     except Exception as e:
-        logger.warning("数据源执行失败", datasource=ds_name, error=str(e))
+        logger.error(
+            "数据源执行失败",
+            datasource=ds_name,
+            error=str(e),
+            exc_info=True,
+        )
         err_msg = str(e)
         # 提取简洁错误信息
         if len(err_msg) > 300:
@@ -245,7 +255,11 @@ def _classify_execution_error(message: str) -> str:
     return result
 
 
-def _validate_column_references(sql: str, tables: list[dict]) -> str | None:
+def _validate_column_references(
+    sql: str,
+    tables: list[dict],
+    dialect: str = "",
+) -> str | None:
     """执行前验证 SQL 中的列引用是否都存在于表结构中。
 
     与 should_retry 配合：验证失败 → execution_error → retry → LLM 修正。
@@ -254,10 +268,17 @@ def _validate_column_references(sql: str, tables: list[dict]) -> str | None:
     Args:
         sql - 待验证的 SQL
         tables - relevant_tables 列表
+        dialect - 数据库方言
 
     Returns: 错误消息字符串，None 表示通过
     """
+    logger.debug(
+        "列引用校验入口",
+        dialect=dialect,
+        table_count=len(tables),
+    )
     if not tables:
+        logger.info("列引用校验完成", result="无表结构，跳过")
         return None
     try:
         import sqlglot
@@ -281,9 +302,15 @@ def _validate_column_references(sql: str, tables: list[dict]) -> str | None:
         if not valid_cols:
             return None
 
-        tree = sqlglot.parse_one(sql, read="mysql")
+        normalized_dialect = (dialect or "").strip().lower()
+        parser_dialect = {
+            "mssql": "tsql",
+            "postgresql": "postgres",
+        }.get(normalized_dialect, normalized_dialect)
+        tree = sqlglot.parse_one(sql, read=parser_dialect or None)
         if not tree:
-            return None
+            logger.error("列引用校验失败", error="SQL 解析结果为空")
+            return "列名校验解析失败: SQL 解析结果为空"
 
         # 收集 SELECT 中 AS 定义的别名，这些不是表列，不校验
         aliases: set[str] = set()
@@ -310,7 +337,11 @@ def _validate_column_references(sql: str, tables: list[dict]) -> str | None:
                         errors.append(err)
 
         if errors:
-            return "列名校验失败: " + "; ".join(errors[:3])
+            result = "列名校验失败: " + "; ".join(errors[:3])
+            logger.info("列引用校验完成", result="失败", error_count=len(errors))
+            return result
+        logger.info("列引用校验完成", result="通过")
         return None
-    except Exception:
-        return None
+    except Exception as exc:
+        logger.error("列引用校验解析失败", error=str(exc), exc_info=True)
+        return "列名校验解析失败"

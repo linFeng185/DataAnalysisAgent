@@ -8,7 +8,7 @@
 |---|------|------|------|------|
 | 7.1.1 | PostgresSaver 配置 | `src/memory/checkpointer.py` | 生产环境 PostgreSQL checkpointer 初始化 + setup()，Windows 自动切换 SelectorEventLoop | 单测完成 |
 | 7.1.2 | MemorySaver 配置 | 同上 | 开发环境内存 checkpointer (用于测试) | 开发完成 |
-| 7.1.3 | checkpointer 工厂函数 | 同上 | get_checkpointer() — 根据环境变量自动选择 PostgresSaver / MemorySaver | 单测完成 |
+| 7.1.3 | checkpointer 工厂函数 | 同上 | 自动选择 PostgresSaver/MemorySaver；自动建库时安全引用数据库标识符 | 单测完成 |
 
 ### 7.2 短期记忆
 
@@ -16,13 +16,13 @@
 |---|------|------|------|------|
 | 7.2.1 | SessionContext dataclass | `src/memory/models.py` | session_id / thread_id / user_id / created_at / conversation_history / current_datasource / current_tables / last_sql / last_result_summary | 开发完成 |
 | 7.2.2 | ConversationTurn dataclass | 同上 | turn_id / user_query / generated_sql / execution_success / analysis_summary / chart_type / timestamp | 开发完成 |
-| 7.2.3 | 会话恢复 | `src/memory/checkpointer.py` | `app.aget_state(config)` — 通过 thread_id 恢复历史会话状态 | 开发完成 |
+| 7.2.3 | 会话恢复 | `src/memory/checkpointer.py`、`src/api/routes/session.py` | 通过 thread_id 恢复状态；存储故障向上报告，不伪装为空历史 | 单测完成 |
 | 7.2.4 | 超时归档 (30分钟) | `src/memory/session_archive.py` | 超过 30 分钟未活动的会话 → 摘要后移入 sessions_archive 表 | 开发完成 |
 | 7.2.5 | 轮次限制 (50轮) | 同上 | 单会话 > 50 轮 → 自动摘要前 20 轮为概括文本 | 开发完成 |
 | 7.2.6 | on_session_start() | 同上 | 会话启动钩子: 加载用户偏好 + 检索相关长期记忆 | 开发完成 |
 | 7.2.7 | archive_sessions() | 同上 | 归档超过 30 天的 inactive 会话 checkpoint | 开发完成 |
 | 7.2.8 | summarize_session() | `src/memory/context_builder.py` | 规则拼接摘要文本用于归档 | 开发完成 |
-| 7.2.9 | 逐轮结构化响应持久化 | `src/memory/history_store.py` | `query_history.final_result` JSONB 保存每轮 SQL、数据、分析、图表和推理，支持跨进程恢复 | 单测完成 |
+| 7.2.9 | 逐轮结构化响应持久化 | `src/memory/history_store.py` | 工作流显式 await PG 写入，`final_result` JSONB 保存每轮 SQL、数据、分析、图表和推理 | 单测完成 |
 
 ### 7.3 长期记忆
 

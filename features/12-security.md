@@ -6,7 +6,7 @@
 
 | # | 功能 | 文件 | 描述 | 状态 |
 |---|------|------|------|------|
-| 12.1.1 | DDL/DML AST 拦截 | `src/graph/nodes/layer3_validate.py` | 解析语句树并拒绝所有写操作和管理语句 | 单测完成 |
+| 12.1.1 | DDL/DML AST 拦截 | `src/graph/nodes/layer3_validate.py` | 拒绝写/管理语句、SELECT INTO 和已知状态变更函数 | 单测完成 |
 | 12.1.2 | 危险语句拦截 | 同上 | 拒绝 CALL / VACUUM / SET ROLE 及 EXPLAIN 包裹的写语句 | 单测完成 |
 | 12.1.3 | 只读白名单模式 | 同上 | 默认只允许 SELECT / SHOW / DESCRIBE / EXPLAIN SELECT | 单测完成 |
 | 12.1.4 | 只读数据库账号 | 各 Connector | 所有数据源连接使用只读账号（运维层面，代码已支持） | 开发完成 |
@@ -39,15 +39,19 @@
 |---|------|------|------|------|
 | 12.4.1 | Cookie 认证与上下文清理 | `src/api/auth.py` | HttpOnly Cookie / Bearer 双入口，请求结束重置 ContextVar | 单测完成 |
 | 12.4.2 | 租户资源隔离 | `src/memory/`、`src/knowledge/file_store.py` | Session、History、FileStore 显式过滤 tenant_id + user_id，并启用 PG RLS | 单测完成 |
-| 12.4.3 | 生产启动安全校验 | `src/config.py` | prod 拒绝匿名模式、弱密钥、缺失凭证密钥和只读数据库配置 | 单测完成 |
+| 12.4.3 | 生产启动安全校验 | `src/config.py`、`src/api/auth.py`、`src/main.py` | prod 拒绝匿名/弱密钥/默认 DB 凭证/临时 JWT，并关闭 Docs、Redoc、OpenAPI | 单测完成 |
 | 12.4.4 | 上传与 Word XSS 防护 | `src/api/routes.py`、`src/knowledge/doc_parser.py` | 限制上传字节数并转义 Word 段落和单元格文本 | 单测完成 |
 | 12.4.5 | 字段权限失败关闭 | `src/security/permission_check.py` | 列解析失败、SELECT * 绕过与行过滤解析失败均阻断 | 单测完成 |
 | 12.4.6 | 平台与租户管理员分权 | `src/api/auth.py`、`src/knowledge/governance.py` | super_admin 管全局；tenant_admin 仅管理本租户知识 | 单测完成 | P0 |
 | 12.4.7 | 数据源访问失败关闭 | `src/security/permission_check.py`、`src/api/routes.py` | 自动发现、显式选择、列表和多源执行统一按 tenant/user/role 授权 | 单测完成 | P0 |
 | 12.4.8 | 受管 MCP RCE/SSRF 防护 | `src/api/routes.py`、`src/mcp_client/client_manager.py` | 禁止数据库 stdio 配置，SSE 主机必须在部署方 allowlist | 单测完成 | P0 |
+| 12.4.9 | 凭证主密钥失败关闭 | `src/config.py`、`src/datasource/credential_manager.py` | 源码无固定默认密钥；生产缺少或弱主密钥拒绝启动 | 单测完成 | P0 |
+| 12.4.10 | ClickHouse 出站 SSRF 防护 | `src/security/network.py`、`src/connectors/clickhouse.py` | 私网默认拒绝，部署 allowlist 放行；探针与客户端固定使用已校验 IP | 单测完成 | P0 |
+| 12.4.11 | API 浏览器安全中间件 | `src/api/security_headers.py`、`src/main.py` | CSP/HSTS/防嵌入/nosniff 与显式 CORS allowlist | 单测完成 | P0 |
+| 12.4.12 | 纯 ASGI 身份上下文 | `src/api/auth.py` | SSE 最后分块发送前保持 JWT 身份，请求结束精确清理 ContextVar | 单测完成 | P0 |
 
 ### 模块收尾
 
-模块功能点共 24 项，已完成 24 项，待开发 0 项。
+模块功能点共 28 项，已完成 28 项，待开发 0 项。
 
 ---

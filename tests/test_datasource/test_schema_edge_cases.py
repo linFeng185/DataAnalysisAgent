@@ -24,7 +24,7 @@ class TestSchemaSnapshotEdgeCases:
     def test_merge_duplicate_relations(self):
         """边界条件: 同表多次 merge 关系追加不覆盖。"""
         from src.datasource.schema_snapshot import (
-            ColumnInfo, SchemaSnapshot, TableRelation, TableSchema,
+            SchemaSnapshot, TableRelation, TableSchema,
         )
         a = SchemaSnapshot(tables=[TableSchema(
             name="t", relations=[TableRelation("u1", "id", "many_to_one")]
@@ -153,6 +153,29 @@ class TestDataSourceRegistryEdgeCases:
         """正常路径: 不存在返回 None 不抛异常。"""
         from src.datasource.registry import DataSourceRegistry
         assert asyncio.run(DataSourceRegistry().resolve_or_none("x")) is None
+
+    # 方法作用：验证 Provider 基础设施异常不能伪装成数据源不存在。
+    # Args: self - pytest 测试类实例。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    def test_resolve_or_none_propagates_provider_failure(self) -> None:
+        """只有 DataSourceNotFoundError 可回退 None，存储故障必须传播。"""
+        from src.datasource.registry import DataSourceRegistry
+
+        class BrokenProvider:
+            """模拟读取配置时发生基础设施故障的 Provider。"""
+
+            # 方法作用：模拟 Provider 查询异常。
+            # Args: name - 待查询数据源名。
+            # Returns: 不返回结果，固定抛出 RuntimeError。
+            async def lookup(self, name: str):
+                del name
+                raise RuntimeError("provider unavailable")
+
+        registry = DataSourceRegistry()
+        registry.register_provider("broken", BrokenProvider())
+
+        with pytest.raises(RuntimeError, match="provider unavailable"):
+            asyncio.run(registry.resolve_or_none("x"))
 
     def test_multiple_providers_iteration(self):
         """正常路径: 遍历所有 Provider 直到匹配。"""

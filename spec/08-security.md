@@ -380,4 +380,20 @@ mysql_test:
 
 单租户模式（`tenant_id=1`）下现有 API 行为不变。
 
+### 7.5 运行时密钥与数据库出站安全
+
+- 凭证加密主密钥只能来自 `CREDENTIAL_ENCRYPTION_KEY` 或显式构造参数，源码和配置模板不得携带固定默认密钥。
+- 生产环境启动时要求凭证主密钥至少 32 字符；`CredentialManager` 自身重复执行同一门禁，避免绕过应用工厂后使用弱密钥。
+- 非生产环境未配置主密钥时仅使用进程级随机临时密钥，并记录重启后无法解密持久化密文的警告。
+- ClickHouse 发起 TCP 探针前必须解析全部目标地址。全局不可路由地址默认拒绝，只有部署方通过
+  `DATASOURCE_HOST_ALLOWLIST` 显式声明的精确主机、IP 或 CIDR 可以访问私网。
+- 校验完成后，TCP 探针和 `clickhouse-connect` 客户端必须使用同一个已校验 IP，禁止再次使用原始主机名解析，避免 DNS 重绑定绕过。
+
+### 7.6 API 中间件安全
+
+- `AuthMiddleware` 使用纯 ASGI 协议，身份 `ContextVar` 从认证完成持续到最后一个 SSE 分块发送结束，再使用 Token 精确恢复。
+- `CORSMiddleware` 默认空 origin 列表，即拒绝跨域；生产环境禁止 `*`，可信前端通过 `CORS_ALLOWED_ORIGINS` 逐项声明。
+- 所有 HTTP 响应写入 `X-Content-Type-Options`、`X-Frame-Options`、`Referrer-Policy` 和 `Permissions-Policy`。
+- 生产环境额外写入 API 专用 CSP；HSTS 仅对生产 HTTPS 响应启用，时长由 `SECURITY_HSTS_SECONDS` 配置。
+
 ---

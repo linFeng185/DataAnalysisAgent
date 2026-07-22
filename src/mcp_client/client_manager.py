@@ -279,7 +279,7 @@ class MCPClientManager:
         raw_schema = getattr(mcp_tool, 'inputSchema', {}) or {}
         if raw_schema.get("properties"):
             try:
-                from pydantic import BaseModel, Field, create_model
+                from pydantic import Field, create_model
                 fields = {}
                 for pn, pp in raw_schema.get("properties", {}).items():
                     pt = _json_type_to_python(pp.get("type", "string"))
@@ -680,16 +680,19 @@ def _json_type_to_python(type_name: str) -> type:
     return result
 
 
-_client_manager: MCPClientManager | None = None
-
-
-# 方法作用：获取全局 MCPClientManager 单例。
+# 方法作用：从当前 AppContext 获取 MCPClientManager。
 # Args: config_path - 首次初始化使用的 YAML 配置路径。
-# Returns: MCPClientManager 全局单例。
+# Returns: 当前应用独享的 MCPClientManager 实例。
 def get_mcp_client_manager(config_path: str = "config/mcp_servers.yaml") -> MCPClientManager:
-    logger.debug("获取 MCPClientManager 单例入口", config_path=config_path)
-    global _client_manager
-    if _client_manager is None:
-        _client_manager = MCPClientManager(config_path)
-    logger.info("获取 MCPClientManager 单例完成")
-    return _client_manager
+    from functools import partial
+
+    from src.app_context import get_app_context
+
+    logger.debug("获取 MCPClientManager 入口", config_path=config_path)
+    result = get_app_context().get_or_create(
+        "mcp_client_manager",
+        partial(MCPClientManager, config_path),
+        closer=MCPClientManager.close_all,
+    )
+    logger.info("获取 MCPClientManager 完成")
+    return result

@@ -61,7 +61,7 @@ async def build_llm_context(
                 qs = [h.payload.get("question", h.content[:60]) for h in hits]
                 parts.append(f"[历史相关经验] {', '.join(qs)}")
         except Exception as e:
-            logger.debug("长期记忆检索跳过", error=str(e))
+            logger.error("长期记忆检索跳过", error=str(e), exc_info=True)
 
     context = "\n---\n".join(parts)
 
@@ -151,7 +151,7 @@ async def _summarize_turns_llm(turns: list[ConversationTurn]) -> str:
                     logger.debug("LLM 摘要请求失败", status=resp.status)
         return ""
     except Exception as e:
-        logger.warning("LLM 摘要生成失败，回退到规则", error=str(e))
+        logger.error("LLM 摘要生成失败，回退到规则", error=str(e), exc_info=True)
         return ""
 
 

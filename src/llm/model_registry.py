@@ -9,6 +9,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from src.llm.adapters.base import SupportedFeatures
+from src.logging_config import get_logger
+
+
+logger = get_logger(__name__)
 
 
 @dataclass
@@ -84,21 +88,34 @@ class ModelRegistry:
         ]
 
 
-# ── 模块级单例 ──
-
-_registry: ModelRegistry | None = None
-
-
+# 方法作用：从当前 AppContext 获取模型注册表并按需注册内置模型。
+# Args: 无。
+# Returns: 当前应用独享的 ModelRegistry 实例。
 def get_model_registry() -> ModelRegistry:
-    """获取 ModelRegistry 单例，首次调用时注册内置模型。
+    """获取当前应用的 ModelRegistry，首次调用时注册内置模型。
 
     Returns: ModelRegistry 实例
     """
-    global _registry
-    if _registry is None:
-        _registry = ModelRegistry()
-        _register_defaults(_registry)
-    return _registry
+    from src.app_context import get_app_context
+
+    logger.debug("获取 ModelRegistry 入口")
+    result = get_app_context().get_or_create(
+        "model_registry",
+        _create_model_registry,
+    )
+    logger.info("获取 ModelRegistry 完成")
+    return result
+
+
+# 方法作用：创建已注册内置模型的 ModelRegistry。
+# Args: 无。
+# Returns: 完成默认模型注册的 ModelRegistry 实例。
+def _create_model_registry() -> ModelRegistry:
+    logger.debug("创建 ModelRegistry 入口")
+    result = ModelRegistry()
+    _register_defaults(result)
+    logger.info("创建 ModelRegistry 完成")
+    return result
 
 
 def _register_defaults(r: ModelRegistry):

@@ -11,9 +11,9 @@
 | 16.1.3 | sqlglot validator 测试 | `tests/test_tools/test_sqlglot_validator.py` | 测试多方言、SQL 错误拦截和函数建议 | 单测完成 |
 | 16.1.4 | SQL 安全拦截测试 | `tests/test_security/test_sql_security.py` | 非只读语句、解析失败、权限失败关闭与审计 hash | 单测完成 |
 | 16.1.5 | compute_statistics() 测试 | `tests/test_tools/test_analyzer.py` | 正常、空值、空输入和非数值列统计 | 单测完成 |
-| 16.1.6 | classify_chart_type() 测试 | `tests/test_tools/test_chart_generator.py` | 各种列组合的选图正确性 | 待开发 |
-| 16.1.7 | LongTermMemoryStore 测试 | `tests/test_memory/test_long_term_store.py` | CRUD + 置信度过滤 + 语义检索 | 待开发 |
-| 16.1.8 | build_llm_context() 测试 | `tests/test_memory/test_context_builder.py` | 三层裁剪逻辑验证 | 待开发 |
+| 16.1.6 | classify_chart_type() 测试 | `tests/test_tools/test_chart_generator.py` | 各种列组合的选图正确性 | 单测完成 |
+| 16.1.7 | LongTermMemoryStore 测试 | `tests/test_memory/test_long_term_store.py` | CRUD + 置信度过滤 + 语义检索 | 单测完成 |
+| 16.1.8 | build_llm_context() 测试 | `tests/test_memory/test_context_builder.py` | 三层裁剪逻辑验证 | 单测完成 |
 | 16.1.9 | SkillManager 测试 | `tests/test_skills/test_skill_manager.py` | discover / match_skills / build_skill_prompt | 待开发 |
 | 16.1.10 | MCPClientManager 测试 | `tests/test_mcp/test_client_manager.py` | 使用 mock MCP Server 测试连接/转换/重连 | 待开发 |
 | 16.1.11 | LLM 输出二次校验测试 | `tests/test_tools/test_sql_security.py` | 模拟 LLM 幻觉编造表名/字段名 → 验证拦截 | 待开发 | P1 |
@@ -48,16 +48,15 @@
 | 16.4.4 | 管理 API 与上传安全 | `tests/test_api/test_management_routes.py` | 数据源生命周期、Schema 管理、XSS 转义和大小限制 | 集成测试完成 |
 | 16.4.5 | 正确性回归 | `tests/test_graph/test_correctness_regressions.py` | 无 LLM 回退、SQLite 内省和分析采样崩溃回归 | 单测完成 |
 | 16.4.6 | 工作流与模型路由整改 | `tests/test_graph/test_workflow_remediation.py`、`tests/test_llm/test_task_routing.py`、`tests/test_mcp/test_client_manager.py` | 编译图、状态清理、EXPLAIN、错误分流、本地/远程任务和 MCP 租户边界 | 单测完成 |
+| 16.4.7 | 安全扫描关键盲区补测 | `tests/test_graph/test_mcp_agent.py`、`tests/test_api/test_middleware.py`、`tests/test_connectors/test_mssql.py`、`tests/test_connectors/test_sqlite.py` | MCP 授权降级、异常响应脱敏、SHOWPLAN 清理和 SQLite Engine 契约 | 单测完成 |
+| 16.4.8 | 其余零覆盖模块补盲 | `tests/test_data_generation.py`、`tests/test_datasource/test_setup.py`、`tests/test_mcp/test_server.py`、`tests/test_memory/`、`tests/test_tools/` | coverage 基线、67% 门禁及全部真实零覆盖生产模块的公共行为测试 | 单测完成 | P1 |
 
 ### 模块收尾
 
-模块功能点共 27 项，已完成 13 项，待开发 14 项。
+模块功能点共 29 项，已完成 18 项，待开发 11 项。
 
 | 功能点 | 不开发原因 | 可开发条件 | 预计开发时机 |
 |--------|------------|------------|--------------|
-| 16.1.6 classify_chart_type() 测试 | 当前只有 table 回退冒烟测试，未覆盖列组合选图矩阵 | 为 `_classify_chart_type()` 补齐时间、分类、占比、双数值和空输入表驱动用例 | Phase 2，可视化专项回归时 |
-| 16.1.7 LongTermMemoryStore 测试 | 双写路径依赖全局 VectorStore 和可选 PG，尚无隔离 fixture | 提供可注入 FakeVectorStore 与 PG stub，验证 CRUD、置信度和补偿分支 | Phase 2，记忆模块加固时 |
-| 16.1.8 build_llm_context() 测试 | 三层裁剪依赖 token 预算、历史和向量检索，当前仅在 Node 中间接使用 | 固化 token 计算器并提供可控历史与向量检索 fixture | Phase 2，上下文预算专项时 |
 | 16.1.9 SkillManager 测试 | 仅有导入冒烟，未覆盖目录发现、匹配和依赖解析 | 建立临时内置/租户 Skill 目录 fixture 和冲突优先级断言 | Phase 2，租户 Skill 扫描完成后 |
 | 16.1.10 MCPClientManager 测试 | 本轮只覆盖 enabled=false，连接、工具转换和重连仍依赖外部进程 | 完成 StaticMCPTestServer，提供确定性的连接中断与恢复场景 | Phase 2，MCP 测试服务就绪后 |
 | 16.1.11 LLM 输出二次校验测试 | 现有测试覆盖 SQL AST 与列预检，但未模拟 LLM 编造表/字段的完整生成链路 | 使用 FakeListChatModel 返回幻觉 SQL，并断言生成节点拒绝输出 | Phase 2，FakeListChatModel fixture 完成后 |

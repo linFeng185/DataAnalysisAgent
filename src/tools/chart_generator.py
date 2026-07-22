@@ -44,7 +44,7 @@ class ChartGeneratorTool(BaseTool):
             resolved = chart_type if chart_type != "auto" else _classify_chart_type(rows)
             return {"recommended_chart_type": resolved, "option": _build_option(rows, resolved)}
         except Exception as e:
-            logger.error("图表生成失败", error=str(e))
+            logger.error("图表生成失败", error=str(e), exc_info=True)
             return {"error": str(e)}
 
 
@@ -81,7 +81,7 @@ def _build_option(rows: list[dict], chart_type: str) -> dict:
     label_col = text_cols[0] if text_cols else cols[0]
     value_col = numeric[0] if numeric else cols[-1]
     labels = [str(r.get(label_col, "")) for r in rows]
-    values = [float(r.get(value_col, 0) or 0) for r in rows]
+    values = [float(r.get(value_col, 0) or 0) for r in rows] if numeric else []
 
     base: dict[str, Any] = {
         "tooltip": {"trigger": "axis" if chart_type in ("line", "bar") else "item"},
@@ -98,7 +98,10 @@ def _build_option(rows: list[dict], chart_type: str) -> dict:
     elif chart_type == "pie":
         base["series"] = [{
             "name": value_col, "type": "pie",
-            "data": [{"name": l, "value": v} for l, v in zip(labels, values)],
+            "data": [
+                {"name": label, "value": value}
+                for label, value in zip(labels, values)
+            ],
         }]
     elif chart_type == "scatter" and len(numeric) >= 2:
         base["xAxis"] = {"type": "value"}

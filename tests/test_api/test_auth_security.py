@@ -2,16 +2,101 @@
 
 from __future__ import annotations
 
+import logging
+from collections.abc import AsyncIterator
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from starlette.requests import Request
 from starlette.responses import Response
+from starlette.middleware.base import BaseHTTPMiddleware
+
+
+logger = logging.getLogger(__name__)
 
 
 class TestCookieAuthentication:
     """覆盖 Cookie 登录、登出和 Bearer 兼容。"""
+
+    # 方法作用：验证认证中间件使用纯 ASGI 协议而非 BaseHTTPMiddleware。
+    # Args: self - pytest 测试类实例。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    def test_auth_middleware_is_pure_asgi(self) -> None:
+        """认证层不得缓冲或破坏 StreamingResponse 与 SSE 上下文。"""
+        logger.debug("test_auth_middleware_is_pure_asgi 入口")
+        # Arrange
+        import src.api.auth as auth
+
+        # Act / Assert
+        assert not issubclass(auth.AuthMiddleware, BaseHTTPMiddleware)
+        logger.info("test_auth_middleware_is_pure_asgi 完成")
+
+    # 方法作用：验证纯 ASGI 认证上下文覆盖整个 StreamingResponse 发送过程。
+    # Args: self - pytest 测试类实例；monkeypatch - pytest 补丁工具。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    async def test_streaming_response_keeps_identity_until_last_chunk(
+        self,
+        monkeypatch,
+    ) -> None:
+        """SSE 生成器的首尾分块必须读取到同一身份，请求后上下文恢复匿名。"""
+        logger.debug("test_streaming_response_keeps_identity_until_last_chunk 入口")
+        # Arrange
+        import asyncio
+
+        from fastapi import FastAPI
+        from fastapi.responses import StreamingResponse
+        from httpx import ASGITransport, AsyncClient
+
+        import src.api.auth as auth
+
+        settings = SimpleNamespace(
+            multi_tenant=True,
+            admin_api_key="",
+            jwt_secret="z" * 32,
+            jwt_access_token_expire_hours=24,
+            env="test",
+        )
+        monkeypatch.setattr(auth, "get_settings", lambda: settings)
+        monkeypatch.setattr(auth, "_secret_cache", None)
+        app = FastAPI()
+
+        # 方法作用：生成两个跨事件循环调度点的身份快照分块。
+        # Args: 无。
+        # Returns: 包含当前用户 ID 的异步字节流。
+        async def chunks() -> AsyncIterator[bytes]:
+            logger.debug("测试流式身份分块入口")
+            yield str(auth.get_current_user_id()).encode("ascii")
+            await asyncio.sleep(0)
+            yield f",{auth.get_current_user_id()}".encode("ascii")
+            logger.info("测试流式身份分块完成")
+
+        # 方法作用：返回用于验证身份生命周期的流式响应。
+        # Args: 无。
+        # Returns: 两个分块组成的 StreamingResponse。
+        @app.get("/stream")
+        async def stream() -> StreamingResponse:
+            logger.debug("测试流式路由入口")
+            result = StreamingResponse(chunks(), media_type="text/event-stream")
+            logger.info("测试流式路由完成")
+            return result
+
+        middleware = auth.AuthMiddleware(app)
+        transport = ASGITransport(app=middleware)
+        token = auth.create_access_token(9, 4, "analyst")
+
+        # Act
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            response = await client.get(
+                "/stream",
+                headers={"Authorization": f"Bearer {token}"},
+            )
+
+        # Assert
+        assert response.text == "9,9"
+        assert auth.get_current_user_id() == 0
+        assert auth.get_current_tenant_id() == 1
+        logger.info("test_streaming_response_keeps_identity_until_last_chunk 完成")
 
     async def test_login_sets_httponly_cookie_without_returning_token(self, monkeypatch):
         """登录应把 JWT 写入 HttpOnly Cookie，响应体不得暴露令牌。"""
@@ -167,11 +252,13 @@ class TestAuthContextIsolation:
         """多租户模式缺少令牌时应返回 401 响应而非抛出中间件异常。"""
         # Arrange
         import src.api.auth as auth
+        from src.app_context import AppContext, use_app_context
 
-        monkeypatch.setattr(auth, "get_settings", lambda: SimpleNamespace(
+        settings = SimpleNamespace(
             multi_tenant=True,
             admin_api_key="",
-        ))
+        )
+        monkeypatch.setattr(auth, "get_settings", lambda: settings)
         scope = {
             "type": "http",
             "http_version": "1.1",
@@ -187,7 +274,11 @@ class TestAuthContextIsolation:
         middleware = auth.AuthMiddleware(AsyncMock())
 
         # Act
-        response = await middleware.dispatch(Request(scope), AsyncMock(return_value=Response("ok")))
+        with use_app_context(AppContext(settings)):
+            response = await middleware.dispatch(
+                Request(scope),
+                AsyncMock(return_value=Response("ok")),
+            )
 
         # Assert
         assert response.status_code == 401
@@ -312,15 +403,18 @@ class TestAuthContextIsolation:
         """身份查询应返回当前上下文及服务端认证开关。"""
         # Arrange
         import src.api.auth as auth
+        from src.app_context import AppContext, use_app_context
 
-        monkeypatch.setattr(auth, "get_settings", lambda: SimpleNamespace(multi_tenant=True))
+        settings = SimpleNamespace(multi_tenant=True)
+        monkeypatch.setattr(auth, "get_settings", lambda: settings)
         user_token = auth._current_user_id.set(9)  # noqa: SLF001
         tenant_token = auth._current_tenant_id.set(4)  # noqa: SLF001
         role_token = auth._current_role.set("viewer")  # noqa: SLF001
 
         try:
             # Act
-            result = await auth.current_user()
+            with use_app_context(AppContext(settings)):
+                result = await auth.current_user()
         finally:
             auth._current_user_id.reset(user_token)  # noqa: SLF001
             auth._current_tenant_id.reset(tenant_token)  # noqa: SLF001

@@ -5,12 +5,7 @@ from __future__ import annotations
 import inspect
 from typing import Any
 
-from src.connectors.clickhouse import (
-    _ClickHouseConnection,
-    _ClickHouseEngine,
-    _ClickHouseResult,
-    _ClickHouseRow,
-)
+from src.connectors import clickhouse as _clickhouse  # noqa: F401
 from src.datasource.config import DataSourceConfig
 from src.datasource.credential_manager import CredentialManager
 from src.datasource.providers.base import DataSourceProvider
@@ -19,21 +14,31 @@ from src.logging_config import get_logger
 
 logger = get_logger(__name__)
 
+# 保留历史导入路径，同时由 clickhouse 模块完成连接器注册副作用。
+_ClickHouseConnection = _clickhouse._ClickHouseConnection
+_ClickHouseEngine = _clickhouse._ClickHouseEngine
+_ClickHouseResult = _clickhouse._ClickHouseResult
+_ClickHouseRow = _clickhouse._ClickHouseRow
 
-# 模块级单例 — 启动时填充，请求时复用
-_registry: DataSourceRegistry | None = None
 
-
+# 方法作用：从当前 AppContext 获取数据源 Registry，兼容既有调用入口。
+# Args: 无。
+# Returns: 当前应用独享的 DataSourceRegistry 实例。
 def get_registry() -> "DataSourceRegistry":
-    """获取进程级数据源 Registry 单例。
+    """获取当前应用的数据源 Registry。
 
     Returns:
-        全局 DataSourceRegistry 实例。
+        当前 AppContext 的 DataSourceRegistry 实例。
     """
-    global _registry
-    if _registry is None:
-        _registry = DataSourceRegistry()
-    return _registry
+    from src.app_context import get_app_context
+
+    logger.debug("获取数据源 Registry 入口")
+    result = get_app_context().get_or_create(
+        "datasource_registry",
+        DataSourceRegistry,
+    )
+    logger.info("获取数据源 Registry 完成")
+    return result
 
 
 class DataSourceRegistry:
@@ -83,6 +88,30 @@ class DataSourceRegistry:
         existed = self._cache.pop(name, None) is not None
         logger.info("数据源缓存失效", datasource=name, existed=existed)
         return existed
+
+    # 方法作用：通过公共边界注册或替换已构建的数据源配置。
+    # Args: config - 已完成 Engine/Schema 初始化的数据源配置；replace - 是否允许覆盖同名配置。
+    # Returns: 注册后的原配置对象。
+    def register_config(
+        self,
+        config: DataSourceConfig,
+        *,
+        replace: bool = True,
+    ) -> DataSourceConfig:
+        logger.debug(
+            "注册数据源配置入口",
+            datasource=config.name,
+            replace=replace,
+        )
+        if not config.name.strip():
+            logger.error("注册数据源配置失败", reason="数据源名称为空")
+            raise ValueError("数据源名称不能为空")
+        if config.name in self._cache and not replace:
+            logger.warning("注册数据源配置拒绝", datasource=config.name, reason="已存在")
+            raise ValueError(f"数据源配置已存在: {config.name}")
+        self._cache[config.name] = config
+        logger.info("注册数据源配置完成", datasource=config.name)
+        return config
 
     async def unregister(self, name: str) -> bool:
         """从 Provider 和 Registry 删除数据源并释放引擎。
@@ -235,6 +264,14 @@ class DataSourceRegistry:
         """
         try:
             return await self.resolve(name)
-        except Exception as exc:
-            logger.warning("数据源解析回退为空", datasource=name, error=str(exc))
+        except DataSourceNotFoundError:
+            logger.info("数据源解析回退为空", datasource=name, reason="not_found")
             return None
+        except Exception as exc:
+            logger.error(
+                "数据源解析失败",
+                datasource=name,
+                error=str(exc),
+                exc_info=True,
+            )
+            raise

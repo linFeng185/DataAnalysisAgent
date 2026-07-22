@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import os
-import sys
 from importlib import import_module
 
 from src.datasource.config import DataSourceConfig
@@ -57,12 +56,24 @@ class EmbeddedDataSourceProvider(DataSourceProvider):
         """2.2.3 检测当前环境是否为 Django 项目。"""
         try:
             import_module("django")
-            os.environ.setdefault("DJANGO_SETTINGS_MODULE", "")
+        except ImportError:
+            logger.info("Django 项目检测完成", installed=False)
+            return False
+        settings_module = os.getenv("DJANGO_SETTINGS_MODULE", "").strip()
+        if not settings_module:
+            logger.info("Django 项目检测完成", installed=True, configured=False)
+            return False
+        try:
             import django
+
             django.setup()
             from django.conf import settings
-            return settings.configured
-        except Exception:
+
+            result = settings.configured
+            logger.info("Django 项目检测完成", installed=True, configured=result)
+            return result
+        except Exception as exc:
+            logger.error("Django 项目检测失败", error=str(exc), exc_info=True)
             return False
 
     def _from_django_config(self) -> list[DataSourceConfig]:
@@ -85,7 +96,7 @@ class EmbeddedDataSourceProvider(DataSourceProvider):
                 ))
             return configs
         except Exception as e:
-            logger.debug("Django 配置解析失败", error=str(e))
+            logger.error("Django 配置解析失败", error=str(e), exc_info=True)
             return []
 
     def _has_sqlalchemy_engine(self) -> bool:
@@ -99,7 +110,6 @@ class EmbeddedDataSourceProvider(DataSourceProvider):
     def _from_sqlalchemy_engine(self) -> DataSourceConfig | None:
         """2.2.6 从 SQLAlchemy engine 提取连接信息。"""
         try:
-            from sqlalchemy import inspect as sa_inspect
             # 尝试获取默认 engine
             import sqlalchemy as sa
             if hasattr(sa, "engine") and sa.engine:
@@ -118,7 +128,7 @@ class EmbeddedDataSourceProvider(DataSourceProvider):
                 description="SQLAlchemy 项目数据库",
             )
         except Exception as e:
-            logger.debug("SQLAlchemy engine 提取失败", error=str(e))
+            logger.error("SQLAlchemy engine 提取失败", error=str(e), exc_info=True)
             return None
 
     # ========== ORM Model Schema (2.2.8-2.2.10) ==========
@@ -145,7 +155,6 @@ class EmbeddedDataSourceProvider(DataSourceProvider):
             import sqlalchemy as sa
             if hasattr(sa, "orm"):
                 # 遍历 declarative_base 的子类
-                from sqlalchemy.orm import DeclarativeBase
                 for mapper in sa.orm.registry.mappers:
                     model = mapper.class_
                     if hasattr(model, "__tablename__"):
@@ -252,7 +261,13 @@ class EmbeddedDataSourceProvider(DataSourceProvider):
             async with ds.engine.connect() as conn:
                 await conn.execute(sa.text("SELECT 1"))
             return True
-        except Exception:
+        except Exception as exc:
+            logger.error(
+                "内置数据源连接测试失败",
+                datasource=ds.name,
+                error=str(exc),
+                exc_info=True,
+            )
             return False
 
 
@@ -278,5 +293,5 @@ def _normalize_dialect(engine_name: str) -> str:
     if "mysql" in engine_name or "mariadb" in engine_name:
         return "mysql"
     if "sqlite" in engine_name:
-        return "postgres"  # 测试用
+        return "sqlite"
     return "postgres"

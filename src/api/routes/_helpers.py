@@ -2,24 +2,10 @@
 
 from __future__ import annotations
 
-import io
-import html
-import json
-import os
 import time
-import uuid
-from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
 
-from fastapi import APIRouter, Body, File, HTTPException, Query, UploadFile
+from fastapi import APIRouter, HTTPException
 
-from src.api.schemas import (
-    ChatRequest, ChatResponse, ColumnCommentRequest,
-    DataSourceCreateRequest, DataSourceInfo, HealthResponse, KnowledgeTagCreateRequest,
-    KnowledgeTagStatusRequest, MCPServerCreate, TableInfo,
-)
-from src.exceptions import DataSourceNotFoundError
-from src.llm.client import is_llm_available
 from src.logging_config import get_logger
 
 logger = get_logger(__name__)
@@ -46,10 +32,10 @@ def _authorize_extension_scope(scope: str) -> tuple[str, int, int, str]:
     """Skill 和 MCP 共用与知识库一致的三级写权限。"""
     logger.debug("扩展资源作用域授权入口", scope=scope)
     from src.api.auth import (
-        get_current_role, get_current_tenant_id, get_current_user_id,
+        get_current_identity, get_current_role, get_current_tenant_id, get_current_user_id,
     )
-    from src.config import get_settings
-    from src.knowledge.governance import can_write_knowledge_scope, normalize_knowledge_scope
+    from src.app_context import get_tenant_policy
+    from src.knowledge.governance import normalize_knowledge_scope
 
     try:
         normalized = normalize_knowledge_scope(scope).value
@@ -59,11 +45,9 @@ def _authorize_extension_scope(scope: str) -> tuple[str, int, int, str]:
     tenant_id = get_current_tenant_id()
     user_id = get_current_user_id()
     role = get_current_role()
-    if not can_write_knowledge_scope(
+    if not get_tenant_policy().can_write_scope(
         normalized,
-        role=role,
-        user_id=user_id,
-        multi_tenant=get_settings().multi_tenant,
+        get_current_identity(),
     ):
         logger.warning(
             "扩展资源作用域授权拒绝",

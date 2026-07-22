@@ -4,7 +4,7 @@
 
 | # | 功能 | 文件 | 状态 | 优先级 |
 |---|------|------|------|--------|
-| 20.1 | 异常吞噬清理 | `src/` 多模块 | 单测完成 | P0 |
+| 20.1 | 关键路径异常吞噬清理 | `src/graph/`、`src/memory/`、`src/api/` | 单测完成 | P0 |
 | 20.2 | 异步 Tool 事件循环修复 | `src/tools/` | 单测完成 | P0 |
 | 20.3 | API 路由领域拆包 | `src/api/routes/` | 单测完成 | P1 |
 | 20.4 | 依赖单一来源 | `pyproject.toml`、`requirements.txt` | 单测完成 | P0 |
@@ -17,9 +17,14 @@
 | 20.11 | 工作流节点目录 | `src/graph/node_registry.py` | 单测完成 | P1 |
 | 20.12 | 启动编排提取 | `src/bootstrap.py` | 单测完成 | P1 |
 | 20.13 | PostgreSQL URL 工具 | `src/db/utils.py` | 单测完成 | P0 |
+| 20.14 | 剩余回退异常可见性审计 | `src/` 20 个模块、30 个 fallback handler | 单测完成 | P1 |
+| 20.15 | AppContext 与依赖注入 | `src/` 全局工厂、Graph、FastAPI | 单测完成 | P1 |
+| 20.16 | 租户策略集中化 | `src/security/`、认证、知识库、Graph | 单测完成 | P0 |
 
 ### 模块收尾
 
-模块功能点共 13 项，已完成 13 项，待开发 0 项。
+模块功能点共 16 项，已完成 16 项，待开发 0 项。
 
 20.5 已通过 `git filter-repo` 清除所有本地 refs 中的 `src/test_data.sql` / `test_data.sql`，本地数据文件继续由 `.gitignore` 排除。远端历史发布属于仓库维护操作，必须在通知协作者后单独 force-push。
+
+本模块无待开发项。AppContext 现按 FastAPI 应用隔离资源并逆序关闭；TenantPolicy 集中认证、数据源和知识隔离语义；30 个宽泛异常回退均由 AST 契约保证堆栈可见性。

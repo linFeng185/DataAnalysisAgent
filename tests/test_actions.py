@@ -80,3 +80,41 @@ class TestExternalActions:
         # Assert
         assert result.status == "rejected"
         assert "交易" in result.message
+
+    # 方法作用：验证审计记录使用有界缓冲而不会无限增长。
+    # Args: self - pytest 测试类实例。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    async def test_audit_log_is_bounded(self):
+        """高频拒绝请求只能保留配置数量的最新审计。"""
+        from src.actions.contracts import ActionRequest, ExternalActionRegistry
+
+        registry = ExternalActionRegistry(audit_max_entries=2)
+        for index in range(3):
+            await registry.dispatch(ActionRequest("missing", {}, str(index), confirmed=True))
+
+        assert len(registry.audit_log()) == 2
+
+    # 方法作用：验证幂等记录达到上限后拒绝新动作且保留既有键。
+    # Args: self - pytest 测试类实例。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    async def test_idempotency_capacity_rejects_new_execution(self):
+        """有界幂等表不得通过淘汰旧键造成动作重复执行。"""
+        from src.actions.contracts import ActionRequest, ExternalAction, ExternalActionRegistry
+
+        class Action(ExternalAction):
+            name = "notify"
+
+            async def execute(self, request):
+                return request.payload
+
+        registry = ExternalActionRegistry(max_idempotency_keys=1)
+        registry.register(Action())
+        first = ActionRequest("notify", {"value": 1}, "key-1", confirmed=True)
+        second = ActionRequest("notify", {"value": 2}, "key-2", confirmed=True)
+
+        assert (await registry.dispatch(first)).status == "executed"
+        result = await registry.dispatch(second)
+
+        assert result.status == "rejected"
+        assert "容量" in result.message
+        assert (await registry.dispatch(first)).status == "already_executed"

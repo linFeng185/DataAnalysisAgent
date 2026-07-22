@@ -23,6 +23,54 @@ _DANGEROUS = [
     (r"\bpg_read_file\b", "pg_read_file"), (r"\bDBCC\b", "DBCC"),
     (r"\bxp_\w+", "扩展存储过程"),
 ]
+_STATE_MUTATING_FUNCTIONS = frozenset({
+    "dblink_exec",
+    "lo_export",
+    "nextval",
+    "pg_advisory_lock",
+    "pg_advisory_lock_shared",
+    "pg_reload_conf",
+    "pg_try_advisory_lock",
+    "pg_try_advisory_lock_shared",
+    "set_config",
+    "setval",
+})
+
+
+# 方法作用：检查 SELECT AST 中隐藏的写表、锁和状态变更函数副作用。
+# Args: tree - sqlglot 已解析的单条 SQL AST；query_type - AST 查询类型。
+# Returns: 无副作用返回空字符串，否则返回阻断原因。
+def _query_side_effect(tree, query_type) -> str:
+    logger.debug("检查查询副作用入口", statement_type=type(tree).__name__)
+    try:
+        from sqlglot import exp
+
+        if isinstance(tree, exp.Select) and tree.args.get("into") is not None:
+            logger.warning("检查查询副作用完成", blocked=True, reason="SELECT INTO")
+            return "SELECT INTO"
+        if isinstance(tree, exp.Select) and tree.args.get("locks"):
+            logger.warning("检查查询副作用完成", blocked=True, reason="SELECT LOCK")
+            return "SELECT FOR UPDATE/SHARE"
+        if not isinstance(tree, query_type):
+            logger.info("检查查询副作用完成", blocked=False, reason="非 Query")
+            return ""
+        for function in tree.find_all(exp.Func):
+            function_name = str(
+                function.name if isinstance(function, exp.Anonymous) else function.sql_name()
+            ).strip().lower()
+            if function_name in _STATE_MUTATING_FUNCTIONS:
+                logger.warning(
+                    "检查查询副作用完成",
+                    blocked=True,
+                    reason="状态变更函数",
+                    function=function_name,
+                )
+                return f"状态变更函数 {function_name}"
+        logger.info("检查查询副作用完成", blocked=False)
+        return ""
+    except Exception as exc:
+        logger.error("检查查询副作用失败", error=str(exc), exc_info=True)
+        raise
 
 
 def validate_readonly_sql(sql: str, dialect: str) -> list[dict]:
@@ -63,6 +111,13 @@ def validate_readonly_sql(sql: str, dialect: str) -> list[dict]:
 
         tree = statements[0]
         allowed = isinstance(tree, exp.Query)
+        side_effect = _query_side_effect(tree, exp.Query)
+        if side_effect:
+            logger.warning("只读 SQL AST 拦截", operation=side_effect)
+            return [{
+                "type": "security_block",
+                "message": f"禁止具有数据库副作用的查询: {side_effect}",
+            }]
 
         if isinstance(tree, exp.Show):
             allowed = True

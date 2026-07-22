@@ -6,10 +6,13 @@ import asyncio
 import socket
 from typing import Any
 
+from sqlalchemy import URL
+
 from src.connectors.base import ConnectorBase
 from src.connectors.registry import register_connector
 from src.config import get_settings
 from src.logging_config import get_logger
+from src.security.network import validate_outbound_host
 
 logger = get_logger(__name__)
 
@@ -220,20 +223,27 @@ class ClickHouseConnector(ConnectorBase):
         logger.info("ClickHouse 超时 SQL 完成", datasource=self.config.name)
         return result
 
-    def _build_url(self) -> str:
-        """构建兼容旧配置展示的 ClickHouse URL。
+    def _build_url(self) -> URL:
+        """构建默认隐藏密码的 ClickHouse SQLAlchemy URL。
 
         Args:
             无，使用当前数据源配置。
 
         Returns:
-            旧版 SQLAlchemy URL 文本；实际连接由 clickhouse-connect 创建。
+            SQLAlchemy URL 对象；实际连接由 clickhouse-connect 创建。
         """
         c = self.config
-        return (
-            f"clickhouse+asynch://{c.username}:{c.password}"
-            f"@{c.host}:{c.port}/{c.database}"
+        logger.debug("ClickHouse URL 构建入口", datasource=c.name)
+        result = URL.create(
+            "clickhouse+asynch",
+            username=c.username or None,
+            password=c.password or None,
+            host=c.host or None,
+            port=c.port or None,
+            database=c.database or None,
         )
+        logger.info("ClickHouse URL 构建完成", datasource=c.name)
+        return result
 
     @staticmethod
     def _bind_parameters(sql: str, params: dict | None) -> tuple[str, dict | None]:
@@ -294,15 +304,26 @@ class ClickHouseConnector(ConnectorBase):
                 port=http_port,
                 timeout=connect_timeout,
             )
+            settings = get_settings()
+            validated_addresses = validate_outbound_host(
+                self.config.host,
+                http_port,
+                getattr(settings, "datasource_host_allowlist", ""),
+            )
+            validated_host = validated_addresses[0]
             with socket.create_connection(
-                (self.config.host, http_port),
+                (validated_host, http_port),
                 timeout=connect_timeout,
             ):
-                logger.info("ClickHouse TCP 探针完成", datasource=self.config.name)
+                logger.info(
+                    "ClickHouse TCP 探针完成",
+                    datasource=self.config.name,
+                    validated_host=validated_host,
+                )
             import clickhouse_connect
 
             client = clickhouse_connect.get_client(
-                host=self.config.host,
+                host=validated_host,
                 port=http_port,
                 username=self.config.username,
                 password=self.config.password,

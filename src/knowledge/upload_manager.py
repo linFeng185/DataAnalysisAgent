@@ -21,6 +21,7 @@ class UploadTask:
     file_name: str = ""
     chunks_count: int = 0
     error: str = ""
+    created_at: float = 0
     started_at: float = 0
     finished_at: float = 0
     tenant_id: int = 1
@@ -46,8 +47,54 @@ class UploadTask:
 class UploadManager:
     """管理上传任务的生命周期。"""
 
-    def __init__(self) -> None:
+    def __init__(self, max_tasks: int = 1000, retention_seconds: float = 86400) -> None:
+        """初始化有界的上传任务管理器。
+
+        Args:
+            max_tasks: 进程内最多保留的任务数。
+            retention_seconds: 终态任务的保留秒数。
+
+        Returns:
+            无返回值。
+        """
+        logger.debug(
+            "初始化上传任务管理器入口",
+            max_tasks=max_tasks,
+            retention_seconds=retention_seconds,
+        )
+        if max_tasks <= 0:
+            logger.error("初始化上传任务管理器失败", error="max_tasks 必须大于 0")
+            raise ValueError("max_tasks 必须大于 0")
+        if retention_seconds < 0:
+            logger.error("初始化上传任务管理器失败", error="retention_seconds 不能小于 0")
+            raise ValueError("retention_seconds 不能小于 0")
         self._tasks: dict[str, UploadTask] = {}
+        self._max_tasks = max_tasks
+        self._retention_seconds = retention_seconds
+        logger.info("初始化上传任务管理器完成", max_tasks=max_tasks)
+
+    def _prune_tasks(self, now: float | None = None) -> int:
+        """清除超过保留期限的完成或失败任务。
+
+        Args:
+            now: 可注入的 monotonic 当前时间。
+
+        Returns:
+            被清除的任务数量。
+        """
+        current = time.monotonic() if now is None else now
+        logger.debug("清理上传任务入口", task_count=len(self._tasks), now=current)
+        expired_ids = []
+        for task_id, task in self._tasks.items():
+            if task.status not in {"done", "error"}:
+                continue
+            terminal_at = task.finished_at or task.created_at
+            if current - terminal_at >= self._retention_seconds:
+                expired_ids.append(task_id)
+        for task_id in expired_ids:
+            del self._tasks[task_id]
+        logger.info("清理上传任务完成", pruned=len(expired_ids), remaining=len(self._tasks))
+        return len(expired_ids)
 
     def create(
         self,
@@ -72,24 +119,29 @@ class UploadManager:
         """
         from src.api.auth import get_current_tenant_id, get_current_user_id
 
-        from src.config import get_settings
-        from src.knowledge.governance import can_write_knowledge_scope, normalize_knowledge_scope
+        from src.app_context import get_tenant_policy
+        from src.knowledge.governance import normalize_knowledge_scope
         from src.api.auth import get_current_role
+        from src.security.tenant_policy import RequestIdentity
 
         normalized_scope = normalize_knowledge_scope(knowledge_scope).value
         role = get_current_role()
         user_id = get_current_user_id()
+        now = time.monotonic()
         logger.debug(
             "创建上传任务入口",
             file_name=file_name,
             knowledge_scope=normalized_scope,
             role=role,
         )
-        if not can_write_knowledge_scope(
+        self._prune_tasks(now)
+        if len(self._tasks) >= self._max_tasks:
+            logger.warning("创建上传任务拒绝", reason="上传任务队列已满", max_tasks=self._max_tasks)
+            raise RuntimeError("上传任务队列已满")
+        tenant_id = get_current_tenant_id()
+        if not get_tenant_policy().can_write_scope(
             normalized_scope,
-            role=role,
-            user_id=user_id,
-            multi_tenant=get_settings().multi_tenant,
+            RequestIdentity(tenant_id=tenant_id, user_id=user_id, role=role),
         ):
             logger.warning(
                 "创建上传任务拒绝",
@@ -100,7 +152,8 @@ class UploadManager:
             raise PermissionError(f"当前角色无权写入 {normalized_scope} 知识")
         t = UploadTask(
             file_name=file_name,
-            tenant_id=get_current_tenant_id(),
+            created_at=now,
+            tenant_id=tenant_id,
             user_id=user_id,
             knowledge_scope=normalized_scope,
             tag_ids=list(tag_ids or []),
@@ -122,6 +175,8 @@ class UploadManager:
         """
         from src.api.auth import get_current_tenant_id, get_current_user_id
 
+        logger.debug("获取上传任务入口", task_id=task_id)
+        self._prune_tasks()
         task = self._tasks.get(task_id)
         visible = bool(
             task
@@ -142,6 +197,8 @@ class UploadManager:
         """
         from src.api.auth import get_current_tenant_id, get_current_user_id
 
+        logger.debug("列出上传任务入口", limit=limit)
+        self._prune_tasks()
         tenant_id = get_current_tenant_id()
         user_id = get_current_user_id()
         visible = [
@@ -313,16 +370,18 @@ async def _write_to_chromadb(
     )
 
 
-_manager: UploadManager | None = None
-
-
+# 方法作用：从当前 AppContext 获取上传任务管理器。
+# Args: 无。
+# Returns: 当前应用独享的 UploadManager 实例。
 def get_upload_manager() -> UploadManager:
-    """获取 UploadManager 单例。
+    """获取当前应用的 UploadManager。
 
     Returns:
-        模块级 UploadManager 实例。
+        当前 AppContext 的 UploadManager 实例。
     """
-    global _manager
-    if _manager is None:
-        _manager = UploadManager()
-    return _manager
+    from src.app_context import get_app_context
+
+    logger.debug("获取 UploadManager 入口")
+    result = get_app_context().get_or_create("upload_manager", UploadManager)
+    logger.info("获取 UploadManager 完成")
+    return result

@@ -501,18 +501,36 @@ def create_datasource_cache(settings: Any):
         raise
 
 
-_cache_singleton: LocalDatasourceCache | RedisDatasourceCache | None = None
-
-
-# 获取进程内共享的数据库内容缓存后端实例。
+# 获取当前 AppContext 共享的数据库内容缓存后端实例。
 # Args: 无。
 # Returns: 配置选定的数据库内容缓存后端。
 def get_datasource_cache() -> LocalDatasourceCache | RedisDatasourceCache:
-    global _cache_singleton
-    logger.debug("获取数据库内容缓存单例入口", initialized=_cache_singleton is not None)
-    if _cache_singleton is None:
-        from src.config import get_settings
+    from functools import partial
 
-        _cache_singleton = create_datasource_cache(get_settings())
-    logger.info("获取数据库内容缓存单例完成", backend=type(_cache_singleton).__name__)
-    return _cache_singleton
+    from src.app_context import get_app_context
+
+    context = get_app_context()
+    logger.debug("获取数据库内容缓存入口")
+    result = context.get_or_create(
+        "datasource_cache",
+        partial(create_datasource_cache, context.settings),
+        closer=_close_datasource_cache,
+    )
+    logger.info("获取数据库内容缓存完成", backend=type(result).__name__)
+    return result
+
+
+# 关闭支持 close/aclose 的数据库内容缓存资源。
+# Args: cache - 当前 AppContext 持有的缓存实例。
+# Returns: 异步关闭结果；本地缓存无需关闭时返回 None。
+def _close_datasource_cache(
+    cache: LocalDatasourceCache | RedisDatasourceCache,
+):
+    logger.debug("关闭数据库内容缓存资源入口", backend=type(cache).__name__)
+    close = getattr(cache, "close", None)
+    if close is None:
+        logger.info("关闭数据库内容缓存资源完成", skipped=True)
+        return None
+    result = close()
+    logger.info("关闭数据库内容缓存资源已提交", backend=type(cache).__name__)
+    return result

@@ -6,7 +6,7 @@
 
 | # | 功能 | 文件 | 描述 | 状态 |
 |---|------|------|------|------|
-| 6.1.1 | SchemaManager 类 | `src/knowledge/schema_manager.py` | 三级回退: ChromaDB 缓存 → 文档仓库 → DB 自动拉取 | 开发完成 |
+| 6.1.1 | SchemaManager 类 | `src/knowledge/schema_manager.py` | 三级回退并实际使用配置的本地 ONNX 模型目录，后端异常记录完整日志 | 单测完成 |
 | 6.1.2 | get_or_fetch_schema() | 同上 | Schema 获取的主入口，包装完整三级回退逻辑 | 开发完成 |
 | 6.1.3 | _query_cache() | 同上 | 查 ChromaDB 缓存，检查 TTL 是否过期 | 开发完成 |
 | 6.1.4 | _find_uncached() | 同上 | 找出哪些表尚未缓存或已过期 → 合并为 _any_expired() | 开发完成 |
@@ -56,7 +56,7 @@
 
 | # | 功能 | 文件 | 描述 | 状态 |
 |---|------|------|------|------|
-| 6.5.1 | auto_discover_enum_values() | `src/knowledge/enum_discovery.py` | 对低基数列采样枚举值 (SELECT DISTINCT ... LIMIT 50) | 开发完成 |
+| 6.5.1 | auto_discover_enum_values() | `src/knowledge/enum_discovery.py` | 表/列按目标方言安全引用，绑定 LIMIT 后采样低基数枚举值 | 单测完成 |
 | 6.5.2 | is_low_cardinality_candidate() | 同上 | 唯一值 ≤ 20 → 可能是枚举 | 开发完成 |
 | 6.5.3 | TTL 设置 | 同上 | 枚举值 TTL=1天 (比表结构变化快) | 开发完成 |
 
@@ -75,7 +75,7 @@
 |---|------|------|------|------|--------|
 | 6.7.1 | 多格式解析 | `src/knowledge/doc_parser.py`、`src/knowledge/document_assets.py` | PDF (PyPDF2) / Word / TXT / MD 文本提取，并保留页码、段落、标题和表格定位 | 单测完成 | P2 |
 | 6.7.2 | 智能分块引擎 | 同上 | 4 种策略 + 重叠 + 最小块配置 | 开发完成 | P2 |
-| 6.7.3 | 异步上传任务 | `src/knowledge/upload_manager.py` | UploadTask 状态 + asyncio 后台 + ChromaDB 写入 | 开发完成 | P2 |
+| 6.7.3 | 异步上传任务 | `src/knowledge/upload_manager.py` | 有界 UploadTask 状态 + 终态 TTL 清理 + asyncio 后台 VectorStore 写入 | 单测完成 | P2 |
 | 6.7.4 | 上传/查询 API | `src/api/routes.py` | POST upload + GET status + GET content + GET raw | 开发完成 | P2 |
 | 6.7.5 | 删除保护 | 同上 | 系统条目/文档禁止删除 | 开发完成 | P2 |
 
@@ -88,7 +88,7 @@
 | 6.8.3 | DataAsset/Evidence 契约 | `src/knowledge/asset_models.py` | 统一资产、证据、分析计划和产物模型 | 单测完成 | P0 |
 | 6.8.4 | KnowledgeEntry 来源版本 | `src/knowledge/models.py` | checksum/版本/页码或 Sheet 定位/embedding 版本 | 单测完成 | P1 |
 | 6.8.5 | 上传 VectorStore 收口 | `src/knowledge/upload_manager.py` | 上传写入统一走 VectorStore，不访问 Chroma 私有对象 | 单测完成 | P0 |
-| 6.8.6 | 知识管理 API VectorStore 收口 | `src/api/routes.py` | 列表/删除通过抽象接口并保留租户和所有者检查 | 单测完成 | P0 |
+| 6.8.6 | 知识管理 API VectorStore 收口 | `src/api/routes.py` | 列表/删除保留 ACL；磁盘回退使用 realpath/commonpath，内部异常响应脱敏 | 单测完成 | P0 |
 | 6.8.7 | 混合召回 | `src/knowledge/retrieval.py` | 向量召回与正文/字段关键词精确匹配融合，保持同一 ACL 过滤 | 单测完成 | P1 |
 | 6.8.8 | 不可信内容隔离 | `src/knowledge/content_safety.py`、`src/graph/nodes/retrieve_schema.py` | 检测提示词注入、证据分隔渲染，禁止文档内容改变系统指令或工具权限 | 单测完成 | P0 |
 | 6.8.9 | LightweightReranker | `src/knowledge/reranker.py` | 对向量/关键词候选按字段精确度、来源多样性和相似度做确定性重排 | 单测完成 | P1 |

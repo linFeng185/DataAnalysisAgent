@@ -74,7 +74,7 @@ class TestBootstrap:
             await bootstrap.bootstrap_all(SimpleNamespace(env="prod"))
         logger.info("test_bootstrap_all_prod_raises_step_error 完成")
 
-    # 方法作用：验证关闭阶段释放 MCP 与 PostgreSQL 连接池。
+    # 方法作用：验证关闭阶段通过 AppContext 统一释放应用资源。
     # Args: self - pytest 测试类实例；monkeypatch - pytest 补丁工具。
     # Returns: 无返回值，断言失败时由 pytest 报告。
     @pytest.mark.asyncio
@@ -83,13 +83,11 @@ class TestBootstrap:
         logger.debug("test_shutdown_all_closes_resources 入口")
         from src import bootstrap
 
-        close_mcp = AsyncMock()
-        close_pool = AsyncMock()
-        monkeypatch.setattr(bootstrap, "_close_mcp", close_mcp)
-        monkeypatch.setattr(bootstrap, "_close_pg", close_pool)
+        del monkeypatch
+        close_context = AsyncMock()
+        context = SimpleNamespace(close=close_context)
 
-        await bootstrap.shutdown_all()
+        await bootstrap.shutdown_all(context)
 
-        close_mcp.assert_awaited_once()
-        close_pool.assert_awaited_once()
+        close_context.assert_awaited_once()
         logger.info("test_shutdown_all_closes_resources 完成")

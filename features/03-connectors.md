@@ -7,7 +7,7 @@
 | # | 功能 | 文件 | 描述 | 状态 |
 |---|------|------|------|------|
 | 3.1.1 | ConnectorBase 抽象类 | `src/connectors/base.py` | execute/explain/health_check/close + rows_to_dict_list | 单测完成 | P0 |
-| 3.1.2 | 连接池工厂 | 同上 | create_engine() + create_connector() — URL 构建 + SQLAlchemy AsyncEngine | 单测完成 | P0 |
+| 3.1.2 | 连接池工厂 | 同上 | `URL.create()` 安全保存特殊字符密码且默认脱敏 + SQLAlchemy AsyncEngine | 单测完成 | P0 |
 | 3.1.3 | 查询超时控制 | 同上 | _get_timeout() — dialect 自适应超时 SQL | 单测完成 | P0 |
 | 3.1.4 | 结果格式化 | 同上 | rows_to_dict_list() — RowMapping → list[dict] | 单测完成 | P0 |
 

@@ -39,17 +39,23 @@ class TestSSEFormat:
 
 
 class TestStreamingResponseConfig:
-    def test_stream_endpoint_mounted(self):
-        from src.api.routes import router
-        stream_routes = [r for r in router.routes if hasattr(r, "path") and "/chat/stream" in r.path]
-        assert len(stream_routes) > 0
+    async def test_stream_endpoint_mounted(self):
+        from httpx import ASGITransport, AsyncClient
+        from src.main import app
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://test",
+        ) as client:
+            response = await client.post("/api/v1/chat/stream", json={})
+        assert response.status_code == 422
 
-    def test_stream_endpoint_post_method(self):
-        from src.api.routes import router
-        for r in router.routes:
-            if hasattr(r, "path") and "/chat/stream" in r.path:
-                assert "POST" in r.methods
-                break
+    async def test_stream_endpoint_post_method(self):
+        from httpx import ASGITransport, AsyncClient
+        from src.main import app
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://test",
+        ) as client:
+            response = await client.get("/api/v1/chat/stream")
+        assert response.status_code == 405
 
 
 class TestFindParentNode:

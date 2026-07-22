@@ -72,7 +72,7 @@ class DataAnalyzerTool(BaseTool):
 
             return result
         except Exception as e:
-            logger.error("数据分析失败", error=str(e))
+            logger.error("数据分析失败", error=str(e), exc_info=True)
             return {"error": str(e)}
 
 

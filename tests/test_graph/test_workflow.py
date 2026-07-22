@@ -893,25 +893,31 @@ class TestE2E:
 
     async def test_workflow_compiles(self, monkeypatch):
         from types import SimpleNamespace
-        import src.memory.checkpointer as checkpointer_module
+        from src.app_context import AppContext, use_app_context_async
         from src.graph.workflow import build_workflow
-        monkeypatch.setattr(checkpointer_module, "get_settings", lambda: SimpleNamespace(database_url=""))
-        assert await build_workflow() is not None
+
+        del monkeypatch
+        context = AppContext(SimpleNamespace(database_url="", multi_tenant=False))
+        async with use_app_context_async(context):
+            assert await build_workflow() is not None
+        await context.close()
 
     async def test_simple_query(self, monkeypatch):
         """完整链路: 无数据源 → 返回错误提示。"""
         from types import SimpleNamespace
+        from src.app_context import AppContext, use_app_context_async
         import src.graph.nodes.generate_sql as generate_module
-        import src.memory.checkpointer as checkpointer_module
         from src.graph.workflow import build_workflow
 
         monkeypatch.setattr(generate_module, "is_llm_available", lambda: False)
-        monkeypatch.setattr(checkpointer_module, "get_settings", lambda: SimpleNamespace(database_url=""))
-        app = await build_workflow()
-        r = await app.ainvoke({
-            "user_query": "查昨天订单",
-            "datasource": "nonexistent",
-        }, {"configurable": {"thread_id": "test-simple-query"}})
+        context = AppContext(SimpleNamespace(database_url="", multi_tenant=False))
+        async with use_app_context_async(context):
+            app = await build_workflow()
+            r = await app.ainvoke({
+                "user_query": "查昨天订单",
+                "datasource": "nonexistent",
+            }, {"configurable": {"thread_id": "test-simple-query"}})
+        await context.close()
         assert "final_response" in r
 
     def test_dangerous_sql_blocked_at_node_level(self):
@@ -922,16 +928,18 @@ class TestE2E:
 
     async def test_retry_path(self, monkeypatch):
         from types import SimpleNamespace
+        from src.app_context import AppContext, use_app_context_async
         import src.graph.nodes.generate_sql as generate_module
-        import src.memory.checkpointer as checkpointer_module
         from src.graph.workflow import build_workflow
 
         monkeypatch.setattr(generate_module, "is_llm_available", lambda: False)
-        monkeypatch.setattr(checkpointer_module, "get_settings", lambda: SimpleNamespace(database_url=""))
-        app = await build_workflow()
-        r = await app.ainvoke({
-            "user_query": "查",
-            "generated_sql": "SELECT bad",
-            "retry_count": 0,
-        }, {"configurable": {"thread_id": "test-retry-path"}})
+        context = AppContext(SimpleNamespace(database_url="", multi_tenant=False))
+        async with use_app_context_async(context):
+            app = await build_workflow()
+            r = await app.ainvoke({
+                "user_query": "查",
+                "generated_sql": "SELECT bad",
+                "retry_count": 0,
+            }, {"configurable": {"thread_id": "test-retry-path"}})
+        await context.close()
         assert "final_response" in r

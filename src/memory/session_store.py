@@ -359,11 +359,14 @@ def _row_to_dict(row) -> dict:
     }
 
 
-_store: SessionStore | None = None
-
-
+# 方法作用：从当前 AppContext 获取会话存储。
+# Args: 无。
+# Returns: 当前应用独享的 SessionStore 实例。
 def get_session_store() -> SessionStore:
-    global _store
-    if _store is None:
-        _store = SessionStore()
-    return _store
+    """获取当前应用的 SessionStore。"""
+    from src.app_context import get_app_context
+
+    logger.debug("获取 SessionStore 入口")
+    result = get_app_context().get_or_create("session_store", SessionStore)
+    logger.info("获取 SessionStore 完成")
+    return result

@@ -70,7 +70,13 @@ def get_anthropic_llm(model: str | None = None, temperature: float | None = None
     )
 
 
-def get_llm(provider: str | None = None, model: str | None = None, temperature: float | None = None, reasoning: bool = True) -> BaseChatModel:
+def get_llm(
+    provider: str | None = None,
+    model: str | None = None,
+    temperature: float | None = None,
+    reasoning: bool = True,
+    max_tokens: int | None = None,
+) -> BaseChatModel:
     """10.1.3 路由器。"""
     s = get_settings()
     provider_name = provider or s.llm_provider
@@ -87,12 +93,31 @@ def get_llm(provider: str | None = None, model: str | None = None, temperature: 
         temperature=temperature,
         stream=True,
         reasoning=reasoning,
+        max_tokens=max_tokens,
     )
 
 
 def get_cheap_llm() -> BaseChatModel:
     """10.1.4 低成本 LLM。"""
-    return get_openai_llm(model=get_settings().cheap_llm_model, temperature=0, max_tokens=1024)
+    settings = get_settings()
+    logger.debug(
+        "创建低成本 LLM 入口",
+        provider=settings.llm_provider,
+        model=settings.cheap_llm_model,
+    )
+    result = get_llm(
+        provider=settings.llm_provider,
+        model=settings.cheap_llm_model,
+        temperature=0,
+        reasoning=False,
+        max_tokens=1024,
+    )
+    logger.info(
+        "创建低成本 LLM 完成",
+        provider=settings.llm_provider,
+        model=settings.cheap_llm_model,
+    )
+    return result
 
 
 # 方法作用：判断配置的远程模型是否具备调用凭证。

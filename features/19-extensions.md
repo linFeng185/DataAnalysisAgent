@@ -20,7 +20,7 @@
 | 19.14 | 联网搜索分析 | MCP 封装搜索 API → 结构化 → 分析，不依赖预配数据源 (见 §15.5) | 待开发 | P2 |
 | 19.15 | SQL 优化 Skills | 索引感知 + 重写规则 + 性能模板 (见 §15.7) | 待开发 | P3 |
 | 19.16 | 知识库增强 | 三范围知识、数据源公共文档、个人补充、标签治理与系统目录扫描（主实现见 6.9） | 单测完成 | P2 |
-| 19.17 | VectorStore 抽象层 | ChromaDB/Milvus/pgvector 统一 VectorStore，8 文件已迁移 | 开发完成 | P2 |
+| 19.17 | VectorStore 抽象层 | ChromaDB/Milvus/pgvector 统一接口；Milvus 表达式转义后执行 metadata 精确过滤 | 单测完成 | P2 |
 | 19.18 | 统一 PG 存储 | PgVectorStore 已实现，待 PG 装扩展后激活 | 开发完成 | P2 |
 | 19.19 | LLM Provider 抽象层 | Provider 注册表 + 4 模型 + 运行时切换 + 降级链 | 开发完成 | P2 |
 | 19.20 | 配置管理升级 | .env 裸密码 → .env.example 模板 + K8s Secret/Vault 注入 | 待开发 | P3 |

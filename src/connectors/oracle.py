@@ -5,6 +5,7 @@ import asyncio
 from typing import Any
 
 import sqlalchemy as sa
+from sqlalchemy import URL
 
 from src.connectors.base import ConnectorBase
 from src.connectors.registry import register_connector
@@ -20,7 +21,7 @@ class OracleConnector(ConnectorBase):
     explain_template = "EXPLAIN PLAN FOR {sql}"
     probe_sql = "SELECT 1 FROM DUAL"
 
-    def _build_url(self) -> str:
+    def _build_url(self) -> URL:
         """构建 Oracle service name 连接 URL。
 
         Args:
@@ -30,9 +31,17 @@ class OracleConnector(ConnectorBase):
             包含 service_name 参数的 SQLAlchemy URL。
         """
         cfg = self.config
-        from urllib.parse import quote_plus
-        pwd = quote_plus(cfg.password) if cfg.password else ""
-        return f"oracle+oracledb://{cfg.username}:{pwd}@{cfg.host}:{cfg.port}/?service_name={cfg.database}"
+        logger.debug("Oracle URL 构建入口", datasource=cfg.name)
+        result = URL.create(
+            "oracle+oracledb",
+            username=cfg.username or None,
+            password=cfg.password or None,
+            host=cfg.host or None,
+            port=cfg.port or None,
+            query={"service_name": cfg.database},
+        )
+        logger.info("Oracle URL 构建完成", datasource=cfg.name)
+        return result
 
     def _get_timeout(self) -> str | None:
         """返回 Oracle 的会话超时 SQL。

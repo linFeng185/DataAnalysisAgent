@@ -50,6 +50,9 @@ logs/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
 
 # 生成的测试数据文件
 test_data.sql

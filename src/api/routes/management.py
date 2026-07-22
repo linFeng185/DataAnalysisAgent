@@ -16,7 +16,7 @@ from fastapi import APIRouter, Body, File, HTTPException, Query, UploadFile
 from src.api.schemas import (
     ChatRequest, ChatResponse, ColumnCommentRequest,
     DataSourceCreateRequest, DataSourceInfo, HealthResponse, KnowledgeTagCreateRequest,
-    KnowledgeTagStatusRequest, MCPServerCreate, TableInfo,
+    KnowledgeTagStatusRequest, MCPServerCreate, ModelTestRequest, TableInfo,
 )
 from src.exceptions import DataSourceNotFoundError
 from src.llm.client import is_llm_available
@@ -43,16 +43,33 @@ async def list_models():
 
 
 @router.post("/models/test")
-async def test_model(req: dict):
+async def test_model(req: ModelTestRequest):
+    """使用固定最小请求测试已注册模型连通性。
+
+    Args:
+        req: 已校验的模型 ID。
+
+    Returns:
+        连通状态和请求延迟。
+    """
     import time as _t
     from src.llm.client import get_provider
+    logger.debug("模型连通性测试入口", model_id=req.model_id)
     try:
-        p = get_provider(req.get("model_id", ""))
+        p = get_provider(req.model_id)
         s = _t.monotonic()
         await p.agenerate([{"role": "user", "content": "ping"}], max_tokens=1)
-        return {"ok": True, "latency_ms": round((_t.monotonic() - s) * 1000)}
-    except Exception as e:
-        return {"ok": False, "error": str(e)}
+        result = {"ok": True, "latency_ms": round((_t.monotonic() - s) * 1000)}
+        logger.info("模型连通性测试完成", model_id=req.model_id, ok=True)
+        return result
+    except Exception as exc:
+        logger.error(
+            "模型连通性测试失败",
+            model_id=req.model_id,
+            error=str(exc),
+            exc_info=True,
+        )
+        return {"ok": False, "error": "模型连接测试失败"}
 
 # ---- Knowledge / 知识库 ----
 

@@ -202,7 +202,7 @@ async def build_response_node(state: AnalysisState) -> dict:
         try:
             from src.memory.history_store import get_history_store
             row_count = len(state.get("query_result_sample", []) or [])
-            get_history_store().add(
+            await get_history_store().add(
                 user_query=query, datasource=state.get("datasource", ""),
                 session_id=state.get("session_id", "") or "",
                 generated_sql=gen_sql, success=not state.get("execution_error"),

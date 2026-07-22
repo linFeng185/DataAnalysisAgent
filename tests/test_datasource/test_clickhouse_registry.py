@@ -47,6 +47,13 @@ class TestClickHouseRegistryAdapter:
             return client
 
         monkeypatch.setattr(clickhouse_connect, "get_client", fake_get_client)
+        monkeypatch.setattr(
+            socket,
+            "getaddrinfo",
+            lambda *args, **kwargs: [
+                (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 8123)),
+            ],
+        )
         tcp_connection = MagicMock()
         tcp_probe = MagicMock(return_value=tcp_connection)
         monkeypatch.setattr(socket, "create_connection", tcp_probe)
@@ -75,7 +82,8 @@ class TestClickHouseRegistryAdapter:
         assert client_options["port"] == 8123
         assert client_options["connect_timeout"] == 5
         assert client_options["query_retries"] == 0
-        tcp_probe.assert_called_once_with(("ch.local", 8123), timeout=5)
+        tcp_probe.assert_called_once_with(("93.184.216.34", 8123), timeout=5)
+        assert client_options["host"] == "93.184.216.34"
 
     # 方法作用：验证 Registry 内部调用也拒绝未实现方言。
     # Args: self - pytest 测试类实例；monkeypatch - pytest 补丁工具。
@@ -116,6 +124,13 @@ class TestClickHouseRegistryAdapter:
                 return None
 
         monkeypatch.setattr(clickhouse_connect, "get_client", MagicMock(return_value=FakeClient()))
+        monkeypatch.setattr(
+            socket,
+            "getaddrinfo",
+            lambda *args, **kwargs: [
+                (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 8123)),
+            ],
+        )
         monkeypatch.setattr(socket, "create_connection", MagicMock(return_value=MagicMock()))
         config = DataSourceConfig(
             name="clickhouse_test", dialect="clickhouse", mode="external",

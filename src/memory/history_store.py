@@ -108,10 +108,10 @@ class HistoryStore:
             logger.error("历史 PG 连接失败", error=str(exc), exc_info=True)
             raise
 
-    def add(self, user_query: str, datasource: str, session_id: str,
-            generated_sql: str = "", success: bool = True, row_count: int = 0,
-            final_result: dict | None = None) -> None:
-        """添加一条绑定当前身份的查询记录（同步接口，兼容现有调用方）。
+    async def add(self, user_query: str, datasource: str, session_id: str,
+                  generated_sql: str = "", success: bool = True, row_count: int = 0,
+                  final_result: dict | None = None) -> None:
+        """添加一条绑定当前身份的查询记录并等待持久化写入。
 
         Args:
             user_query - 用户查询语句
@@ -145,15 +145,17 @@ class HistoryStore:
         if len(self._items) > _MAX_SIZE:
             self._items = self._items[-_MAX_SIZE:]
 
-        # 异步写 PG（fire-and-forget，不阻塞同步调用）
-        import asyncio as _asyncio
         try:
-            loop = _asyncio.get_event_loop()
-            if loop.is_running():
-                loop.create_task(self._pg_insert(item))
-        except Exception:
-            logger.error("历史异步任务创建失败", session_id=session_id[:20], exc_info=True)
-        logger.info("历史已加入内存", session_id=session_id[:20], user_id=user_id)
+            await self._pg_insert(item)
+        except Exception as exc:
+            logger.error(
+                "历史持久化写入失败",
+                session_id=session_id[:20],
+                error=str(exc),
+                exc_info=True,
+            )
+            raise
+        logger.info("历史写入完成", session_id=session_id[:20], user_id=user_id)
 
     async def _pg_insert(self, item: dict) -> None:
         """将条目写入 PG。"""
@@ -180,6 +182,7 @@ class HistoryStore:
                 )
         except Exception as exc:
             logger.error("PG 历史写入失败", error=str(exc), exc_info=True)
+            raise
 
     async def list_session(
         self, session_id: str, before: int | None = None, limit: int = 20,
@@ -418,13 +421,14 @@ def _pg_row_to_dict(row) -> dict:
     }
 
 
-# 模块级单例
-_store: HistoryStore | None = None
-
-
+# 方法作用：从当前 AppContext 获取历史记录存储。
+# Args: 无。
+# Returns: 当前应用独享的 HistoryStore 实例。
 def get_history_store() -> HistoryStore:
-    """获取 HistoryStore 单例。"""
-    global _store
-    if _store is None:
-        _store = HistoryStore()
-    return _store
+    """获取当前应用的 HistoryStore。"""
+    from src.app_context import get_app_context
+
+    logger.debug("获取 HistoryStore 入口")
+    result = get_app_context().get_or_create("history_store", HistoryStore)
+    logger.info("获取 HistoryStore 完成")
+    return result

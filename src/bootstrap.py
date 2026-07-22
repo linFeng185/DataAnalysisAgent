@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable
 from typing import Any
 
+from src.app_context import AppContext, use_app_context_async
 from src.config import Settings
 from src.logging_config import get_logger
 
@@ -163,11 +164,29 @@ async def _load_external_datasources(settings: Settings) -> None:
     logger.info("_load_external_datasources 完成", count=len(sources))
 
 
-# 方法作用：按固定顺序执行所有启动阶段，开发环境允许单阶段降级。
+# 方法作用：按固定顺序执行所有启动阶段，并绑定显式应用 Context。
+# Args: settings - 当前应用配置；context - 可选应用级依赖容器。
+# Returns: 无返回值。
+async def bootstrap_all(
+    settings: Settings,
+    *,
+    context: AppContext | None = None,
+) -> None:
+    logger.debug("bootstrap_all 入口", env=settings.env)
+    if context is not None:
+        async with use_app_context_async(context):
+            await _run_bootstrap_steps(settings)
+        logger.info("bootstrap_all 完成", env=settings.env, context_bound=True)
+        return
+    await _run_bootstrap_steps(settings)
+    logger.info("bootstrap_all 完成", env=settings.env, context_bound=False)
+
+
+# 方法作用：执行启动阶段并应用生产阻断、非生产降级策略。
 # Args: settings - 当前应用配置。
 # Returns: 无返回值。
-async def bootstrap_all(settings: Settings) -> None:
-    logger.debug("bootstrap_all 入口", env=settings.env)
+async def _run_bootstrap_steps(settings: Settings) -> None:
+    logger.debug("_run_bootstrap_steps 入口", env=settings.env)
     for name, description in _BOOTSTRAP_STEPS:
         step: Callable[[Settings], Awaitable[Any]] = globals()[name]
         logger.debug("启动阶段开始", step=name, description=description)
@@ -178,37 +197,17 @@ async def bootstrap_all(settings: Settings) -> None:
             if settings.env == "prod":
                 raise
             logger.warning("非生产环境跳过启动阶段", step=name, env=settings.env)
-    logger.info("bootstrap_all 完成", env=settings.env)
+    logger.info("_run_bootstrap_steps 完成", env=settings.env)
 
 
-# 方法作用：关闭 MCP 和 PostgreSQL 共享资源，避免进程退出时连接泄漏。
-# Args: 无。
+# 方法作用：通过 AppContext 逆序关闭当前应用已创建的全部共享资源。
+# Args: context - 待关闭的应用级依赖容器；缺省时使用当前 Context。
 # Returns: 无返回值。
-async def shutdown_all() -> None:
+async def shutdown_all(context: AppContext | None = None) -> None:
     logger.debug("shutdown_all 入口")
-    await _close_mcp()
-    await _close_pg()
+    if context is None:
+        from src.app_context import get_app_context
+
+        context = get_app_context()
+    await context.close()
     logger.info("shutdown_all 完成")
-
-
-# 方法作用：关闭已创建的全局 MCP 管理器。
-# Args: 无。
-# Returns: 无返回值。
-async def _close_mcp() -> None:
-    logger.debug("_close_mcp 入口")
-    from src.mcp_client import client_manager
-
-    if client_manager._client_manager is not None:  # noqa: SLF001
-        await client_manager._client_manager.close_all()  # noqa: SLF001
-    logger.info("_close_mcp 完成")
-
-
-# 方法作用：关闭全局 PostgreSQL 连接池。
-# Args: 无。
-# Returns: 无返回值。
-async def _close_pg() -> None:
-    logger.debug("_close_pg 入口")
-    from src.memory.pg_pool import close_pg_pool
-
-    await close_pg_pool()
-    logger.info("_close_pg 完成")

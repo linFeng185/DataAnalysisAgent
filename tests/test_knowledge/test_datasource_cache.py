@@ -288,25 +288,27 @@ class TestDatasourceCacheFactory:
         assert isinstance(redis, RedisDatasourceCache)
         logger.info("test_factory_switches_backend_from_settings 完成")
 
-    # 验证全局工厂只创建一次后端，避免重复连接 Redis。
+    # 验证单个 AppContext 只创建一次后端，避免重复连接 Redis。
     # Args: self - pytest 测试类实例；monkeypatch - pytest 补丁工具。
     # Returns: 无返回值，断言失败时由 pytest 报告。
-    def test_get_datasource_cache_reuses_singleton(self, monkeypatch):
+    def test_get_datasource_cache_reuses_context_resource(self, monkeypatch):
         """get_datasource_cache 连续调用应返回同一实例。"""
-        logger.debug("test_get_datasource_cache_reuses_singleton 入口")
+        logger.debug("test_get_datasource_cache_reuses_context_resource 入口")
         import src.knowledge.datasource_cache as cache_module
+        from src.app_context import AppContext, use_app_context
 
         expected = object()
         sync_create = MagicMock(return_value=expected)
-        monkeypatch.setattr(cache_module, "_cache_singleton", None)
         monkeypatch.setattr(cache_module, "create_datasource_cache", sync_create)
 
-        first = cache_module.get_datasource_cache()
-        second = cache_module.get_datasource_cache()
+        context = AppContext(SimpleNamespace(multi_tenant=False))
+        with use_app_context(context):
+            first = cache_module.get_datasource_cache()
+            second = cache_module.get_datasource_cache()
 
         assert first is expected and second is expected
         sync_create.assert_called_once()
-        logger.info("test_get_datasource_cache_reuses_singleton 完成")
+        logger.info("test_get_datasource_cache_reuses_context_resource 完成")
 
 
 class TestSchemaManagerSharedCache:

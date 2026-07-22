@@ -573,6 +573,41 @@ class TestKnowledgeVectorStoreRoutes:
         file_store.delete.assert_awaited_once_with("tenant.md", knowledge_scope="tenant")
         store.delete_by_ids.assert_awaited_once_with(["tenant:4:chunk"])
 
+    # 方法作用：验证内置文档共同路径判断不会接受仅共享字符串前缀的兄弟目录。
+    # Args: self - pytest 测试类实例。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    def test_builtin_document_path_rejects_prefix_sibling(self):
+        """metrics_evil 目录不得因 startswith 前缀碰撞被视为 metrics 子目录。"""
+        # Arrange
+        import src.api.routes.knowledge as knowledge_routes
+
+        # Act / Assert
+        assert not knowledge_routes._is_path_within(
+            "/srv/docs/metrics",
+            "/srv/docs/metrics_evil/secret.txt",
+        )
+
+    # 方法作用：验证知识检索失败响应不包含内部异常和路径信息。
+    # Args: self - pytest 测试类实例；monkeypatch - pytest 补丁工具。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    async def test_knowledge_search_error_is_sanitized(self, monkeypatch):
+        """内部存储异常只写日志，客户端收到稳定通用错误。"""
+        # Arrange
+        import src.api.routes as routes
+        import src.memory.vector_store as vector_module
+
+        monkeypatch.setattr(
+            vector_module,
+            "get_vector_store",
+            AsyncMock(side_effect=RuntimeError("secret /internal/path")),
+        )
+
+        # Act / Assert
+        with pytest.raises(HTTPException) as caught:
+            await routes.test_knowledge_search(q="test", datasource="")
+        assert caught.value.status_code == 500
+        assert caught.value.detail == "知识库检索测试失败"
+
 
 class TestDataIntelligenceRoutes:
     """覆盖 Phase B/D 结构化 profile 和预测 API。"""

@@ -41,7 +41,7 @@
 
 | # | 功能 | 文件 | 描述 | 状态 |
 |---|------|------|------|------|
-| 17.5.1 | 生产启动配置门禁 | `src/config.py`、`src/main.py` | prod 启动前校验认证、密钥、凭证加密和只读数据库配置 | 单测完成 |
+| 17.5.1 | 生产启动配置门禁 | `src/config.py`、`src/main.py` | prod 校验认证、随机盐凭证主密钥、默认 DB 凭证和只读连接，并关闭 API 元数据 | 单测完成 |
 
 ### 模块收尾
 
@@ -56,7 +56,7 @@
 | 17.3.2 Prometheus metrics | 尚未引入 collector 和 `/metrics` 端点 | 确定指标命名、标签基数和认证策略 | Phase 3，可观测性批次 |
 | 17.3.3 Grafana Dashboard | 缺少 Prometheus 数据源和稳定指标定义 | 17.3.2 完成并积累基线数据 | Phase 3，Prometheus 上线后 |
 | 17.4.1 Dockerfile | 仓库当前没有应用镜像构建文件 | 明确前端静态资源交付方式和 Python 运行时依赖 | Phase 3，容器部署批次 |
-| 17.4.2 docker-compose.yml | 当前文件只编排开发数据库与 Milvus，未包含 App、Redis、ChromaDB 和应用健康依赖 | 完成 Dockerfile，并拆分最小应用栈与可选数据库 profiles | Phase 3，Dockerfile 完成后 |
+| 17.4.2 docker-compose.yml | 当前已编排开发数据库、带认证持久化的 Redis 7 与 Milvus，但仍未包含 App、ChromaDB 和应用健康依赖 | 完成 Dockerfile，并拆分最小应用栈与可选数据库 profiles | Phase 3，Dockerfile 完成后 |
 | 17.4.3 .dockerignore | 仓库当前没有 .dockerignore | Dockerfile 路径和构建上下文确定后补齐并验证镜像上下文 | Phase 3，Dockerfile 同批次 |
 
 ---

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from types import SimpleNamespace
 from datetime import datetime, timezone
 from unittest.mock import patch
 
@@ -12,6 +13,54 @@ from src.knowledge.models import AUTO_TTL_SECONDS, KnowledgeEntry, KnowledgeSour
 
 
 logger = logging.getLogger(__name__)
+
+
+class TestLocalEmbeddingModel:
+    """覆盖功能 6.1.1：配置的本地 ONNX 模型目录必须被实际使用。"""
+
+    # 方法作用：验证本地嵌入函数实例指向配置目录而非 Chroma 默认缓存。
+    # Args: self - pytest 测试类实例；tmp_path - pytest 临时目录；monkeypatch - pytest 补丁工具。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    def test_create_embedding_function_uses_configured_directory(
+        self, tmp_path, monkeypatch,
+    ) -> None:
+        """合法本地模型目录不得触发 HuggingFace 默认下载路径。"""
+        logger.debug("test_create_embedding_function_uses_configured_directory 入口")
+        try:
+            # Arrange
+            from chromadb.utils import embedding_functions
+            from src.knowledge.schema_manager import SchemaManager
+
+            for name in (
+                "config.json", "model.onnx", "special_tokens_map.json",
+                "tokenizer_config.json", "tokenizer.json", "vocab.txt",
+            ):
+                (tmp_path / name).write_text("test", encoding="utf-8")
+
+            class FakeONNX:
+                DOWNLOAD_PATH = "default-cache"
+                EXTRACTED_FOLDER_NAME = "onnx"
+
+                def __init__(self, preferred_providers=None):
+                    self.preferred_providers = preferred_providers
+
+            monkeypatch.setattr(embedding_functions, "ONNXMiniLM_L6_V2", FakeONNX)
+            settings = SimpleNamespace(embedding_model_path=str(tmp_path))
+
+            # Act
+            result = SchemaManager._create_embedding_function(settings)
+
+            # Assert
+            assert result.DOWNLOAD_PATH == str(tmp_path)
+            assert result.EXTRACTED_FOLDER_NAME == ""
+            logger.info("test_create_embedding_function_uses_configured_directory 完成")
+        except Exception as exc:
+            logger.error(
+                "test_create_embedding_function_uses_configured_directory 异常: %s",
+                exc,
+                exc_info=True,
+            )
+            raise
 
 
 class TestFormatHelpers:

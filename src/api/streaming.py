@@ -10,10 +10,12 @@ from __future__ import annotations
 
 import json
 from collections import defaultdict
-from src.config import get_settings
 from datetime import date, datetime
 from decimal import Decimal
 
+from src.app_context import get_tenant_policy
+from src.config import get_settings
+from src.graph.node_registry import get_progress_map
 from src.logging_config import get_logger
 
 logger = get_logger(__name__)
@@ -88,9 +90,6 @@ def _json_serialize(obj):
         return obj.decode("utf-8", errors="replace")
     raise TypeError(f"Type {type(obj)} not serializable")
 
-from src.graph.node_registry import get_progress_map
-
-
 # 需要推送 progress 事件的节点文案由工作流节点目录统一生成。
 _PROGRESS_MAP: dict[str, str] = get_progress_map()
 
@@ -140,7 +139,7 @@ async def stream_analysis(user_query: str, datasource: str, session_id: str = ""
         if str(name).strip()
     ))
     if datasource_access is None:
-        if get_settings().multi_tenant:
+        if get_tenant_policy().datasource_isolation_enabled:
             logger.error("流式权限快照缺失", tenant_id=tenant_id, user_id=user_id)
             raise PermissionError("数据源权限快照缺失")
         datasource_access = {
@@ -159,9 +158,13 @@ async def stream_analysis(user_query: str, datasource: str, session_id: str = ""
     if is_new:
         logger.info("新会话", session_id=effective_id[:20])
         # 异步写入会话元数据（不影响主流程）
-        import asyncio as _asyncio
+        from src.api.background_tasks import create_background_task
         try:
-            _asyncio.create_task(_save_session_meta(effective_id, datasource, user_query))
+            create_background_task(
+                _save_session_meta(effective_id, datasource, user_query),
+                name="save-session-meta",
+                context={"session_id": effective_id[:20]},
+            )
         except Exception as exc:
             logger.error(
                 "新会话元数据任务创建失败",
@@ -171,9 +174,13 @@ async def stream_analysis(user_query: str, datasource: str, session_id: str = ""
             )
     else:
         logger.info("会话续用", session_id=session_id[:20])
-        import asyncio as _asyncio
+        from src.api.background_tasks import create_background_task
         try:
-            _asyncio.create_task(_touch_session_meta(effective_id, datasource, user_query))
+            create_background_task(
+                _touch_session_meta(effective_id, datasource, user_query),
+                name="touch-session-meta",
+                context={"session_id": effective_id[:20]},
+            )
         except Exception as exc:
             logger.error(
                 "会话活跃时间任务创建失败",

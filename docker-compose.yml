@@ -32,6 +32,29 @@ services:
       -c log_directory=/var/log/postgresql
       -c log_filename=postgresql.log
 
+  # ===== Redis 共享缓存 =====
+  redis:
+    image: redis:7.4-alpine
+    container_name: redis
+    restart: unless-stopped
+    environment:
+      REDIS_PASSWORD: "${REDIS_PASSWORD:?REDIS_PASSWORD is required}"
+    ports:
+      - "127.0.0.1:6379:6379"
+    volumes:
+      - redis_data:/data
+    command: >
+      sh -c 'exec redis-server
+      --appendonly yes
+      --appendfsync everysec
+      --requirepass "$$REDIS_PASSWORD"'
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli --no-auth-warning -a \"$$REDIS_PASSWORD\" ping | grep -q PONG"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+
   oracle:
     image: gvenzl/oracle-xe:21
     container_name: oracle
@@ -142,3 +165,6 @@ services:
       interval: 30s
       timeout: 20s
       retries: 3
+
+volumes:
+  redis_data:

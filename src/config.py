@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 from typing import Literal
+from urllib.parse import unquote, urlsplit
 
 from dotenv import load_dotenv
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -34,7 +35,7 @@ class Settings(BaseSettings):
     )
 
     # ---- 运行环境 ----
-    env: Literal["dev", "prod", "test"] = "dev"
+    env: Literal["dev", "prod", "test"] = "prod"
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = "INFO"
     log_format: Literal["console", "json"] = "console"
     log_file: str = "logs/app.log"
@@ -58,7 +59,7 @@ class Settings(BaseSettings):
     llm_allow_remote_fallback: bool = False
 
     # ---- 数据库 (智能体自身的状态存储) ----
-    database_url: str = "postgresql+asyncpg://postgres:postgres@localhost:5432/data_agent"
+    database_url: str = ""
     database_readonly_url: str = ""  # 只读账号，配了就用它执行用户 SQL
     run_migrations_on_startup: bool = True
 
@@ -88,6 +89,10 @@ class Settings(BaseSettings):
     jwt_refresh_token_expire_days: int = 7
     admin_api_key: str = ""                  # 管理端点 API Key，空=不启用
     credential_encryption_key: str = ""
+
+    # ---- API 浏览器安全 ----
+    cors_allowed_origins: str = ""
+    security_hsts_seconds: int = 31_536_000
 
     # ---- LLM 降级 ----
     llm_fallback_chain: str = ""             # 降级链 "gpt-4o,claude-sonnet-4-6"
@@ -121,6 +126,8 @@ class Settings(BaseSettings):
 
     # ---- SQL 安全 ----
     explain_skip_dialects: list[str] = ["snowflake"]
+    datasource_host_allowlist: str = ""
+    """允许访问私网的可信数据库主机、IP 或 CIDR，逗号分隔。"""
 
     # ---- LangSmith ----
     langsmith_api_key: str = ""
@@ -145,11 +152,24 @@ class Settings(BaseSettings):
     """系统知识只读目录，多个路径使用分号分隔。"""
 
 
+# 方法作用：从环境变量和项目配置文件构造当前应用设置。
+# Args: 无。
+# Returns: 当前应用 Settings 实例。
 def get_settings() -> Settings:
-    """Settings 单例工厂。"""
-    return Settings()
+    """构造当前应用配置。"""
+    logger.debug("获取应用配置入口")
+    try:
+        result = Settings()
+        logger.info("获取应用配置完成", extra={"env": result.env})
+        return result
+    except Exception as exc:
+        logger.error("获取应用配置失败", exc_info=True)
+        raise exc
 
 
+# 方法作用：校验生产环境必须具备的认证、密钥和数据库安全配置。
+# Args: settings - 待校验的应用设置。
+# Returns: 校验通过时无返回值，失败时抛出 ValueError。
 def validate_production_settings(settings: Settings) -> None:
     """校验生产环境必须具备的认证、凭证和只读数据库配置。
 
@@ -176,6 +196,24 @@ def validate_production_settings(settings: Settings) -> None:
         errors.append("ADMIN_API_KEY 至少需要 32 字符")
     if len(settings.credential_encryption_key) < 32:
         errors.append("CREDENTIAL_ENCRYPTION_KEY 至少需要 32 字符")
+    cors_origins = {
+        origin.strip()
+        for origin in settings.cors_allowed_origins.split(",")
+        if origin.strip()
+    }
+    if "*" in cors_origins:
+        errors.append("CORS_ALLOWED_ORIGINS 生产环境禁止使用通配符")
+    try:
+        parsed_database_url = urlsplit(settings.database_url)
+        database_user = unquote(parsed_database_url.username or "")
+        database_password = unquote(parsed_database_url.password or "")
+        if not parsed_database_url.hostname or not database_user or not database_password:
+            errors.append("DATABASE_URL 必须包含完整连接地址和凭证")
+        elif database_user == "postgres" and database_password == "postgres":
+            errors.append("DATABASE_URL 禁止使用 postgres/postgres 默认凭证")
+    except ValueError as exc:
+        logger.error("生产 DATABASE_URL 解析失败", exc_info=True)
+        errors.append(f"DATABASE_URL 格式无效: {exc}")
     if not settings.database_readonly_url:
         errors.append("DATABASE_READONLY_URL 必须配置")
     if not settings.run_migrations_on_startup:

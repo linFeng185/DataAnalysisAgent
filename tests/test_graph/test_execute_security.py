@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-import pytest
 
 
 class TestExecuteSQLSecurity:
@@ -20,9 +19,9 @@ class TestExecuteSQLSecurity:
         from src.datasource.registry import DataSourceRegistry
         from src.graph.nodes import execute_sql as execute_module
         from src.security import data_masker
+        from src.app_context import AppContext, use_app_context
         import src.api.auth  # noqa: F401
         import src.config as config_module
-        import src.datasource.registry as registry_module
 
         engine = create_async_engine("sqlite+aiosqlite:///:memory:", poolclass=sa.pool.StaticPool)
         async with engine.begin() as connection:
@@ -50,15 +49,17 @@ class TestExecuteSQLSecurity:
         registry._cache["pii"] = DataSourceConfig(  # noqa: SLF001
             name="pii", dialect="sqlite", mode="embedded", engine=engine,
         )
-        monkeypatch.setattr(registry_module, "_registry", registry)
+        context = AppContext(settings)
+        context.set_resource("datasource_registry", registry)
         data_masker._rate_limits.clear()  # noqa: SLF001
 
         # Act
-        result = await execute_module.execute_sql_node({
-            "datasource": "pii",
-            "dialect": "sqlite",
-            "generated_sql": "SELECT email, phone FROM pii ORDER BY id",
-        })
+        with use_app_context(context):
+            result = await execute_module.execute_sql_node({
+                "datasource": "pii",
+                "dialect": "sqlite",
+                "generated_sql": "SELECT email, phone FROM pii ORDER BY id",
+            })
 
         # Assert
         assert result["execution_error"] == ""
@@ -98,8 +99,8 @@ class TestExecuteSQLSecurity:
         from src.datasource.registry import DataSourceRegistry
         from src.graph.nodes import execute_sql as execute_module
         from src.security import data_masker
+        from src.app_context import AppContext, use_app_context
         import src.config as config_module
-        import src.datasource.registry as registry_module
 
         class Row:
             _mapping = {"value": 1}
@@ -142,14 +143,16 @@ class TestExecuteSQLSecurity:
         registry._cache["oracle"] = DataSourceConfig(  # noqa: SLF001
             name="oracle", dialect="oracle", mode="external", engine=Engine(),
         )
-        monkeypatch.setattr(registry_module, "_registry", registry)
+        context = AppContext(settings)
+        context.set_resource("datasource_registry", registry)
         data_masker._rate_limits.clear()  # noqa: SLF001
 
-        result = await execute_module.execute_sql_node({
-            "datasource": "oracle",
-            "dialect": "oracle",
-            "generated_sql": "SELECT 1 FROM dual",
-        })
+        with use_app_context(context):
+            result = await execute_module.execute_sql_node({
+                "datasource": "oracle",
+                "dialect": "oracle",
+                "generated_sql": "SELECT 1 FROM dual",
+            })
 
         assert result["execution_error"] == ""
         assert result["query_result_sample"] == [{"value": 1}]

@@ -9,7 +9,6 @@ import importlib.util
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
 
 import yaml
 
@@ -513,25 +512,25 @@ class SkillManager:
         return result
 
 
-# ── 全局单例 ──────────────────────────────────────
-
-_skill_manager: SkillManager | None = None
-
-
-# 方法作用：获取全局 SkillManager，并在首次调用时注入目录配置。
+# 方法作用：从当前 AppContext 获取 SkillManager，并在首次调用时注入目录配置。
 # Args: builtin_dir - 内置目录；extra_dirs - 额外系统目录；managed_dir - 三级作用域受管目录。
-# Returns: SkillManager 全局单例。
+# Returns: 当前应用独享的 SkillManager 实例。
 def get_skill_manager(
     builtin_dir: str = "skills",
     extra_dirs: str = "",
     managed_dir: str = "data/skills",
 ) -> SkillManager:
-    logger.debug("获取 SkillManager 单例入口")
-    global _skill_manager
-    if _skill_manager is None:
-        _skill_manager = SkillManager(builtin_dir, extra_dirs, managed_dir)
-    logger.info("获取 SkillManager 单例完成")
-    return _skill_manager
+    from functools import partial
+
+    from src.app_context import get_app_context
+
+    logger.debug("获取 SkillManager 入口")
+    result = get_app_context().get_or_create(
+        "skill_manager",
+        partial(SkillManager, builtin_dir, extra_dirs, managed_dir),
+    )
+    logger.info("获取 SkillManager 完成")
+    return result
 
 
 # 方法作用：按 Skill Manifest v2 的资产类型、网络权限和调用预算授权一次执行请求。

@@ -83,7 +83,7 @@
 |---|------|------|------|------|
 | 4.7.1 | execute_sql_node() | `src/graph/nodes/execute_sql.py` | 对接全局 Registry 并执行真实数据源查询 | 单测完成 | P0 |
 | 4.7.2 | 错误信息简洁化 | `src/graph/nodes/execute_sql.py:82-91` | 从 DB 原始错误提取错误码和消息 | 开发完成 | P1 |
-| 4.7.3 | 列名预检验证 (Layer 2) | `src/graph/nodes/execute_sql.py:_validate_column_references()` | sqlglot 解析列引用 → 对照 schema → 触发 retry | 开发完成 | P0 |
+| 4.7.3 | 列名预检验证 (Layer 2) | `src/graph/nodes/execute_sql.py:_validate_column_references()` | 按实际方言解析列引用，对照 schema；MSSQL 使用 tsql，解析失败阻断并触发 retry | 单测完成 | P0 |
 | 4.7.4 | float→Decimal 精度 `[P1]` | 同上 `_row_to_dict()` | 查询结果 float 自动转 Decimal，从源头消除 IEEE 754 | 开发完成 |
 | 4.7.5 | sync/async 引擎兼容 `[P1]` | 同上 | 检测 AsyncEngine→async with，否则在线程池中执行 sync Engine（Oracle/MSSQL支持） | 单测完成 |
 
@@ -105,7 +105,7 @@
 
 | # | 功能 | 文件 | 描述 | 状态 |
 |---|------|------|------|------|
-| 4.9.1 | generate_chart_node() | `src/graph/nodes/generate_chart.py` | Phase 2 ECharts 生成 (Phase 1 占位) | 单测完成 | P1 |
+| 4.9.1 | generate_chart_node() | `src/graph/nodes/generate_chart.py` | ECharts 配置生成，跨行寻找首个非空数值，避免首行 None 误分类 | 单测完成 | P1 |
 | 4.9.4 | CHART_RECOMMEND_PROMPT | `src/llm/prompts.py` | 图表推荐 Prompt | 单测完成 | P0 |
 | 4.9.5 | 交叉透视智能降维 `[P1]` | `src/graph/nodes/generate_chart.py` | X 列重复 → 按第三列拆多系列；>30行截断 | 开发完成 |
 | 4.9.6 | 伪数值列过滤 `[P1]` | 同上 | phone/id/no 类列不参与图表 | 开发完成 |
@@ -144,7 +144,7 @@
 | 4.13.2 | 有界执行与结果脱敏 | `src/graph/nodes/execute_sql.py` | 最多读取 MAX_RESULT_ROWS + 1 行，写入 state 前脱敏并标记 truncated | 单测完成 |
 | 4.13.3 | 确定性无 LLM 回退 | `src/graph/nodes/generate_sql.py` | 数量查询生成 COUNT(*)，无法确定语义时返回明确错误 | 单测完成 |
 | 4.13.4 | 方言与分析契约修复 | `src/datasource/introspection.py`、`src/graph/nodes/analyze_result.py` | SQLite 内省、LLM 样本长度和 statistics 输出契约回归 | 单测完成 |
-| 4.13.5 | 编排与状态契约修复 | `src/graph/workflow.py`、`prepare_turn.py` | 修复 MCP 死边、metadata 无 Schema、幻觉错误覆盖和瞬态错误误回 LLM | 单测完成 |
+| 4.13.5 | 编排与状态契约修复 | `src/graph/workflow.py`、`prepare_turn.py`、`generate_sql.py` | 修复 MCP 死边、metadata 无 Schema、幻觉错误覆盖；表引用解析异常失败关闭 | 单测完成 |
 | 4.13.6 | 跨源列契约与最终 SQL | `src/graph/nodes/multi_source.py`、`build_response.py` | 按维度/指标角色序列对齐任意数量列；冲突时保留原字段；返回每个来源重写后的最终 SQL | 单测完成 |
 
 ### 模块收尾

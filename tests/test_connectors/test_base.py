@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import pytest
+from sqlalchemy.engine import make_url
 
 from src.datasource.config import DataSourceConfig
 
@@ -21,20 +22,41 @@ class TestConnectionURL:
         from src.connectors.clickhouse import ClickHouseConnector
         ds = _ds("clickhouse", host="ch.local", port=9000, database="analytics", username="r", password="s")
         url = ClickHouseConnector(ds)._build_url()  # noqa: SLF001
-        assert url == "clickhouse+asynch://r:s@ch.local:9000/analytics"
+        assert str(url) == "clickhouse+asynch://r:***@ch.local:9000/analytics"
+        assert url.password == "s"
 
     def test_mysql(self):
         from src.connectors.mysql import MySQLConnector
         ds = _ds("mysql", host="db1", port=3306, database="ecom", username="ro", password="p")
         url = MySQLConnector(ds)._build_url()  # noqa: SLF001
-        assert "mysql+aiomysql://ro:p@db1:3306/ecom" in url
-        assert "utf8mb4" in url
+        assert str(url) == "mysql+aiomysql://ro:***@db1:3306/ecom?charset=utf8mb4"
+        assert url.password == "p"
 
     def test_postgres(self):
         from src.connectors.postgres import PostgreSQLConnector
         ds = _ds("postgres", host="pg", port=5432, database="analytics", username="ro", password="p")
         url = PostgreSQLConnector(ds)._build_url()  # noqa: SLF001
-        assert url == "postgresql+asyncpg://ro:p@pg:5432/analytics"
+        assert str(url) == "postgresql+asyncpg://ro:***@pg:5432/analytics"
+        assert url.password == "p"
+
+    # 方法作用：验证特殊字符密码通过 SQLAlchemy URL 结构化保存且 repr 脱敏。
+    # Args: self - pytest 测试类实例。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    def test_special_character_password_is_safe(self):
+        """密码中的 @、/、: 不得改变 URL 主机与数据库解析结果。"""
+        from src.connectors.mysql import MySQLConnector
+
+        password = "p@ss/w:rd"
+        ds = _ds(
+            "mysql", host="db.local", port=3306, database="sales",
+            username="reader", password=password,
+        )
+        url = MySQLConnector(ds)._build_url()  # noqa: SLF001
+        parsed = make_url(url)
+
+        assert parsed.password == password
+        assert parsed.host == "db.local"
+        assert password not in repr(url)
 
     @pytest.mark.asyncio
     async def test_oracle_create_engine_is_async_and_uses_service_name(self, monkeypatch):
@@ -188,6 +210,13 @@ class TestConnectionURL:
 
         import clickhouse_connect
         monkeypatch.setattr(clickhouse_connect, "get_client", lambda **kwargs: client)
+        monkeypatch.setattr(
+            socket,
+            "getaddrinfo",
+            lambda *args, **kwargs: [
+                (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 8123)),
+            ],
+        )
         monkeypatch.setattr(socket, "create_connection", MagicMock(return_value=MagicMock()))
         connector = ClickHouseConnector(_ds(
             "clickhouse", host="ch.local", port=9000,

@@ -35,6 +35,7 @@ SCHEMA = {
 
 async def ensure_demo_datasource() -> DataSourceConfig:
     """启动时自动创建 SQLite 内存演示库。"""
+    logger.debug("初始化演示数据源入口")
     from sqlalchemy.ext.asyncio import create_async_engine
     import sqlalchemy as sa
 
@@ -73,7 +74,7 @@ async def ensure_demo_datasource() -> DataSourceConfig:
     ds.schema = SchemaSnapshot(tables=tables)
 
     from src.datasource.registry import get_registry
-    get_registry()._cache[DEMO] = ds  # noqa: SLF001
+    get_registry().register_config(ds)
 
     logger.info("演示数据源就绪", tables=["orders(15行)", "users(3行)"])
     return ds

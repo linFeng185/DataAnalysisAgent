@@ -81,3 +81,23 @@ class TestGenerateChartDecimal:
         # Assert
         assert result["chart_config"] == {"type": "table", "option": {}}
         logger.info("test_non_numeric_data_falls_back_to_table 完成", extra={"chart_type": "table"})
+
+    # 验证首行为空值时仍会扫描后续行识别数值列。
+    # Args: self - pytest 测试类实例。
+    # Returns: 无返回值，断言后续有效数值能生成坐标轴图表。
+    async def test_first_row_none_uses_later_numeric_value(self):
+        """首行 None 不得把实际数值列误判为非数值列。"""
+        logger.debug("test_first_row_none_uses_later_numeric_value 入口")
+        state = {
+            "query_result_sample": [
+                {"category": "未知", "amount": None},
+                {"category": "食品", "amount": Decimal("12.5")},
+            ],
+            "analysis_result": {},
+        }
+
+        result = await generate_chart_node(state)
+
+        assert result["chart_config"]["type"] == "bar"
+        assert result["chart_config"]["option"]["series"][0]["data"] == [0, 12.5]
+        logger.info("test_first_row_none_uses_later_numeric_value 完成")

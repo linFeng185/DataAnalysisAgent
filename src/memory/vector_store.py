@@ -6,8 +6,10 @@
 
 from __future__ import annotations
 
+import inspect
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
+from functools import partial
 from typing import Any
 
 from src.logging_config import get_logger
@@ -147,13 +149,11 @@ class VectorStore(ABC):
         ...
 
 
-# ── 模块级单例 ──
-
-_store: VectorStore | None = None
+_VECTOR_STORE_RESOURCE = "vector_store"
 
 
 async def get_vector_store() -> VectorStore:
-    """获取 VectorStore 单例。
+    """获取当前 AppContext 的 VectorStore。
 
     首次调用时按 config.vector_store_type 选择实现并初始化。
     hot reload 时通过 health_check 自动检测失效并重建。
@@ -161,40 +161,80 @@ async def get_vector_store() -> VectorStore:
 
     Returns: VectorStore 实例
     """
-    global _store
-    logger.debug("获取 VectorStore", existing=_store is not None)
+    from src.app_context import get_app_context
 
-    if _store is not None:
+    context = get_app_context()
+    store = context.get_resource(_VECTOR_STORE_RESOURCE)
+    logger.debug("获取 VectorStore 入口", existing=store is not None)
+    if store is not None:
         try:
-            if await _store.health_check():
-                return _store
+            if await store.health_check():
+                logger.info("获取 VectorStore 完成", reused=True)
+                return store
         except Exception:
-            logger.warning("VectorStore 健康检查失败，重建")
-            _store = None
+            logger.warning("VectorStore 健康检查失败，重建", exc_info=True)
+        await context.close_resource(_VECTOR_STORE_RESOURCE)
 
-    from src.config import get_settings
-    s = get_settings()
+    result = await context.get_or_create_async(
+        _VECTOR_STORE_RESOURCE,
+        partial(_create_configured_vector_store, context.settings),
+        closer=_close_vector_store_resource,
+    )
+    logger.info("获取 VectorStore 完成", reused=False, backend=type(result).__name__)
+    return result
 
-    if not s.vector_store_abstract_enabled:
+
+# 方法作用：按当前应用配置创建对应的 VectorStore 后端。
+# Args: settings - 当前 AppContext 的应用配置。
+# Returns: 初始化完成的 VectorStore 实例。
+async def _create_configured_vector_store(settings: Any) -> VectorStore:
+    logger.debug(
+        "创建 VectorStore 入口",
+        backend=getattr(settings, "vector_store_type", "chroma"),
+    )
+    if not settings.vector_store_abstract_enabled:
         logger.info("VectorStore 抽象层未启用，使用 ChromaDB 直连")
-        _store = await _create_chroma_store()
-        return _store
+        result = await _create_chroma_store()
+        logger.info("创建 VectorStore 完成", backend=type(result).__name__)
+        return result
 
-    if s.vector_store_type == "pgvector":
+    if settings.vector_store_type == "pgvector":
         logger.info("VectorStore 类型: pgvector")
         from src.memory.vector_store_pg import PgVectorStore
-        _store = await PgVectorStore.create(s.database_url)
-        return _store
+        result = await PgVectorStore.create(settings.database_url)
+        logger.info("创建 VectorStore 完成", backend=type(result).__name__)
+        return result
 
-    if s.vector_store_type == "milvus":
-        logger.info("VectorStore 类型: Milvus", uri=s.milvus_uri)
+    if settings.vector_store_type == "milvus":
+        logger.info("VectorStore 类型: Milvus", uri=settings.milvus_uri)
         from src.memory.vector_store_milvus import MilvusVectorStore
-        _store = await MilvusVectorStore.create(s.milvus_uri)
-        return _store
+        result = await MilvusVectorStore.create(settings.milvus_uri)
+        logger.info("创建 VectorStore 完成", backend=type(result).__name__)
+        return result
 
     logger.info("VectorStore 类型: ChromaDB（默认）")
-    _store = await _create_chroma_store()
-    return _store
+    result = await _create_chroma_store()
+    logger.info("创建 VectorStore 完成", backend=type(result).__name__)
+    return result
+
+
+# 方法作用：释放支持 close/aclose 的 VectorStore 资源。
+# Args: store - 当前 AppContext 持有的 VectorStore。
+# Returns: 无返回值。
+async def _close_vector_store_resource(store: VectorStore) -> None:
+    logger.debug("关闭 VectorStore 资源入口", backend=type(store).__name__)
+    close = getattr(store, "aclose", None) or getattr(store, "close", None)
+    if close is None:
+        logger.info("关闭 VectorStore 资源完成", skipped=True)
+        return
+    try:
+        result = close()
+        if inspect.isawaitable(result):
+            await result
+    except Exception:
+        logger.error("关闭 VectorStore 资源失败", exc_info=True)
+        raise
+    logger.info("关闭 VectorStore 资源完成", skipped=False)
 
 
 async def _create_chroma_store() -> VectorStore:

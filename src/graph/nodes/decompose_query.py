@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-import json, time
+import json
+import time
 from src.graph.state import AnalysisState
 from src.logging_config import get_logger
 logger = get_logger(__name__)
@@ -51,13 +52,14 @@ async def decompose_query_node(state: AnalysisState) -> dict:
         logger.info("查询分解完成", label=label, elapsed_ms=elapsed)
         return result
     except Exception as e:
-        logger.warning("查询分解失败，回退", error=str(e))
+        logger.error("查询分解失败，回退", error=str(e), exc_info=True)
         return {"needs_decompose": False, "decompose_steps": []}
 
 
 def _parse(text: str) -> dict:
     try:
-        s = text.index("{"); e = text.rindex("}") + 1
+        s = text.index("{")
+        e = text.rindex("}") + 1
         data = json.loads(text[s:e])
     except (json.JSONDecodeError, ValueError):
         return {"needs_decompose": False, "decompose_steps": []}

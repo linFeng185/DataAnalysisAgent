@@ -186,7 +186,7 @@ async def list_mcp_servers(scope: str | None = None):
         return result
     except Exception as exc:
         logger.error("MCP Server 数据库列表失败", error=str(exc), exc_info=True)
-        return {"servers": runtime_system, "total": len(runtime_system)}
+        raise HTTPException(503, "MCP Server 配置存储不可用") from exc
 
 
 @router.post("/mcp/servers", status_code=201)

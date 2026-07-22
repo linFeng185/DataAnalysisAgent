@@ -12,6 +12,21 @@ logger = get_logger(__name__)
 _NUMERIC_TYPES = (int, float, Decimal)
 
 
+# 方法作用：从结果行中寻找指定列首个非布尔数值。
+# Args: rows - 查询结果行；column - 待检查列名。
+# Returns: 首个数值；不存在时返回 None。
+def _first_numeric_value(rows: list[dict], column: str):
+    """忽略前置空值识别实际数值列。"""
+    logger.debug("图表数值样本查找入口", column=column, row_count=len(rows))
+    for row in rows:
+        value = row.get(column)
+        if isinstance(value, _NUMERIC_TYPES) and not isinstance(value, bool):
+            logger.info("图表数值样本查找完成", column=column, found=True)
+            return value
+    logger.info("图表数值样本查找完成", column=column, found=False)
+    return None
+
+
 async def generate_chart_node(state: AnalysisState) -> dict:
     _start = time.monotonic()
     logger.info("节点开始", node="generate_chart")
@@ -50,15 +65,15 @@ def _pick_type(analysis: dict, data: list[dict]) -> str:
         return "table"
     cols = list(data[0].keys())
     if len(cols) >= 2:
-        for i, col in enumerate(cols[1:], 1):
-            v = list(data[0].values())[i]
-            if isinstance(v, _NUMERIC_TYPES) and not isinstance(v, bool):
+        for col in cols[1:]:
+            value = _first_numeric_value(data, col)
+            if value is not None:
                 low = col.lower()
                 if any(w in low for w in ("phone", "tel", "mobile", "手机", "电话")):
                     logger.info("图表数值列跳过", column=col, reason="联系方式")
                     continue
                 if (any(w in low for w in ("id", "no", "编号", "序号"))
-                        and isinstance(v, int) and v > 999):
+                        and isinstance(value, int) and value > 999):
                     logger.info("图表数值列跳过", column=col, reason="标识符")
                     continue
                 logger.info("图表类型选择完成", chart_type="bar", source="numeric_column")
@@ -99,11 +114,9 @@ def _axis_option(rows: list[dict], keys: list[str], chart_type: str) -> dict:
     # 找数值列
     numeric_col = None
     for col in keys[1:]:
-        if col in rows[0]:
-            v = rows[0].get(col)
-            if isinstance(v, _NUMERIC_TYPES) and not isinstance(v, bool):
-                numeric_col = col
-                break
+        if _first_numeric_value(rows, col) is not None:
+            numeric_col = col
+            break
     if not numeric_col:
         logger.warning("坐标轴配置回退", reason="无数值列", columns=keys)
         return {}
@@ -116,7 +129,9 @@ def _axis_option(rows: list[dict], keys: list[str], chart_type: str) -> dict:
     group_col = None
     if is_cross:
         for col in keys[1:]:
-            if col in rows[0] and col != numeric_col and isinstance(rows[0].get(col), str):
+            if col == numeric_col:
+                continue
+            if any(isinstance(row.get(col), str) for row in rows):
                 group_col = col
                 break
 

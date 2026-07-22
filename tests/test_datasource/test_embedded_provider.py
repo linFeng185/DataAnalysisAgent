@@ -85,7 +85,7 @@ class TestNormalizeDialect:
         ("postgresql+asyncpg", "postgres"),
         ("django.db.backends.mysql", "mysql"),
         ("mysql+aiomysql", "mysql"),
-        ("sqlite3", "postgres"),
+        ("sqlite3", "sqlite"),
         ("unknown_engine", "postgres"),
     ])
     def test_normalize(self, engine, expected):

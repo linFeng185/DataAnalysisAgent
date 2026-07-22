@@ -4,12 +4,13 @@ from __future__ import annotations
 
 from src.logging_config import get_logger
 from src.memory.pg_pool import get_pg_pool
+from src.security.tenant_policy import TenantPolicy, normalize_role
 
 logger = get_logger(__name__)
 
 
 # 方法作用：在可用数据源中解析当前身份允许访问的数据源及其行列权限。
-# Args: available_datasources - Registry 数据源摘要；requested_datasources - 用户显式选择；tenant_id/user_id/role - 当前身份；multi_tenant - 是否启用多租户。
+# Args: available_datasources - Registry 数据源摘要；requested_datasources - 用户显式选择；tenant_id/user_id/role - 当前身份；tenant_policy - 集中租户策略；multi_tenant - 兼容旧调用的开关。
 # Returns: 按候选顺序返回的数据源权限映射，键为数据源名称。
 async def resolve_datasource_access(
     available_datasources: list[dict],
@@ -18,7 +19,8 @@ async def resolve_datasource_access(
     tenant_id: int,
     user_id: int,
     role: str,
-    multi_tenant: bool,
+    multi_tenant: bool | None = None,
+    tenant_policy: TenantPolicy | None = None,
 ) -> dict[str, dict]:
     """先完成服务端授权，再把候选集合交给模型选择或 SQL 工作流。
 
@@ -28,7 +30,8 @@ async def resolve_datasource_access(
         tenant_id: 当前租户 ID。
         user_id: 当前用户 ID。
         role: 当前用户角色。
-        multi_tenant: 是否启用多租户隔离。
+        multi_tenant: 兼容旧调用的多租户开关。
+        tenant_policy: AppContext 注入的集中租户策略。
 
     Returns:
         包含数据源描述、列白名单和行过滤条件的有序映射。
@@ -36,7 +39,9 @@ async def resolve_datasource_access(
     Raises:
         PermissionError: 数据源无权访问或权限服务不可用。
     """
-    normalized_role = str(role or "anonymous").strip().lower()
+    policy = tenant_policy or TenantPolicy(multi_tenant=bool(multi_tenant))
+    normalized_role = normalize_role(role)
+    isolation_enabled = policy.datasource_isolation_enabled
     available_by_name = {
         str(item.get("name", "")).strip(): dict(item)
         for item in available_datasources
@@ -51,7 +56,7 @@ async def resolve_datasource_access(
         tenant_id=tenant_id,
         user_id=user_id,
         role=normalized_role,
-        multi_tenant=multi_tenant,
+        tenant_isolation=isolation_enabled,
         requested_count=len(requested),
         available_count=len(available_by_name),
     )
@@ -61,7 +66,7 @@ async def resolve_datasource_access(
         logger.warning("数据源访问解析拒绝", reason="数据源不存在", datasources=unknown)
         raise PermissionError(f"无权访问数据源: {', '.join(unknown)}")
 
-    if not multi_tenant or normalized_role == "super_admin":
+    if not isolation_enabled or normalized_role == "super_admin":
         result = {
             name: {
                 **available_by_name[name],
