@@ -53,6 +53,30 @@ class TestResultRendering:
             )
             raise
 
+    # 方法作用：验证 SQL 面板为高亮根节点和未分类文本提供可读前景色。
+    # Args: self - pytest 测试类实例。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    def test_sql_panel_keeps_plain_sql_text_visible(self) -> None:
+        """未被 Highlight.js 包裹的字段名和标点在深色背景上也必须可见。"""
+        logger.debug("test_sql_panel_keeps_plain_sql_text_visible 入口")
+        try:
+            # Arrange / Act
+            component = Path("frontend/src/components/SqlPanel.tsx").read_text(encoding="utf-8")
+            stylesheet = Path("frontend/src/index.css").read_text(encoding="utf-8")
+
+            # Assert
+            assert '<code ref={codeRef} className="hljs" />' in component
+            assert ".sql-block" in stylesheet
+            assert "color: #c9d1d9" in stylesheet
+            logger.info("test_sql_panel_keeps_plain_sql_text_visible 完成")
+        except Exception as exc:
+            logger.error(
+                "test_sql_panel_keeps_plain_sql_text_visible 异常: %s",
+                exc,
+                exc_info=True,
+            )
+            raise
+
     # 方法作用：验证聊天 Hook 按 stream_id 隔离并行推理和内容流。
     # Args: self - pytest 测试类实例。
     # Returns: 无返回值，断言失败时由 pytest 报告。

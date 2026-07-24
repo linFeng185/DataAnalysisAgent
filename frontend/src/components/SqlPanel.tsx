@@ -32,7 +32,7 @@ export default function SqlPanel({ sqlCode }: { sqlCode: string }) {
           onClick={() => navigator.clipboard.writeText(sqlCode)}>复制</Button>
       </div>
       <pre className="sql-block" style={{ margin: 0, paddingTop: 40, overflow: 'auto' }}>
-        <code ref={codeRef} />
+        <code ref={codeRef} className="hljs" />
       </pre>
     </div>
   );
