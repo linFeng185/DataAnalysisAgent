@@ -51,3 +51,20 @@ class TestDependencies:
         assert len(names) == len(set(names))
         assert set(names).issubset(declared_names)
         logger.info("test_requirements_are_generated_from_pyproject 完成")
+
+    # 方法作用：验证仓库内置报告 Skill 的运行时依赖被显式声明。
+    # Args: self - pytest 测试类实例。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    def test_custom_report_declares_jinja2_runtime_dependency(self) -> None:
+        """安装主项目后 custom_report 不应依赖其他包偶然传递安装 Jinja2。"""
+        logger.debug("test_custom_report_declares_jinja2_runtime_dependency 入口")
+        # Arrange / Act
+        pyproject = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+        dependencies = {
+            _package_name(item)
+            for item in pyproject["project"]["dependencies"]
+        }
+
+        # Assert
+        assert "jinja2" in dependencies
+        logger.info("test_custom_report_declares_jinja2_runtime_dependency 完成")

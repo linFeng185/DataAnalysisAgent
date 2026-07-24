@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -18,9 +19,6 @@ from src.datasource.introspection import (
     introspect_foreign_keys,
     introspect_table,
 )
-from src.datasource.schema_snapshot import ColumnInfo, TableRelation
-
-
 # ---- helpers ----
 
 def _ds(dialect: str) -> DataSourceConfig:
@@ -194,6 +192,29 @@ class TestEstimateRowCount:
         c = asyncio.run(estimate_row_count(_ds("mysql"), "t", _raise(RuntimeError("timeout"))))
         assert c == 0
 
+    # 方法作用：验证行数估算失败以生产可见级别记录完整异常。
+    # Args: self - pytest 测试类实例；monkeypatch - pytest 补丁工具。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    def test_error_is_logged_as_warning_with_traceback(self, monkeypatch) -> None:
+        """允许回退为零，但异常不能仅停留在 DEBUG。"""
+        # Arrange
+        import src.datasource.introspection as introspection_module
+
+        probe_logger = MagicMock()
+        monkeypatch.setattr(introspection_module, "logger", probe_logger)
+
+        # Act
+        count = asyncio.run(
+            introspection_module.estimate_row_count(
+                _ds("mysql"), "orders", _raise(RuntimeError("timeout")),
+            )
+        )
+
+        # Assert
+        assert count == 0
+        probe_logger.warning.assert_called_once()
+        assert probe_logger.warning.call_args.kwargs["exc_info"] is True
+
     def test_empty_result_returns_zero(self):
         """边界条件: 无结果返回 0。"""
         c = asyncio.run(estimate_row_count(_ds("postgres"), "t", _EMPTY))
@@ -265,6 +286,15 @@ class TestIntrospectDatabase:
         assert "INFORMATION_SCHEMA.TABLES" in str(captured["sql"])
         assert "TABLE_CATALOG = :database" in str(captured["sql"])
         assert "BASE TABLE" in str(captured["sql"])
+
+    # 方法作用：验证未知方言不会静默执行 PostgreSQL 系统表查询。
+    # Args: self - pytest 测试类实例。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    def test_unknown_dialect_is_rejected_before_query(self) -> None:
+        """配置错误必须明确暴露方言名称，不能伪装成数据库查询失败。"""
+        # Arrange / Act / Assert
+        with pytest.raises(ValueError, match="unknown"):
+            asyncio.run(_list_tables(_ds("unknown"), _EMPTY))
 
     def test_mssql_columns_query_is_valid_tsql(self):
         """MSSQL 列查询必须是合法 T-SQL。

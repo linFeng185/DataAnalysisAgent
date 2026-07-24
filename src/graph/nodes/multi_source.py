@@ -194,7 +194,12 @@ async def _analyze_one(datasource: str, state: AnalysisState) -> dict | None:
 
         # 执行
         from src.graph.nodes.execute_sql import execute_sql_node
-        r4 = await execute_sql_node({**s2, "generated_sql": sql, "dialect": dialect})
+        r4 = await execute_sql_node({
+            **s2,
+            "generated_sql": sql,
+            "dialect": dialect,
+            "sql_explain_checked": True,
+        })
         data = r4.get("query_result_sample", []) or []
 
         final_sql = str(r4.get("generated_sql", "") or sql)

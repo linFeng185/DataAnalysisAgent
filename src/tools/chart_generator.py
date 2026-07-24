@@ -48,36 +48,41 @@ class ChartGeneratorTool(BaseTool):
             return {"error": str(e)}
 
 
+# 方法作用：根据时间、文本和数值列组合推荐图表类型。
+# Args: rows - 非空查询结果行。
+# Returns: line/bar/pie/scatter/table 之一。
 def _classify_chart_type(rows: list[dict]) -> str:
     """14.1 智能选图 — 时间+数值→line / 分类+数值→bar / 少数类目→pie。"""
+    logger.debug("图表类型分类入口", row_count=len(rows))
     cols = list(rows[0].keys())
     has_time = any(
         w in c.lower() for c in cols
         for w in ("date", "time", "day", "month", "year", "dt", "created", "updated")
     )
-    numeric = [
-        c for c in cols if all(
-            isinstance(r.get(c), (int, float)) or
-            (isinstance(r.get(c), str) and r.get(c, "").replace(".", "", 1).replace("-", "", 1).isdigit())
-            for r in rows[:5]
-        )
-    ]
-    text_cols = [c for c in cols if all(isinstance(r.get(c), str) for r in rows[:5] if r.get(c) is not None)]
+    numeric, text_cols = _infer_column_types(rows, cols)
     if has_time and numeric:
+        logger.info("图表类型分类完成", chart_type="line")
         return "line"
     if text_cols and numeric:
         unique = len({r.get(text_cols[0]) for r in rows})
-        return "pie" if unique <= 8 else "bar"
+        result = "pie" if unique <= 8 else "bar"
+        logger.info("图表类型分类完成", chart_type=result)
+        return result
     if len(numeric) >= 2:
+        logger.info("图表类型分类完成", chart_type="scatter")
         return "scatter"
+    logger.info("图表类型分类完成", chart_type="table")
     return "table"
 
 
+# 方法作用：根据查询行和图表类型构建 ECharts option。
+# Args: rows - 非空查询结果行；chart_type - 已选择图表类型。
+# Returns: ECharts 配置字典或 table 数据配置。
 def _build_option(rows: list[dict], chart_type: str) -> dict:
     """14.2~14.6 生成 ECharts option JSON。"""
+    logger.debug("图表配置构建入口", row_count=len(rows), chart_type=chart_type)
     cols = list(rows[0].keys())
-    numeric = [c for c in cols if all(isinstance(r.get(c), (int, float)) for r in rows[:5])]
-    text_cols = [c for c in cols if all(isinstance(r.get(c), str) for r in rows[:5] if r.get(c) is not None)]
+    numeric, text_cols = _infer_column_types(rows, cols)
     label_col = text_cols[0] if text_cols else cols[0]
     value_col = numeric[0] if numeric else cols[-1]
     labels = [str(r.get(label_col, "")) for r in rows]
@@ -115,4 +120,49 @@ def _build_option(rows: list[dict], chart_type: str) -> dict:
         base["columns"] = [{"field": c, "title": c} for c in cols]
         base["rows"] = rows[:50]
 
+    logger.info("图表配置构建完成", chart_type=chart_type, series_count=len(base.get("series", [])))
     return base
+
+
+# 方法作用：跳过 NULL 后从最多 100 个有效值推断数值列和文本列。
+# Args: rows - 查询结果行；columns - 待检查列名。
+# Returns: 数值列名列表和文本列名列表。
+def _infer_column_types(
+    rows: list[dict],
+    columns: list[str],
+) -> tuple[list[str], list[str]]:
+    """避免固定查看前五行导致 NULL 前缀误判列类型。"""
+    logger.debug("图表列类型推断入口", row_count=len(rows), column_count=len(columns))
+    try:
+        numeric: list[str] = []
+        text: list[str] = []
+        for column in columns:
+            samples = [row.get(column) for row in rows if row.get(column) is not None][:100]
+            if not samples:
+                logger.info("图表列类型推断跳过", column=column, reason="无有效值")
+                continue
+            if all(_is_numeric_value(value) for value in samples):
+                numeric.append(column)
+            elif all(isinstance(value, str) for value in samples):
+                text.append(column)
+    except Exception as exc:
+        logger.error("图表列类型推断失败", error=str(exc), exc_info=True)
+        raise
+    logger.info("图表列类型推断完成", numeric=numeric, text=text)
+    return numeric, text
+
+
+# 方法作用：判断值能否安全转换为图表数值。
+# Args: value - 待判断值。
+# Returns: int/float 或合法十进制字符串返回 True。
+def _is_numeric_value(value: Any) -> bool:
+    logger.debug("图表数值判断入口", value_type=type(value).__name__)
+    result = isinstance(value, (int, float)) and not isinstance(value, bool)
+    if isinstance(value, str):
+        try:
+            float(value)
+            result = True
+        except ValueError:
+            result = False
+    logger.debug("图表数值判断完成", numeric=result)
+    return result

@@ -95,6 +95,7 @@ class LLMProvider(ABC):
         max_tokens: int | None = None,
         stream: bool = True,
         reasoning: bool = True,
+        timeout: int | None = None,
     ):
         """创建供 LangGraph/LangChain 组合使用的 ChatModel。
 
@@ -103,6 +104,7 @@ class LLMProvider(ABC):
             max_tokens: 最大输出 Token 数。
             stream: 是否启用流式。
             reasoning: 是否启用模型推理模式。
+            timeout: 单次调用超时秒数，None 时使用应用配置。
 
         Returns:
             LangChain BaseChatModel 实例。
@@ -122,6 +124,8 @@ class LLMProvider(ABC):
         """
         from langchain_core.messages import SystemMessage, HumanMessage, AIMessage
         r, c = m.get("role", "user"), m.get("content", "")
-        if r == "system": return SystemMessage(content=c)
-        if r == "assistant": return AIMessage(content=c)
+        if r == "system":
+            return SystemMessage(content=c)
+        if r == "assistant":
+            return AIMessage(content=c)
         return HumanMessage(content=c)

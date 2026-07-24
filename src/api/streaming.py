@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import json
+import math
 from collections import defaultdict
 from datetime import date, datetime
 from decimal import Decimal
@@ -67,8 +68,13 @@ class _PrecisionEncoder(json.JSONEncoder):
         return super().encode(self._walk(o))
 
     @staticmethod
+    # 方法作用：递归清洗响应树中的浮点数并把非有限值转为空值。
+    # Args: obj - 待清洗的任意响应值。
+    # Returns: 可由严格 JSON 编码器处理的响应值。
     def _walk(obj):
         if isinstance(obj, float) and not isinstance(obj, bool):
+            if not math.isfinite(obj):
+                return None
             return _clean_float(obj)
         if isinstance(obj, dict):
             return {k: _PrecisionEncoder._walk(v) for k, v in obj.items()}
@@ -76,11 +82,16 @@ class _PrecisionEncoder(json.JSONEncoder):
             return [_PrecisionEncoder._walk(v) for v in obj]
         return obj
 
+# 方法作用：把日期、Decimal 和字节转换为 JSON 兼容值。
+# Args: obj - JSON 默认编码器无法处理的值。
+# Returns: JSON 兼容标量；不支持类型抛出 TypeError。
 def _json_serialize(obj):
     """JSON 序列化器，Decimal 保持精确数值。"""
     if isinstance(obj, (datetime, date)):
         return obj.isoformat()
     if isinstance(obj, Decimal):
+        if not obj.is_finite():
+            return None
         normalized = obj.normalize()
         _, _, exp = normalized.as_tuple()
         if exp >= 0:
@@ -314,16 +325,31 @@ async def stream_analysis(user_query: str, datasource: str, session_id: str = ""
                 yield _sse("llm_end", {"node": node, "stream_id": stream_id})
 
     except Exception as e:
-        logger.error("流式错误", error=str(e))
+        logger.error("流式错误", error=str(e), exc_info=True)
         yield _sse("error", {"message": str(e)})
+        logger.info("流式异常终止", stats=stats)
+        yield _sse("done", {"status": "error"})
+        return
 
     logger.info("流式完成", stats=stats, had_stream_tokens=stats["chat_model_stream"] > 0,
                 thinking=stats["thinking_events"], tokens=stats["token_events"])
     yield _sse("done", {"status": "complete"})
 
 
+# 方法作用：使用严格 JSON 编码生成单个 SSE data 分块。
+# Args: event - 事件类型；data - 事件载荷。
+# Returns: 以空行结尾的 SSE data 文本。
 def _sse(event: str, data: dict) -> str:
-    return f"data: {json.dumps({'type': event, **data}, ensure_ascii=False, default=_json_serialize)}\n\n"
+    logger.debug("SSE 事件序列化入口", event_type=event)
+    result = f"data: {json.dumps(
+        {'type': event, **data},
+        ensure_ascii=False,
+        cls=_PrecisionEncoder,
+        default=_json_serialize,
+        allow_nan=False,
+    )}\n\n"
+    logger.debug("SSE 事件序列化完成", event_type=event)
+    return result
 
 
 def _find_parent_node(event: dict) -> str | None:

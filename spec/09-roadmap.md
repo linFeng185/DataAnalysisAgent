@@ -5,7 +5,7 @@
 ### Phase 1 — MVP（1-2周）
 
 - [ ] 项目骨架搭建（FastAPI + Poetry）
-- [ ] 配置体系: settings.py (pydantic-settings) + config/mcp_servers.yaml
+- [x] 配置体系: pydantic-settings + config/app.yaml 统一配置目录
 - [ ] DataSourceRegistry + DataSourceConfig + EmbeddedProvider
 - [ ] ClickHouse 连接器 + DB 内省 (INFORMATION_SCHEMA 查询)
 - [ ] SchemaManager: 三级回退机制 (ChromaDB 缓存 → 文档仓库 → DB 自动拉取)

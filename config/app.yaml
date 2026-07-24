@@ -1,0 +1,95 @@
+# 应用统一配置。密钥值保持为空，由部署环境使用同名大写环境变量覆盖。
+env: dev
+log_level: INFO
+log_format: console
+log_file: logs/app.log
+
+llm_provider: openai
+llm_model: gpt-4o
+llm_temperature: 0.0
+llm_max_tokens: 4096
+llm_timeout: 60
+openai_api_key: ""
+openai_base_url: ""
+anthropic_api_key: ""
+cheap_llm_model: gpt-4o-mini
+local_llm_model: ""
+local_llm_base_url: ""
+local_llm_api_key: local
+local_llm_timeout: 15
+llm_remote_tasks: generate_sql
+llm_allow_remote_fallback: false
+
+database_url: ""
+run_migrations_on_startup: true
+
+vector_store_type: chroma
+vector_store_abstract_enabled: true
+milvus_uri: ""
+chroma_persist_dir: ./chroma_data
+chroma_collection_name: data_agent_knowledge
+embedding_model_path: ""
+
+redis_url: redis://localhost:6379/0
+datasource_cache_backend: local
+datasource_cache_dir: ./data/cache/datasource
+datasource_cache_ttl_seconds: 604800
+datasource_cache_redis_prefix: data-agent:datasource-cache
+
+multi_tenant: false
+registration_enabled: false
+super_admin_username: admin
+super_admin_password: ""
+jwt_secret: ""
+jwt_access_token_expire_hours: 24
+jwt_refresh_token_expire_days: 7
+admin_api_key: ""
+credential_encryption_key: ""
+
+cors_allowed_origins: ""
+security_hsts_seconds: 31536000
+llm_fallback_chain: ""
+
+context_max_tokens: 50000
+context_hot_turns: 5
+context_warm_turns: 20
+context_summary_model: ""
+analysis_data_max_chars: 50000
+max_retry_count: 3
+
+max_queries_per_hour: 100
+login_max_per_hour: 20
+registration_max_per_hour: 10
+login_lockout_threshold: 5
+login_lockout_minutes: 15
+max_query_chars: 8000
+max_datasources_per_query: 5
+max_scan_rows: 10000000
+max_execution_time: 30
+max_result_rows: 100000
+max_stats_rows: 500000
+max_upload_bytes: 20971520
+max_upload_files: 20
+max_upload_total_bytes: 104857600
+
+explain_skip_dialects:
+  - snowflake
+datasource_host_allowlist: ""
+langsmith_api_key: ""
+langsmith_project: data-analysis-agent
+
+mcp_config_path: config/app.yaml
+mcp_remote_host_allowlist: ""
+mcp_servers:
+  filesystem:
+    enabled: false
+    transport: stdio
+    command: ""
+    args: []
+    description: 文件系统访问（默认禁用）
+
+skills_dir: skills
+extra_skills_dirs: ""
+managed_skills_dir: data/skills
+metrics_docs_dir: docs/metrics
+system_knowledge_dirs: ""

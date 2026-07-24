@@ -16,6 +16,11 @@ logger = get_logger(__name__)
 # Returns: 可供 analyze_result 使用的当前轮结果字段，或明确的不可恢复说明。
 async def restore_previous_result_node(state: AnalysisState) -> dict:
     """只为明确的 meta 追问恢复同一数据源、同一会话中的上一轮结果。"""
+    logger.debug(
+        "上一轮结果恢复入口",
+        session_id=(state.get("session_id", "") or "")[:20],
+        datasource=state.get("datasource", ""),
+    )
     snapshot = state.get("previous_turn_snapshot", {}) or {}
     current_sources = set(state.get("selected_datasources", []) or [])
     if not current_sources and state.get("datasource"):
@@ -43,14 +48,67 @@ async def restore_previous_result_node(state: AnalysisState) -> dict:
         )
         return _unavailable_result("数据源已切换，不能复用上一数据源的查询结果，请重新发起查询。")
 
+    rich_result: dict = {}
+    session_id = state.get("session_id", "") or ""
+    if session_id:
+        try:
+            from src.memory.history_store import get_history_store
+
+            history = await get_history_store().list_session(session_id, limit=1)
+            if history:
+                candidate = history[-1].get("final_result", {}) or {}
+                if isinstance(candidate, dict):
+                    rich_result = candidate
+            logger.info(
+                "上一轮富结果读取完成",
+                session_id=session_id[:20],
+                found=bool(rich_result),
+            )
+        except Exception as exc:
+            logger.error(
+                "上一轮富结果读取失败",
+                session_id=session_id[:20],
+                error=str(exc),
+                exc_info=True,
+            )
+
+    # 兼容升级前已经保存富结果的旧 checkpoint。
+    rows = rich_result.get("data", snapshot.get("query_result_sample", [])) or []
+    statements = rich_result.get("sql_statements", []) or []
+    generated_sql = (
+        rich_result.get("sql", "")
+        or snapshot.get("generated_sql", "")
+        or ""
+    )
+    if not rich_result and not rows and not snapshot.get("query_result_sample"):
+        logger.warning("上一轮结果恢复跳过", reason="持久化富结果不存在")
+        return _unavailable_result("上一轮结果明细已不可用，请重新执行数据查询。")
+
     result = {
         "previous_result_restored": True,
-        "generated_sql": snapshot.get("generated_sql", "") or "",
-        "query_result_sample": deepcopy(snapshot.get("query_result_sample", []) or []),
-        "query_result_full_count": int(snapshot.get("query_result_full_count", 0) or 0),
-        "query_result_truncated": bool(snapshot.get("query_result_truncated", False)),
+        "generated_sql": generated_sql,
+        "query_result_sample": deepcopy(rows),
+        "query_result_full_count": int(
+            rich_result.get(
+                "row_count", snapshot.get("query_result_full_count", len(rows)),
+            ) or 0
+        ),
+        "query_result_truncated": bool(
+            rich_result.get(
+                "truncated", snapshot.get("query_result_truncated", False),
+            )
+        ),
         "query_result_statistics": deepcopy(snapshot.get("query_result_statistics", {}) or {}),
-        "multi_source_results": deepcopy(snapshot.get("multi_source_results", []) or []),
+        "multi_source_results": [
+            {
+                "success": True,
+                "datasource": statement.get("datasource", ""),
+                "dialect": statement.get("dialect", ""),
+                "sql": statement.get("sql", ""),
+            }
+            for statement in statements
+            if isinstance(statement, dict) and statement.get("sql")
+        ],
     }
     logger.info(
         "上一轮结果恢复完成",

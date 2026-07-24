@@ -2,15 +2,24 @@
 
 from __future__ import annotations
 
+import hashlib
+from typing import TYPE_CHECKING
+
 from langchain_core.language_models import BaseChatModel
 
 from src.config import get_settings
 from src.llm.adapters.registry import get_adapter
 from src.logging_config import get_logger
 
+if TYPE_CHECKING:
+    from src.llm.provider import LLMProvider
+
 logger = get_logger(__name__)
 
 
+# 方法作用：通过统一 Provider 入口创建 OpenAI-compatible ChatModel。
+# Args: model - 模型名；temperature - 温度；max_tokens - 输出上限；reasoning - 是否启用推理；base_url/api_key/timeout - 可选连接覆盖。
+# Returns: Provider 创建的 BaseChatModel。
 def get_openai_llm(
     model: str | None = None,
     temperature: float | None = None,
@@ -37,39 +46,44 @@ def get_openai_llm(
     logger.info("LLM 初始化", model=model_name, base_url=base, has_key=bool(resolved_api_key),
                 reasoning=sf.reasoning and reasoning, streaming=sf.streaming)
 
-    from src.llm.reasoning_chat_openai import ReasoningChatOpenAI
-    adapter_kwargs = adapter.get_chat_openai_kwargs()
-
-    if not reasoning:
-        adapter_kwargs.pop("reasoning_effort", None)
-        adapter_kwargs.pop("extra_body", None)
-
-    return ReasoningChatOpenAI(
-        model=model_name,
+    provider_instance = get_provider(
+        model_id=model_name,
+        provider_name="openai",
+        base_url=base,
+        api_key=resolved_api_key,
+    )
+    result = provider_instance.get_chat_model(
         temperature=temperature if temperature is not None else s.llm_temperature,
         max_tokens=max_tokens or s.llm_max_tokens,
-        api_key=resolved_api_key or None,
-        base_url=base or None,
+        stream=True,
+        reasoning=reasoning,
         timeout=resolved_timeout,
-        streaming=True,  # 始终开启，ainvoke 内部静默消费，astream_events 输出事件
-        **adapter_kwargs,
     )
+    logger.info("OpenAI-compatible LLM 创建完成", model=model_name)
+    return result
 
 
+# 方法作用：通过统一 Provider 入口创建 Anthropic ChatModel。
+# Args: model - 模型名；temperature - 温度；max_tokens - 输出上限。
+# Returns: Provider 创建的 BaseChatModel。
 def get_anthropic_llm(model: str | None = None, temperature: float | None = None, max_tokens: int | None = None) -> BaseChatModel:
     """10.1.2 ChatAnthropic 工厂。"""
-    s = get_settings()
-    from src.llm.provider_registry import create_provider_from_settings, get_default_model
+    from src.llm.provider_registry import get_default_model
 
     model_name = model or get_default_model("anthropic")
-    provider = create_provider_from_settings("anthropic", model_name, s)
-    return provider.get_chat_model(
+    provider = get_provider(model_id=model_name, provider_name="anthropic")
+    result = provider.get_chat_model(
         temperature=temperature,
         max_tokens=max_tokens,
         stream=True,
     )
+    logger.info("Anthropic LLM 创建完成", model=model_name)
+    return result
 
 
+# 方法作用：兼容旧调用并通过统一 Provider 入口创建 ChatModel。
+# Args: provider - Provider 名称；model - 模型名；temperature - 温度；reasoning - 是否推理；max_tokens - 输出上限。
+# Returns: Provider 创建的 BaseChatModel。
 def get_llm(
     provider: str | None = None,
     model: str | None = None,
@@ -80,7 +94,7 @@ def get_llm(
     """10.1.3 路由器。"""
     s = get_settings()
     provider_name = provider or s.llm_provider
-    from src.llm.provider_registry import create_provider_from_settings, get_default_model
+    from src.llm.provider_registry import get_default_model
 
     if model:
         model_name = model
@@ -88,15 +102,20 @@ def get_llm(
         model_name = s.llm_model
     else:
         model_name = get_default_model(provider_name)
-    provider_instance = create_provider_from_settings(provider_name, model_name, s)
-    return provider_instance.get_chat_model(
+    provider_instance = get_provider(model_id=model_name, provider_name=provider_name)
+    result = provider_instance.get_chat_model(
         temperature=temperature,
         stream=True,
         reasoning=reasoning,
         max_tokens=max_tokens,
     )
+    logger.info("兼容 LLM 路由完成", provider=provider_name, model=model_name)
+    return result
 
 
+# 方法作用：通过统一兼容路由创建低成本模型。
+# Args: 无。
+# Returns: 已配置的低成本 BaseChatModel。
 def get_cheap_llm() -> BaseChatModel:
     """10.1.4 低成本 LLM。"""
     settings = get_settings()
@@ -202,13 +221,17 @@ def get_task_llm(
     target = resolve_llm_task_target(task, settings=settings)
     logger.debug("创建任务 LLM 入口", task=task, target=target, reasoning=reasoning)
     if target == "local":
-        model = get_openai_llm(
-            model=settings.local_llm_model,
-            temperature=temperature,
-            max_tokens=max_tokens,
-            reasoning=reasoning,
+        provider = get_provider(
+            model_id=settings.local_llm_model,
+            provider_name="openai",
             base_url=settings.local_llm_base_url,
             api_key=settings.local_llm_api_key or "local",
+        )
+        model = provider.get_chat_model(
+            temperature=temperature,
+            max_tokens=max_tokens,
+            stream=True,
+            reasoning=reasoning,
             timeout=settings.local_llm_timeout,
         )
     elif target == "remote":
@@ -223,20 +246,65 @@ def get_task_llm(
     return model
 
 
-def get_provider(model_id: str | None = None) -> "LLMProvider":
+# 方法作用：解析模型所属 Provider，并在当前 AppContext 内复用实例。
+# Args: model_id - 模型标识；provider_name - 可选显式 Provider；base_url/api_key - 可选连接覆盖。
+# Returns: 当前 Context 持有的 LLMProvider。
+def get_provider(
+    model_id: str | None = None,
+    *,
+    provider_name: str | None = None,
+    base_url: str | None = None,
+    api_key: str | None = None,
+) -> "LLMProvider":
     s = get_settings()
     mid = model_id or s.llm_model
-    logger.info("Provider 路由边界输入", model_id=mid)
-    from src.llm.model_registry import get_model_registry
-    info = get_model_registry().get(mid)
-    if not info:
-        logger.error("Provider 路由失败", model_id=mid, reason="模型未注册")
-        raise ValueError(f"未知模型: {mid}")
-    logger.info("Provider 模型解析完成", model_id=mid, provider=info.provider)
-    from src.llm.provider_registry import create_provider_from_settings
+    logger.info(
+        "Provider 路由边界输入",
+        model_id=mid,
+        explicit_provider=provider_name or "",
+        explicit_connection=base_url is not None or api_key is not None,
+    )
+    resolved_provider = (provider_name or "").strip().lower()
+    if not resolved_provider:
+        from src.llm.model_registry import get_model_registry
 
-    provider = create_provider_from_settings(info.provider, mid, s)
-    logger.info("Provider 路由完成", model_id=mid, provider=info.provider)
+        info = get_model_registry().get(mid)
+        if not info:
+            logger.error("Provider 路由失败", model_id=mid, reason="模型未注册")
+            raise ValueError(f"未知模型: {mid}")
+        resolved_provider = info.provider
+    logger.info("Provider 模型解析完成", model_id=mid, provider=resolved_provider)
+
+    from src.app_context import get_app_context
+    from src.llm.provider_registry import create_provider, create_provider_from_settings
+
+    connection_fingerprint = hashlib.sha256(
+        (
+            f"base_explicit={base_url is not None}:{base_url or ''}\0"
+            f"key_explicit={api_key is not None}:{api_key or ''}"
+        ).encode("utf-8")
+    ).hexdigest()[:12]
+    resource_name = f"llm_provider:{resolved_provider}:{mid}:{connection_fingerprint}"
+
+    # 方法作用：按显式连接覆盖或 Settings 注册元数据创建 Provider。
+    # Args: 无。
+    # Returns: 新建 LLMProvider。
+    def factory() -> "LLMProvider":
+        logger.debug("Provider 资源工厂入口", provider=resolved_provider, model_id=mid)
+        if base_url is not None or api_key is not None:
+            result = create_provider(
+                resolved_provider,
+                mid,
+                base_url or "",
+                api_key or "",
+            )
+        else:
+            result = create_provider_from_settings(resolved_provider, mid, s)
+        logger.info("Provider 资源工厂完成", provider=resolved_provider, model_id=mid)
+        return result
+
+    provider = get_app_context().get_or_create(resource_name, factory)
+    logger.info("Provider 路由完成", model_id=mid, provider=resolved_provider)
     return provider
 
 

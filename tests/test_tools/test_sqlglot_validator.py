@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+import logging
+
 import pytest
 
 from src.tools.sqlglot_validator import (
@@ -15,6 +17,9 @@ from src.tools.sqlglot_validator import (
     _suggest_correct_function,
     validate_with_sqlglot,
 )
+
+
+logger = logging.getLogger(__name__)
 
 
 class TestSqlglotValidator:
@@ -51,6 +56,21 @@ class TestSqlglotValidator:
     def test_transpile_non_mysql(self):
         result = validate_with_sqlglot("SELECT * FROM orders LIMIT 10", "clickhouse")
         assert result["valid"] is True
+
+    # 方法作用：验证 LangChain SQL 校验工具复用统一只读安全边界。
+    # Args: self - pytest 测试类实例。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    def test_readonly_security_delegates_to_unified_validator(self) -> None:
+        """注释中的危险词可放行，真实写操作必须 fail-closed。"""
+        logger.debug("test_readonly_security_delegates_to_unified_validator 入口")
+
+        commented = validate_with_sqlglot("SELECT 1 -- DROP TABLE users", "postgres")
+        destructive = validate_with_sqlglot("DROP /* hidden */ TABLE users", "postgres")
+
+        assert commented["valid"] is True
+        assert destructive["valid"] is False
+        assert destructive["errors"][0]["type"] == "security_block"
+        logger.info("test_readonly_security_delegates_to_unified_validator 完成")
 
 
 class TestSupportedDialects:

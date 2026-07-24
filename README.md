@@ -13,14 +13,14 @@
 - **知识库** — 上传 PDF/Word/TXT/MD，智能分块 + ChromaDB 向量索引
 - **共享缓存** — 本地 JSON 或 Redis 后端，支持连接级 Schema/枚举缓存及 TTL
 - **依赖与租户隔离** — `AppContext` 管理应用资源，`TenantPolicy` 集中执行认证和租户边界
-- **Web UI** — React + Ant Design、6 页面：对话 / 数据源 / 表结构 / 历史 / Skills / 知识库
+- **Web UI** — React + Ant Design，提供强制登录、平台管理、租户/用户治理和业务分析页面
 
 ## 快速开始
 
 ### 环境要求
 
 - Python 3.12+
-- PostgreSQL 16+（可选，用于会话、检查点和审计持久化）
+- PostgreSQL 16+（必需，用于账号、租户、配置、会话和审计持久化）
 - Redis 7+（可选，用于多实例共享的数据源内容缓存）
 - Node.js 18+（前端开发）
 - Docker Compose v2（可选，用于启动本地依赖）
@@ -52,19 +52,30 @@ pip install -e ".[dev]"
 
 ### 3. 配置
 
+系统配置统一维护在 `config/app.yaml`。加载优先级为：构造参数 > 环境变量 > `.env` >
+`config/app.yaml` > 代码默认值；可通过 `APP_CONFIG_PATH` 指向其他 YAML。`config/datasources.yaml`
+是可选的固定数据源清单，页面创建的数据源会加密保存到 PostgreSQL。
+
+密钥建议通过部署环境或本地 `.env` 覆盖，不要提交真实值：
+
 ```bash
 cp .env.example .env
 ```
 
-`.env.example` 默认使用 `ENV=dev`，适合本机演示。最少配置（用 DeepSeek API 即可启动）：
+首次启动至少配置状态库、固定超级管理员密码和 LLM：
 
 ```env
+DATABASE_URL=postgresql+asyncpg://postgres:postgres@localhost:5432/data_agent
+SUPER_ADMIN_USERNAME=admin
+SUPER_ADMIN_PASSWORD=replace-with-a-strong-password
+JWT_SECRET=replace-with-at-least-32-random-characters
 OPENAI_API_KEY=sk-your-deepseek-api-key
 OPENAI_BASE_URL=https://api.deepseek.com
 LLM_MODEL=deepseek-v4-pro
 ```
 
-开发模式未配置 PostgreSQL 时会使用内存检查点；未配置持久凭证密钥时会生成进程级临时密钥。临时密钥在进程重启后变化，只适合演示环境。
+首次启动会运行迁移并创建唯一的 `users.id=1` 超级管理员。后续启动不会使用配置密码覆盖已有账号。
+开发模式未配置持久凭证密钥时会生成进程级临时密钥，只适合不保存动态数据源的短期演示。
 
 ### 4. 启动后端
 
@@ -88,9 +99,11 @@ npm run dev
 
 前端运行在 http://localhost:5173 ，Vite 代理将 `/api` 请求转发到后端 8000 端口。
 
-### 6. 首次查询
+### 6. 首次登录与查询
 
-打开前端 → 选择 `demo` 数据源 → 输入"本月各产品的销售额排名是怎样的？" → 发送。
+打开前端后使用 `SUPER_ADMIN_USERNAME` / `SUPER_ADMIN_PASSWORD` 登录。固定超级管理员可进入
+“平台管理”创建租户和用户，也可管理系统 Skills、系统知识库和系统 MCP；普通用户看不到这些
+`system` 内容。完成账号配置后选择数据源并发送查询。
 
 系统会自动生成 SQL、执行查询、分析结果并展示图表。
 
@@ -157,7 +170,6 @@ docker compose --env-file .env up -d
 |------|------|--------|
 | `DATABASE_URL` | PG 连接串（`postgresql+asyncpg://`）| —（留空用内存） |
 | `RUN_MIGRATIONS_ON_STARTUP` | 启动时运行版本化迁移 | true |
-| `DATABASE_READONLY_URL` | 执行用户 SQL 的只读连接；生产必填 | — |
 
 Docker 快速启动 PG：
 
@@ -202,12 +214,18 @@ DATASOURCE_CACHE_BACKEND=redis
 
 | 变量 | 说明 | 默认值 |
 |------|------|--------|
-| `MULTI_TENANT` | 开启 JWT 认证和租户隔离 | false |
+| `MULTI_TENANT` | 是否启用跨租户数据隔离；不影响强制登录 | false |
+| `REGISTRATION_ENABLED` | 是否开放登录页公开注册 | false |
+| `SUPER_ADMIN_USERNAME` | 固定 `users.id=1` 超级管理员用户名 | admin |
+| `SUPER_ADMIN_PASSWORD` | 首次创建超级管理员所需密码 | — |
 | `JWT_SECRET` | JWT 签名密钥，生产至少 32 字符 | — |
 | `ADMIN_API_KEY` | 平台管理操作密钥，生产至少 32 字符 | — |
 | `CORS_ALLOWED_ORIGINS` | 可信前端 origin，多个值用逗号分隔 | 空 |
+| `LOGIN_MAX_PER_HOUR` | 单进程每 IP+用户名每小时登录上限 | 20 |
+| `LOGIN_LOCKOUT_THRESHOLD` | 账号连续失败锁定阈值 | 5 |
+| `LOGIN_LOCKOUT_MINUTES` | 账号锁定分钟数 | 15 |
 
-`dev/test + MULTI_TENANT=false` 允许匿名演示。`prod` 必须启用多租户，并提供 JWT、管理密钥、凭证加密密钥和只读数据库连接，否则应用拒绝启动。
+所有模式都必须登录。`MULTI_TENANT=false` 仅关闭跨租户隔离并使用默认租户，不会开放匿名访问；首次启动必须配置状态数据库和超级管理员密码。
 
 ### 数据源密码
 
@@ -369,15 +387,15 @@ coverage 配置位于 `pyproject.toml`，当前门禁要求 branch coverage 不�
 
 生产环境至少完成以下配置后再启动：
 
-1. 设置 `ENV=prod`、`MULTI_TENANT=true`，配置不少于 32 字符的 `JWT_SECRET` 和 `ADMIN_API_KEY`。
-2. 生成独立的 `CREDENTIAL_ENCRYPTION_KEY`，不要复用 `.env.example` 中的示例值。
-3. 分别配置状态库 `DATABASE_URL` 和只读查询连接 `DATABASE_READONLY_URL`，后者不得拥有 DDL/DML 权限。
+1. 设置 `ENV=prod`，配置不少于 32 字符的 `JWT_SECRET`；按部署需求选择 `MULTI_TENANT=true/false`。
+2. 生成独立的 `CREDENTIAL_ENCRYPTION_KEY`，首次启动通过安全环境注入 `SUPER_ADMIN_PASSWORD`。
+3. 配置状态库 `DATABASE_URL`；每个业务数据源必须使用独立只读账号，不得拥有 DDL/DML 权限。
 4. 将 `CORS_ALLOWED_ORIGINS` 限制为实际前端域名；HTTPS 部署保留 HSTS 和其他安全响应头。
 5. 私网数据源必须显式加入 `DATASOURCE_HOST_ALLOWLIST`，避免开放任意内网目标。
 6. Redis 不应直接暴露公网；生产使用强密码、网络 ACL，并根据备份要求管理 AOF/快照。
 7. 将日志目录挂载到持久存储。应用日志每日轮转并保留 7 天，审计合规需要更长留存时应由日志平台归档。
 
-生产启动会执行配置门禁；认证、凭证密钥或只读数据库配置不完整时会直接失败，不会降级到匿名模式。
+生产启动会执行配置门禁；认证、凭证密钥或状态数据库配置不完整时会直接失败，不会降级到匿名模式。
 
 ## 常见问题
 

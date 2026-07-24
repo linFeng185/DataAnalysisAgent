@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import math
 import inspect
 from abc import ABC, abstractmethod
 from decimal import Decimal
@@ -29,23 +30,20 @@ class ConnectorBase(ABC):
     # Args: config - 已归一化的数据源配置。
     # Returns: 无返回值。
     def __init__(self, config: DataSourceConfig) -> None:
-        logger.debug("ConnectorBase.__init__ 入口", datasource=config.name, dialect=config.dialect)
         self.config = config
         self._engine: Any | None = None
-        logger.info("ConnectorBase.__init__ 完成", datasource=config.name, dialect=config.dialect)
 
     # 方法作用：创建并缓存通用 SQLAlchemy AsyncEngine。
     # Args: 无，使用构造时保存的数据源配置。
     # Returns: 创建完成的 AsyncEngine。
     async def create_engine(self) -> AsyncEngine:
         """使用方言 URL 和连接器参数创建异步连接池。"""
-        settings = get_settings()
         logger.debug("连接器引擎创建入口", datasource=self.config.name, dialect=self.config.dialect)
         try:
             self._engine = create_async_engine(
                 self._build_url(),
                 **self.engine_kwargs,
-                echo=settings.env == "dev",
+                echo=False,
             )
         except Exception as exc:
             logger.error(
@@ -69,15 +67,12 @@ class ConnectorBase(ABC):
         Returns:
             可传给 create_async_engine 的参数字典。
         """
-        logger.debug("连接器引擎参数入口", datasource=self.config.name)
-        result = {
+        return {
             "pool_size": self.config.extra_params.get("pool_size", 5),
             "max_overflow": self.config.extra_params.get("max_overflow", 10),
             "pool_pre_ping": True,
             "pool_recycle": 3600,
         }
-        logger.info("连接器引擎参数完成", datasource=self.config.name)
-        return result
 
     @property
     def timeout_sql(self) -> str | None:
@@ -89,8 +84,6 @@ class ConnectorBase(ABC):
         Returns:
             默认不注入超时 SQL。
         """
-        logger.debug("连接器超时 SQL 入口", datasource=self.config.name)
-        logger.info("连接器超时 SQL 完成", datasource=self.config.name, configured=False)
         return None
 
     @abstractmethod
@@ -115,8 +108,6 @@ class ConnectorBase(ABC):
         Returns:
             引擎或 None。
         """
-        logger.debug("连接器引擎读取入口", datasource=self.config.name)
-        logger.info("连接器引擎读取完成", datasource=self.config.name, available=self._engine is not None)
         return self._engine
 
     # 方法作用：复用 Registry 已创建的引擎，避免 Tool 或节点重复建池。
@@ -126,7 +117,6 @@ class ConnectorBase(ABC):
         """把外部已有引擎绑定到连接器。"""
         logger.debug("连接器绑定引擎入口", datasource=self.config.name)
         self._engine = engine
-        logger.info("连接器绑定引擎完成", datasource=self.config.name)
         return self
 
     # 方法作用：执行 SQL 并返回全部结果字典。
@@ -171,7 +161,7 @@ class ConnectorBase(ABC):
             else:
                 result = connection.execute(sa.text(sql))
             rows = self.rows_to_dict_list(result)
-        logger.info("同步连接器执行完成", datasource=self.config.name, row_count=len(rows))
+        logger.debug("同步连接器执行完成", datasource=self.config.name, row_count=len(rows))
         return rows
 
     # 方法作用：有界读取查询结果，避免大结果集占满内存。
@@ -244,7 +234,7 @@ class ConnectorBase(ABC):
             fetched = result.fetchmany(max_rows + 1)
             result.close()
         rows = [self._row_to_dict(row) for row in fetched]
-        logger.info("同步连接器有界执行完成", datasource=self.config.name, row_count=len(rows))
+        logger.debug("同步连接器有界执行完成", datasource=self.config.name, row_count=len(rows))
         return rows
 
     # 方法作用：用方言模板执行 EXPLAIN 语义校验。
@@ -253,8 +243,15 @@ class ConnectorBase(ABC):
     async def explain(self, sql: str) -> dict:
         """未配置模板或显式跳过的方言直接视为有效。"""
         settings = get_settings()
+        logger.info(
+            "连接器 EXPLAIN 配置探针",
+            datasource=self.config.name,
+            dialect=self.config.dialect,
+            skip_dialects=getattr(settings, "explain_skip_dialects", []),
+            settings_id=id(settings),
+        )
         logger.debug("连接器 EXPLAIN 入口", datasource=self.config.name, sql=sql)
-        if self.config.dialect in settings.explain_skip_dialects:
+        if self.config.dialect in getattr(settings, "explain_skip_dialects", []):
             logger.warning("连接器 EXPLAIN 跳过", datasource=self.config.name, reason="配置跳过")
             return {"valid": True, "errors": []}
         if not self.explain_template:
@@ -312,10 +309,7 @@ class ConnectorBase(ABC):
     @staticmethod
     def rows_to_dict_list(rows: Any) -> list[dict]:
         """统一 RowMapping 和精度转换。"""
-        logger.debug("连接器结果格式化入口")
-        result = [ConnectorBase._row_to_dict(row) for row in rows]
-        logger.info("连接器结果格式化完成", row_count=len(result))
-        return result
+        return [ConnectorBase._row_to_dict(row) for row in rows]
 
     # 方法作用：将单行结果转换为字典并把 float 转为 Decimal。
     # Args: row - SQLAlchemy Row 或兼容行。
@@ -323,14 +317,28 @@ class ConnectorBase(ABC):
     @staticmethod
     def _row_to_dict(row: Any) -> dict:
         """保持执行节点原有的数值精度契约。"""
-        logger.debug("连接器单行格式化入口", row_type=type(row).__name__)
+        mapping = dict(row._mapping)
+        non_finite_columns = [
+            key
+            for key, value in mapping.items()
+            if isinstance(value, float) and not isinstance(value, bool) and not math.isfinite(value)
+        ]
+        if non_finite_columns:
+            logger.warning(
+                "连接器非有限数值已转为空值",
+                columns=non_finite_columns,
+                count=len(non_finite_columns),
+            )
         result = {
-            key: Decimal(str(value))
-            if isinstance(value, float) and not isinstance(value, bool)
-            else value
-            for key, value in dict(row._mapping).items()
+            key: (
+                None
+                if isinstance(value, float) and not isinstance(value, bool) and not math.isfinite(value)
+                else Decimal(str(value))
+                if isinstance(value, float) and not isinstance(value, bool)
+                else value
+            )
+            for key, value in mapping.items()
         }
-        logger.info("连接器单行格式化完成", column_count=len(result))
         return result
 
     # 方法作用：兼容旧调用路径读取 timeout_sql。
@@ -338,10 +346,7 @@ class ConnectorBase(ABC):
     # Returns: 方言超时 SQL 或 None。
     def _get_timeout(self) -> str | None:
         """旧测试和插件可继续调用该方法。"""
-        logger.debug("连接器兼容超时入口", datasource=self.config.name)
-        result = self.timeout_sql
-        logger.info("连接器兼容超时完成", datasource=self.config.name, configured=bool(result))
-        return result
+        return self.timeout_sql
 
 
 # 方法作用：兼容旧导入路径并委托统一连接器注册表。
@@ -352,6 +357,4 @@ def create_connector(ds: DataSourceConfig) -> ConnectorBase:
     logger.debug("兼容连接器工厂入口", datasource=ds.name, dialect=ds.dialect)
     from src.connectors.registry import create_connector as create_registered_connector
 
-    connector = create_registered_connector(ds)
-    logger.info("兼容连接器工厂完成", datasource=ds.name, dialect=ds.dialect)
-    return connector
+    return create_registered_connector(ds)

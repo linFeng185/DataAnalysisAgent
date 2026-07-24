@@ -88,5 +88,37 @@ class SQLServerConnector(ConnectorBase):
             try:
                 connection.execute(sa.text(sql))
             finally:
-                connection.execute(sa.text("SET SHOWPLAN_TEXT OFF"))
+                try:
+                    connection.execute(sa.text("SET SHOWPLAN_TEXT OFF"))
+                except Exception as exc:
+                    logger.error(
+                        "SQL Server SHOWPLAN 清理失败，连接已废弃",
+                        datasource=self.config.name,
+                        error=str(exc),
+                        exc_info=True,
+                    )
+                    connection.invalidate()
+                    raise
         logger.info("SQL Server SHOWPLAN 同步执行完成", datasource=self.config.name)
+
+    # 方法作用：在线程池中释放同步 SQL Server Engine。
+    # Args: 无。
+    # Returns: 无返回值。
+    async def close(self) -> None:
+        """避免同步 dispose 阻塞 asyncio 事件循环。"""
+        logger.debug("SQL Server 引擎关闭入口", datasource=self.config.name)
+        if self._engine is not None:
+            engine = self._engine
+            try:
+                await asyncio.to_thread(engine.dispose)
+            except Exception as exc:
+                logger.error(
+                    "SQL Server 引擎关闭失败",
+                    datasource=self.config.name,
+                    error=str(exc),
+                    exc_info=True,
+                )
+                raise
+            finally:
+                self._engine = None
+        logger.info("SQL Server 引擎关闭完成", datasource=self.config.name)

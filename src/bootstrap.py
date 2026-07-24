@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Awaitable, Callable
 from typing import Any
 
@@ -16,6 +17,7 @@ logger = get_logger(__name__)
 # 启动阶段名称和说明集中声明，便于测试顺序和未来增加阶段。
 _BOOTSTRAP_STEPS: tuple[tuple[str, str], ...] = (
     ("_run_migrations", "数据库迁移"),
+    ("_ensure_super_admin", "平台超级管理员"),
     ("_init_workflow", "LangGraph 工作流"),
     ("_ensure_demo_datasource", "演示数据源"),
     ("_warmup_knowledge", "知识库预热"),
@@ -25,6 +27,8 @@ _BOOTSTRAP_STEPS: tuple[tuple[str, str], ...] = (
     ("_connect_mcp_servers", "MCP 连接"),
     ("_load_external_datasources", "外部数据源加载"),
 )
+
+_REQUIRED_BOOTSTRAP_STEPS = {"_run_migrations", "_ensure_super_admin"}
 
 
 # 方法作用：执行数据库版本化迁移并返回已应用迁移数量。
@@ -39,6 +43,71 @@ async def _run_migrations(settings: Settings) -> None:
 
     applied = await run_migrations(settings.database_url)
     logger.info("_run_migrations 完成", applied_count=len(applied))
+
+
+# 方法作用：幂等创建或校验固定 id=1 的平台超级管理员。
+# Args: settings - 当前应用配置，首次初始化时提供账号和密码。
+# Returns: 无返回值，冲突或缺少首次密码时抛出 RuntimeError。
+async def _ensure_super_admin(settings: Settings) -> None:
+    logger.debug("_ensure_super_admin 入口", username=settings.super_admin_username)
+    from src.api.auth import SUPER_ADMIN_USER_ID, _hash_password
+    from src.memory.pg_pool import get_pg_pool
+
+    username = settings.super_admin_username.strip()
+    if not username:
+        logger.error("固定超级管理员初始化失败", reason="用户名为空")
+        raise RuntimeError("SUPER_ADMIN_USERNAME 必须配置")
+    pool = await get_pg_pool()
+    async with pool.acquire() as connection:
+        transaction_factory = getattr(connection, "transaction", None)
+
+        # 方法作用：在事务中校验或创建固定平台账号。
+        # Args: 无，使用外层配置和数据库连接。
+        # Returns: 是否新建账号。
+        async def _upsert() -> bool:
+            logger.debug("固定超级管理员写入入口", user_id=SUPER_ADMIN_USER_ID)
+            row = await connection.fetchrow(
+                "SELECT id, username, role, is_active FROM users WHERE id=$1 FOR UPDATE",
+                SUPER_ADMIN_USER_ID,
+            )
+            if row is not None:
+                if str(row["role"]) != "super_admin" or not bool(row["is_active"]):
+                    logger.error("固定超级管理员校验失败", user_id=SUPER_ADMIN_USER_ID)
+                    raise RuntimeError("users.id=1 必须是启用的 super_admin")
+                logger.info("固定超级管理员写入完成", created=False, username=row["username"])
+                return False
+            if not settings.super_admin_password:
+                logger.error("固定超级管理员初始化失败", reason="首次密码为空")
+                raise RuntimeError("首次启动必须配置 SUPER_ADMIN_PASSWORD")
+            conflict = await connection.fetchval(
+                "SELECT id FROM users WHERE LOWER(username)=LOWER($1)",
+                username,
+            )
+            if conflict is not None:
+                logger.error("固定超级管理员初始化失败", reason="用户名已占用")
+                raise RuntimeError("SUPER_ADMIN_USERNAME 已被其他账号占用")
+            password_hash = await asyncio.to_thread(_hash_password, settings.super_admin_password)
+            await connection.execute(
+                "INSERT INTO users (id, username, password_hash, role, tenant_id, is_active) "
+                "VALUES ($1, $2, $3, 'super_admin', 1, TRUE)",
+                SUPER_ADMIN_USER_ID,
+                username,
+                password_hash,
+            )
+            await connection.execute(
+                "SELECT setval(pg_get_serial_sequence('users', 'id'), "
+                "GREATEST((SELECT MAX(id) FROM users), 1), TRUE)",
+            )
+            logger.info("固定超级管理员写入完成", created=True, username=username)
+            return True
+
+        if callable(transaction_factory):
+            async with transaction_factory():
+                created = await _upsert()
+        else:
+            logger.warning("超级管理员连接不支持事务，使用兼容路径")
+            created = await _upsert()
+    logger.info("_ensure_super_admin 完成", created=created, user_id=SUPER_ADMIN_USER_ID)
 
 
 # 方法作用：初始化 LangGraph 工作流及其 Checkpointer。
@@ -71,12 +140,10 @@ async def _ensure_demo_datasource(settings: Settings) -> None:
 async def _warmup_knowledge(settings: Settings) -> None:
     logger.debug("_warmup_knowledge 入口", vector_store_type=settings.vector_store_type)
     from src.knowledge.file_store import get_file_store
+    from src.memory.vector_store import get_vector_store
 
-    await get_file_store()._ensure()  # noqa: SLF001
-    if settings.vector_store_type == "chroma":
-        from src.knowledge.schema_manager import get_schema_manager
-
-        get_schema_manager()._ensure_initialized()  # noqa: SLF001
+    await get_file_store().initialize()
+    await get_vector_store()
     if settings.system_knowledge_dirs.strip():
         from src.knowledge.system_scanner import scan_configured_system_knowledge
 
@@ -153,15 +220,21 @@ async def _connect_mcp_servers(settings: Settings) -> None:
 # Args: settings - 当前应用配置。
 # Returns: 无返回值。
 async def _load_external_datasources(settings: Settings) -> None:
-    del settings
-    logger.debug("_load_external_datasources 入口")
+    logger.debug("_load_external_datasources 入口", config_path="config/datasources.yaml")
     from src.datasource.providers.external import ExternalDataSourceProvider
     from src.datasource.registry import get_registry
 
     provider = ExternalDataSourceProvider.from_yaml("config/datasources.yaml")
+    persisted_count = await provider.load_persisted()
     get_registry().register_provider("external", provider)
     sources = await provider.list_all()
-    logger.info("_load_external_datasources 完成", count=len(sources))
+    logger.info(
+        "_load_external_datasources 完成",
+        count=len(sources),
+        persisted_count=persisted_count,
+        yaml_optional=True,
+        env=settings.env,
+    )
 
 
 # 方法作用：按固定顺序执行所有启动阶段，并绑定显式应用 Context。
@@ -194,7 +267,7 @@ async def _run_bootstrap_steps(settings: Settings) -> None:
             await step(settings)
         except Exception:
             logger.error("启动阶段失败", step=name, description=description, exc_info=True)
-            if settings.env == "prod":
+            if settings.env == "prod" or name in _REQUIRED_BOOTSTRAP_STEPS:
                 raise
             logger.warning("非生产环境跳过启动阶段", step=name, env=settings.env)
     logger.info("_run_bootstrap_steps 完成", env=settings.env)

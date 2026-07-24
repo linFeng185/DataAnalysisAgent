@@ -70,6 +70,9 @@ def _knowledge_where(extra: dict | None = None, owner_only: bool = False) -> dic
 
 
 @router.get("/knowledge")
+# 方法作用：按当前身份、范围和分类分页列出知识条目。
+# Args: category - 分类；search - 搜索词；knowledge_scope - 范围；page/page_size - 分页参数。
+# Returns: 知识条目分页结果；存储失败抛出 HTTP 500。
 async def list_knowledge(
     category: str | None = Query(default=None),
     search: str | None = Query(default=None),
@@ -87,12 +90,18 @@ async def list_knowledge(
         page_size=page_size,
     )
     try:
+        from src.api.auth import is_platform_super_admin
         from src.memory.vector_store import get_vector_store
         from src.knowledge.governance import normalize_knowledge_scope
         from src.knowledge.retrieval import build_accessible_knowledge_filters
 
         store = await get_vector_store()
         filter_groups = build_accessible_knowledge_filters(category=category or "")
+        if not is_platform_super_admin():
+            filter_groups = [
+                filters for filters in filter_groups
+                if filters.get("visibility") != "system"
+            ]
         if knowledge_scope:
             normalized_scope = normalize_knowledge_scope(knowledge_scope).value
             filter_groups = [
@@ -165,7 +174,7 @@ async def list_knowledge(
         raise HTTPException(400, str(exc)) from exc
     except Exception as e:
         logger.error("知识库加载失败", error=str(e), exc_info=True)
-        return {"entries": [], "total": 0, "page": page, "page_size": page_size}
+        raise HTTPException(500, "知识库加载失败") from e
 
 
 # 方法作用：过滤知识文档格式并检查单文件与累计上传大小。
@@ -319,16 +328,13 @@ async def upload_knowledge_docs(
     )
     from src.knowledge.governance import normalize_knowledge_scope
 
-    settings = get_settings()
-    max_upload_bytes = max(1, int(settings.max_upload_bytes))
-    max_upload_files = max(1, int(getattr(settings, "max_upload_files", 20)))
-    max_upload_total_bytes = max(
-        max_upload_bytes,
-        int(getattr(settings, "max_upload_total_bytes", 100 * 1024 * 1024)),
+    logger.info(
+        "知识文件上传配置前授权探针",
+        knowledge_scope=knowledge_scope,
+        role=get_current_role(),
+        tenant_id=get_current_tenant_id(),
+        user_id=get_current_user_id(),
     )
-    if len(files) > max_upload_files:
-        logger.warning("知识文件上传数量超限", file_count=len(files), limit=max_upload_files)
-        raise HTTPException(413, f"单次最多上传 {max_upload_files} 个文件")
     try:
         normalized_scope = normalize_knowledge_scope(knowledge_scope).value
     except ValueError as exc:
@@ -361,6 +367,17 @@ async def upload_knowledge_docs(
         tenant_id=get_current_tenant_id(),
         user_id=user_id,
     )
+
+    settings = get_settings()
+    max_upload_bytes = max(1, int(settings.max_upload_bytes))
+    max_upload_files = max(1, int(getattr(settings, "max_upload_files", 20)))
+    max_upload_total_bytes = max(
+        max_upload_bytes,
+        int(getattr(settings, "max_upload_total_bytes", 100 * 1024 * 1024)),
+    )
+    if len(files) > max_upload_files:
+        logger.warning("知识文件上传数量超限", file_count=len(files), limit=max_upload_files)
+        raise HTTPException(413, f"单次最多上传 {max_upload_files} 个文件")
 
     requested_tag_ids, resolved_tag_names = await _resolve_upload_tags(
         tag_ids,
@@ -586,6 +603,9 @@ async def test_knowledge_search(q: str = Query(default=""), datasource: str = Qu
     有 q 时做语义搜索，返回匹配条目和相关性分数。
     无 q 时返回全部条目列表。
     """
+    from src.api.auth import require_super_admin
+
+    require_super_admin()
     try:
         from src.memory.vector_store import get_vector_store
         from src.knowledge.retrieval import build_knowledge_filters, search_knowledge
@@ -608,12 +628,17 @@ async def test_knowledge_search(q: str = Query(default=""), datasource: str = Qu
 @router.get("/knowledge/docs")
 async def list_knowledge_docs():
     """列出当前身份可见文档并附带服务端删除权限。"""
-    from src.api.auth import get_current_role, get_current_tenant_id, get_current_user_id
+    from src.api.auth import (
+        get_current_role, get_current_tenant_id, get_current_user_id,
+        is_platform_super_admin,
+    )
     from src.knowledge.governance import can_manage_knowledge_resource
     from src.knowledge.file_store import get_file_store
 
     logger.debug("知识文档列表 API 入口", role=get_current_role())
     docs = await get_file_store().list_files()
+    if not is_platform_super_admin():
+        docs = [doc for doc in docs if str(doc.get("scope", "")) != "system"]
     for doc in docs:
         scope = str(doc.get("scope", "system" if doc.get("is_builtin") else "private"))
         doc["can_delete"] = not doc.get("is_builtin", False) and can_manage_knowledge_resource(
@@ -632,14 +657,21 @@ async def list_knowledge_docs():
 @router.get("/knowledge/docs/{doc_name}/content")
 async def get_doc_content(doc_name: str, knowledge_scope: str = ""):
     """获取已索引文档的内容（从 PG 读取，回退磁盘）。"""
+    from src.api.auth import is_platform_super_admin
     from src.knowledge.file_store import get_file_store
+    if knowledge_scope == "system" and not is_platform_super_admin():
+        raise HTTPException(404, f"文档 '{doc_name}' 未找到")
     store = get_file_store()
     doc = await store.get_by_name(doc_name, knowledge_scope=knowledge_scope)
     if doc:
+        if str(doc.get("scope", "")) == "system" and not is_platform_super_admin():
+            raise HTTPException(404, f"文档 '{doc_name}' 未找到")
         raw = doc["file_data"]
         size = doc["size"]
     else:
         if knowledge_scope and knowledge_scope != "system":
+            raise HTTPException(404, f"文档 '{doc_name}' 未找到")
+        if not is_platform_super_admin():
             raise HTTPException(404, f"文档 '{doc_name}' 未找到")
         # 磁盘回退仅用于系统内置目录。
         base_dir = os.path.realpath(os.path.join(os.path.dirname(__file__), "..", "..", "docs", "metrics"))
@@ -674,11 +706,18 @@ async def get_doc_content(doc_name: str, knowledge_scope: str = ""):
 async def get_doc_raw(doc_name: str, knowledge_scope: str = ""):
     """返回原始文件（从 PG 读取，回退磁盘，用于 PDF iframe 渲染）。"""
     from fastapi.responses import Response
+    from src.api.auth import is_platform_super_admin
     from src.knowledge.file_store import get_file_store
+    if knowledge_scope == "system" and not is_platform_super_admin():
+        raise HTTPException(404, f"文档 '{doc_name}' 未找到")
     doc = await get_file_store().get_by_name(doc_name, knowledge_scope=knowledge_scope)
     if doc:
+        if str(doc.get("scope", "")) == "system" and not is_platform_super_admin():
+            raise HTTPException(404, f"文档 '{doc_name}' 未找到")
         return Response(content=bytes(doc["file_data"]), media_type=doc["content_type"])
     if knowledge_scope and knowledge_scope != "system":
+        raise HTTPException(404, f"文档 '{doc_name}' 未找到")
+    if not is_platform_super_admin():
         raise HTTPException(404, f"文档 '{doc_name}' 未找到")
     # 磁盘回退仅用于系统内置目录。
     from fastapi.responses import FileResponse

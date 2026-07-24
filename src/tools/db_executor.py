@@ -55,26 +55,31 @@ class DBExecutorTool(BaseTool):
         datasource = datasource or self.datasource
         logger.debug("DBExecutorTool._arun 入口", datasource=datasource, sql=sql[:120])
         try:
-            from src.connectors.registry import create_connector
-            from src.datasource.registry import get_registry
-            from src.graph.nodes.layer3_validate import validate_readonly_sql
-            from src.tools.sqlglot_validator import validate_with_sqlglot
+            from src.security.sql_execution import validate_and_execute_sql
 
-            validation = validate_with_sqlglot(sql, dialect="mysql")
-            readonly_errors = validate_readonly_sql(sql, "mysql")
-            if not validation.get("valid", False) or readonly_errors:
+            execution = await validate_and_execute_sql(sql, datasource)
+            if not execution.success:
                 logger.warning("DBExecutorTool._arun 拒绝", datasource=datasource, reason="SQL 校验失败")
                 return {
                     "success": False,
-                    "error": "SQL 校验失败",
-                    "details": validation.get("errors", []) + readonly_errors,
+                    "error": (
+                        "SQL 校验失败"
+                        if execution.error_type in {"security", "sql_semantic"}
+                        else execution.error
+                    ),
+                    "details": execution.details,
                 }
-            ds = await get_registry().resolve(datasource)
-            connector = create_connector(ds)
-            connector._engine = ds.engine
-            rows = await connector.execute(sql)
-            result = {"success": True, "data": rows, "row_count": len(rows)}
-            logger.info("DBExecutorTool._arun 完成", datasource=datasource, row_count=len(rows))
+            result = {
+                "success": True,
+                "data": execution.data,
+                "row_count": execution.row_count,
+            }
+            logger.info(
+                "DBExecutorTool._arun 完成",
+                datasource=datasource,
+                dialect=execution.dialect,
+                row_count=execution.row_count,
+            )
             return result
         except Exception as exc:
             logger.error("DBExecutorTool._arun 失败", error=str(exc), exc_info=True)
@@ -121,14 +126,16 @@ class DBExplainTool(BaseTool):
         datasource = datasource or self.datasource
         logger.debug("DBExplainTool._arun 入口", datasource=datasource, sql=sql[:120])
         try:
-            from src.connectors.registry import create_connector
-            from src.datasource.registry import get_registry
+            from src.security.sql_execution import validate_and_explain_sql
 
-            ds = await get_registry().resolve(datasource)
-            connector = create_connector(ds)
-            connector._engine = ds.engine
-            plan = await connector.explain(sql)
-            result = {"success": bool(plan.get("valid")), "explain_plan": plan}
+            explanation = await validate_and_explain_sql(sql, datasource)
+            result = {
+                "success": explanation.success,
+                "explain_plan": explanation.explain_plan,
+            }
+            if not explanation.success:
+                result["error"] = explanation.error
+                result["details"] = explanation.details
             logger.info("DBExplainTool._arun 完成", datasource=datasource, valid=result["success"])
             return result
         except Exception as exc:

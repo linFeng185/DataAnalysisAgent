@@ -76,11 +76,7 @@ async def execute_sql_node(state: AnalysisState) -> dict:
     sql = (state.get("generated_sql", "") or "").strip()
     ds_name = state.get("datasource", "")
 
-    # SQL 方言重写 — 修复 LLM 常见语法错误（纯正则，非 LLM call）
     dialect = state.get("dialect", "")
-    if sql and dialect:
-        from src.tools.sql_rewriter import rewrite_sql
-        sql = rewrite_sql(sql, dialect)
 
     # LLM 返回空 SQL（如问题无法用现有数据回答）时直接跳过执行
     if not sql:
@@ -142,28 +138,21 @@ async def execute_sql_node(state: AnalysisState) -> dict:
                 "generated_sql": sql, "execution_error": col_err,
                 "execution_error_type": "sql_semantic"}
 
-    # 尝试连接数据源
+    # 统一服务在真实数据源方言下重新校验并有界执行。
     try:
-        from src.datasource.registry import get_registry
-        registry = get_registry()
-        ds = await registry.resolve_or_none(ds_name)
-        if ds and ds.engine:
-            connector = ds.connector
-            if connector is None:
-                from src.connectors.registry import create_connector
+        from src.security.sql_execution import validate_and_execute_sql
 
-                connector = create_connector(ds).attach_engine(ds.engine)
-                ds.connector = connector
-                logger.warning(
-                    "执行节点补建连接器",
-                    datasource=ds_name,
-                    dialect=ds.dialect,
-                    reason="旧缓存缺少 connector",
-                )
-            rows, truncated = await connector.execute_bounded(
-                sql,
-                get_settings().max_result_rows,
-            )
+        execution = await validate_and_execute_sql(
+            sql,
+            ds_name,
+            dialect,
+            explain=not bool(state.get("sql_explain_checked", False)),
+            max_rows=get_settings().max_result_rows,
+        )
+        sql = execution.sql or sql
+        if execution.success:
+            rows = execution.data
+            truncated = execution.truncated
             elapsed = round((time.monotonic() - _start) * 1000)
             # 12.3.3 在返回前持久化审计，避免任务在请求结束时被取消。
             from src.security.data_masker import mask_sensitive_data
@@ -182,51 +171,50 @@ async def execute_sql_node(state: AnalysisState) -> dict:
                 "execution_error_type": "",
                 "execution_retry_count": 0,
             }
-    except Exception as e:
+        detail_message = "; ".join(
+            str(item.get("message", ""))
+            for item in execution.details
+            if item.get("message")
+        )
+        err_msg = detail_message or execution.error or "SQL 执行失败"
+        if execution.error_type in {"security", "sql_semantic", "configuration"}:
+            error_type = execution.error_type
+        else:
+            error_type = _classify_execution_error(err_msg)
+    except Exception as exc:
         logger.error(
             "数据源执行失败",
             datasource=ds_name,
-            error=str(e),
+            error=str(exc),
             exc_info=True,
         )
-        err_msg = str(e)
-        # 提取简洁错误信息
-        if len(err_msg) > 300:
-            # 截取 pymysql/mysql 错误的关键部分
-            import re
-            match = re.search(r'\((\d+), "([^"]+)"\)', err_msg)
-            if match:
-                err_msg = f"SQL 执行错误 [{match.group(1)}]: {match.group(2)}"
-            else:
-                err_msg = err_msg[:300]
-        logger.info("节点完成", node="execute_sql", elapsed_ms=round((time.monotonic() - _start) * 1000))
+        err_msg = str(exc)
         error_type = _classify_execution_error(err_msg)
-        execution_retry_count = state.get("execution_retry_count", 0)
-        if error_type == "transient":
-            execution_retry_count += 1
-        await _record_query_audit(
-            state, ds_name, sql, _start, success=False, error_message=err_msg,
-        )
-        return {
-            "query_result_sample": [],
-            "query_result_full_count": 0,
-            "query_result_statistics": {"row_count": 0},
-            "generated_sql": sql,
-            "execution_error": err_msg,
-            "execution_error_type": error_type,
-            "execution_retry_count": execution_retry_count,
-        }
 
-    logger.error("execute_sql 未预期路径", datasource=ds_name)
-    await _record_query_audit(
-        state, ds_name, sql, _start, success=False, error_message="datasource unavailable",
+    if len(err_msg) > 300:
+        err_msg = err_msg[:300]
+    logger.info(
+        "节点完成",
+        node="execute_sql",
+        elapsed_ms=round((time.monotonic() - _start) * 1000),
+        success=False,
+        error_type=error_type,
     )
-    return {"query_result_sample": [], "query_result_full_count": 0,
-            "query_result_statistics": {"row_count": 0},
-            "generated_sql": sql,
-            "execution_error": f"数据源 '{ds_name}' 内部错误",
-            "execution_error_type": "configuration",
-            "retry_count": 99}
+    execution_retry_count = state.get("execution_retry_count", 0)
+    if error_type == "transient":
+        execution_retry_count += 1
+    await _record_query_audit(
+        state, ds_name, sql, _start, success=False, error_message=err_msg,
+    )
+    return {
+        "query_result_sample": [],
+        "query_result_full_count": 0,
+        "query_result_statistics": {"row_count": 0},
+        "generated_sql": sql,
+        "execution_error": err_msg,
+        "execution_error_type": error_type,
+        "execution_retry_count": execution_retry_count,
+    }
 
 
 # 方法作用：把数据库错误稳定分类为执行重试、SQL 重生成或直接终止三类。

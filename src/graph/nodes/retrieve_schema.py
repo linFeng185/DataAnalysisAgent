@@ -29,7 +29,7 @@ async def retrieve_schema_node(state: AnalysisState) -> dict:
             if tables_count == 0:
                 schema = None
         except Exception as e:
-            logger.warning("Schema 检索失败", error=str(e))
+            logger.warning("Schema 检索失败", error=str(e), exc_info=True)
             schema = None
         if schema is None:
             try:

@@ -111,6 +111,7 @@ class OpenAIProvider(LLMProvider):
         max_tokens: int | None = None,
         stream: bool = True,
         reasoning: bool = True,
+        timeout: int | None = None,
     ):
         """通过 Provider 统一暴露现有 ReasoningChatOpenAI 工厂。"""
         settings = get_settings()
@@ -127,6 +128,7 @@ class OpenAIProvider(LLMProvider):
             resolved_max_tokens,
             stream,
             reasoning=reasoning,
+            timeout=timeout,
         )
         logger.info("OpenAIProvider.get_chat_model 完成", model=self._model_id, stream=stream)
         return model
@@ -137,6 +139,7 @@ class OpenAIProvider(LLMProvider):
         max_tokens: int,
         stream: bool,
         reasoning: bool = True,
+        timeout: int | None = None,
     ):
         """获取 ChatOpenAI 实例。
 
@@ -151,6 +154,7 @@ class OpenAIProvider(LLMProvider):
         Returns: ReasoningChatOpenAI 实例
         """
         from src.llm.reasoning_chat_openai import ReasoningChatOpenAI
+        resolved_timeout = timeout if timeout is not None else get_settings().llm_timeout
         adapter_kwargs = self._adapter.get_chat_openai_kwargs()
         if not reasoning:
             adapter_kwargs.pop("reasoning_effort", None)
@@ -160,7 +164,7 @@ class OpenAIProvider(LLMProvider):
             return ReasoningChatOpenAI(
                 model=self._model_id, temperature=temperature, max_tokens=max_tokens,
                 api_key=self._api_key or None, base_url=self._base_url or None,
-                timeout=get_settings().llm_timeout, streaming=True,
+                timeout=resolved_timeout, streaming=True,
                 **adapter_kwargs)
         if not reasoning:
             return ReasoningChatOpenAI(
@@ -169,7 +173,7 @@ class OpenAIProvider(LLMProvider):
                 max_tokens=max_tokens,
                 api_key=self._api_key or None,
                 base_url=self._base_url or None,
-                timeout=get_settings().llm_timeout,
+                timeout=resolved_timeout,
                 streaming=False,
                 **adapter_kwargs,
             )
@@ -177,7 +181,7 @@ class OpenAIProvider(LLMProvider):
         if self._cached_llm is None:
             self._cached_llm = ReasoningChatOpenAI(
                 model=self._model_id, api_key=self._api_key or None,
-                base_url=self._base_url or None, timeout=get_settings().llm_timeout,
+                base_url=self._base_url or None, timeout=resolved_timeout,
                 streaming=False, **adapter_kwargs)
         self._cached_llm.temperature = temperature
         self._cached_llm.max_tokens = max_tokens

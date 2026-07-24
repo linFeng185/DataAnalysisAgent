@@ -11,11 +11,11 @@ from src.logging_config import get_logger
 logger = get_logger(__name__)
 
 
-# 方法作用：把已完成轮次的 SQL、结果和分析固化为可校验的跨轮快照。
+# 方法作用：把已完成轮次的来源和 SQL 固化为可校验的轻量跨轮索引。
 # Args: state - 已完成上一轮或正在构建响应的 LangGraph 状态。
 # Returns: 只包含跨轮分析所需字段的普通字典。
 def build_turn_snapshot(state: AnalysisState) -> dict:
-    """构建不包含 Schema 对象和错误状态的轻量结果快照。"""
+    """构建不复制结果、分析、图表和 Schema 对象的轻量索引。"""
     logger.debug(
         "构建轮次结果快照入口",
         datasource=state.get("datasource", ""),
@@ -43,19 +43,12 @@ def build_turn_snapshot(state: AnalysisState) -> dict:
         "datasource": source_datasource,
         "selected_datasources": deepcopy(state.get("selected_datasources", []) or []),
         "generated_sql": state.get("generated_sql", "") or "",
-        "query_result_sample": deepcopy(state.get("query_result_sample", []) or []),
-        "query_result_full_count": int(state.get("query_result_full_count", 0) or 0),
-        "query_result_truncated": bool(state.get("query_result_truncated", False)),
-        "query_result_statistics": deepcopy(state.get("query_result_statistics", {}) or {}),
-        "analysis_result": deepcopy(state.get("analysis_result", {}) or {}),
-        "chart_config": deepcopy(state.get("chart_config", {}) or {}),
-        "multi_source_results": deepcopy(multi_source_results),
         "result_available": result_available,
     }
     logger.info(
         "构建轮次结果快照完成",
         datasource=source_datasource,
-        rows=len(snapshot["query_result_sample"]),
+        selected_sources=len(snapshot["selected_datasources"]),
         result_available=result_available,
     )
     return snapshot
@@ -119,6 +112,7 @@ async def prepare_turn_node(state: AnalysisState) -> dict:
         "validation_warnings": [],
         "transpiled_sql": "",
         "explain_errors": [],
+        "sql_explain_checked": False,
         "execution_error": "",
         "execution_error_type": "",
         "execution_retry_count": 0,
@@ -131,6 +125,20 @@ async def prepare_turn_node(state: AnalysisState) -> dict:
         "mcp_agent_output": "",
         "final_response": {},
     }
+    # 升级后首次请求顺手移除旧 checkpoint 中重复保存的富结果。
+    compact_history = []
+    history_compacted = False
+    for item in state.get("conversation_history", []) or []:
+        if not isinstance(item, dict):
+            compact_history.append(item)
+            continue
+        compact_item = dict(item)
+        history_compacted = "final_result" in compact_item or history_compacted
+        compact_item.pop("final_result", None)
+        compact_history.append(compact_item)
+    if history_compacted:
+        result["conversation_history"] = compact_history
+        logger.info("旧 checkpoint 对话富结果已移除", history_turns=len(compact_history))
     logger.info(
         "轮次状态初始化完成",
         cleared_fields=len(result),

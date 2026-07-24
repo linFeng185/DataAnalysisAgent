@@ -63,6 +63,71 @@ class AppContext:
 `FileStore`、`UploadManager`、`KnowledgeTagStore`、`SkillManager`、`MCPClientManager`、
 `DatasourceCache`、`ModelRegistry`、PostgreSQL Pool 和 LangGraph Checkpointer。
 
+### 配置唯一来源
+
+- `AppContext.settings` 是运行时配置的唯一实例来源；应用、请求、Graph、后台任务和资源工厂必须读取同一个对象。
+- `get_settings()` 仅作为兼容入口，必须委托当前 `AppContext.settings`，禁止重新构造 `Settings()` 或维护第二份缓存。
+- `create_app()` 是 FastAPI 启动边界，可在创建 `AppContext` 前构造一次 `Settings`；Context 建立后所有读取均受当前 Context 绑定。
+
+## LLM 单一调用链
+
+- 节点任务统一通过 `get_task_llm(task_name)` 进入任务路由，再由 `get_provider()` 解析并复用当前 Context 的 Provider。
+- `get_llm()`、`get_openai_llm()` 和 `get_anthropic_llm()` 是兼容工厂，只能委托 `get_provider()`，不得直接创建厂商 ChatModel。
+- 管理端模型连通性测试允许直接获取指定 Provider，但 Provider 创建、凭证、超时和 Adapter 注入仍走同一工厂。
+- OpenAI-compatible 本地模型使用显式 `base_url/api_key/timeout` 覆盖创建 Provider，不得绕过 Provider 直接调用 Adapter。
+- Provider Context 缓存键必须包含连接地址和 API Key 的不可逆摘要；同模型、同地址但不同凭证不得复用认证客户端。
+
+## SQL 安全执行边界
+
+- `src/security/sql_execution.py` 是 SQL 解析、只读校验、方言重写、EXPLAIN 和有界执行的唯一实现边界。
+- `validate_sql()` 必须按数据源真实方言解析并在异常时 fail-closed；注释不参与危险关键字判断，AST 中的写操作和状态变更函数必须阻断。
+- `validate_and_explain_sql()` 供 Layer 4 和 EXPLAIN Tool 使用；`validate_and_execute_sql()` 供主工作流、多数据源 worker 和 `DBExecutorTool` 使用。
+- 调用方传入的方言仅作提示，数据源 Registry 返回的方言是执行权威；两者不一致时记录 warning 并使用 Registry 方言。
+- 执行统一使用 Connector 的 `execute_bounded()`，禁止 Tool 绕过结果上限调用裸 `execute()`。
+
+## 异常处理决策矩阵
+
+| 领域 | 策略 | 允许的结果 |
+|---|---|---|
+| SQL 安全、表列白名单、权限注入 | fail-closed | 返回明确校验错误，禁止进入数据库 |
+| 数据库连接、EXPLAIN、SQL 执行 | fail-closed | 返回明确配置或执行错误，禁止伪造成功 |
+| LLM 调用 | fail-open | 降级到确定性规则、模板或不可用提示 |
+| 知识库检索 | fail-open | 记录完整异常并返回空证据 |
+| 数据处理器与图表生成 | fail-open | 回退通用分析或表格展示 |
+
+`src/failure_policy.py` 集中声明上述策略。安全域不得由单个函数临时决定吞异常；所有回退必须记录原因，异常日志包含堆栈。
+
+## VectorStore 所有权
+
+- `VectorStore` 及具体实现拥有向量客户端、Collection、嵌入函数和关闭生命周期。
+- `SchemaManager`、`BusinessRuleStore` 等调用方只依赖 `VectorStore` 公共接口，禁止保存或访问 ChromaDB Collection。
+- Chroma 工厂直接从当前 Context 配置创建 `ChromaVectorStore`，不得通过 `SchemaManager._collection` 反向取资源。
+- 切换 `VECTOR_STORE_TYPE` 后，Schema、业务规则、知识检索和上传写入必须使用同一个 Context 资源。
+- 三种后端共享 metadata 过滤 DSL：普通键表示等值，`not:key` 与 `{"$ne": value}` 表示不等值；非法运算符失败关闭。
+- Chroma、Milvus 和 pgvector 的 search/get/delete/count 必须保持相同过滤语义；`delete_by_filter({})` 必须返回 0，禁止解释为全表删除。
+- pgvector 扩展、表或索引初始化失败必须 fail-closed，禁止返回延迟到首个请求才报错的半初始化 Store。
+
+## 公共生命周期与抽象边界
+
+- 启动编排只调用资源公开生命周期接口：`FileStore.initialize()`、`get_vector_store()` 和 `AppContext.close()`。
+- API 路由不得读取管理器私有状态；MCP Server 选择、Skill 清单解析必须由管理器公开方法完成。
+- 结构化查询只能使用 `StructuredAssetAdapter.load_tables()` 与 `serialize_frame()`，不得调用格式识别、DataFrame 加载或 JSON 转换私有方法。
+- AST 架构门禁持续检查上述跨模块私有访问，测试内部白盒断言不视为生产边界泄漏。
+
+## AnalysisState 持久化边界
+
+- 会话级字段由 Checkpointer 保存：`user_query`、`datasource`、`session_id`、`intent`、精简 `conversation_history`、`messages` 和轻量上一轮引用。
+- 请求级字段使用 LangGraph `UntrackedValue`：身份/权限快照、Schema、SQL 校验与执行中间态、结果样本、多源结果、分析、图表和 `final_response`。
+- `conversation_history` 只保存查询、SQL、成功状态和摘要，不保存 `final_result/data/chart` 大对象。
+- 每轮完整富结果以 `query_history.final_result` 为权威存储；会话 UI 和“分析刚才的数据”按 `session_id` 从 HistoryStore 恢复，checkpoint 只保存轻量元数据。
+- `previous_turn_snapshot` 禁止包含 `query_result_sample`、`multi_source_results`、`analysis_result` 或 `chart_config`。
+
+## 路由导入边界
+
+- 每个领域路由只显式导入自身使用的标准库、FastAPI 类型和 Schema。
+- 禁止 `from ._helpers import *`；共享 helper 只收敛真正共享的行为，不作为符号转发层。
+- AST 契约测试阻止复制整块 Schema 导入和模块级未使用导入回归。
+
 ## TenantPolicy 租户策略
 
 ### 常量与身份

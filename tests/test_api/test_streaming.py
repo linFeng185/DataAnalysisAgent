@@ -4,9 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
-
-import pytest
-
+from decimal import Decimal
 
 logger = logging.getLogger(__name__)
 
@@ -41,18 +39,24 @@ class TestSSEFormat:
 class TestStreamingResponseConfig:
     async def test_stream_endpoint_mounted(self):
         from httpx import ASGITransport, AsyncClient
+        from src.api.auth import create_access_token
         from src.main import app
+        token = create_access_token(9, 4, "analyst")
         async with AsyncClient(
             transport=ASGITransport(app=app), base_url="http://test",
+            headers={"Authorization": f"Bearer {token}"},
         ) as client:
             response = await client.post("/api/v1/chat/stream", json={})
         assert response.status_code == 422
 
     async def test_stream_endpoint_post_method(self):
         from httpx import ASGITransport, AsyncClient
+        from src.api.auth import create_access_token
         from src.main import app
+        token = create_access_token(9, 4, "analyst")
         async with AsyncClient(
             transport=ASGITransport(app=app), base_url="http://test",
+            headers={"Authorization": f"Bearer {token}"},
         ) as client:
             response = await client.get("/api/v1/chat/stream")
         assert response.status_code == 405
@@ -108,3 +112,85 @@ class TestStreamIdentity:
         except Exception as exc:
             logger.error("test_event_stream_id_uses_run_id 异常: %s", exc, exc_info=True)
             raise
+
+
+class TestStreamTerminalState:
+    """覆盖 SSE 异常终态和非有限数值序列化。"""
+
+    # 方法作用：验证工作流异常后终态明确标记失败，不能再宣告成功完成。
+    # Args: self - pytest 测试类实例；monkeypatch - pytest 补丁工具。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    async def test_stream_error_is_not_followed_by_complete_done(self, monkeypatch) -> None:
+        """`error` 后只能发送失败终态，不能发送 `status=complete`。"""
+        logger.debug("test_stream_error_is_not_followed_by_complete_done 入口")
+        # Arrange
+        import src.api.background_tasks as background_tasks
+        import src.graph.workflow as workflow
+        from src.api.streaming import stream_analysis
+
+        class FailingWorkflow:
+            """在首个进度事件后抛出固定异常。"""
+
+            # 方法作用：模拟 LangGraph 在流式处理中失败。
+            # Args: self - 模拟工作流；args/kwargs - 被测方法透传参数。
+            # Returns: 先产生一个事件，再抛出 RuntimeError。
+            async def astream_events(self, *args, **kwargs):
+                logger.debug("FailingWorkflow.astream_events 入口")
+                del args, kwargs
+                yield {"event": "on_chain_start", "name": "generate_sql"}
+                logger.error("FailingWorkflow.astream_events 异常", exc_info=True)
+                raise RuntimeError("stream failed")
+
+        # 方法作用：关闭测试中创建的后台协程，避免访问真实 SessionStore。
+        # Args: coroutine - 待丢弃协程；args/kwargs - 后台任务元数据。
+        # Returns: None。
+        def discard_background_task(coroutine, *args, **kwargs) -> None:
+            logger.debug("discard_background_task 入口")
+            del args, kwargs
+            coroutine.close()
+            logger.info("discard_background_task 完成")
+
+        monkeypatch.setattr(workflow, "app", FailingWorkflow())
+        monkeypatch.setattr(background_tasks, "create_background_task", discard_background_task)
+
+        # Act
+        events = [
+            json.loads(chunk.removeprefix("data: ").strip())
+            async for chunk in stream_analysis(
+                "查询订单",
+                "demo",
+                session_id="session-1",
+                datasource_access={"demo": {"allowed_columns": [], "row_filter_sql": ""}},
+            )
+        ]
+
+        # Assert
+        assert events[-2] == {"type": "error", "message": "stream failed"}
+        assert events[-1] == {"type": "done", "status": "error"}
+        assert not any(event.get("status") == "complete" for event in events)
+        logger.info("test_stream_error_is_not_followed_by_complete_done 完成")
+
+    # 方法作用：验证 SSE 将 NaN 和 Infinity 规范化为 JSON null。
+    # Args: self - pytest 测试类实例。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    def test_sse_serializes_non_finite_numbers_as_null(self) -> None:
+        """数据库非有限数值不得生成非法 JSON 或触发 Decimal 序列化异常。"""
+        logger.debug("test_sse_serializes_non_finite_numbers_as_null 入口")
+        # Arrange
+        from src.api.streaming import _sse
+
+        # Act
+        payload = json.loads(_sse("result", {
+            "decimal_nan": Decimal("NaN"),
+            "decimal_inf": Decimal("Infinity"),
+            "float_nan": float("nan"),
+        }).removeprefix("data: ").strip())
+
+        # Assert
+        assert payload == {
+            "type": "result",
+            "decimal_nan": None,
+            "decimal_inf": None,
+            "float_nan": None,
+        }
+        logger.info("test_sse_serializes_non_finite_numbers_as_null 完成")

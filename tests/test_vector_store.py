@@ -2,9 +2,14 @@
 
 from __future__ import annotations
 
+import logging
+
 import pytest
 
 from src.memory.vector_store import VectorEntry, VectorSearchResult, VectorStore
+
+
+logger = logging.getLogger(__name__)
 
 
 class FakeVectorStore(VectorStore):
@@ -111,3 +116,24 @@ class TestVectorStore:
     @pytest.mark.asyncio
     async def test_health(self, vs):
         assert await vs.health_check()
+
+    # 方法作用：验证 Chroma 条件构建器支持统一的不等值过滤语法。
+    # Args: self - pytest 测试类实例。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    def test_chroma_filter_dsl_supports_not_equal(self) -> None:
+        """not: 前缀和显式 $ne 必须编译为相同的 Chroma 运算符。"""
+        logger.debug("test_chroma_filter_dsl_supports_not_equal 入口")
+        from src.memory.vector_store_chroma import _build_where
+
+        result = _build_where({
+            "tenant_id": 4,
+            "not:status": "deleted",
+            "source": {"$ne": "legacy"},
+        })
+
+        assert result == {"$and": [
+            {"tenant_id": 4},
+            {"status": {"$ne": "deleted"}},
+            {"source": {"$ne": "legacy"}},
+        ]}
+        logger.info("test_chroma_filter_dsl_supports_not_equal 完成")

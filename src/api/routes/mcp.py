@@ -2,32 +2,17 @@
 
 from __future__ import annotations
 
-import io
-import html
-import json
-import os
-import time
-import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
-from fastapi import APIRouter, Body, File, HTTPException, Query, UploadFile
+from fastapi import APIRouter, HTTPException
 
-from src.api.schemas import (
-    ChatRequest, ChatResponse, ColumnCommentRequest,
-    DataSourceCreateRequest, DataSourceInfo, HealthResponse, KnowledgeTagCreateRequest,
-    KnowledgeTagStatusRequest, MCPServerCreate, TableInfo,
-)
-from src.exceptions import DataSourceNotFoundError
-from src.llm.client import is_llm_available
+from src.api.schemas import MCPServerCreate
 from src.logging_config import get_logger
-from src.api.routes._helpers import _app, _authorize_extension_scope, _registry
+from src.api.routes._helpers import _authorize_extension_scope
 
 logger = get_logger(__name__)
 router = APIRouter()
-_started_at = time.time()
-
-
 # 方法作用：把作用域和当前身份转换为 MCP 数据库存储所有者字段。
 # Args: scope - 已规范化作用域；tenant_id - 当前租户；user_id - 当前用户。
 # Returns: 数据库 tenant_id 与 owner_user_id。
@@ -106,7 +91,9 @@ def _validate_managed_mcp_request(req: MCPServerCreate, scope: str, role: str) -
 async def _connect_scoped_mcp_db() -> AsyncIterator:
     """所有 MCP 管理 SQL 必须经过事务局部 RLS 身份注入。"""
     logger.debug("连接 MCP 作用域数据库入口")
-    from src.api.auth import get_current_role, get_current_tenant_id, get_current_user_id
+    from src.api.auth import (
+        get_current_role, get_current_tenant_id, get_current_user_id,
+    )
     from src.memory.pg_pool import pg_connection
 
     try:
@@ -129,12 +116,16 @@ async def _connect_scoped_mcp_db() -> AsyncIterator:
 async def list_mcp_servers(scope: str | None = None):
     """列出当前身份可见的 system/tenant/private MCP Server。"""
     logger.debug("MCP Server 列表入口", scope=scope or "")
-    from src.api.auth import get_current_role, get_current_tenant_id, get_current_user_id
-    from src.knowledge.governance import is_super_admin, normalize_knowledge_scope
+    from src.api.auth import (
+        get_current_tenant_id,
+        get_current_user_id,
+        is_platform_super_admin,
+    )
+    from src.knowledge.governance import normalize_knowledge_scope
 
     tenant_id = get_current_tenant_id()
     user_id = get_current_user_id()
-    role = get_current_role()
+    platform_admin = is_platform_super_admin()
     normalized_scope = None
     if scope:
         try:
@@ -144,13 +135,13 @@ async def list_mcp_servers(scope: str | None = None):
     from src.mcp_client.client_manager import get_mcp_client_manager
     runtime_system = (
         get_mcp_client_manager().list_system_servers()
-        if normalized_scope in (None, "system") else []
+        if platform_admin and normalized_scope in (None, "system") else []
     )
     try:
         import src.api.routes as routes_package
 
         async with routes_package._connect_scoped_mcp_db() as conn:
-            if is_super_admin(role):
+            if platform_admin:
                 rows = await conn.fetch(
                     "SELECT name, scope, tenant_id, owner_user_id, transport, command, args, "
                     "url, description, is_builtin, enabled FROM mcp_servers "
@@ -160,7 +151,7 @@ async def list_mcp_servers(scope: str | None = None):
                 rows = await conn.fetch(
                     "SELECT name, scope, tenant_id, owner_user_id, transport, command, args, "
                     "url, description, is_builtin, enabled FROM mcp_servers WHERE "
-                    "scope='system' OR (scope='tenant' AND tenant_id=$1) OR "
+                    "(scope='tenant' AND tenant_id=$1) OR "
                     "(scope='private' AND tenant_id=$1 AND owner_user_id=$2) "
                     "ORDER BY scope, name",
                     tenant_id, user_id,
@@ -322,22 +313,12 @@ async def test_mcp_server(name: str, scope: str | None = None):
         tenant_id = get_current_tenant_id()
         user_id = get_current_user_id()
         await mgr.ensure_scoped_servers(tenant_id, user_id)
-        candidates = []
-        for internal_name in mgr.sessions:
-            server_scope = mgr._server_scopes.get(internal_name, "system")  # noqa: SLF001
-            if scope and server_scope != scope:
-                continue
-            if internal_name.endswith(f"_{name}") or internal_name == name:
-                candidates.append(internal_name)
-        if not candidates:
+        resolved = mgr.resolve_loaded_server(name, scope)
+        if resolved is None:
             raise HTTPException(404, f"MCP Server '{name}' 未找到")
-        priority = {"private": 3, "tenant": 2, "system": 1}
-        internal_name = max(
-            candidates,
-            key=lambda item: priority.get(mgr._server_scopes.get(item, "system"), 0),  # noqa: SLF001
-        )
+        internal_name, resolved_scope = resolved
         ok = await mgr.test_connection(internal_name)
-        result = {"name": name, "scope": mgr._server_scopes.get(internal_name, "system"), "ok": ok}  # noqa: SLF001
+        result = {"name": name, "scope": resolved_scope, "ok": ok}
         logger.info("测试 MCP Server API 完成", name=name, ok=ok)
         return result
     except HTTPException:

@@ -18,6 +18,8 @@ class DataSourceConfig:
     database: str = ""
     username: str = ""
     password: str = ""
+    tenant_id: int = 1
+    owner_user_id: int = 0
 
     engine: object = None  # SQLAlchemy AsyncEngine, resolve() 时注入
     connector: object = None  # ConnectorBase, resolve() 时注入

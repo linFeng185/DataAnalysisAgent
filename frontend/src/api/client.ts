@@ -1,5 +1,14 @@
 const BASE = '/api/v1';
 
+// 方法作用：认证失效时统一返回登录页，避免页面停留在不可用状态。
+// Args: 无。
+// Returns: 无返回值。
+function redirectToLogin(): void {
+  console.debug('redirectToLogin 入口');
+  if (window.location.pathname !== '/login') window.location.assign('/login');
+  console.info('redirectToLogin 完成');
+}
+
 async function request<T>(method: string, path: string, body?: Record<string, unknown>): Promise<T> {
   const opts: RequestInit = {
     method,
@@ -8,6 +17,7 @@ async function request<T>(method: string, path: string, body?: Record<string, un
   };
   if (body) opts.body = JSON.stringify(body);
   const res = await fetch(`${BASE}${path}`, opts);
+  if (res.status === 401) redirectToLogin();
   if (!res.ok) {
     const text = await res.text().catch(() => '');
     throw new Error(text || `API error: ${res.status}`);
@@ -82,6 +92,7 @@ export function streamChat(
     body: JSON.stringify({ query, datasource, datasources: datasources || [datasource], model_id: modelId || '', stream: true, session_id: sessionId }),
     signal: controller.signal,
   }).then(async (res) => {
+    if (res.status === 401) redirectToLogin();
     if (!res.ok) {
       const text = await res.text().catch(() => '');
       onError(text || `HTTP ${res.status}`);
@@ -100,7 +111,12 @@ export function streamChat(
         buf = lines.pop() || '';
         for (const line of lines) {
           if (line.startsWith('data: ')) {
-            try { onEvent(JSON.parse(line.slice(6))); } catch { /* skip */ }
+            try {
+              onEvent(JSON.parse(line.slice(6)));
+            } catch (error) {
+              console.error('流式事件 JSON 解析失败', error);
+              throw new Error('流式事件格式无效');
+            }
           }
         }
       }

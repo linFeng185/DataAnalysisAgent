@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import os
 
 import pytest
 
@@ -73,6 +72,23 @@ class TestEnvDiscovery:
         names = {s.name for s in sources}
         assert "ch1" in names
         assert "pg1" in names
+
+    # 方法作用：验证空端口环境变量回退到对应方言默认端口。
+    # Args: self - pytest 测试类实例；monkeypatch - pytest 补丁工具。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    def test_empty_port_uses_dialect_default(self, monkeypatch) -> None:
+        """Docker/Kubernetes 注入空字符串时应用不得启动失败。"""
+        # Arrange
+        from src.datasource.providers.embedded import _parse_ds_from_prefix
+
+        monkeypatch.setenv("DATASOURCE_X_DIALECT", "postgres")
+        monkeypatch.setenv("DATASOURCE_X_PORT", "")
+
+        # Act
+        datasource = _parse_ds_from_prefix("DATASOURCE_X_", "pg")
+
+        # Assert
+        assert datasource.port == 5432
 
 
 class TestNormalizeDialect:

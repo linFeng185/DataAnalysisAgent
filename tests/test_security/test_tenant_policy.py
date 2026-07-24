@@ -40,7 +40,7 @@ class TestTenantPolicyMatrix:
     # Returns: 无返回值，断言失败时由 pytest 报告。
     @pytest.mark.parametrize(
         ("multi_tenant", "is_probe", "required"),
-        [(False, False, False), (False, True, False), (True, False, True), (True, True, False)],
+        [(False, False, True), (False, True, False), (True, False, True), (True, True, False)],
     )
     def test_authentication_requirement_matrix(
         self,
@@ -48,7 +48,7 @@ class TestTenantPolicyMatrix:
         is_probe: bool,
         required: bool,
     ) -> None:
-        """只有多租户普通业务请求必须认证，身份探测始终可访问。"""
+        """所有业务请求必须认证，只有身份探测始终可访问。"""
         logger.debug("test_authentication_requirement_matrix 入口")
         from src.security.tenant_policy import TenantPolicy
 
@@ -93,7 +93,8 @@ class TestTenantPolicyMatrix:
         from src.security.tenant_policy import RequestIdentity, TenantPolicy
 
         anonymous = RequestIdentity.anonymous()
-        assert TenantPolicy(multi_tenant=False).validate_identity(anonymous) is anonymous
+        with pytest.raises(PermissionError):
+            TenantPolicy(multi_tenant=False).validate_identity(anonymous)
         with pytest.raises(PermissionError, match="身份"):
             TenantPolicy(multi_tenant=True).validate_identity(anonymous)
         logger.info("test_identity_validation_fails_closed_in_multi_tenant 完成")

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import time
-from copy import deepcopy
 
 from src.graph.state import AnalysisState
 from src.logging_config import get_logger
@@ -161,7 +160,14 @@ async def build_response_node(state: AnalysisState) -> dict:
     final_result["activated_knowledge"] = state.get("long_term_memories_text", "") or ""
 
     # 追加对话历史（所有路径共用，含时间提示路径）
-    history = list(state.get("conversation_history", []) or [])
+    history = []
+    for item in state.get("conversation_history", []) or []:
+        if isinstance(item, dict):
+            compact_item = dict(item)
+            compact_item.pop("final_result", None)
+            history.append(compact_item)
+        else:
+            history.append(item)
     if not history:
         msgs = state.get("messages", []) or []
         for msg in msgs:
@@ -187,7 +193,6 @@ async def build_response_node(state: AnalysisState) -> dict:
             "execution_success": not state.get("execution_error"),
             "analysis_summary": analysis_summary,
             "chart_type": analysis.get("recommended_chart_type") or state.get("chart_config", {}).get("type", ""),
-            "final_result": deepcopy(final_result),
         }
         history.append(turn_entry)
         logger.info("对话历史已追加", turns=len(history), query=query[:60])

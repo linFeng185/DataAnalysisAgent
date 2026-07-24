@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import re
 from dataclasses import dataclass, field
 from typing import Any
@@ -110,25 +111,64 @@ class StructuredQueryEngine:
         if duckdb is None:
             raise StructuredQueryError("结构化 SQL 执行需要安装 DuckDB，请安装 structured 可选依赖")
         try:
-            fmt = self.adapter._detect_format(file_name)  # noqa: SLF001
-            frames = self.adapter._load_frames(fmt, content, sheet_name=sheet_name,
-                                               row_limit=self.max_scan_rows)  # noqa: SLF001
+            result = await asyncio.to_thread(
+                self._execute_sync,
+                duckdb,
+                file_name,
+                content,
+                sql,
+                sheet_name,
+            )
+            logger.info(
+                "结构化 SQL 执行完成",
+                file_name=file_name,
+                rows=len(result.rows),
+                truncated=result.truncated,
+            )
+            return result
+        except StructuredQueryError:
+            logger.warning("结构化 SQL 执行拒绝", file_name=file_name, exc_info=True)
+            raise
+        except Exception as exc:
+            logger.error("结构化 SQL 执行失败", file_name=file_name, error=str(exc), exc_info=True)
+            raise StructuredQueryError(f"结构化 SQL 执行失败: {exc}") from exc
+
+    # 方法作用：在线程池内完成文件解析、DuckDB 查询和结果序列化。
+    # Args: duckdb - DuckDB 模块；file_name - 文件名；content - 文件字节；sql - 只读查询；sheet_name - Excel sheet。
+    # Returns: StructuredQueryResult 查询结果。
+    def _execute_sync(
+        self,
+        duckdb: Any,
+        file_name: str,
+        content: bytes,
+        sql: str,
+        sheet_name: str | None,
+    ) -> StructuredQueryResult:
+        """把同步 Pandas/DuckDB 工作隔离到 asyncio 事件循环之外。"""
+        logger.debug("结构化 SQL 同步管线入口", file_name=file_name)
+        try:
+            _, frames = self.adapter.load_tables(
+                file_name,
+                content,
+                sheet_name=sheet_name,
+                row_limit=self.max_scan_rows,
+            )
             table_frames = _build_table_frames(frames)
             normalized_sql = self.validate_sql(sql, set(table_frames))
             connection = duckdb.connect(database=":memory:")
             try:
                 for table_name, (_original, frame) in table_frames.items():
                     connection.register(table_name, frame)
-                limited_sql = f"SELECT * FROM ({normalized_sql}) AS _data_agent_result LIMIT {self.max_rows + 1}"
+                limited_sql = (
+                    f"SELECT * FROM ({normalized_sql}) AS _data_agent_result "
+                    f"LIMIT {self.max_rows + 1}"
+                )
                 result_frame = connection.execute(limited_sql).fetchdf()
             finally:
                 connection.close()
             truncated = len(result_frame) > self.max_rows
             result_frame = result_frame.head(self.max_rows)
-            rows = [
-                {str(key): self.adapter._json_value(value) for key, value in row.items()}  # noqa: SLF001
-                for row in result_frame.to_dict(orient="records")
-            ]
+            rows = self.adapter.serialize_frame(result_frame)
             result = StructuredQueryResult(
                 rows=rows,
                 columns=[str(column) for column in result_frame.columns],
@@ -138,14 +178,16 @@ class StructuredQueryEngine:
                 sql=normalized_sql,
                 tables={name: original for name, (original, _frame) in table_frames.items()},
             )
-            logger.info("结构化 SQL 执行完成", file_name=file_name, rows=len(rows), truncated=truncated)
-            return result
-        except StructuredQueryError:
-            logger.warning("结构化 SQL 执行拒绝", file_name=file_name, exc_info=True)
-            raise
         except Exception as exc:
-            logger.error("结构化 SQL 执行失败", file_name=file_name, error=str(exc), exc_info=True)
-            raise StructuredQueryError(f"结构化 SQL 执行失败: {exc}") from exc
+            logger.error(
+                "结构化 SQL 同步管线失败",
+                file_name=file_name,
+                error=str(exc),
+                exc_info=True,
+            )
+            raise
+        logger.info("结构化 SQL 同步管线完成", file_name=file_name, rows=len(result.rows))
+        return result
 
 
 # 方法作用：延迟加载可选 DuckDB 依赖，使 profile 功能不被执行引擎阻断。

@@ -49,12 +49,12 @@ class TestEnvExample:
 class TestProductionSettings:
     """覆盖生产配置安全校验。"""
 
-    # 方法作用：验证没有显式环境配置时应用采用安全的生产模式。
+    # 方法作用：验证没有环境覆盖时应用读取统一 YAML 的显式运行模式。
     # Args: self - pytest 测试类实例；monkeypatch - pytest 环境变量补丁。
     # Returns: 无返回值，断言失败时由 pytest 报告。
-    def test_environment_defaults_to_production(self, monkeypatch):
-        """漏配 ENV 时不得静默进入匿名开发模式。"""
-        logger.debug("test_environment_defaults_to_production 入口")
+    def test_environment_uses_unified_yaml_default(self, monkeypatch):
+        """开发模板的 env 值应来自 config/app.yaml 而非第二份代码默认。"""
+        logger.debug("test_environment_uses_unified_yaml_default 入口")
         try:
             # Arrange
             from src.config import Settings
@@ -65,35 +65,28 @@ class TestProductionSettings:
             settings = Settings(_env_file=None)
 
             # Assert
-            assert settings.env == "prod"
-            logger.info("test_environment_defaults_to_production 完成")
+            assert settings.env == "dev"
+            logger.info("test_environment_uses_unified_yaml_default 完成")
         except Exception as exc:
-            logger.error("test_environment_defaults_to_production 异常: %s", exc, exc_info=True)
+            logger.error("test_environment_uses_unified_yaml_default 异常: %s", exc, exc_info=True)
             raise
 
-    def test_prod_rejects_anonymous_mode(self):
-        """生产环境必须启用多租户认证。"""
-        # Arrange
-        from src.config import Settings, validate_production_settings
-
-        settings = Settings(env="prod", multi_tenant=False)
-
-        # Act / Assert
-        with pytest.raises(ValueError, match="MULTI_TENANT"):
-            validate_production_settings(settings)
-
-    def test_prod_accepts_complete_security_configuration(self):
-        """完整生产安全配置应通过校验。"""
+    # 方法作用：验证生产环境允许关闭多租户隔离但仍通过认证安全门禁。
+    # Args: self - pytest 测试类实例。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    def test_prod_accepts_single_tenant_mode(self):
+        """multi_tenant 只控制隔离，不再决定是否强制登录。"""
+        logger.debug("test_prod_accepts_single_tenant_mode 入口")
         # Arrange
         from src.config import Settings, validate_production_settings
 
         settings = Settings(
+            _env_file=None,
             env="prod",
-            multi_tenant=True,
+            multi_tenant=False,
             jwt_secret="j" * 32,
-            admin_api_key="a" * 32,
             credential_encryption_key="c" * 32,
-            database_readonly_url="postgresql+asyncpg://reader:secret@db/app",
+            database_url="postgresql+asyncpg://app:strong-secret@db/app",
         )
 
         # Act
@@ -101,6 +94,40 @@ class TestProductionSettings:
 
         # Assert
         assert result is None
+        logger.info("test_prod_accepts_single_tenant_mode 完成")
+
+    # 方法作用：验证完整生产安全配置无需无效的全局只读连接即可通过校验。
+    # Args: self - pytest 测试类实例。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    def test_prod_accepts_complete_security_configuration(self):
+        """动态数据源使用各自凭证时不应要求全局只读连接。"""
+        logger.debug("test_prod_accepts_complete_security_configuration 入口")
+        try:
+            # Arrange
+            from src.config import Settings, validate_production_settings
+
+            settings = Settings(
+                env="prod",
+                multi_tenant=True,
+                jwt_secret="j" * 32,
+                admin_api_key="a" * 32,
+                credential_encryption_key="c" * 32,
+            )
+
+            # Act
+            result = validate_production_settings(settings)
+
+            # Assert
+            assert result is None
+            assert "database_readonly_url" not in Settings.model_fields
+            logger.info("test_prod_accepts_complete_security_configuration 完成")
+        except Exception as exc:
+            logger.error(
+                "test_prod_accepts_complete_security_configuration 异常: %s",
+                exc,
+                exc_info=True,
+            )
+            raise
 
     # 方法作用：验证生产配置拒绝代码内置的 PostgreSQL 弱账号连接串。
     # Args: self - pytest 测试类实例。
@@ -120,7 +147,6 @@ class TestProductionSettings:
                 admin_api_key="a" * 32,
                 credential_encryption_key="c" * 32,
                 database_url="postgresql+asyncpg://postgres:postgres@localhost:5432/data_agent",
-                database_readonly_url="postgresql+asyncpg://reader:secret@db/app",
             )
 
             # Act / Assert
@@ -153,7 +179,6 @@ class TestProductionSettings:
                 admin_api_key="a" * 32,
                 credential_encryption_key="c" * 31,
                 database_url="postgresql+asyncpg://app:strong-secret@db/app",
-                database_readonly_url="postgresql+asyncpg://reader:secret@db/app",
             )
 
             # Act / Assert
@@ -324,7 +349,7 @@ class TestDockerSecrets:
             raise
 
     def test_datasource_yaml_uses_environment_credentials(self):
-        """外挂数据源配置只能保存环境变量凭证占位符。"""
+        """仓库内置外挂数据源必须使用环境变量凭证占位符。"""
         # Arrange
         from pathlib import Path
         import yaml
@@ -341,6 +366,77 @@ class TestDockerSecrets:
         # Assert
         assert passwords
         assert all(value.startswith("${") and value.endswith("}") for value in passwords)
+
+    # 方法作用：验证仓库默认配置保留历史固定数据源及关键连接信息。
+    # Args: self - pytest 测试类实例。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    def test_datasource_yaml_preserves_default_sources(self) -> None:
+        """可选配置机制不得清空仓库原有的六个固定数据源。"""
+        logger.debug("test_datasource_yaml_preserves_default_sources 入口")
+        try:
+            # Arrange
+            import yaml
+
+            expected_names = {
+                "clickhouse_prod",
+                "clickhouse_test",
+                "mysql_test",
+                "postgres_main",
+                "oracle_xe",
+                "mssql_express",
+            }
+
+            # Act
+            config = yaml.safe_load(Path("config/datasources.yaml").read_text(encoding="utf-8"))
+            datasources = config.get("datasources", {})
+
+            # Assert
+            assert set(datasources) == expected_names
+            assert datasources["clickhouse_test"]["database"] == "analytics"
+            assert datasources["mssql_express"]["username"] == "${MSSQL_USERNAME}"
+            logger.info(
+                "test_datasource_yaml_preserves_default_sources 完成",
+                extra={"count": len(datasources)},
+            )
+        except Exception as exc:
+            logger.error(
+                "test_datasource_yaml_preserves_default_sources 异常: %s",
+                exc,
+                exc_info=True,
+            )
+            raise
+
+    # 方法作用：验证 SQL Server 示例不再默认使用 sysadmin 的 sa 账号。
+    # Args: self - pytest 测试类实例。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    def test_mssql_datasource_requires_external_readonly_username(self) -> None:
+        """存在 SQL Server 固定配置时，用户名必须由部署环境注入只读账号。"""
+        logger.debug("test_mssql_datasource_requires_external_readonly_username 入口")
+        try:
+            # Arrange
+            import yaml
+
+            config = yaml.safe_load(Path("config/datasources.yaml").read_text(encoding="utf-8"))
+
+            # Act
+            mssql_config = config.get("datasources", {}).get("mssql_express")
+            username = str(mssql_config.get("username", "")) if mssql_config else ""
+
+            # Assert
+            assert mssql_config is not None
+            assert username != "sa"
+            assert username.startswith("${") and username.endswith("}")
+            logger.info(
+                "test_mssql_datasource_requires_external_readonly_username 完成",
+                extra={"configured": bool(mssql_config)},
+            )
+        except Exception as exc:
+            logger.error(
+                "test_mssql_datasource_requires_external_readonly_username 异常: %s",
+                exc,
+                exc_info=True,
+            )
+            raise
 
     def test_data_import_script_has_no_hardcoded_database_passwords(self):
         """数据导入辅助脚本不得内置数据库明文密码。"""

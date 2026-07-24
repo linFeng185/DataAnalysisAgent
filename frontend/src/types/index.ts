@@ -62,6 +62,22 @@ export interface DatasourceConfig {
   port: number;
   database: string;
   username: string;
+  description?: string;
+  schema?: string;
+  tablespace?: string;
+  service_name?: string;
+  instance?: string;
+  file_path?: string;
+}
+
+export interface DatasourceCreatePayload {
+  name: string;
+  dialect: string;
+  version?: string;
+  host?: string;
+  port?: number;
+  database?: string;
+  username?: string;
   password?: string;
   description?: string;
   schema?: string;

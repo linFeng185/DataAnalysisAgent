@@ -19,7 +19,6 @@ from dataclasses import replace
 from datetime import datetime, timezone
 from typing import Any
 
-from src.config import get_settings
 from src.knowledge.models import (
     AUTO_TTL_SECONDS,
     KnowledgeEntry,
@@ -57,9 +56,6 @@ class SchemaManager:
 
             datasource_cache = get_datasource_cache()
         self._datasource_cache = datasource_cache
-        self._client = None
-        self._collection = None
-        self._initialized = False
         logger.info(
             "初始化 SchemaManager 完成",
             cache_backend=type(self._datasource_cache).__name__,
@@ -524,7 +520,6 @@ class SchemaManager:
             table=table_name,
             column=column_name,
         )
-        self._ensure_initialized()
         try:
             from src.memory.vector_store import VectorEntry, get_vector_store
             store = await get_vector_store()
@@ -650,6 +645,8 @@ class SchemaManager:
         """将 SchemaSnapshot 转为表级 + 字段级双粒度 KnowledgeEntry 列表。"""
         entries: list[KnowledgeEntry] = []
         now = datetime.now(timezone.utc)
+        tenant_id = self._current_tenant_id()
+        owner_user_id = self._current_user_id()
 
         for table in (snapshot.tables if snapshot else []):
             columns_desc = ", ".join(
@@ -673,8 +670,8 @@ class SchemaManager:
                     "partition_key": table.partition_key or "",
                     "tags": list(table.tags or []),
                     "datasource": datasource_name,
-                    "tenant_id": self._current_tenant_id(),
-                    "owner_user_id": self._current_user_id(),
+                    "tenant_id": tenant_id,
+                    "owner_user_id": owner_user_id,
                     "visibility": "tenant",
                     "foreign_keys": [
                         {"target_table": r.target_table, "join_key": r.join_key,
@@ -705,8 +702,8 @@ class SchemaManager:
                         "is_indexed": getattr(col, "is_indexed", False),
                         "enum_values": list(col.enum_values or []),
                         "datasource": datasource_name,
-                        "tenant_id": self._current_tenant_id(),
-                        "owner_user_id": self._current_user_id(),
+                        "tenant_id": tenant_id,
+                        "owner_user_id": owner_user_id,
                         "visibility": "tenant",
                     },
                 ))
@@ -720,12 +717,9 @@ class SchemaManager:
         Returns:
             当前租户 ID；无请求上下文时返回 1。
         """
-        logger.debug("读取 Schema 当前租户入口")
         from src.api.auth import get_current_tenant_id
 
-        result = get_current_tenant_id()
-        logger.info("读取 Schema 当前租户完成", tenant_id=result)
-        return result
+        return get_current_tenant_id()
 
     @staticmethod
     def _current_user_id() -> int:
@@ -734,12 +728,9 @@ class SchemaManager:
         Returns:
             当前用户 ID；无请求上下文时返回 0。
         """
-        logger.debug("读取 Schema 当前用户入口")
         from src.api.auth import get_current_user_id
 
-        result = get_current_user_id()
-        logger.info("读取 Schema 当前用户完成", user_id=result)
-        return result
+        return get_current_user_id()
 
     # ── 私有：缓存写入 ──────────────────────────────────
 
@@ -987,89 +978,8 @@ class SchemaManager:
             base += f" - {comment}"
         return base
 
-    # ── ChromaDB 生命周期 ───────────────────────────────
-
-    def _ensure_initialized(self) -> None:
-        """延迟初始化 ChromaDB 客户端和 collection。"""
-        if self._initialized:
-            return
-        try:
-            import chromadb
-
-            settings = get_settings()
-            embedding_function = self._create_embedding_function(settings)
-
-            self._client = chromadb.PersistentClient(path=settings.chroma_persist_dir)
-            self._collection = self._client.get_or_create_collection(
-                name=settings.chroma_collection_name,
-                embedding_function=embedding_function,
-                metadata={"hnsw:space": "cosine"},
-            )
-            self._initialized = True
-            logger.info(
-                "ChromaDB 初始化完成",
-                path=settings.chroma_persist_dir,
-                collection=settings.chroma_collection_name,
-                model_path=settings.embedding_model_path,
-            )
-        except Exception as exc:
-            logger.error("ChromaDB 初始化失败", error=str(exc), exc_info=True)
-            raise
-
-    @staticmethod
-    def _create_embedding_function(settings):
-        """创建嵌入函数。
-
-        Args:
-            settings: 包含 embedding_model_path 的运行配置。
-
-        Returns:
-            使用本地目录或默认缓存的 ChromaDB 嵌入函数。
-        """
-        from pathlib import Path
-
-        model_dir = settings.embedding_model_path
-        logger.debug("创建嵌入函数入口", configured=bool(model_dir))
-        if model_dir:
-            model_path = Path(model_dir)
-            if not model_path.exists():
-                raise FileNotFoundError(f"嵌入模型路径不存在: {model_dir}")
-            onnx_dir = model_path / "onnx"
-            search_dir = onnx_dir if onnx_dir.exists() else model_path
-            required = ["config.json", "model.onnx", "special_tokens_map.json",
-                        "tokenizer_config.json", "tokenizer.json", "vocab.txt"]
-            missing = [f for f in required if not (search_dir / f).exists()]
-            if missing:
-                raise FileNotFoundError(f"嵌入模型目录缺少文件: {missing}")
-            from chromadb.utils.embedding_functions import ONNXMiniLM_L6_V2
-
-            class _LocalModelEmbeddingFunction(ONNXMiniLM_L6_V2):
-                """把 ChromaDB ONNX 模型读取目录固定到已校验的本地路径。"""
-
-                DOWNLOAD_PATH = str(model_path)
-                EXTRACTED_FOLDER_NAME = "onnx" if onnx_dir.exists() else ""
-
-            result = _LocalModelEmbeddingFunction(
-                preferred_providers=["CPUExecutionProvider"],
-            )
-            logger.info("嵌入模型加载成功", model_dir=str(model_path))
-            return result
-
-        # 未配置 → HuggingFace 自动下载
-        logger.info("EMBEDDING_MODEL_PATH 未配置，从 HuggingFace 自动下载 all-MiniLM-L6-v2")
-        from chromadb.utils.embedding_functions import ONNXMiniLM_L6_V2
-        result = ONNXMiniLM_L6_V2(preferred_providers=["CPUExecutionProvider"])
-        logger.info("默认嵌入模型加载成功")
-        return result
-
-    def _row_to_entry(
-        self, entry_id: str, content: str, metadata: dict
-    ) -> KnowledgeEntry:
-        """ChromaDB 行 → KnowledgeEntry。"""
-        return KnowledgeEntry.from_dict({"id": entry_id, "content": content, **metadata})
-
     async def close(self) -> None:
-        """释放 ChromaDB 资源。"""
+        """释放 SchemaManager 持有的数据源精确缓存资源。"""
         logger.debug("关闭 SchemaManager 入口")
         close_cache = getattr(self._datasource_cache, "close", None)
         if close_cache is not None:
@@ -1077,9 +987,6 @@ class SchemaManager:
                 await close_cache()
             except Exception as exc:
                 logger.error("关闭数据库内容缓存失败", error=str(exc), exc_info=True)
-        self._client = None
-        self._collection = None
-        self._initialized = False
         logger.info("关闭 SchemaManager 完成")
 
 

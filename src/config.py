@@ -3,17 +3,21 @@
 from __future__ import annotations
 
 import logging
+import os
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal, cast
 from urllib.parse import unquote, urlsplit
 
 from dotenv import load_dotenv
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import YamlConfigSettingsSource
 
 # 项目根目录 (src/config.py → src/ → 项目根)
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 _ENV_FILE = _PROJECT_ROOT / ".env"
 _ENV_EXAMPLE = _PROJECT_ROOT / ".env.example"
+_DEFAULT_APP_CONFIG_FILE = _PROJECT_ROOT / "config" / "app.yaml"
 
 logger = logging.getLogger(__name__)
 
@@ -26,13 +30,42 @@ load_dotenv(_ENV_FILE)
 
 
 class Settings(BaseSettings):
-    """全局配置，所有字段可从环境变量或 .env 文件覆盖。"""
+    """全局配置，环境变量覆盖 .env 和统一 YAML 配置。"""
 
     model_config = SettingsConfigDict(
         env_file=str(_ENV_FILE),
         env_file_encoding="utf-8",
         extra="ignore",
     )
+
+    # 方法作用：按显式参数、环境变量、.env、统一 YAML 和默认值顺序加载配置。
+    # Args: settings_cls - Settings 类型；init_settings/env_settings/dotenv_settings/file_secret_settings - Pydantic 配置源。
+    # Returns: 按优先级排列的配置源元组。
+    @classmethod
+    def settings_customise_sources(
+        cls,
+        settings_cls,
+        init_settings,
+        env_settings,
+        dotenv_settings,
+        file_secret_settings,
+    ):
+        logger.debug("统一配置源装配入口")
+        config_path = Path(os.getenv("APP_CONFIG_PATH", str(_DEFAULT_APP_CONFIG_FILE)))
+        yaml_settings = YamlConfigSettingsSource(
+            settings_cls,
+            yaml_file=config_path,
+            yaml_file_encoding="utf-8",
+        )
+        result = (
+            init_settings,
+            env_settings,
+            dotenv_settings,
+            yaml_settings,
+            file_secret_settings,
+        )
+        logger.info("统一配置源装配完成", extra={"config_path": str(config_path)})
+        return result
 
     # ---- 运行环境 ----
     env: Literal["dev", "prod", "test"] = "prod"
@@ -60,7 +93,6 @@ class Settings(BaseSettings):
 
     # ---- 数据库 (智能体自身的状态存储) ----
     database_url: str = ""
-    database_readonly_url: str = ""  # 只读账号，配了就用它执行用户 SQL
     run_migrations_on_startup: bool = True
 
     # ---- 向量存储 ----
@@ -84,6 +116,9 @@ class Settings(BaseSettings):
 
     # ---- 多租户与认证 ----
     multi_tenant: bool = False               # 是否启用多租户
+    registration_enabled: bool = False
+    super_admin_username: str = "admin"
+    super_admin_password: str = ""
     jwt_secret: str = ""
     jwt_access_token_expire_hours: int = 24
     jwt_refresh_token_expire_days: int = 7
@@ -114,6 +149,8 @@ class Settings(BaseSettings):
     max_queries_per_hour: int = 100
     login_max_per_hour: int = 20
     registration_max_per_hour: int = 10
+    login_lockout_threshold: int = 5
+    login_lockout_minutes: int = 15
     max_query_chars: int = 8_000
     max_datasources_per_query: int = 5
     max_scan_rows: int = 10_000_000
@@ -134,7 +171,8 @@ class Settings(BaseSettings):
     langsmith_project: str = "data-analysis-agent"
 
     # ---- MCP ----
-    mcp_config_path: str = "config/mcp_servers.yaml"
+    mcp_config_path: str = "config/app.yaml"
+    mcp_servers: dict[str, dict[str, Any]] = Field(default_factory=dict)
     mcp_remote_host_allowlist: str = ""
     """数据库受管 SSE MCP 的精确主机 allowlist，逗号分隔。"""
 
@@ -156,22 +194,31 @@ class Settings(BaseSettings):
 # Args: 无。
 # Returns: 当前应用 Settings 实例。
 def get_settings() -> Settings:
-    """构造当前应用配置。"""
+    """返回当前 AppContext 持有的唯一配置实例。"""
     logger.debug("获取应用配置入口")
     try:
-        result = Settings()
-        logger.info("获取应用配置完成", extra={"env": result.env})
+        from src.app_context import get_app_context
+
+        result = cast(Settings, get_app_context().settings)
+        logger.debug(
+            "获取应用配置完成",
+            extra={
+                "env": getattr(result, "env", "unknown"),
+                "source": "app_context",
+                "settings_id": id(result),
+            },
+        )
         return result
-    except Exception as exc:
+    except Exception:
         logger.error("获取应用配置失败", exc_info=True)
-        raise exc
+        raise
 
 
 # 方法作用：校验生产环境必须具备的认证、密钥和数据库安全配置。
 # Args: settings - 待校验的应用设置。
 # Returns: 校验通过时无返回值，失败时抛出 ValueError。
 def validate_production_settings(settings: Settings) -> None:
-    """校验生产环境必须具备的认证、凭证和只读数据库配置。
+    """校验生产环境必须具备的认证、凭证和状态数据库配置。
 
     Args:
         settings: 待校验的应用配置。
@@ -188,12 +235,8 @@ def validate_production_settings(settings: Settings) -> None:
         return
 
     errors: list[str] = []
-    if not settings.multi_tenant:
-        errors.append("MULTI_TENANT 必须为 true")
     if len(settings.jwt_secret) < 32:
         errors.append("JWT_SECRET 至少需要 32 字符")
-    if len(settings.admin_api_key) < 32:
-        errors.append("ADMIN_API_KEY 至少需要 32 字符")
     if len(settings.credential_encryption_key) < 32:
         errors.append("CREDENTIAL_ENCRYPTION_KEY 至少需要 32 字符")
     cors_origins = {
@@ -214,8 +257,6 @@ def validate_production_settings(settings: Settings) -> None:
     except ValueError as exc:
         logger.error("生产 DATABASE_URL 解析失败", exc_info=True)
         errors.append(f"DATABASE_URL 格式无效: {exc}")
-    if not settings.database_readonly_url:
-        errors.append("DATABASE_READONLY_URL 必须配置")
     if not settings.run_migrations_on_startup:
         errors.append("RUN_MIGRATIONS_ON_STARTUP 必须为 true")
 

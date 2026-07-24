@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 import socket
 from typing import Any
 
@@ -256,7 +257,9 @@ class ClickHouseConnector(ConnectorBase):
         Returns:
             可由 clickhouse-connect 执行的 SQL 和参数映射。
         """
+        logger.debug("ClickHouse 参数绑定入口", parameter_count=len(params or {}))
         if not params:
+            logger.info("ClickHouse 参数绑定完成", parameter_count=0)
             return sql, None
         for name, value in params.items():
             type_name = "String"
@@ -266,7 +269,9 @@ class ClickHouseConnector(ConnectorBase):
                 type_name = "Int64"
             elif isinstance(value, float):
                 type_name = "Float64"
-            sql = sql.replace(f":{name}", f"{{{name}:{type_name}}}")
+            pattern = re.compile(rf"(?<!:):{re.escape(name)}(?![A-Za-z0-9_])")
+            sql = pattern.sub(f"{{{name}:{type_name}}}", sql)
+        logger.info("ClickHouse 参数绑定完成", parameter_count=len(params))
         return sql, params
 
     async def create_engine(self) -> Any:
@@ -358,6 +363,7 @@ class ClickHouseConnector(ConnectorBase):
                 self._engine.client.query,
                 bound_sql,
                 parameters=bound_params,
+                settings={"max_execution_time": get_settings().max_execution_time},
             )
             rows = [dict(zip(result.column_names, row)) for row in result.result_rows]
         except Exception as exc:
@@ -387,7 +393,6 @@ class ClickHouseConnector(ConnectorBase):
             max_rows=max_rows,
             sql=sql,
         )
-        await self.execute(self.timeout_sql)
         rows = await self.execute(sql, params)
         truncated = len(rows) > max_rows
         bounded = rows[:max_rows]

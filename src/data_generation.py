@@ -55,7 +55,7 @@ def main():
         categories = []
         f.write("-- 商品分类\n")
         for i in range(1, CATEGORY_COUNT+1):
-            name = fake.unique.word().capitalize() + "类"
+            name = f"{fake.word().capitalize()}类-{i}"
             categories.append((i, name))
             f.write(f"INSERT INTO categories (category_id, name) VALUES ({i}, '{name}');\n")
         f.write("\n")
@@ -70,7 +70,7 @@ def main():
                 price = round(random.uniform(500, 5000), 2)
             else:
                 price = round(random.uniform(10, 500), 2)
-            name = fake.unique.catch_phrase()
+            name = f"{fake.catch_phrase()}-{i}"
             products.append((i, cat_id, name, price))
             f.write(f"INSERT INTO products (product_id, category_id, name, price) VALUES ({i}, {cat_id}, '{name}', {price});\n")
         f.write("\n")

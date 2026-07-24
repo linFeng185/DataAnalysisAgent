@@ -10,7 +10,7 @@
 
 ## 全局约束
 
-- `dev/test + MULTI_TENANT=false` 保留匿名演示；`prod` 强制认证与安全配置。
+- 所有环境强制认证；`MULTI_TENANT=false` 仅关闭跨租户隔离。
 - 每个新增或修改的公开函数包含中文说明、参数和返回值说明，并记录入口、出口与异常日志。
 - 不修改根目录 `SPEC.md` / `FEATURES.md`；设计与状态只写 `spec/` / `features/`。
 - 不覆盖当前工作树的用户改动，不引入 SPEC 未声明的重量级依赖。
@@ -24,7 +24,7 @@
 - 修改：`src/main.py`
 - 修改：`src/logging_config.py`
 - 修改：`src/mcp_client/client_manager.py`
-- 修改：`config/mcp_servers.yaml`
+- 修改：`config/app.yaml` 中的 `mcp_servers`
 - 修改：`docker-compose.yml`
 - 测试：`tests/test_config_security.py`
 

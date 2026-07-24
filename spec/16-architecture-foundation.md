@@ -469,7 +469,7 @@ multi_tenant: bool = False  # MULTI_TENANT=true 开启
 
 | multi_tenant | 行为 |
 |-------------|------|
-| `false` | 所有用户 `tenant_id=1`，不强制登录，现有功能不变 |
+| `false` | 所有登录用户使用 `tenant_id=1`，关闭跨租户隔离但仍强制认证 |
 | `true` | 必须登录，JWT 校验，RLS 生效 |
 
 ---

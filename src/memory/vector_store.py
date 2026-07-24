@@ -16,6 +16,10 @@ from src.logging_config import get_logger
 
 logger = get_logger(__name__)
 
+type MetadataValue = str | int | float | bool
+type MetadataFilters = dict[str, Any]
+type NormalizedMetadataFilter = tuple[str, bool, MetadataValue]
+
 
 @dataclass
 class VectorEntry:
@@ -54,14 +58,14 @@ class VectorStore(ABC):
     @abstractmethod
     async def search(
         self, query: str, top_k: int = 5,
-        filters: dict[str, str] | None = None,
+        filters: MetadataFilters | None = None,
     ) -> list[VectorSearchResult]:
         """语义向量搜索，按相似度降序返回 top_k 条。
 
         Args:
             query: 搜索查询文本
             top_k: 返回结果数上限（内部限制 ≤50）
-            filters: metadata 精确过滤 {"datasource": "mysql", "source": "user_upload"}
+            filters: metadata 过滤，支持等值、not: 前缀和 {"$ne": value}
 
         Returns: 相关结果列表，已按 score 降序排列
         """
@@ -80,12 +84,12 @@ class VectorStore(ABC):
 
     @abstractmethod
     async def get_by_filter(
-        self, filters: dict[str, str], limit: int = 100,
+        self, filters: MetadataFilters, limit: int = 100,
     ) -> list[VectorEntry]:
         """按 metadata 精确过滤（非语义搜索，不做向量匹配）。
 
         Args:
-            filters: metadata 键值对 {"category": "table", "datasource": "mysql"}
+            filters: metadata 过滤，支持等值、not: 前缀和 {"$ne": value}
             limit: 返回条数上限
 
         Returns: 匹配的条目列表
@@ -117,7 +121,7 @@ class VectorStore(ABC):
         ...
 
     @abstractmethod
-    async def delete_by_filter(self, filters: dict[str, str]) -> int:
+    async def delete_by_filter(self, filters: MetadataFilters) -> int:
         """按 metadata 过滤批量删除。
 
         Args:
@@ -130,7 +134,7 @@ class VectorStore(ABC):
     # ── 管理 ──
 
     @abstractmethod
-    async def count(self, filters: dict[str, str] | None = None) -> int:
+    async def count(self, filters: MetadataFilters | None = None) -> int:
         """获取条目总数。
 
         Args:
@@ -139,6 +143,39 @@ class VectorStore(ABC):
         Returns: 条目数量
         """
         ...
+
+
+# 方法作用：把公共 metadata 过滤 DSL 规范化为后端无关条件。
+# Args: filters - 等值、not: 前缀或 $ne 运算符组成的过滤字典。
+# Returns: (字段名, 是否不等值, 标量值) 条件列表。
+def normalize_metadata_filters(
+    filters: MetadataFilters | None,
+) -> list[NormalizedMetadataFilter]:
+    logger.debug("规范化 metadata 过滤入口", filter_count=len(filters or {}))
+    try:
+        result: list[NormalizedMetadataFilter] = []
+        for raw_key, raw_value in (filters or {}).items():
+            if not isinstance(raw_key, str) or not raw_key:
+                raise ValueError("metadata 过滤字段名必须是非空字符串")
+            is_not = raw_key.startswith("not:")
+            key = raw_key[4:] if is_not else raw_key
+            if not key:
+                raise ValueError("metadata 过滤字段名不能为空")
+
+            value = raw_value
+            if isinstance(raw_value, dict):
+                if set(raw_value) != {"$ne"}:
+                    raise ValueError(f"不支持的 metadata 过滤运算符: {sorted(raw_value)}")
+                is_not = True
+                value = raw_value["$ne"]
+            if not isinstance(value, (str, int, float, bool)):
+                raise ValueError(f"metadata 过滤值必须是标量: {key}")
+            result.append((key, is_not, value))
+    except Exception as exc:
+        logger.error("规范化 metadata 过滤失败", error=str(exc), exc_info=True)
+        raise
+    logger.debug("规范化 metadata 过滤完成", condition_count=len(result))
+    return result
 
     @abstractmethod
     async def health_check(self) -> bool:
@@ -194,7 +231,7 @@ async def _create_configured_vector_store(settings: Any) -> VectorStore:
     )
     if not settings.vector_store_abstract_enabled:
         logger.info("VectorStore 抽象层未启用，使用 ChromaDB 直连")
-        result = await _create_chroma_store()
+        result = await _create_chroma_store(settings)
         logger.info("创建 VectorStore 完成", backend=type(result).__name__)
         return result
 
@@ -213,7 +250,7 @@ async def _create_configured_vector_store(settings: Any) -> VectorStore:
         return result
 
     logger.info("VectorStore 类型: ChromaDB（默认）")
-    result = await _create_chroma_store()
+    result = await _create_chroma_store(settings)
     logger.info("创建 VectorStore 完成", backend=type(result).__name__)
     return result
 
@@ -237,17 +274,21 @@ async def _close_vector_store_resource(store: VectorStore) -> None:
     logger.info("关闭 VectorStore 资源完成", skipped=False)
 
 
-async def _create_chroma_store() -> VectorStore:
+async def _create_chroma_store(settings: Any) -> VectorStore:
     """创建 ChromaDB 适配器实例。
 
-    复用现有 SchemaManager 的 Collection 和 embedding_fn，
-    不创建新连接，兼容已有数据。
+    ChromaVectorStore 自主管理客户端、Collection 和嵌入函数，
+    SchemaManager 不感知具体向量后端。
 
     Returns: ChromaVectorStore 实例
     """
     from src.memory.vector_store_chroma import ChromaVectorStore
-    from src.knowledge.schema_manager import get_schema_manager
-    logger.debug("初始化 ChromaVectorStore")
-    sm = get_schema_manager()
-    sm._ensure_initialized()  # noqa: SLF001
-    return ChromaVectorStore(sm._collection)  # noqa: SLF001
+
+    logger.debug("初始化 ChromaVectorStore 入口")
+    try:
+        result = await ChromaVectorStore.create(settings)
+    except Exception as exc:
+        logger.error("初始化 ChromaVectorStore 失败", error=str(exc), exc_info=True)
+        raise
+    logger.info("初始化 ChromaVectorStore 完成")
+    return result

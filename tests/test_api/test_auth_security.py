@@ -101,8 +101,6 @@ class TestCookieAuthentication:
     async def test_login_sets_httponly_cookie_without_returning_token(self, monkeypatch):
         """登录应把 JWT 写入 HttpOnly Cookie，响应体不得暴露令牌。"""
         # Arrange
-        from passlib.hash import bcrypt
-
         import src.api.auth as auth
 
         connection = MagicMock()
@@ -112,18 +110,20 @@ class TestCookieAuthentication:
             "role": "analyst",
             "password_hash": "test-hash",
         })
+        connection.execute = AsyncMock(return_value="UPDATE 1")
         acquire = MagicMock()
         acquire.__aenter__ = AsyncMock(return_value=connection)
         acquire.__aexit__ = AsyncMock(return_value=None)
         pool = MagicMock()
         pool.acquire.return_value = acquire
-        monkeypatch.setattr(bcrypt, "verify", lambda password, password_hash: True)
+        monkeypatch.setattr(auth, "_verify_password", lambda password, password_hash: True)
         monkeypatch.setattr(auth, "get_pg_pool", AsyncMock(return_value=pool))
         monkeypatch.setattr(auth, "get_settings", lambda: SimpleNamespace(
             database_url="postgresql+asyncpg://test",
             jwt_secret="x" * 32,
             jwt_access_token_expire_hours=24,
             env="test",
+            registration_enabled=True,
         ))
         monkeypatch.setattr(auth, "_secret_cache", None)
         response = Response()
@@ -144,8 +144,6 @@ class TestCookieAuthentication:
     async def test_register_sets_httponly_cookie_without_returning_token(self, monkeypatch):
         """注册成功后应直接建立 Cookie 会话且不暴露 JWT。"""
         # Arrange
-        from passlib.hash import bcrypt
-
         import src.api.auth as auth
 
         connection = MagicMock()
@@ -159,11 +157,12 @@ class TestCookieAuthentication:
         acquire.__aexit__ = AsyncMock(return_value=None)
         pool = MagicMock()
         pool.acquire.return_value = acquire
-        monkeypatch.setattr(bcrypt, "hash", lambda password: "test-hash")
+        monkeypatch.setattr(auth, "_hash_password", lambda password: "test-hash")
         monkeypatch.setattr(auth, "get_pg_pool", AsyncMock(return_value=pool))
         monkeypatch.setattr(auth, "get_settings", lambda: SimpleNamespace(
             database_url="postgresql+asyncpg://test",
             multi_tenant=False,
+            registration_enabled=True,
             jwt_secret="x" * 32,
             jwt_access_token_expire_hours=24,
             env="test",
@@ -197,6 +196,55 @@ class TestCookieAuthentication:
         cookie = response.headers.get("set-cookie", "")
         assert "access_token=" in cookie
         assert "Max-Age=0" in cookie
+
+    # 方法作用：验证显式 Bearer 凭证优先于浏览器残留的无效 Cookie。
+    # Args: self - pytest 测试类实例；monkeypatch - pytest 补丁工具。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    async def test_valid_bearer_overrides_invalid_cookie(self, monkeypatch) -> None:
+        """API 客户端显式提供有效 JWT 时不得被过期 Cookie 阻断。"""
+        logger.debug("test_valid_bearer_overrides_invalid_cookie 入口")
+        # Arrange
+        import src.api.auth as auth
+
+        settings = SimpleNamespace(
+            multi_tenant=True,
+            admin_api_key="",
+            jwt_secret="z" * 32,
+            jwt_access_token_expire_hours=24,
+            env="test",
+            registration_enabled=True,
+        )
+        monkeypatch.setattr(auth, "get_settings", lambda: settings)
+        monkeypatch.setattr(auth, "_secret_cache", None)
+        token = auth.create_access_token(9, 4, "analyst")
+        scope = {
+            "type": "http", "http_version": "1.1", "method": "GET",
+            "scheme": "http", "path": "/api/v1/auth/me",
+            "raw_path": b"/api/v1/auth/me", "query_string": b"",
+            "headers": [
+                (b"cookie", b"access_token=expired.invalid.token"),
+                (b"authorization", f"Bearer {token}".encode("ascii")),
+            ],
+            "client": ("127.0.0.1", 1234), "server": ("test", 80),
+        }
+        seen: dict[str, int] = {}
+
+        # 方法作用：记录认证中间件解析出的当前身份。
+        # Args: request - 当前测试请求。
+        # Returns: 成功响应。
+        async def call_next(request: Request) -> Response:
+            logger.debug("test_valid_bearer call_next 入口", extra={"path": request.url.path})
+            seen["user_id"] = auth.get_current_user_id()
+            logger.info("test_valid_bearer call_next 完成", extra=seen)
+            return Response("ok")
+
+        # Act
+        response = await auth.AuthMiddleware(AsyncMock()).dispatch(Request(scope), call_next)
+
+        # Assert
+        assert response.status_code == 200
+        assert seen == {"user_id": 9}
+        logger.info("test_valid_bearer_overrides_invalid_cookie 完成")
 
 
 class TestAuthContextIsolation:
@@ -353,8 +401,8 @@ class TestAuthContextIsolation:
     # 方法作用：验证平台管理写端点仍然强制 ADMIN_API_KEY。
     # Args: self - pytest 测试类实例；monkeypatch - pytest 补丁工具。
     # Returns: 无返回值，断言失败时由 pytest 报告。
-    async def test_admin_api_key_still_gates_platform_management(self, monkeypatch):
-        """数据源注册属于平台管理操作，只有 JWT 仍不足以放行。"""
+    async def test_fixed_admin_jwt_does_not_require_browser_api_key(self, monkeypatch):
+        """固定超级管理员登录态可直接使用后台，密钥不进入浏览器。"""
         # Arrange
         import src.api.auth as auth
 
@@ -367,7 +415,7 @@ class TestAuthContextIsolation:
         )
         monkeypatch.setattr(auth, "get_settings", lambda: settings)
         monkeypatch.setattr(auth, "_secret_cache", None)
-        token = auth.create_access_token(9, 4, "super_admin")
+        token = auth.create_access_token(1, 1, "super_admin")
         path = "/api/v1/datasources"
         base_scope = {
             "type": "http", "http_version": "1.1", "method": "POST",
@@ -377,27 +425,26 @@ class TestAuthContextIsolation:
         middleware = auth.AuthMiddleware(AsyncMock())
 
         # Act
-        denied_scope = {
+        cookie_scope = {
             **base_scope,
             "headers": [(b"authorization", f"Bearer {token}".encode("ascii"))],
         }
-        allowed_scope = {
+        api_key_scope = {
             **base_scope,
             "headers": [
-                (b"authorization", f"Bearer {token}".encode("ascii")),
                 (b"x-admin-key", settings.admin_api_key.encode("ascii")),
             ],
         }
-        denied = await middleware.dispatch(
-            Request(denied_scope), AsyncMock(return_value=Response("ok")),
+        cookie_response = await middleware.dispatch(
+            Request(cookie_scope), AsyncMock(return_value=Response("ok")),
         )
-        allowed = await middleware.dispatch(
-            Request(allowed_scope), AsyncMock(return_value=Response("ok")),
+        api_key_response = await middleware.dispatch(
+            Request(api_key_scope), AsyncMock(return_value=Response("ok")),
         )
 
         # Assert
-        assert denied.status_code == 401
-        assert allowed.status_code == 200
+        assert cookie_response.status_code == 200
+        assert api_key_response.status_code == 200
 
     async def test_current_user_reports_auth_requirement(self, monkeypatch):
         """身份查询应返回当前上下文及服务端认证开关。"""
@@ -424,6 +471,7 @@ class TestAuthContextIsolation:
         assert result == {
             "authenticated": True,
             "auth_required": True,
+            "registration_enabled": False,
             "user_id": 9,
             "tenant_id": 4,
             "role": "viewer",
@@ -458,6 +506,11 @@ class TestAdministratorBoundaries:
         import src.api.auth as auth
 
         monkeypatch.setattr(auth, "get_current_role", lambda: role)
+        monkeypatch.setattr(
+            auth,
+            "get_current_user_id",
+            lambda: 1 if role == "super_admin" else 7,
+        )
 
         # Act / Assert
         assert auth.require_tenant_admin() is None

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-import sys
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -127,6 +126,33 @@ class TestMCPToolIsolation:
         assert servers[0]["is_builtin"] is True
         assert manager.get_all_tools(tenant_id=4, user_id=7) == []
         logger.info("test_list_system_servers_includes_disabled_configuration 完成")
+
+    # 方法作用：验证公开 Server 解析接口按作用域优先级选择连接。
+    # Args: self - pytest 测试类实例。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    def test_resolve_loaded_server_prefers_narrowest_scope(self) -> None:
+        """同名 Server 默认选 private，显式 scope 时必须精确匹配。"""
+        logger.debug("test_resolve_loaded_server_prefers_narrowest_scope 入口")
+        from src.mcp_client.client_manager import MCPClientManager
+
+        manager = MCPClientManager()
+        manager.sessions = {
+            "docs": object(),
+            "tenant_4_0_docs": object(),
+            "private_4_7_docs": object(),
+        }
+        manager._server_scopes = {
+            "docs": "system",
+            "tenant_4_0_docs": "tenant",
+            "private_4_7_docs": "private",
+        }
+
+        assert manager.resolve_loaded_server("docs") == ("private_4_7_docs", "private")
+        assert manager.resolve_loaded_server("docs", "tenant") == (
+            "tenant_4_0_docs", "tenant",
+        )
+        assert manager.resolve_loaded_server("missing") is None
+        logger.info("test_resolve_loaded_server_prefers_narrowest_scope 完成")
 
 
 class TestMCPScopedLifecycle:

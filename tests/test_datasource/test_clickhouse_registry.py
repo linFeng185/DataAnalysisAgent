@@ -91,8 +91,6 @@ class TestClickHouseRegistryAdapter:
     async def test_unimplemented_dialect_never_falls_back_to_postgres(self, monkeypatch):
         """YAML 或内部配置绕过 API 时也不得创建 PostgreSQL engine。"""
         # Arrange
-        from unittest.mock import MagicMock
-
         from src.datasource.config import DataSourceConfig
         from src.datasource.registry import DataSourceRegistry
 
@@ -146,21 +144,28 @@ class TestClickHouseRegistryAdapter:
         # Assert
         assert rows[0]._mapping["name"] == "orders"
 
-    # 验证测试数据源指向实际承载测试数据的 analytics 库。
+    # 验证仓库内置 ClickHouse 测试数据源指向实际承载测试数据的 analytics 库。
     # Args: self - pytest 测试类实例。
     # Returns: 无返回值，断言失败时由 pytest 报告。
     def test_clickhouse_test_config_uses_analytics_database(self):
-        """clickhouse_test 必须连接含十万行测试数据的 analytics 数据库。"""
+        """仓库内置 clickhouse_test 必须连接含测试数据的 analytics 数据库。"""
         logger.debug("test_clickhouse_test_config_uses_analytics_database 入口")
         try:
             # Arrange / Act：只解析配置，不建立真实连接。
+            from pathlib import Path
+
             import yaml
 
-            with open("config/datasources.yaml", encoding="utf-8") as config_file:
-                config = yaml.safe_load(config_file)
-            datasource = config["datasources"]["clickhouse_test"]
+            datasource_path = Path("config/datasources.yaml")
+            config = (
+                yaml.safe_load(datasource_path.read_text(encoding="utf-8"))
+                if datasource_path.exists()
+                else {}
+            )
+            datasource = (config or {}).get("datasources", {}).get("clickhouse_test")
 
             # Assert
+            assert datasource is not None
             assert datasource["database"] == "analytics"
             logger.info(
                 "test_clickhouse_test_config_uses_analytics_database 完成",

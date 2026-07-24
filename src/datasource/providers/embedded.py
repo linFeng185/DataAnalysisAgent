@@ -271,16 +271,35 @@ class EmbeddedDataSourceProvider(DataSourceProvider):
             return False
 
 
+# 方法作用：从指定环境变量前缀构造内置数据源配置。
+# Args: prefix - 环境变量前缀；name - 数据源名称。
+# Returns: 端口已归一化的 DataSourceConfig。
 def _parse_ds_from_prefix(prefix: str, name: str) -> DataSourceConfig:
+    """从一组环境变量构建数据源，空端口按未配置处理。"""
+    logger.debug("解析环境变量数据源入口", prefix=prefix, datasource=name)
     dialect = os.getenv(f"{prefix}DIALECT", "clickhouse")
-    return DataSourceConfig(
+    raw_port = os.getenv(f"{prefix}PORT", "").strip()
+    try:
+        port = int(raw_port) if raw_port else _DIALECT_DEFAULTS.get(dialect, 0)
+    except ValueError as exc:
+        logger.error(
+            "解析环境变量数据源失败",
+            datasource=name,
+            dialect=dialect,
+            port=raw_port,
+            exc_info=True,
+        )
+        raise ValueError(f"数据源 '{name}' 端口无效: {raw_port}") from exc
+    result = DataSourceConfig(
         name=name, mode="embedded", dialect=dialect,
         host=os.getenv(f"{prefix}HOST", "localhost"),
-        port=int(os.getenv(f"{prefix}PORT", "0")) or _DIALECT_DEFAULTS.get(dialect, 0),
+        port=port,
         database=os.getenv(f"{prefix}DATABASE", ""),
         username=os.getenv(f"{prefix}USERNAME", ""),
         password=os.getenv(f"{prefix}PASSWORD", ""),
     )
+    logger.info("解析环境变量数据源完成", datasource=name, dialect=dialect, port=port)
+    return result
 
 
 def _normalize_dialect(engine_name: str) -> str:

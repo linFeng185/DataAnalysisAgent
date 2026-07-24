@@ -24,4 +24,5 @@
 | [18-frontend.md](18-frontend.md) | 18. 前端 | 131 行 |
 | [19-extensions.md](19-extensions.md) | 19. 扩展能力 | 183 行 |
 | [20-architecture-remediation.md](20-architecture-remediation.md) | 20. 架构整改 | 动态 |
+| [21-platform-admin.md](21-platform-admin.md) | 21. 平台管理与强制认证 | 动态 |
 | [99-summary.md](99-summary.md) | 附录 | 145 行 |

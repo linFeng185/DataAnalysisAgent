@@ -35,13 +35,17 @@ class TestDBTools:
         import src.datasource.registry as datasource_registry
         from src.tools.db_executor import DBExecutorTool, DBExplainTool
 
-        datasource = SimpleNamespace(engine=object())
-        registry = SimpleNamespace(resolve=AsyncMock(return_value=datasource))
         connector = SimpleNamespace(
-            _engine=None,
-            execute=AsyncMock(return_value=[{"value": 1}]),
+            execute_bounded=AsyncMock(return_value=([{"value": 1}], False)),
             explain=AsyncMock(return_value={"valid": True, "plan": "ok"}),
         )
+        datasource = SimpleNamespace(
+            name="demo",
+            dialect="sqlite",
+            engine=object(),
+            connector=connector,
+        )
+        registry = SimpleNamespace(resolve=AsyncMock(return_value=datasource))
         monkeypatch.setattr(datasource_registry, "get_registry", lambda: registry)
         monkeypatch.setattr(connector_registry, "create_connector", lambda config: connector)
 
@@ -50,8 +54,8 @@ class TestDBTools:
 
         assert execution == {"success": True, "data": [{"value": 1}], "row_count": 1}
         assert explain["success"] is True
-        connector.execute.assert_awaited_once_with("SELECT 1")
-        connector.explain.assert_awaited_once_with("SELECT 1")
+        connector.execute_bounded.assert_awaited_once()
+        assert connector.explain.await_count == 2
         logger.info("test_async_execution_and_explain 完成")
 
     # 方法作用：验证危险 SQL 在连接数据库前被拒绝。

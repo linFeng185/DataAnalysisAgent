@@ -4,9 +4,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
-
-
 def _write_skill(root: Path, name: str, keyword: str) -> None:
     """写入最小 Skill 清单供作用域发现测试使用。"""
     skill_dir = root / name
@@ -52,7 +49,7 @@ class TestSkillManifestV2:
         )
 
         # Act
-        skill = SkillManager()._parse_skill_manifest(skill_dir / "SKILL.md")
+        skill = SkillManager().load_skill_manifest(skill_dir / "SKILL.md")
 
         # Assert
         assert skill.api_version == "data-agent/v2"

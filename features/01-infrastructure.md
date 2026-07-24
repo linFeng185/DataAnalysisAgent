@@ -20,7 +20,7 @@
 |---|------|------|------|------|
 | 1.2.1 | Settings 类 | `src/config.py` | LLM API Key / DB 连接串 / Redis URL / ChromaDB 路径 / 限流参数 / 日志级别 | 单测完成 | P0 |
 | 1.2.2 | .env 模板 | `.env.example` | 所有可配置环境变量的模板文件 | 单测完成 | P0 |
-| 1.2.3 | MCP Server 注册表 | `config/mcp_servers.yaml` | 声明外部 MCP Server | 开发完成 | P0 |
+| 1.2.3 | MCP Server 注册表 | `config/app.yaml` | 在统一配置中声明外部 MCP Server | 单测完成 | P0 |
 | 1.2.4 | 数据源配置文件 | `config/datasources.yaml` | 外挂模式数据源声明 (dialect/host/port/database/凭证引用) | 开发完成 | P0 |
 
 ### 1.3 异常与错误处理

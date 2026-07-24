@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import inspect
+import json
 from pathlib import Path
 
 import yaml
@@ -48,6 +49,7 @@ class ExternalDataSourceProvider(DataSourceProvider):
         cred_mgr = CredentialManager()
         for name, cfg in config_data.get("datasources", {}).items():
             raw_pw = cred_mgr.resolve_env_ref(str(cfg.get("password", "")))
+            username = cred_mgr.resolve_env_ref(str(cfg.get("username", "")))
             ds = DataSourceConfig(
                 name=name, mode="external",
                 dialect=cfg.get("dialect", "postgres"),
@@ -55,7 +57,7 @@ class ExternalDataSourceProvider(DataSourceProvider):
                 host=cfg.get("host", "localhost"),
                 port=cfg.get("port", 0) or _DIALECT_DEFAULTS.get(cfg.get("dialect", ""), 0),
                 database=cfg.get("database", ""),
-                username=cfg.get("username", ""),
+                username=username,
                 password=cred_mgr.encrypt(raw_pw),
                 description=cfg.get("description", ""),
                 tags=cfg.get("tags", []),
@@ -91,6 +93,137 @@ class ExternalDataSourceProvider(DataSourceProvider):
         self._register(ds)
         logger.info("外部数据源注册完成", datasource=ds.name, dialect=ds.dialect)
         return ds
+
+    # 方法作用：把页面创建的数据源及加密凭证持久化到状态数据库。
+    # Args: ds - 已加密密码的数据源配置；tenant_id - 所属租户；owner_user_id - 创建者。
+    # Returns: 持久化成功时无返回值。
+    async def persist(
+        self,
+        ds: DataSourceConfig,
+        *,
+        tenant_id: int,
+        owner_user_id: int,
+    ) -> None:
+        logger.debug(
+            "页面数据源持久化入口",
+            datasource=ds.name,
+            tenant_id=tenant_id,
+            owner_user_id=owner_user_id,
+        )
+        from src.memory.pg_pool import get_pg_pool
+
+        ds.tenant_id = tenant_id
+        ds.owner_user_id = owner_user_id
+        try:
+            pool = await get_pg_pool()
+            async with pool.acquire() as connection:
+                async with connection.transaction():
+                    await connection.execute(
+                        "INSERT INTO datasource_configs "
+                        "(name, tenant_id, owner_user_id, dialect, version, host, port, "
+                        "database_name, username, encrypted_password, description, extra_params) "
+                        "VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12::jsonb) "
+                        "ON CONFLICT (name) DO UPDATE SET tenant_id=EXCLUDED.tenant_id, "
+                        "owner_user_id=EXCLUDED.owner_user_id, dialect=EXCLUDED.dialect, "
+                        "version=EXCLUDED.version, host=EXCLUDED.host, port=EXCLUDED.port, "
+                        "database_name=EXCLUDED.database_name, username=EXCLUDED.username, "
+                        "encrypted_password=EXCLUDED.encrypted_password, "
+                        "description=EXCLUDED.description, extra_params=EXCLUDED.extra_params, "
+                        "updated_at=NOW()",
+                        ds.name, tenant_id, owner_user_id, ds.dialect, ds.version,
+                        ds.host, ds.port, ds.database, ds.username, ds.password,
+                        ds.description, json.dumps(ds.extra_params, ensure_ascii=False),
+                    )
+                    await connection.execute(
+                        "INSERT INTO datasource_permissions "
+                        "(datasource_name, tenant_id, owner_user_id, visibility, access_level) "
+                        "VALUES ($1,$2,$3,'tenant','read') "
+                        "ON CONFLICT (datasource_name, tenant_id) DO UPDATE SET "
+                        "owner_user_id=EXCLUDED.owner_user_id, visibility='tenant', access_level='read'",
+                        ds.name, tenant_id, owner_user_id,
+                    )
+        except Exception:
+            logger.error("页面数据源持久化失败", datasource=ds.name, exc_info=True)
+            raise
+        logger.info("页面数据源持久化完成", datasource=ds.name, tenant_id=tenant_id)
+
+    # 方法作用：从状态数据库恢复页面维护的数据源配置。
+    # Args: 无。
+    # Returns: 本次加载的数据源数量。
+    async def load_persisted(self) -> int:
+        logger.debug("持久化数据源加载入口")
+        from src.memory.pg_pool import get_pg_pool
+
+        try:
+            pool = await get_pg_pool()
+            async with pool.acquire() as connection:
+                rows = await connection.fetch(
+                    "SELECT name, tenant_id, owner_user_id, dialect, version, host, port, "
+                    "database_name, username, encrypted_password, description, extra_params "
+                    "FROM datasource_configs ORDER BY id",
+                )
+            for row in rows:
+                ds = DataSourceConfig(
+                    name=str(row["name"]),
+                    mode="external",
+                    dialect=str(row["dialect"]),
+                    version=str(row["version"] or ""),
+                    host=str(row["host"] or "localhost"),
+                    port=int(row["port"] or 0),
+                    database=str(row["database_name"] or ""),
+                    username=str(row["username"] or ""),
+                    password=str(row["encrypted_password"] or ""),
+                    description=str(row["description"] or ""),
+                    extra_params=dict(row["extra_params"] or {}),
+                    tenant_id=int(row["tenant_id"]),
+                    owner_user_id=int(row["owner_user_id"]),
+                )
+                self._register(ds)
+        except Exception:
+            logger.error("持久化数据源加载失败", exc_info=True)
+            raise
+        logger.info("持久化数据源加载完成", count=len(rows))
+        return len(rows)
+
+    # 方法作用：删除页面持久化的数据源和对应权限记录。
+    # Args: name - 数据源名称；tenant_id - 当前租户；platform_admin - 是否平台超级管理员。
+    # Returns: 存在并删除时返回 True。
+    async def delete_persisted(
+        self,
+        name: str,
+        *,
+        tenant_id: int,
+        platform_admin: bool,
+    ) -> bool:
+        logger.debug(
+            "持久化数据源删除入口",
+            datasource=name,
+            tenant_id=tenant_id,
+            platform_admin=platform_admin,
+        )
+        from src.memory.pg_pool import get_pg_pool
+
+        try:
+            pool = await get_pg_pool()
+            async with pool.acquire() as connection:
+                async with connection.transaction():
+                    row = await connection.fetchrow(
+                        "DELETE FROM datasource_configs WHERE name=$1 "
+                        "AND ($2::bool OR tenant_id=$3) RETURNING tenant_id",
+                        name, platform_admin, tenant_id,
+                    )
+                    if row is not None:
+                        await connection.execute(
+                            "DELETE FROM datasource_permissions WHERE datasource_name=$1 "
+                            "AND tenant_id=$2",
+                            name, int(row["tenant_id"]),
+                        )
+        except Exception:
+            logger.error("持久化数据源删除失败", datasource=name, exc_info=True)
+            raise
+        removed = row is not None
+        logger.info("持久化数据源删除完成", datasource=name, removed=removed)
+        return removed
 
     async def unregister(self, name: str) -> None:
         """移除数据源并兼容关闭同步/异步连接池。

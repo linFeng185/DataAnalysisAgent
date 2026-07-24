@@ -24,7 +24,8 @@
 | 18. 前端 | — | — | 13 | 5 | 18 | — |
 | 19. 扩展能力 | — | — | 5 | 11 | 16 | — |
 | 20. 架构整改 | 5 | 8 | — | — | 13 | — |
-| **总计** | **141** | **113** | **72** | **29** | **355** | — |
+| 21. 平台管理与强制认证 | 12 | 3 | — | — | 15 | — |
+| **总计** | **153** | **116** | **72** | **29** | **370** | — |
 
 > 优先级分配依据 SPEC.md §8 实现路线图的四个 Phase：
 > - P0 = Phase 1 MVP（核心链路）
@@ -70,7 +71,7 @@ Phase 1 核心链路:
   5.1.1 SchemaExplorerTool ─→ 6.1.2 get_or_fetch_schema()
   5.1.3 SQLglotValidator ───→ 5.2.1 validate_with_sqlglot()
 
-  8.1.1 MCPClientManager ───→ config/mcp_servers.yaml (1.2.3)
+  8.1.1 MCPClientManager ───→ config/app.yaml (1.2.3)
   9.1.2 SkillManager ───────→ 4.2.3 Skill 匹配触发
 
 Phase 2 关键依赖:
@@ -124,7 +125,8 @@ Phase 3 关键依赖:
 | 18. 前端 | 10 | — | — | 10 | — |
 | 19. 扩展能力 | 20 | — | — | 9 | 11 |
 | 20. 架构整改 | 13 | 5 | 8 | — | — |
-| **总计** | **388** | **146** | **139** | **78** | **25** |
+| 21. 平台管理与强制认证 | 15 | 12 | 3 | — | — |
+| **总计** | **403** | **158** | **142** | **78** | **25** |
 
 ---
 
@@ -135,8 +137,6 @@ Phase 3 关键依赖:
 [^1]: **1.2.3 MCP Server 注册表** — 原因: MCP Client 模块(8)未实现，配置文件结构需与 `MCPClientManager.connect_all()` 同步定义。条件: MCP Client Manager 开发时一并创建。时机: Phase 1 后续(模块 8)。
 
 [^2]: **1.3.7 全局异常中间件 / 2.3.7~9 外挂 API 路由** — 原因: 依赖 FastAPI 路由体系，当前 `api/` 仅占位。条件: `api/routes.py` + `api/schemas.py` 创建时。时机: Phase 2(模块 11)。
-
-[^3]: **2.1.4 DataSourceConfigStore** — 原因: 通用迁移执行器已完成，但 `datasource_configs` 的凭证加密字段和租户唯一键设计尚未落地。条件: 完成 17.1.5 表结构设计与迁移后。时机: Phase 3，多实例部署前。
 
 [^4]: **2.4.3 KMS 集成** — 原因: 需 Vault/AWS KMS/Azure Key Vault 等外部基础设施，当前 AES 本地加密已覆盖 MVP。条件: 生产环境 KMS 就绪。时机: Phase 4。
 

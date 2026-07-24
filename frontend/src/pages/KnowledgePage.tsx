@@ -5,6 +5,7 @@ import { get, post, patch } from '../api/client';
 import type { KnowledgeEntry, KnowledgeDoc, KnowledgeScope, KnowledgeTag } from '../types';
 import { useAuth } from '../hooks/AuthContext';
 import dayjs from 'dayjs';
+import DOMPurify from 'dompurify';
 
 const STRATEGY_OPTIONS = [
   { value: 'auto', label: '自动检测', desc: '根据文档内容自动选择最佳策略（推荐）' },
@@ -54,6 +55,10 @@ export default function KnowledgePage() {
   const [entryDetail, setEntryDetail] = useState<KnowledgeEntry | null>(null);
   const [docDetail, setDocDetail] = useState<KnowledgeDoc | null>(null);
   const [docContent, setDocContent] = useState('');
+  const sanitizedDocContent = useMemo(
+    () => DOMPurify.sanitize(docContent || '<p>无法渲染</p>'),
+    [docContent],
+  );
   const [docType, setDocType] = useState('text');
   const [docRawUrl, setDocRawUrl] = useState('');
   const [docLoading, setDocLoading] = useState(false);
@@ -507,13 +512,13 @@ export default function KnowledgePage() {
             ) : docType === 'pdf' ? (
               docRawUrl ? (
                 <iframe src={docRawUrl} style={{ width: '100%', height: 500, border: '1px solid #d9d9d9', borderRadius: 6 }}
-                  title={docDetail.name} />
+                  title={docDetail.name} sandbox="" referrerPolicy="no-referrer" />
               ) : (
                 <div style={{ padding: 16, color: '#999' }}>无法加载 PDF</div>
               )
             ) : docType === 'word' ? (
               <div style={{ maxHeight: 450, overflow: 'auto', background: '#fafafa', padding: 12, borderRadius: 6 }}
-                dangerouslySetInnerHTML={{ __html: docContent || '<p>无法渲染</p>' }} />
+                dangerouslySetInnerHTML={{ __html: sanitizedDocContent }} />
             ) : (
               <div style={{ whiteSpace: 'pre-wrap', maxHeight: 450, overflow: 'auto', fontSize: 13,
                 lineHeight: 1.7, background: '#fafafa', padding: 12, borderRadius: 6 }}>

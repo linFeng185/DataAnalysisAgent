@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import io
-import sys
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -254,12 +253,20 @@ class TestDatasourceLifecycle:
     async def test_register_is_visible_and_delete_removes_provider(self, monkeypatch):
         """注册后的数据源应进入全局列表，删除后不可见。"""
         # Arrange
+        import src.api.auth as auth
         import src.api.routes as routes
         from src.datasource.providers.external import ExternalDataSourceProvider
         from src.datasource.registry import DataSourceRegistry
 
         provider = ExternalDataSourceProvider()
         monkeypatch.setattr(provider, "_prefetch_schema", AsyncMock())
+        monkeypatch.setattr(provider, "persist", AsyncMock())
+        monkeypatch.setattr(provider, "delete_persisted", AsyncMock(return_value=True))
+        monkeypatch.setattr(auth, "require_tenant_admin", lambda: None)
+        monkeypatch.setattr(auth, "get_current_tenant_id", lambda: 1)
+        monkeypatch.setattr(auth, "get_current_user_id", lambda: 1)
+        monkeypatch.setattr(auth, "get_current_role", lambda: "super_admin")
+        monkeypatch.setattr(auth, "is_platform_super_admin", lambda: True)
         registry = DataSourceRegistry()
         registry.register_provider("external", provider)
         monkeypatch.setattr(routes, "_registry", lambda: registry)
@@ -282,9 +289,11 @@ class TestDatasourceLifecycle:
     async def test_delete_unknown_datasource_returns_404(self, monkeypatch):
         """删除不存在的数据源必须返回 404 而非假成功。"""
         # Arrange
+        import src.api.auth as auth
         import src.api.routes as routes
         from src.datasource.registry import DataSourceRegistry
 
+        monkeypatch.setattr(auth, "require_tenant_admin", lambda: None)
         registry = DataSourceRegistry()
         monkeypatch.setattr(routes, "_registry", lambda: registry)
 
@@ -298,15 +307,25 @@ class TestDatasourceLifecycle:
         # Arrange
         from httpx import ASGITransport, AsyncClient
 
+        import src.api.auth as auth
         import src.api.routes as routes
         from src.datasource.providers.external import ExternalDataSourceProvider
         from src.datasource.registry import DataSourceRegistry
         from src.main import create_app
 
+        provider = ExternalDataSourceProvider()
+        monkeypatch.setattr(provider, "_prefetch_schema", AsyncMock())
+        monkeypatch.setattr(provider, "persist", AsyncMock())
+        monkeypatch.setattr(provider, "delete_persisted", AsyncMock(return_value=True))
         registry = DataSourceRegistry()
-        registry.register_provider("external", ExternalDataSourceProvider())
+        registry.register_provider("external", provider)
         monkeypatch.setattr(routes, "_registry", lambda: registry)
-        client = AsyncClient(transport=ASGITransport(app=create_app()), base_url="http://test")
+        token = auth.create_access_token(1, 1, "super_admin")
+        client = AsyncClient(
+            transport=ASGITransport(app=create_app()),
+            base_url="http://test",
+            headers={"Authorization": f"Bearer {token}"},
+        )
 
         # Act
         created = await client.post("/api/v1/datasources", json={
@@ -332,9 +351,11 @@ class TestSchemaManagement:
     async def test_refresh_unknown_datasource_returns_404(self, monkeypatch):
         """Schema 刷新必须验证数据源真实存在。"""
         # Arrange
+        import src.api.auth as auth
         import src.api.routes as routes
         from src.datasource.registry import DataSourceRegistry
 
+        monkeypatch.setattr(auth, "require_tenant_admin", lambda: None)
         registry = DataSourceRegistry()
         monkeypatch.setattr(routes, "_registry", lambda: registry)
 
@@ -346,8 +367,10 @@ class TestSchemaManagement:
     async def test_comment_delegates_to_schema_manager(self, monkeypatch):
         """字段备注更新必须写入 SchemaManager，而不是只返回成功消息。"""
         # Arrange
+        import src.api.auth as auth
         import src.api.routes as routes
 
+        monkeypatch.setattr(auth, "require_tenant_admin", lambda: None)
         manager = SimpleNamespace(update_column_comment=AsyncMock(return_value=True))
         monkeypatch.setattr(routes, "_registry", lambda: SimpleNamespace(resolve=AsyncMock(return_value=object())))
         monkeypatch.setattr(routes, "_schema_manager", lambda: manager, raising=False)
@@ -389,9 +412,13 @@ class TestKnowledgeUploadSafety:
     async def test_upload_rejects_content_over_limit(self, monkeypatch):
         """上传内容超过 MAX_UPLOAD_BYTES 时应在处理前返回 413。"""
         # Arrange
+        import src.api.auth as auth
         import src.config as config_module
         import src.api.routes as routes
 
+        monkeypatch.setattr(auth, "get_current_role", lambda: "analyst")
+        monkeypatch.setattr(auth, "get_current_tenant_id", lambda: 1)
+        monkeypatch.setattr(auth, "get_current_user_id", lambda: 7)
         monkeypatch.setattr(config_module, "get_settings", lambda: SimpleNamespace(max_upload_bytes=4))
         upload = UploadFile(filename="too-large.txt", file=io.BytesIO(b"12345"))
 
@@ -408,9 +435,13 @@ class TestKnowledgeUploadSafety:
     async def test_upload_rejects_too_many_files(self, monkeypatch):
         """文件数量超限时应在读取任何文件前返回 413。"""
         # Arrange
+        import src.api.auth as auth
         import src.api.routes as routes
         import src.config as config_module
 
+        monkeypatch.setattr(auth, "get_current_role", lambda: "analyst")
+        monkeypatch.setattr(auth, "get_current_tenant_id", lambda: 1)
+        monkeypatch.setattr(auth, "get_current_user_id", lambda: 7)
         monkeypatch.setattr(config_module, "get_settings", lambda: SimpleNamespace(
             max_upload_bytes=10, max_upload_files=1, max_upload_total_bytes=10,
             multi_tenant=False,
@@ -434,9 +465,13 @@ class TestKnowledgeUploadSafety:
     async def test_upload_rejects_total_request_bytes(self, monkeypatch):
         """累计大小超限时不得保存任意一个文件。"""
         # Arrange
+        import src.api.auth as auth
         import src.api.routes as routes
         import src.config as config_module
 
+        monkeypatch.setattr(auth, "get_current_role", lambda: "analyst")
+        monkeypatch.setattr(auth, "get_current_tenant_id", lambda: 1)
+        monkeypatch.setattr(auth, "get_current_user_id", lambda: 7)
         monkeypatch.setattr(config_module, "get_settings", lambda: SimpleNamespace(
             max_upload_bytes=4, max_upload_files=2, max_upload_total_bytes=5,
             multi_tenant=False,
@@ -458,20 +493,24 @@ class TestKnowledgeVectorStoreRoutes:
     """覆盖 6.8.6 知识管理 API 的 VectorStore 和租户边界。"""
 
     async def test_list_knowledge_uses_scoped_vector_store_filter(self, monkeypatch):
-        """知识列表应分别读取系统、租户和个人范围，而不是执行宽查询。"""
+        """普通用户知识列表应只读取租户和个人范围，而不是执行宽查询。"""
         # Arrange
+        import src.api.auth as auth
         import src.api.routes as routes
         import src.memory.vector_store as vector_module
         from src.memory.vector_store import VectorEntry
 
         store = SimpleNamespace(get_by_filter=AsyncMock(side_effect=[
-            [],
             [VectorEntry(
                 id="doc-1", content="GMV 定义",
                 metadata={"category": "metric", "source": "user_upload", "visibility": "tenant"},
             )],
             [],
         ]))
+        monkeypatch.setattr(auth, "get_current_role", lambda: "analyst")
+        monkeypatch.setattr(auth, "get_current_tenant_id", lambda: 4)
+        monkeypatch.setattr(auth, "get_current_user_id", lambda: 7)
+        monkeypatch.setattr(auth, "is_platform_super_admin", lambda: False)
         monkeypatch.setattr(vector_module, "get_vector_store", AsyncMock(return_value=store))
 
         # Act
@@ -481,8 +520,28 @@ class TestKnowledgeVectorStoreRoutes:
         assert result["total"] == 1
         assert result["entries"][0]["id"] == "doc-1"
         filters = [call.args[0] for call in store.get_by_filter.await_args_list]
-        assert [item["visibility"] for item in filters] == ["system", "tenant", "private"]
+        assert [item["visibility"] for item in filters] == ["tenant", "private"]
         assert all(item["category"] == "metric" for item in filters)
+
+    # 方法作用：验证知识存储故障以 HTTP 500 暴露，不能伪装成空列表。
+    # Args: self - pytest 测试类实例；monkeypatch - pytest 补丁工具。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    async def test_list_knowledge_store_failure_is_visible(self, monkeypatch) -> None:
+        """存储不可用与真实无数据必须使用不同响应语义。"""
+        # Arrange
+        import src.api.routes as routes
+        import src.memory.vector_store as vector_module
+
+        store = SimpleNamespace(
+            get_by_filter=AsyncMock(side_effect=RuntimeError("vector store unavailable")),
+        )
+        monkeypatch.setattr(vector_module, "get_vector_store", AsyncMock(return_value=store))
+
+        # Act / Assert
+        with pytest.raises(HTTPException) as caught:
+            await routes.list_knowledge(category=None, search=None, page=1, page_size=20)
+        assert caught.value.status_code == 500
+        assert caught.value.detail == "知识库加载失败"
 
     async def test_delete_knowledge_entry_checks_owner_before_delete(self, monkeypatch):
         """删除用户知识条目前必须校验租户和所有者。"""
@@ -593,9 +652,12 @@ class TestKnowledgeVectorStoreRoutes:
     async def test_knowledge_search_error_is_sanitized(self, monkeypatch):
         """内部存储异常只写日志，客户端收到稳定通用错误。"""
         # Arrange
+        import src.api.auth as auth
         import src.api.routes as routes
         import src.memory.vector_store as vector_module
 
+        monkeypatch.setattr(auth, "get_current_role", lambda: "super_admin")
+        monkeypatch.setattr(auth, "get_current_user_id", lambda: 1)
         monkeypatch.setattr(
             vector_module,
             "get_vector_store",

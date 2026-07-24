@@ -54,3 +54,28 @@ def test_knowledge_types_expose_governance_fields() -> None:
     except Exception as exc:
         logger.error("test_knowledge_types_expose_governance_fields 异常: %s", exc, exc_info=True)
         raise
+
+
+# 方法作用：验证不可信文档内容经过 HTML 清洗且 PDF iframe 启用沙箱。
+# Args: 无。
+# Returns: 无返回值，断言失败时由 pytest 报告。
+def test_document_preview_sanitizes_html_and_sandboxes_iframe() -> None:
+    """Word HTML 和 PDF 预览不得获得页面脚本执行能力。"""
+    logger.debug("test_document_preview_sanitizes_html_and_sandboxes_iframe 入口")
+    try:
+        # Arrange / Act
+        source = Path("frontend/src/pages/KnowledgePage.tsx").read_text(encoding="utf-8")
+
+        # Assert
+        assert "DOMPurify" in source
+        assert "DOMPurify.sanitize" in source
+        assert 'sandbox=""' in source
+        assert 'referrerPolicy="no-referrer"' in source
+        logger.info("test_document_preview_sanitizes_html_and_sandboxes_iframe 完成")
+    except Exception as exc:
+        logger.error(
+            "test_document_preview_sanitizes_html_and_sandboxes_iframe 异常: %s",
+            exc,
+            exc_info=True,
+        )
+        raise

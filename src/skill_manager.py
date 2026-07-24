@@ -150,7 +150,7 @@ class SkillManager:
                 logger.warning("Skill 缺少依赖", skill=skill.name, missing=missing)
                 skill.enabled = False
             fresh[skill.resource_id] = skill
-            logger.info(
+            logger.debug(
                 "Skill 已加载",
                 name=skill.name,
                 scope=scope,
@@ -190,12 +190,12 @@ class SkillManager:
             name, scope=scope, tenant_id=tenant_id, user_id=user_id,
         )
         if not skill:
-            logger.info("判断内置 Skill 完成", name=name, builtin=False)
+            logger.debug("判断内置 Skill 完成", name=name, builtin=False)
             return False
         source = Path(skill.source_path).resolve()
         builtin = self.builtin_dir.resolve()
         result = source == builtin or builtin in source.parents
-        logger.info("判断内置 Skill 完成", name=name, builtin=result)
+        logger.debug("判断内置 Skill 完成", name=name, builtin=result)
         return result
 
     # 方法作用：按当前身份可见范围从缓存移除指定 Skill。
@@ -218,7 +218,7 @@ class SkillManager:
             del self.skills[skill.resource_id]
             logger.info("Skill 已从缓存移除", name=name, resource_id=skill.resource_id)
             return True
-        logger.info("Skill 缓存移除完成", name=name, removed=False)
+        logger.debug("Skill 缓存移除完成", name=name, removed=False)
         return False
 
     @property
@@ -228,7 +228,7 @@ class SkillManager:
     def upload_dir(self) -> Path:
         """兼容旧调用返回受管目录根路径。"""
         logger.debug("获取 Skill 受管目录入口")
-        logger.info("获取 Skill 受管目录完成", path=str(self.managed_dir))
+        logger.debug("获取 Skill 受管目录完成", path=str(self.managed_dir))
         return self.managed_dir
 
     # 方法作用：根据可信身份计算 Skill 上传目录。
@@ -249,7 +249,7 @@ class SkillManager:
         else:
             logger.error("计算 Skill 上传目录失败", scope=scope, exc_info=True)
             raise ValueError(f"不支持的 Skill 作用域: {scope}")
-        logger.info("计算 Skill 上传目录完成", path=str(result), scope=normalized)
+        logger.debug("计算 Skill 上传目录完成", path=str(result), scope=normalized)
         return result
 
     # 方法作用：返回当前租户和用户可见的全部 Skill 资源。
@@ -272,7 +272,7 @@ class SkillManager:
         result = sorted(
             candidates, key=lambda item: (item.name, priority.get(item.scope, 3)),
         )
-        logger.info("获取可见 Skill 完成", tenant_id=tenant_id, user_id=user_id, count=len(result))
+        logger.debug("获取可见 Skill 完成", tenant_id=tenant_id, user_id=user_id, count=len(result))
         return result
 
     # 方法作用：在当前身份可见集合中按名称和可选作用域查找 Skill。
@@ -296,9 +296,9 @@ class SkillManager:
         if candidates:
             priority = {"private": 3, "tenant": 2, "system": 1}
             skill = max(candidates, key=lambda item: priority.get(item.scope, 0))
-            logger.info("查找 Skill 完成", name=name, found=True, resource_id=skill.resource_id)
+            logger.debug("查找 Skill 完成", name=name, found=True, resource_id=skill.resource_id)
             return skill
-        logger.info("查找 Skill 完成", name=name, found=False)
+        logger.debug("查找 Skill 完成", name=name, found=False)
         return None
 
     # ── 9.1.6 匹配 ──────────────────────────────────
@@ -341,7 +341,7 @@ class SkillManager:
         if activated:
             logger.info("Skill 激活", names=[s.name for s in activated])
         else:
-            logger.info("Skill 匹配完成", names=[])
+            logger.debug("Skill 匹配完成", names=[])
         return activated
 
     # ── 9.1.7 获取工具 ──────────────────────────────
@@ -366,7 +366,7 @@ class SkillManager:
                             tools.append(t)
             except Exception as e:
                 logger.warning("Skill 工具加载失败", skill=skill.name, error=str(e))
-        logger.info("获取 Skill 工具完成", tool_count=len(tools))
+        logger.debug("获取 Skill 工具完成", tool_count=len(tools))
         return tools
 
     # ── 9.1.8 构建 Prompt ───────────────────────────
@@ -378,7 +378,7 @@ class SkillManager:
         """将激活的 Skill 指令追加到 System Prompt。"""
         logger.debug("构建 Skill Prompt 入口", skill_count=len(activated_skills))
         if not activated_skills:
-            logger.info("构建 Skill Prompt 完成", chars=0)
+            logger.debug("构建 Skill Prompt 完成", chars=0)
             return ""
         parts = [
             "\n## 激活的技能\n",
@@ -389,10 +389,40 @@ class SkillManager:
             parts.append(s.system_prompt_override)
             parts.append("")
         result = "\n".join(parts)
-        logger.info("构建 Skill Prompt 完成", chars=len(result))
+        logger.debug("构建 Skill Prompt 完成", chars=len(result))
         return result
 
     # ── 9.1.4 解析清单 ───────────────────────────────
+
+    # 方法作用：通过公开接口解析可信目录中的 SKILL.md 清单。
+    # Args: skill_md_path - 清单路径；scope - 可信作用域；tenant_id - 租户；owner_user_id - 所有者。
+    # Returns: 完整 Skill 数据对象。
+    def load_skill_manifest(
+        self,
+        skill_md_path: Path,
+        *,
+        scope: str = "system",
+        tenant_id: int = 0,
+        owner_user_id: int = 0,
+    ) -> Skill:
+        logger.debug("公开加载 Skill 清单入口", path=str(skill_md_path), scope=scope)
+        try:
+            result = self._parse_skill_manifest(
+                skill_md_path,
+                scope=scope,
+                tenant_id=tenant_id,
+                owner_user_id=owner_user_id,
+            )
+        except Exception as exc:
+            logger.error(
+                "公开加载 Skill 清单失败",
+                path=str(skill_md_path),
+                error=str(exc),
+                exc_info=True,
+            )
+            raise
+        logger.debug("公开加载 Skill 清单完成", skill=result.name, scope=result.scope)
+        return result
 
     # 方法作用：解析 SKILL.md 并注入由目录确定的可信作用域身份。
     # Args: skill_md_path - 清单路径；scope - 可信作用域；tenant_id - 租户；owner_user_id - 所有者。
@@ -436,7 +466,7 @@ class SkillManager:
             owner_user_id=owner_user_id,
             resource_id=self._resource_key(name, scope, tenant_id, owner_user_id),
         )
-        logger.info("解析 Skill 清单完成", name=result.name, resource_id=result.resource_id)
+        logger.debug("解析 Skill 清单完成", name=result.name, resource_id=result.resource_id)
         return result
 
     # ── 9.1.5 依赖检查 ───────────────────────────────
@@ -453,7 +483,7 @@ class SkillManager:
                 __import__(pkg)
             except ImportError:
                 missing.append(pkg)
-        logger.info("检查 Skill 依赖完成", skill=skill.name, missing=missing)
+        logger.debug("检查 Skill 依赖完成", skill=skill.name, missing=missing)
         return missing
 
     # ── 9.1.9 动态加载 ───────────────────────────────
@@ -466,7 +496,7 @@ class SkillManager:
         logger.debug("加载 Skill 模块入口", resource_id=skill.resource_id, skill=skill.name)
         tools_path = Path(skill.source_path) / "tools.py"
         if not tools_path.exists():
-            logger.info("加载 Skill 模块完成", skill=skill.name, loaded=False)
+            logger.debug("加载 Skill 模块完成", skill=skill.name, loaded=False)
             return None
         safe_id = skill.resource_id.replace(":", "_").replace("-", "_")
         module_name = f"skills.{safe_id}.tools"
@@ -477,7 +507,7 @@ class SkillManager:
         module = importlib.util.module_from_spec(spec)
         sys.modules[module_name] = module
         spec.loader.exec_module(module)
-        logger.info("加载 Skill 模块完成", skill=skill.name, loaded=True)
+        logger.debug("加载 Skill 模块完成", skill=skill.name, loaded=True)
         return module
 
     # 方法作用：生成不会因同名 Skill 冲突的内部复合标识。
@@ -493,7 +523,7 @@ class SkillManager:
             owner_user_id=owner_user_id,
         )
         result = f"{scope}:{tenant_id}:{owner_user_id}:{name}"
-        logger.info("生成 Skill 复合标识完成", resource_id=result)
+        logger.debug("生成 Skill 复合标识完成", resource_id=result)
         return result
 
     # 方法作用：使用显式参数或认证 ContextVar 解析当前身份。
@@ -508,7 +538,7 @@ class SkillManager:
             tenant_id = get_current_tenant_id() if tenant_id is None else tenant_id
             user_id = get_current_user_id() if user_id is None else user_id
         result = int(tenant_id), int(user_id)
-        logger.info("解析 Skill 请求身份完成", tenant_id=result[0], user_id=result[1])
+        logger.debug("解析 Skill 请求身份完成", tenant_id=result[0], user_id=result[1])
         return result
 
 
@@ -529,7 +559,7 @@ def get_skill_manager(
         "skill_manager",
         partial(SkillManager, builtin_dir, extra_dirs, managed_dir),
     )
-    logger.info("获取 SkillManager 完成")
+    logger.debug("获取 SkillManager 完成")
     return result
 
 
@@ -562,5 +592,5 @@ def validate_skill_request(skill: Skill, asset_kind: str, tool_calls: int = 0,
         if allowed != ["*"] and network_host not in allowed:
             logger.warning("Skill 网络域名未授权", skill=skill.name, host=network_host)
             return False
-    logger.info("Skill 请求授权完成", skill=skill.name, authorized=True)
+    logger.debug("Skill 请求授权完成", skill=skill.name, authorized=True)
     return True

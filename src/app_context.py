@@ -56,7 +56,7 @@ class AppContext:
         """返回 Context 是否已经完成关闭。"""
         logger.debug("读取 AppContext 关闭状态入口")
         result = self._closed
-        logger.info("读取 AppContext 关闭状态完成", closed=result)
+        logger.debug("读取 AppContext 关闭状态完成", closed=result)
         return result
 
     # 方法作用：确保关闭后的 Context 不再创建或替换资源。
@@ -67,7 +67,7 @@ class AppContext:
         if self._closed:
             logger.error("校验 AppContext 可用状态失败", reason="Context 已关闭")
             raise RuntimeError("AppContext 已关闭")
-        logger.info("校验 AppContext 可用状态完成")
+        logger.debug("校验 AppContext 可用状态完成")
 
     # 方法作用：读取已创建资源，不触发工厂。
     # Args: self - 当前 Context；name - 资源名；default - 不存在时返回值。
@@ -75,7 +75,7 @@ class AppContext:
     def get_resource(self, name: str, default: T | None = None) -> Any | T | None:
         logger.debug("读取 AppContext 资源入口", resource=name)
         result = self._resources.get(name, default)
-        logger.info("读取 AppContext 资源完成", resource=name, found=name in self._resources)
+        logger.debug("读取 AppContext 资源完成", resource=name, found=name in self._resources)
         return result
 
     # 方法作用：显式注册资源和可选关闭器。
@@ -96,7 +96,7 @@ class AppContext:
             raise ValueError("资源名不能为空")
         if name in self._resources and not replace:
             if self._resources[name] is value:
-                logger.info("注册 AppContext 资源完成", resource=name, reused=True)
+                logger.debug("注册 AppContext 资源完成", resource=name, reused=True)
                 return value
             logger.error("注册 AppContext 资源失败", resource=name, reason="资源已存在")
             raise ValueError(f"资源已存在: {name}")
@@ -122,7 +122,7 @@ class AppContext:
         self._ensure_open()
         existing = self._resources.get(name, _MISSING)
         if existing is not _MISSING:
-            logger.info("同步获取 AppContext 资源完成", resource=name, reused=True)
+            logger.debug("同步获取 AppContext 资源完成", resource=name, reused=True)
             return cast(T, existing)
         try:
             value = factory()
@@ -135,7 +135,7 @@ class AppContext:
                 exc_info=True,
             )
             raise
-        logger.info("同步获取 AppContext 资源完成", resource=name, reused=False)
+        logger.debug("同步获取 AppContext 资源完成", resource=name, reused=False)
         return result
 
     # 方法作用：并发安全地惰性创建异步资源。
@@ -152,14 +152,14 @@ class AppContext:
         self._ensure_open()
         existing = self._resources.get(name, _MISSING)
         if existing is not _MISSING:
-            logger.info("异步获取 AppContext 资源完成", resource=name, reused=True)
+            logger.debug("异步获取 AppContext 资源完成", resource=name, reused=True)
             return cast(T, existing)
         lock = self._async_locks.setdefault(name, asyncio.Lock())
         async with lock:
             self._ensure_open()
             existing = self._resources.get(name, _MISSING)
             if existing is not _MISSING:
-                logger.info("异步获取 AppContext 资源完成", resource=name, reused=True)
+                logger.debug("异步获取 AppContext 资源完成", resource=name, reused=True)
                 return cast(T, existing)
             try:
                 value = await factory()
@@ -172,7 +172,7 @@ class AppContext:
                     exc_info=True,
                 )
                 raise
-        logger.info("异步获取 AppContext 资源完成", resource=name, reused=False)
+        logger.debug("异步获取 AppContext 资源完成", resource=name, reused=False)
         return result
 
     # 方法作用：关闭并移除单个资源。
@@ -181,7 +181,7 @@ class AppContext:
     async def close_resource(self, name: str) -> bool:
         logger.debug("关闭 AppContext 资源入口", resource=name)
         if name not in self._resources:
-            logger.info("关闭 AppContext 资源完成", resource=name, existed=False)
+            logger.debug("关闭 AppContext 资源完成", resource=name, existed=False)
             return False
         value = self._resources.pop(name)
         closer = self._closers.pop(name, None)
@@ -211,7 +211,7 @@ class AppContext:
         logger.debug("关闭 AppContext 入口", resource_count=len(self._resources))
         async with self._close_lock:
             if self._closed:
-                logger.info("关闭 AppContext 完成", already_closed=True)
+                logger.debug("关闭 AppContext 完成", already_closed=True)
                 return
             self._closed = True
             errors: list[BaseException] = []
@@ -254,14 +254,14 @@ def get_app_context() -> AppContext:
     logger.debug("获取 AppContext 入口")
     current = _current_app_context.get()
     if current is not None:
-        logger.info("获取 AppContext 完成", source="current")
+        logger.debug("获取 AppContext 完成", source="current")
         return current
     global _default_app_context
     if _default_app_context is None or _default_app_context.closed:
         from src.config import Settings
 
         _default_app_context = AppContext(Settings())
-    logger.info("获取 AppContext 完成", source="default")
+    logger.debug("获取 AppContext 完成", source="default")
     return _default_app_context
 
 
@@ -274,7 +274,7 @@ def get_tenant_policy() -> TenantPolicy:
     if policy is None:
         logger.error("获取 TenantPolicy 失败", reason="AppContext 未初始化租户策略")
         raise RuntimeError("AppContext 未初始化 TenantPolicy")
-    logger.info("获取 TenantPolicy 完成")
+    logger.debug("获取 TenantPolicy 完成")
     return policy
 
 
@@ -299,13 +299,13 @@ def use_app_context(context: AppContext) -> Iterator[AppContext]:
     token = _current_app_context.set(context)
     try:
         yield context
-        logger.info("绑定 AppContext 使用完成")
+        logger.debug("绑定 AppContext 使用完成")
     except Exception as exc:
         logger.error("绑定 AppContext 使用失败", error=str(exc), exc_info=True)
         raise
     finally:
         _current_app_context.reset(token)
-        logger.info("绑定 AppContext 已恢复")
+        logger.debug("绑定 AppContext 已恢复")
 
 
 # 方法作用：异步临时绑定当前协程 AppContext 并在退出时恢复。
@@ -316,7 +316,7 @@ async def use_app_context_async(context: AppContext) -> AsyncIterator[AppContext
     logger.debug("异步绑定 AppContext 入口")
     with use_app_context(context):
         yield context
-    logger.info("异步绑定 AppContext 完成")
+    logger.debug("异步绑定 AppContext 完成")
 
 
 # 方法作用：从 FastAPI app.state 获取当前应用 Context。
@@ -328,7 +328,7 @@ def get_request_app_context(request: Request) -> AppContext:
     if not isinstance(context, AppContext):
         logger.error("FastAPI AppContext 依赖失败", path=request.url.path)
         raise RuntimeError("FastAPI 应用未配置 AppContext")
-    logger.info("FastAPI AppContext 依赖完成", path=request.url.path)
+    logger.debug("FastAPI AppContext 依赖完成", path=request.url.path)
     return context
 
 
@@ -352,8 +352,8 @@ class AppContextMiddleware:
         logger.debug("AppContextMiddleware 调用入口", scope_type=scope_type)
         if scope_type not in {"http", "websocket"}:
             await self.app(scope, receive, send)
-            logger.info("AppContextMiddleware 调用完成", mode="passthrough")
+            logger.debug("AppContextMiddleware 调用完成", mode="passthrough")
             return
         async with use_app_context_async(self.context):
             await self.app(scope, receive, send)
-        logger.info("AppContextMiddleware 调用完成", mode="bound")
+        logger.debug("AppContextMiddleware 调用完成", mode="bound")

@@ -20,11 +20,20 @@
 | 20.14 | 剩余回退异常可见性审计 | `src/` 20 个模块、30 个 fallback handler | 单测完成 | P1 |
 | 20.15 | AppContext 与依赖注入 | `src/` 全局工厂、Graph、FastAPI | 单测完成 | P1 |
 | 20.16 | 租户策略集中化 | `src/security/`、认证、知识库、Graph | 单测完成 | P0 |
+| 20.17 | Settings 单一 Context 来源 | `src/config.py`、`src/main.py`、`src/app_context.py` | 单测完成 | P0 |
+| 20.18 | LLM Provider 单一调用链 | `src/llm/` | 单测完成 | P0 |
+| 20.19 | 路由显式最小导入 | `src/api/routes/` | 单测完成 | P1 |
+| 20.20 | SQL 安全执行统一入口 | `src/security/sql_execution.py`、Graph、Tools | 单测完成 | P0 |
+| 20.21 | PostgreSQL 裸连接回归门禁 | `src/`、`tests/` | 单测完成 | P0 |
+| 20.22 | 异常处理决策矩阵 | `src/failure_policy.py`、安全与降级边界 | 单测完成 | P0 |
+| 20.23 | VectorStore 所有权收口 | `src/memory/`、`src/knowledge/` | 单测完成 | P0 |
+| 20.24 | AnalysisState 持久化分层 | `src/graph/`、会话历史 | 单测完成 | P0 |
 
 ### 模块收尾
 
-模块功能点共 16 项，已完成 16 项，待开发 0 项。
+模块功能点共 24 项，已完成 24 项，待开发 0 项；第二轮底层架构收口已完成。
 
 20.5 已通过 `git filter-repo` 清除所有本地 refs 中的 `src/test_data.sql` / `test_data.sql`，本地数据文件继续由 `.gitignore` 排除。远端历史发布属于仓库维护操作，必须在通知协作者后单独 force-push。
 
-本模块无待开发项。AppContext 现按 FastAPI 应用隔离资源并逆序关闭；TenantPolicy 集中认证、数据源和知识隔离语义；30 个宽泛异常回退均由 AST 契约保证堆栈可见性。
+第一轮 20.1-20.16 与第二轮 20.17-20.24 均已完成。额外审计同步修复了跨后端 VectorStore 不等值过滤、
+pgvector 空过滤全表删除风险、启动预热私有接口泄漏、MCP/Skill/结构化资产跨模块私有访问，以及知识上传授权顺序。

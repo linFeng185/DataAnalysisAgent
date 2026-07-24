@@ -162,10 +162,15 @@ async def search_knowledge(
         try:
             results = await store.search(query, top_k=bounded_top_k, filters=filters)
         except Exception as exc:
-            logger.warning(
+            from src.failure_policy import FailureDomain, fallback_allowed
+
+            if not fallback_allowed(FailureDomain.KNOWLEDGE):
+                raise
+            logger.error(
                 "知识库向量分范围召回失败",
                 visibility=filters.get("visibility", ""),
                 error=str(exc),
+                exc_info=True,
             )
             continue
         for result in results:
@@ -227,10 +232,15 @@ async def search_knowledge(
                         evidence.scores["fused"] = lexical_score * 0.75
                         unique[evidence.source_id] = evidence
             except Exception as exc:
-                logger.warning(
+                from src.failure_policy import FailureDomain, fallback_allowed
+
+                if not fallback_allowed(FailureDomain.KNOWLEDGE):
+                    raise
+                logger.error(
                     "知识库关键词分范围召回失败，保留向量结果",
                     visibility=filters.get("visibility", ""),
                     error=str(exc),
+                    exc_info=True,
                 )
     from src.knowledge.reranker import rerank_evidence
     candidates = sorted(
@@ -264,7 +274,7 @@ def _lexical_score(query: str, content: str, metadata: dict[str, Any] | None = N
     body_overlap = len(query_tokens & body_tokens) / len(query_tokens)
     field_overlap = len(query_tokens & field_tokens) / len(query_tokens)
     result = min(1.0, body_overlap * 0.6 + field_overlap * 0.4)
-    logger.info("计算知识词法相关性完成", score=round(result, 4))
+    logger.debug("计算知识词法相关性完成", score=round(result, 4))
     return result
 
 
@@ -274,5 +284,5 @@ def _lexical_score(query: str, content: str, metadata: dict[str, Any] | None = N
 def _tokenize(text: str) -> list[str]:
     logger.debug("知识查询分词入口", text_size=len(text))
     tokens = re.findall(r"[A-Za-z0-9_]+|[\u4e00-\u9fff]", str(text).lower())
-    logger.info("知识查询分词完成", token_count=len(tokens))
+    logger.debug("知识查询分词完成", token_count=len(tokens))
     return tokens

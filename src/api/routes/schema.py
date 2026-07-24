@@ -2,33 +2,14 @@
 
 from __future__ import annotations
 
-import io
-import html
-import json
-import os
-import time
-import uuid
-from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from fastapi import APIRouter, HTTPException, Query
 
-from fastapi import APIRouter, Body, File, HTTPException, Query, UploadFile
-
-from src.api.schemas import (
-    ChatRequest, ChatResponse, ColumnCommentRequest,
-    DataSourceCreateRequest, DataSourceInfo, HealthResponse, KnowledgeTagCreateRequest,
-    KnowledgeTagStatusRequest, MCPServerCreate, TableInfo,
-)
+from src.api.schemas import ColumnCommentRequest, TableInfo
 from src.exceptions import DataSourceNotFoundError
-from src.llm.client import is_llm_available
 from src.logging_config import get_logger
-from src.api.routes._helpers import _app, _authorize_extension_scope, _registry
 
 logger = get_logger(__name__)
 router = APIRouter()
-_started_at = time.time()
-
-
-
 def _schema_manager():
     """获取全局 SchemaManager 实例。
 
@@ -103,6 +84,9 @@ async def refresh_schema(datasource: str = Query(default="demo")):
         刷新状态和表数量。
     """
     logger.debug("Schema 刷新路由入口", datasource=datasource)
+    from src.api.auth import require_tenant_admin
+
+    require_tenant_admin()
     try:
         import src.api.routes as routes_package
 
@@ -138,6 +122,9 @@ async def update_column_comment(
         更新后的字段备注摘要。
     """
     logger.debug("字段备注路由入口", datasource=datasource, table=table_name, column=column_name)
+    from src.api.auth import require_tenant_admin
+
+    require_tenant_admin()
     try:
         import src.api.routes as routes_package
 

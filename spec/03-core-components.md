@@ -1560,7 +1560,7 @@ async def execute_sql_node(state: AnalysisState) -> dict:
 
 智能体内置 MCP Client，启动时通过配置文件发现并连接外部 MCP Server，将其工具注入到 LangGraph 的工具层中。
 
-**MCP Server 配置文件** (`config/mcp_servers.yaml`)：
+**MCP Server 配置节** (`config/app.yaml` 中的 `mcp_servers`)：
 
 ```yaml
 # 智能体启动时读取此文件，自动连接所有 MCP Server
@@ -1605,7 +1605,7 @@ class MCPClientManager:
     4. 关闭时优雅断开所有连接
     """
 
-    def __init__(self, config_path: str = "config/mcp_servers.yaml"):
+    def __init__(self, config_path: str = "config/app.yaml"):
         self.config_path = config_path
         self.sessions: dict[str, ClientSession] = {}
         self.exit_stack = AsyncExitStack()
@@ -1788,7 +1788,7 @@ async def get_metrics(metric_name: str) -> dict | None:
 ```
                     ┌─────────────────────┐
                     │    config/           │
-                    │    mcp_servers.yaml  │ ← MCP Server 注册表
+                    │    app.yaml          │ ← 统一配置与 MCP Server 注册表
                     └──────────┬──────────┘
                                │ 启动时加载
                                ▼

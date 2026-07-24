@@ -50,12 +50,18 @@ export default function ChatPage() {
       .then(data => {
         const list = data.datasources || [];
         setDatasources(list);
-        if (list.length > 0 && ds.length === 0) { setDs([list[0].name]); saveDs(list[0].name); }
+        const selectionIsValid = ds.length > 0 && list.some(item => item.name === ds[0]);
+        if (list.length > 0 && !selectionIsValid) {
+          setDs([list[0].name]);
+          saveDs(list[0].name);
+        } else if (list.length === 0) {
+          setDs([]);
+        }
       })
+      .catch(() => message.warning('无法加载数据源列表'));
     get<{models:{id:string;name:string}[],default:string}>('/models')
       .then(data => { setModels(data.models||[]); if (!modelId) setModelId(data.default||''); })
-      .catch(() => {})
-      .catch(() => message.warning('无法加载数据源列表'));
+      .catch(() => message.warning('无法加载模型列表'));
   }, []);
 
   // 新消息时自动滚到底部
@@ -75,8 +81,11 @@ export default function ChatPage() {
 
   const handleSend = () => {
     if (!query.trim() || loading) return;
-    if (!ds) { message.warning('请选择数据源'); return; }
-    send(query, ds[0] || 'demo', ds.length > 1 ? ds : undefined, modelId || undefined);
+    if (ds.length === 0 || !datasources.some(item => item.name === ds[0])) {
+      message.warning('请选择有效的数据源');
+      return;
+    }
+    send(query, ds[0], ds.length > 1 ? ds : undefined, modelId || undefined);
     setQuery('');
   };
 

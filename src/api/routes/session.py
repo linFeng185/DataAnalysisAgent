@@ -2,31 +2,12 @@
 
 from __future__ import annotations
 
-import io
-import html
-import json
-import os
-import time
-import uuid
-from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from fastapi import APIRouter, HTTPException, Query
 
-from fastapi import APIRouter, Body, File, HTTPException, Query, UploadFile
-
-from src.api.schemas import (
-    ChatRequest, ChatResponse, ColumnCommentRequest,
-    DataSourceCreateRequest, DataSourceInfo, HealthResponse, KnowledgeTagCreateRequest,
-    KnowledgeTagStatusRequest, MCPServerCreate, TableInfo,
-)
-from src.exceptions import DataSourceNotFoundError
-from src.llm.client import is_llm_available
 from src.logging_config import get_logger
-from src.api.routes._helpers import _app, _authorize_extension_scope, _registry
 
 logger = get_logger(__name__)
 router = APIRouter()
-_started_at = time.time()
-
 # ---- 查询历史 ----
 
 

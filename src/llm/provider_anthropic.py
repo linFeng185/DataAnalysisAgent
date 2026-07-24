@@ -68,6 +68,7 @@ class AnthropicProvider(LLMProvider):
         max_tokens: int | None = None,
         stream: bool = True,
         reasoning: bool = True,
+        timeout: int | None = None,
     ):
         """使用统一参数创建 ChatAnthropic，不发起网络请求。"""
         del reasoning
@@ -84,7 +85,7 @@ class AnthropicProvider(LLMProvider):
             "temperature": temperature if temperature is not None else settings.llm_temperature,
             "max_tokens": max_tokens or settings.llm_max_tokens,
             "api_key": self._api_key or None,
-            "timeout": settings.llm_timeout,
+            "timeout": timeout if timeout is not None else settings.llm_timeout,
             "streaming": stream,
         }
         if self._base_url:

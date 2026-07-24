@@ -7,7 +7,7 @@
 | # | 功能 | 文件 | 描述 | 状态 |
 |---|------|------|------|------|
 | 8.1.1 | MCPClientManager 类 | `src/mcp/client_manager.py` | 管理所有 MCP Client 连接的生命周期 | 开发完成 |
-| 8.1.2 | connect_all() | 同上 | 启动时并发连接 config/mcp_servers.yaml 中所有 MCP Server | 开发完成 |
+| 8.1.2 | connect_all() | 同上 | 启动时并发连接 config/app.yaml 中声明的 MCP Server | 单测完成 |
 | 8.1.3 | _connect_single() | 同上 | 连接单个 MCP Server (支持 stdio + SSE transport) | 开发完成 |
 | 8.1.4 | _resolve_env() | 同上 | 解析 MCP 配置中的 ${VAR_NAME} 环境变量占位符 | 开发完成 |
 | 8.1.5 | _mcp_to_langchain_tool() | 同上 | 将 MCP Tool 适配为 LangChain StructuredTool (加 namespace 前缀) | 开发完成 |

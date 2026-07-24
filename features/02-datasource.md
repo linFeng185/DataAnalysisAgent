@@ -9,7 +9,7 @@
 | 2.1.1 | DataSourceConfig 定义 | `src/datasource/config.py` | dataclass: name/dialect/mode/host/port/database/username/password/engine/schema/description/tags/extra_params | 单测完成 | P0 |
 | 2.1.2 | DataSourceRegistry | `src/datasource/registry.py` | register_provider() / resolve() / list_all() / _create_engine() | 单测完成 | P0 |
 | 2.1.3 | DataSourceProvider 抽象基类 | `src/datasource/providers/base.py` | lookup() / extract_schema() / test_connection() 抽象方法 | 单测完成 | P0 |
-| 2.1.4 | DataSourceConfigStore | `src/datasource/config_store.py` | 外挂模式配置持久化到 PostgreSQL | 待开发[^3] | P1 |
+| 2.1.4 | DataSourceConfigStore | `src/datasource/providers/external.py` | 页面数据源加密持久化到 PostgreSQL 并在启动时恢复，见 21.3.4 | 单测完成 | P1 |
 | 2.1.5 | DataSourceCreateRequest | `src/datasource/providers/external.py` | 外挂模式注册请求体 (临时，后续迁移到 api/schemas.py) | 开发完成 | P1 |
 
 ### 2.2 内置模式 Provider (Embedded)
@@ -79,11 +79,10 @@
 
 ### 模块收尾
 
-模块功能点共 47 项，已完成 44 项，待开发 3 项。
+模块功能点共 47 项，已完成 45 项，待开发 2 项。
 
 | 功能点 | 不开发原因 | 可开发条件 | 预计开发时机 |
 |--------|------------|------------|--------------|
-| 2.1.4 DataSourceConfigStore | 动态数据源当前驻留全局 Provider，持久化表和加密字段尚未落地 | 完成 17.1.5 数据源配置表及租户唯一键设计 | Phase 3，多实例部署前 |
 | 2.4.3 KMS 集成 | 当前 PBKDF2 + Fernet 已满足本地部署，外部 Vault/KMS 需要额外运维依赖 | 确定生产密钥托管平台和轮换流程 | Phase 3，生产密钥治理批次 |
 | 2.5.10 _query_metadata() 权限告警 | 当前只返回可用元数据，权限不足告警需要统一 SYSTEM_WARNING 知识条目契约 | 固化各方言权限错误映射并接入知识库告警 | Phase 2，Schema 权限治理批次 |
 

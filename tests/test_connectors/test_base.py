@@ -18,6 +18,37 @@ def _ds(dialect: str, **kw) -> DataSourceConfig:
 
 class TestConnectionURL:
 
+    # 方法作用：验证开发环境创建异步引擎时也不会开启 SQLAlchemy SQL 回显。
+    # Args: self - pytest 测试类实例；monkeypatch - pytest 补丁工具。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    @pytest.mark.asyncio
+    async def test_async_engine_disables_sql_echo(self, monkeypatch):
+        """SQL 文本不得因开发模式被重复写入应用日志。"""
+        # Arrange
+        from src.connectors import base as base_module
+        from src.connectors.mysql import MySQLConnector
+
+        captured: dict[str, object] = {}
+        expected_engine = object()
+
+        # 方法作用：记录通用连接器传给 SQLAlchemy 的引擎参数。
+        # Args: url - SQLAlchemy URL；kwargs - 引擎关键字参数。
+        # Returns: 测试用引擎对象。
+        def fake_create_async_engine(url, **kwargs):
+            captured["url"] = url
+            captured["kwargs"] = kwargs
+            return expected_engine
+
+        monkeypatch.setattr(base_module, "create_async_engine", fake_create_async_engine)
+        connector = MySQLConnector(_ds("mysql"))
+
+        # Act
+        result = await connector.create_engine()
+
+        # Assert
+        assert result is expected_engine
+        assert captured["kwargs"]["echo"] is False
+
     def test_clickhouse(self):
         from src.connectors.clickhouse import ClickHouseConnector
         ds = _ds("clickhouse", host="ch.local", port=9000, database="analytics", username="r", password="s")
@@ -186,7 +217,6 @@ class TestConnectionURL:
     async def test_clickhouse_connector_uses_clickhouse_connect_client(self, monkeypatch):
         """ClickHouseConnector 首次执行应使用已安装的 clickhouse-connect 客户端。"""
         # Arrange
-        from src.connectors import clickhouse as clickhouse_module
         from src.connectors.clickhouse import ClickHouseConnector
 
         class QueryResult:
@@ -197,8 +227,8 @@ class TestConnectionURL:
             def __init__(self):
                 self.queries: list[str] = []
 
-            def query(self, sql, parameters=None):
-                self.queries.append(sql)
+            def query(self, sql, parameters=None, settings=None):
+                self.queries.append((sql, parameters, settings))
                 return QueryResult()
 
             def close(self):
@@ -229,7 +259,26 @@ class TestConnectionURL:
 
         # Assert
         assert result == [{"value": 1}]
-        assert client.queries == ["SELECT 1"]
+        assert client.queries[0][0] == "SELECT 1"
+        assert client.queries[0][2]["max_execution_time"] > 0
+
+    # 方法作用：验证 ClickHouse 命名参数替换不会破坏共享前缀的长参数名。
+    # Args: self - pytest 测试类实例。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    def test_clickhouse_parameter_binding_respects_identifier_boundaries(self) -> None:
+        """`:date` 与 `:date_end` 必须分别绑定，不能产生 `{date}_end`。"""
+        # Arrange
+        from src.connectors.clickhouse import ClickHouseConnector
+
+        # Act
+        sql, params = ClickHouseConnector._bind_parameters(  # noqa: SLF001
+            "SELECT :date AS start_date, :date_end AS end_date",
+            {"date": "2026-01-01", "date_end": "2026-01-31"},
+        )
+
+        # Assert
+        assert sql == "SELECT {date:String} AS start_date, {date_end:String} AS end_date"
+        assert params == {"date": "2026-01-01", "date_end": "2026-01-31"}
 
 
 # ================================================================
@@ -270,6 +319,25 @@ class TestRowsToDictList:
         from src.connectors.base import ConnectorBase
         assert ConnectorBase.rows_to_dict_list([]) == []
 
+    # 方法作用：验证数据库 NaN/Infinity 在批量转换时安全降级为空值。
+    # Args: self - pytest 测试类实例。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    def test_non_finite_float_values_become_none(self) -> None:
+        """非有限浮点不得进入 Decimal 和后续 JSON 序列化链路。"""
+        # Arrange
+        from src.connectors.base import ConnectorBase
+
+        class Row:
+            _mapping = {"nan": float("nan"), "positive_inf": float("inf"), "value": 1.25}
+
+        # Act
+        result = ConnectorBase.rows_to_dict_list([Row()])
+
+        # Assert
+        assert result[0]["nan"] is None
+        assert result[0]["positive_inf"] is None
+        assert str(result[0]["value"]) == "1.25"
+
 
 # ================================================================
 # 超时 SQL (3.1.3)
@@ -301,12 +369,16 @@ class TestEXPLAIN:
 
     def test_clickhouse_skipped(self, monkeypatch):
         """explain_skip_dialects 配置生效。"""
-        monkeypatch.setenv("EXPLAIN_SKIP_DIALECTS", '["clickhouse"]')
         import asyncio
+        from src.app_context import AppContext, use_app_context
+        from src.config import Settings
         from src.connectors.clickhouse import ClickHouseConnector
-        result = asyncio.run(
-            ClickHouseConnector(_ds("clickhouse")).explain("SELECT 1")
-        )
+        del monkeypatch
+        settings = Settings(explain_skip_dialects=["clickhouse"])
+        with use_app_context(AppContext(settings)):
+            result = asyncio.run(
+                ClickHouseConnector(_ds("clickhouse")).explain("SELECT 1")
+            )
         assert result["valid"] is True
 
 

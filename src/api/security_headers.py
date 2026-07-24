@@ -31,7 +31,7 @@ class _SecurityHeaderSender:
         self._scheme = scheme
         self._production = production
         self._hsts_seconds = hsts_seconds
-        logger.info("安全响应头发送器初始化完成", scheme=scheme, production=production)
+        logger.debug("安全响应头发送器初始化完成", scheme=scheme, production=production)
 
     # 方法作用：在响应开始消息中写入安全头后转发给服务器。
     # Args: message - 当前 ASGI 响应消息。
@@ -52,14 +52,14 @@ class _SecurityHeaderSender:
                         "Strict-Transport-Security",
                         f"max-age={self._hsts_seconds}; includeSubDomains",
                     )
-            logger.info(
+            logger.debug(
                 "安全响应头写入完成",
                 production=self._production,
                 hsts=self._production and self._scheme == "https" and self._hsts_seconds > 0,
             )
         await self._send(message)
         if message_type == "http.response.start":
-            logger.info("安全响应头发送完成", message_type=message_type)
+            logger.debug("安全响应头发送完成", message_type=message_type)
         else:
             logger.debug("安全响应体分块发送完成", message_type=message_type)
 
@@ -95,7 +95,7 @@ class SecurityHeadersMiddleware:
         logger.debug("安全响应头中间件入口", scope_type=scope_type, path=scope.get("path", ""))
         if scope_type != "http":
             await self.app(scope, receive, send)
-            logger.info("安全响应头中间件完成", scope_type=scope_type, mode="passthrough")
+            logger.debug("安全响应头中间件完成", scope_type=scope_type, mode="passthrough")
             return
         wrapped_send = _SecurityHeaderSender(
             send,
@@ -104,4 +104,4 @@ class SecurityHeadersMiddleware:
             hsts_seconds=self.hsts_seconds,
         )
         await self.app(scope, receive, wrapped_send)
-        logger.info("安全响应头中间件完成", scope_type=scope_type, path=scope.get("path", ""))
+        logger.debug("安全响应头中间件完成", scope_type=scope_type, path=scope.get("path", ""))

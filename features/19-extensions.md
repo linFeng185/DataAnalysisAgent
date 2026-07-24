@@ -105,7 +105,7 @@ Phase 1 核心链路:
   5.1.1 SchemaExplorerTool ─→ 6.1.2 get_or_fetch_schema()
   5.1.3 SQLglotValidator ───→ 5.2.1 validate_with_sqlglot()
 
-  8.1.1 MCPClientManager ───→ config/mcp_servers.yaml (1.2.3)
+  8.1.1 MCPClientManager ───→ config/app.yaml (1.2.3)
   9.1.2 SkillManager ───────→ 4.2.3 Skill 匹配触发
 
 Phase 2 关键依赖:

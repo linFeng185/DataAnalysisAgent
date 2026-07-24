@@ -3,6 +3,7 @@ import { Card, Table, Button, Modal, Form, Input, Select, message, Popconfirm, T
 import { PlusOutlined, DeleteOutlined } from '@ant-design/icons';
 import { get, post, del } from '../api/client';
 import type { DatasourceConfig } from '../types';
+import { useAuth } from '../hooks/AuthContext';
 
 const DIALECTS = [
   { value: 'mysql', label: 'MySQL' },
@@ -50,6 +51,8 @@ function placeholder(f: string, d: string): string {
 }
 
 export default function DatasourcePage() {
+  const { user } = useAuth();
+  const canManage = ['super_admin', 'tenant_admin'].includes(user?.role || '');
   const [dss, setDss] = useState<DatasourceConfig[]>([]);
   const [open, setOpen] = useState(false);
   const [form] = Form.useForm();
@@ -85,7 +88,7 @@ export default function DatasourcePage() {
   return (
     <div style={{ maxWidth: 1000, margin: '0 auto' }}>
       <Card title="数据源管理" extra={
-        <Button type="primary" icon={<PlusOutlined />} onClick={() => setOpen(true)}>添加</Button>
+        canManage ? <Button type="primary" icon={<PlusOutlined />} onClick={() => setOpen(true)}>添加</Button> : null
       }>
         <Table dataSource={dss} rowKey="name" loading={loading}
           columns={[
@@ -99,11 +102,11 @@ export default function DatasourcePage() {
             { title: '数据库', dataIndex: 'database', key: 'database', width: 100, ellipsis: true },
             { title: '用户', dataIndex: 'username', key: 'username', width: 80 },
             { title: '描述', dataIndex: 'description', key: 'description', ellipsis: true },
-            { title: '操作', key: 'action', width: 80, render: (_: unknown, r: DatasourceConfig) => (
+            ...(canManage ? [{ title: '操作', key: 'action', width: 80, render: (_: unknown, r: DatasourceConfig) => (
               <Popconfirm title="确定删除?" onConfirm={() => handleDelete(r.name)}>
                 <Button danger icon={<DeleteOutlined />} size="small">删除</Button>
               </Popconfirm>
-            )},
+            ) }] : []),
           ]} />
       </Card>
 

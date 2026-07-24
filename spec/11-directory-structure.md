@@ -60,7 +60,7 @@ dataAnalysisAgent/
 │   │           └── weekly_report.jinja2
 │   ├── skill_manager.py             # ★ Skill 发现/加载/激活引擎
 │   ├── config/                       # 配置文件
-│   │   └── mcp_servers.yaml         # MCP Server 注册表
+│   │   └── app.yaml                 # 应用统一配置与 MCP Server 注册表
 │   ├── knowledge/                    # 知识库管理
 │   │   ├── schema_manager.py        # Schema 缓存管理 (文档 → 自动拉取 三级回退)
 │   │   ├── business_rules.py        # 业务规则存储与检索

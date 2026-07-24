@@ -13,6 +13,15 @@ from src.llm.client import get_task_llm as _get_task_llm
 from src.llm.client import is_task_llm_available as _is_task_llm_available
 from src.llm.prompts import DATA_ANALYSIS_SYSTEM
 from src.logging_config import get_logger
+from src.tools import processors as _processors  # noqa: F401
+from src.tools.analyzer import (
+    _extract,
+    _find_numeric,
+    compute_concentration,
+    compute_statistics,
+    compute_trend,
+    detect_outliers_zscore,
+)
 
 
 def _json_default(obj):
@@ -26,15 +35,6 @@ def _json_default(obj):
             return int(normalized)
         return float(normalized) if abs(exp) <= 12 else str(normalized)
     raise TypeError(f"Type {type(obj)} not serializable")
-from src.tools.processors import *  # noqa: F401 — 触发 @register 注册
-from src.tools.analyzer import (
-    compute_concentration,
-    compute_statistics,
-    compute_trend,
-    detect_outliers_zscore,
-    _extract,
-    _find_numeric,
-)
 
 logger = get_logger(__name__)
 
@@ -94,8 +94,12 @@ async def analyze_result_node(state: AnalysisState) -> dict:
             processor_result = await asyncio.to_thread(proc.process, rows, params)
             logger.info("处理器完成", processor=proc.name, intent=intent,
                         confidence=processor_result.confidence)
-    except Exception as e:
-        logger.warning("处理器失败，回退 LLM", error=str(e))
+    except Exception as exc:
+        from src.failure_policy import FailureDomain, fallback_allowed
+
+        if not fallback_allowed(FailureDomain.DATA_PROCESSOR):
+            raise
+        logger.error("处理器失败，回退 LLM", error=str(exc), exc_info=True)
 
     # 处理器结果有效 — 直接用脚本结果，LLM 仅做自然语言润色
     if processor_result and processor_result.data:
@@ -115,8 +119,12 @@ async def analyze_result_node(state: AnalysisState) -> dict:
                 llm_polish = await _llm_polish(processor_result.summary, processor_result.insights, data_sample)
                 if llm_polish:
                     result["summary"] = llm_polish.get("summary", result["summary"])
-            except Exception as e:
-                logger.warning("LLM 润色失败", error=str(e))
+            except Exception as exc:
+                from src.failure_policy import FailureDomain, fallback_allowed
+
+                if not fallback_allowed(FailureDomain.LLM):
+                    raise
+                logger.error("LLM 润色失败", error=str(exc), exc_info=True)
         logger.info("节点完成", node="analyze_result", processor=result.get("processor_name"),
                     elapsed_ms=round((time.monotonic() - _start) * 1000))
         return {"analysis_result": result}
@@ -183,7 +191,6 @@ async def _llm_polish(summary: str, insights: list[str], data_sample: str) -> di
     """LLM 对处理器输出做自然语言润色，不参与数值计算。"""
     try:
         from langchain_core.messages import HumanMessage, SystemMessage
-        from src.llm.client import get_llm
         llm = _get_task_llm("polish_result", temperature=0.3, reasoning=False)
         prompt = f"""## 分析摘要
 {summary}

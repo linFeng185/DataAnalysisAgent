@@ -73,7 +73,7 @@ class MCPClientManager:
     # 方法作用：初始化 MCP 连接、工具、作用域和生命周期缓存。
     # Args: config_path - 系统 MCP YAML 配置路径。
     # Returns: 无返回值。
-    def __init__(self, config_path: str = "config/mcp_servers.yaml"):
+    def __init__(self, config_path: str = "config/app.yaml"):
         logger.debug("初始化 MCPClientManager 入口", config_path=config_path)
         self.config_path = config_path
         self.sessions: dict[str, Any] = {}
@@ -374,6 +374,38 @@ class MCPClientManager:
             })
         result = sorted(servers, key=lambda item: item["name"])
         logger.info("列出系统 MCP Server 完成", count=len(result))
+        return result
+
+    # 方法作用：按显示名称和可选作用域选择已加载的最高优先级 MCP Server。
+    # Args: name - 对外 Server 名称；scope - 可选 system/tenant/private 精确作用域。
+    # Returns: 内部名称和作用域；没有匹配项时返回 None。
+    def resolve_loaded_server(
+        self,
+        name: str,
+        scope: str | None = None,
+    ) -> tuple[str, str] | None:
+        logger.debug("解析已加载 MCP Server 入口", name=name, scope=scope or "")
+        priority = {"private": 3, "tenant": 2, "system": 1}
+        candidates = [
+            (internal_name, self._server_scopes.get(internal_name, "system"))
+            for internal_name in self.sessions
+            if (internal_name.endswith(f"_{name}") or internal_name == name)
+            and (
+                not scope
+                or self._server_scopes.get(internal_name, "system") == scope
+            )
+        ]
+        result = max(
+            candidates,
+            key=lambda item: priority.get(item[1], 0),
+            default=None,
+        )
+        logger.info(
+            "解析已加载 MCP Server 完成",
+            name=name,
+            found=result is not None,
+            resolved_scope=result[1] if result else "",
+        )
         return result
 
     # ── 8.1.8 健康检查 ───────────────────────────────
@@ -683,7 +715,7 @@ def _json_type_to_python(type_name: str) -> type:
 # 方法作用：从当前 AppContext 获取 MCPClientManager。
 # Args: config_path - 首次初始化使用的 YAML 配置路径。
 # Returns: 当前应用独享的 MCPClientManager 实例。
-def get_mcp_client_manager(config_path: str = "config/mcp_servers.yaml") -> MCPClientManager:
+def get_mcp_client_manager(config_path: str = "config/app.yaml") -> MCPClientManager:
     from functools import partial
 
     from src.app_context import get_app_context

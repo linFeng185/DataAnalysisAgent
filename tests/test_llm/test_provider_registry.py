@@ -81,3 +81,43 @@ class TestProviderRegistry:
         with pytest.raises(ValueError, match="不支持的 Provider"):
             create_provider("missing", "model", "", "")
         logger.info("test_unknown_provider_is_rejected 完成")
+
+    # 方法作用：验证 Provider Context 缓存使用凭证摘要区分连接实例。
+    # Args: self - pytest 测试类实例；monkeypatch - pytest 补丁工具。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    def test_provider_cache_fingerprint_distinguishes_api_keys(self, monkeypatch) -> None:
+        """同模型和地址的不同 Key 不得错误复用认证客户端。"""
+        logger.debug("test_provider_cache_fingerprint_distinguishes_api_keys 入口")
+        import src.llm.client as client_module
+        import src.llm.provider_registry as registry_module
+        from src.app_context import AppContext, use_app_context
+
+        created: list[object] = []
+
+        # 方法作用：为每组连接参数返回可比较的独立 Provider 对象。
+        # Args: name - Provider 名；model_id - 模型；base_url - 地址；api_key - 凭证。
+        # Returns: 新建测试 Provider 对象。
+        def create_provider(name: str, model_id: str, base_url: str, api_key: str) -> object:
+            logger.debug("测试 Provider 工厂入口", extra={"provider": name, "model": model_id})
+            provider = object()
+            created.append(provider)
+            logger.info("测试 Provider 工厂完成", extra={"has_key": bool(api_key)})
+            return provider
+
+        monkeypatch.setattr(registry_module, "create_provider", create_provider)
+        settings = SimpleNamespace(multi_tenant=False, llm_model="model")
+        with use_app_context(AppContext(settings)):
+            first = client_module.get_provider(
+                "model", provider_name="openai", base_url="http://llm", api_key="key-one",
+            )
+            second = client_module.get_provider(
+                "model", provider_name="openai", base_url="http://llm", api_key="key-two",
+            )
+            reused = client_module.get_provider(
+                "model", provider_name="openai", base_url="http://llm", api_key="key-one",
+            )
+
+        assert first is reused
+        assert first is not second
+        assert len(created) == 2
+        logger.info("test_provider_cache_fingerprint_distinguishes_api_keys 完成")

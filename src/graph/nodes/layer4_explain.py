@@ -32,65 +32,27 @@ async def layer4_explain_node(state: AnalysisState) -> dict:
         logger.warning("EXPLAIN 拒绝", datasource=datasource, reason="SQL 为空")
         return {"explain_errors": [error], "sql_valid": False}
 
-    from src.tools.sql_rewriter import rewrite_sql
+    from src.security.sql_execution import validate_and_explain_sql
 
-    original_sql = sql
-    sql = rewrite_sql(sql, dialect)
-    logger.info(
-        "EXPLAIN SQL 方言重写完成",
-        datasource=datasource,
-        dialect=dialect,
-        changed=sql != original_sql,
-        sql=sql,
-    )
-
-    try:
-        from src.datasource.registry import get_registry
-
-        resolved = await get_registry().resolve_or_none(datasource)
-        if resolved is None or resolved.engine is None:
-            error = {"type": "configuration", "message": f"数据源 '{datasource}' 不可用"}
-            logger.warning("EXPLAIN 数据源不可用", datasource=datasource)
-            return {"explain_errors": [error], "sql_valid": False, "generated_sql": sql}
-
-        connector = getattr(resolved, "connector", None)
-        if connector is None:
-            from src.connectors.registry import create_connector
-
-            connector = create_connector(resolved).attach_engine(resolved.engine)
-            resolved.connector = connector
-            logger.warning(
-                "EXPLAIN 补建连接器",
-                datasource=datasource,
-                dialect=resolved.dialect,
-                reason="旧缓存缺少 connector",
-            )
-        validation = await connector.explain(sql)
-        if not validation.get("valid", False):
-            errors = validation.get("errors", []) or [{
-                "type": "semantic_error",
-                "message": "EXPLAIN 校验失败",
-            }]
-            logger.warning(
-                "EXPLAIN 校验拒绝",
-                datasource=datasource,
-                dialect=dialect,
-                errors=errors,
-            )
-            return {"explain_errors": errors, "sql_valid": False, "generated_sql": sql}
-    except Exception as exc:
-        error = {
-            "type": "semantic_error",
-            "message": str(exc).split("Stack trace:")[0][:500],
-        }
-        logger.error(
-            "EXPLAIN 执行失败",
+    validation = await validate_and_explain_sql(sql, datasource, dialect)
+    if not validation.success:
+        errors = validation.details or [{
+            "type": validation.error_type or "semantic_error",
+            "message": validation.error or "EXPLAIN 校验失败",
+        }]
+        logger.warning(
+            "EXPLAIN 校验拒绝",
             datasource=datasource,
-            dialect=dialect,
-            error=error["message"],
-            exc_info=True,
+            dialect=validation.dialect or dialect,
+            errors=errors,
         )
-        return {"explain_errors": [error], "sql_valid": False, "generated_sql": sql}
+        return {
+            "explain_errors": errors,
+            "sql_valid": False,
+            "generated_sql": validation.sql or sql,
+            "sql_explain_checked": False,
+        }
+    sql = validation.sql
 
     elapsed_ms = round((time.monotonic() - started_at) * 1000)
     logger.info(
@@ -99,4 +61,9 @@ async def layer4_explain_node(state: AnalysisState) -> dict:
         dialect=dialect,
         elapsed_ms=elapsed_ms,
     )
-    return {"explain_errors": [], "sql_valid": True, "generated_sql": sql}
+    return {
+        "explain_errors": [],
+        "sql_valid": True,
+        "generated_sql": sql,
+        "sql_explain_checked": True,
+    }

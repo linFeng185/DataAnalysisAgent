@@ -81,7 +81,7 @@ def _check_02_config_loading() -> bool:
 
     try:
         import yaml
-        mcp_config = yaml.safe_load(open("config/mcp_servers.yaml", encoding="utf-8"))
+        mcp_config = yaml.safe_load(open("config/app.yaml", encoding="utf-8"))
         servers = mcp_config.get("mcp_servers", {})
         active_k = [k for k, v in servers.items() if isinstance(v, dict)]
         all_ok &= check("MCP配置加载", len(active_k) > 0, f"活跃: {active_k}")
@@ -90,12 +90,22 @@ def _check_02_config_loading() -> bool:
 
     try:
         import yaml
-        ds_config = yaml.safe_load(open("config/datasources.yaml", encoding="utf-8"))
-        datasources = ds_config.get("datasources", {})
-        all_ok &= check("数据源配置加载", len(datasources) >= 5,
-                        f"共{len(datasources)}个")
+        from pathlib import Path
+
+        datasource_path = Path("config/datasources.yaml")
+        ds_config = (
+            yaml.safe_load(datasource_path.read_text(encoding="utf-8"))
+            if datasource_path.exists()
+            else {}
+        )
+        datasources = (ds_config or {}).get("datasources", {})
+        all_ok &= check(
+            "可选数据源配置加载",
+            isinstance(datasources, dict) and len(datasources) >= 6,
+            f"共{len(datasources)}个",
+        )
     except Exception as e:
-        all_ok &= check("数据源配置加载", False, str(e))
+        all_ok &= check("可选数据源配置加载", False, str(e))
 
     try:
         from src.config import get_settings

@@ -21,9 +21,13 @@ class TestUploadManagerRetention:
         logger.debug("test_create_rejects_when_active_task_capacity_is_full 入口")
         try:
             # Arrange
+            import src.api.auth as auth
             import src.config as config_module
             from src.knowledge.upload_manager import UploadManager
 
+            monkeypatch.setattr(auth, "get_current_role", lambda: "analyst")
+            monkeypatch.setattr(auth, "get_current_tenant_id", lambda: 1)
+            monkeypatch.setattr(auth, "get_current_user_id", lambda: 7)
             monkeypatch.setattr(
                 config_module,
                 "get_settings",
@@ -54,9 +58,13 @@ class TestUploadManagerRetention:
         logger.debug("test_expired_finished_task_is_pruned 入口")
         try:
             # Arrange
+            import src.api.auth as auth
             import src.config as config_module
             import src.knowledge.upload_manager as upload_module
 
+            monkeypatch.setattr(auth, "get_current_role", lambda: "analyst")
+            monkeypatch.setattr(auth, "get_current_tenant_id", lambda: 1)
+            monkeypatch.setattr(auth, "get_current_user_id", lambda: 7)
             monkeypatch.setattr(
                 config_module,
                 "get_settings",

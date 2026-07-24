@@ -51,7 +51,7 @@ class TestTurnPreparation:
     # Args: self - pytest 测试类实例。
     # Returns: 无返回值，断言失败时由 pytest 报告。
     async def test_prepare_turn_preserves_previous_result_snapshot(self):
-        """上一轮结果必须进入独立快照，不能与当前轮瞬态字段一起丢失。"""
+        """上一轮只保留定位信息，富结果由 HistoryStore 单独持久化。"""
         logger.debug("test_prepare_turn_preserves_previous_result_snapshot 入口")
         from src.graph.nodes.prepare_turn import prepare_turn_node
 
@@ -74,9 +74,11 @@ class TestTurnPreparation:
         assert snapshot["source_query"] == "列出订单金额"
         assert snapshot["datasource"] == "demo"
         assert snapshot["generated_sql"] == "SELECT order_id, amount FROM orders"
-        assert snapshot["query_result_sample"] == [{"order_id": 1, "amount": 128000}]
-        assert snapshot["query_result_full_count"] == 1
         assert snapshot["result_available"] is True
+        assert "query_result_sample" not in snapshot
+        assert "query_result_statistics" not in snapshot
+        assert "analysis_result" not in snapshot
+        assert "chart_config" not in snapshot
         assert result["query_result_sample"] == []
         logger.info("test_prepare_turn_preserves_previous_result_snapshot 完成")
 
@@ -112,6 +114,54 @@ class TestPreviousTurnRestore:
         assert result["query_result_sample"] == [{"amount": 100}, {"amount": 200}]
         assert result["query_result_full_count"] == 2
         logger.info("test_restore_previous_result_for_same_datasource 完成")
+
+    # 方法作用：验证轻量快照通过 HistoryStore 恢复上一轮完整结果。
+    # Args: self - pytest 测试类实例；monkeypatch - pytest 补丁工具。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    async def test_restore_previous_result_loads_rich_history(self, monkeypatch) -> None:
+        """checkpoint 不含结果数据时，meta 追问必须从逐轮历史恢复。"""
+        logger.debug("test_restore_previous_result_loads_rich_history 入口")
+        import src.memory.history_store as history_module
+        from src.graph.nodes.restore_previous_result import restore_previous_result_node
+
+        list_session = AsyncMock(return_value=[{
+            "datasource": "demo",
+            "final_result": {
+                "success": True,
+                "sql": "SELECT amount FROM orders",
+                "sql_statements": [{
+                    "datasource": "demo", "dialect": "postgres",
+                    "sql": "SELECT amount FROM orders",
+                }],
+                "data": [{"amount": 100}, {"amount": 200}],
+                "row_count": 2,
+                "truncated": False,
+            },
+        }])
+        monkeypatch.setattr(
+            history_module,
+            "get_history_store",
+            lambda: SimpleNamespace(list_session=list_session),
+        )
+
+        result = await restore_previous_result_node({
+            "intent": "meta",
+            "session_id": "session-1",
+            "datasource": "demo",
+            "previous_turn_snapshot": {
+                "datasource": "demo",
+                "selected_datasources": ["demo"],
+                "generated_sql": "SELECT amount FROM orders",
+                "result_available": True,
+            },
+        })
+
+        list_session.assert_awaited_once_with("session-1", limit=1)
+        assert result["previous_result_restored"] is True
+        assert result["query_result_sample"] == [{"amount": 100}, {"amount": 200}]
+        assert result["query_result_full_count"] == 2
+        assert result["multi_source_results"][0]["sql"] == "SELECT amount FROM orders"
+        logger.info("test_restore_previous_result_loads_rich_history 完成")
 
     # 方法作用：验证切换数据源后不会恢复其他数据源的旧结果。
     # Args: self - pytest 测试类实例。
@@ -263,12 +313,12 @@ class TestMetadataGrounding:
         try:
             # Arrange
             from types import SimpleNamespace
-            from unittest.mock import Mock
+            from unittest.mock import AsyncMock
 
             import src.memory.history_store as history_module
             from src.graph.nodes.build_response import build_response_node
 
-            history_add = Mock()
+            history_add = AsyncMock()
             monkeypatch.setattr(
                 history_module, "get_history_store",
                 lambda: SimpleNamespace(add=history_add),
@@ -295,7 +345,9 @@ class TestMetadataGrounding:
             assert len(result["conversation_history"]) == 2
             assert result["conversation_history"][-1]["turn_id"] == 2
             assert result["conversation_history"][-1]["analysis_summary"] == "第二次回答"
-            history_add.assert_called_once()
+            assert "final_result" not in result["conversation_history"][-1]
+            history_add.assert_awaited_once()
+            assert history_add.call_args.kwargs["final_result"]["data"] == [{"value": 2}]
             logger.info("test_build_response_records_repeated_query_as_new_turn 完成")
         except Exception as exc:
             logger.error(
@@ -412,6 +464,7 @@ class TestLayer4Explain:
             "explain_errors": [],
             "sql_valid": True,
             "generated_sql": "SELECT 1",
+            "sql_explain_checked": True,
         }
         logger.info("test_explain_accepts_valid_sql 完成")
 

@@ -124,3 +124,51 @@ process.stdout.write(JSON.stringify(catches));
     # Assert：至少一个读取 catch 报错，任何 catch 都不能报告正常完成。
     assert any("onError" in calls for calls in catch_calls)
     assert all("onDone" not in calls for calls in catch_calls)
+
+
+# 方法作用：验证发送新消息前终止旧流，并在所有错误路径清除重试状态。
+# Args: 无。
+# Returns: 无返回值，断言失败时由 pytest 报告。
+def test_use_chat_aborts_previous_stream_and_clears_retry_on_errors() -> None:
+    """旧 SSE 回调不得与新消息竞争，错误横幅也不得永久残留。"""
+    logger.debug("test_use_chat_aborts_previous_stream_and_clears_retry_on_errors 入口")
+    try:
+        # Arrange / Act
+        source = Path("frontend/src/hooks/useChat.ts").read_text(encoding="utf-8")
+        send_start = source.index("const send = useCallback")
+        stream_start = source.index("aborterRef.current = streamChat", send_start)
+        send_body = source[send_start:stream_start]
+        error_body = source[source.index("case 'error':", stream_start):]
+
+        # Assert
+        assert "aborterRef.current?.abort()" in send_body
+        assert "setRetryInfo(null)" in error_body
+        assert source.count("setRetryInfo(null)") >= 2
+        logger.info("test_use_chat_aborts_previous_stream_and_clears_retry_on_errors 完成")
+    except Exception as exc:
+        logger.error(
+            "test_use_chat_aborts_previous_stream_and_clears_retry_on_errors 异常: %s",
+            exc,
+            exc_info=True,
+        )
+        raise
+
+
+# 方法作用：验证 SSE JSON 解析失败具有可观测日志且进入错误回调。
+# Args: 无。
+# Returns: 无返回值，断言失败时由 pytest 报告。
+def test_stream_chat_reports_malformed_sse_events() -> None:
+    """协议损坏不能静默丢事件后继续宣告完成。"""
+    logger.debug("test_stream_chat_reports_malformed_sse_events 入口")
+    try:
+        # Arrange / Act
+        source = Path("frontend/src/api/client.ts").read_text(encoding="utf-8")
+
+        # Assert
+        assert "流式事件 JSON 解析失败" in source
+        assert "console.error" in source
+        assert "throw new Error('流式事件格式无效')" in source
+        logger.info("test_stream_chat_reports_malformed_sse_events 完成")
+    except Exception as exc:
+        logger.error("test_stream_chat_reports_malformed_sse_events 异常: %s", exc, exc_info=True)
+        raise

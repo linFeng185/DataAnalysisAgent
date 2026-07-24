@@ -9,16 +9,25 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging as stdlib_logging
 import time
+from collections.abc import Generator
 from typing import Any
 
 from src.config import get_settings
 from src.logging_config import get_logger
-from src.memory.vector_store import VectorEntry, VectorSearchResult, VectorStore
+from src.memory.vector_store import (
+    MetadataFilters,
+    VectorEntry,
+    VectorSearchResult,
+    VectorStore,
+    normalize_metadata_filters,
+)
 
 logger = get_logger(__name__)
 _COLLECTION = "data_agent_knowledge"
 _DIM = 384
+_QUERY_BATCH_SIZE = 1_000
 
 
 class MilvusVectorStore(VectorStore):
@@ -68,16 +77,24 @@ class MilvusVectorStore(VectorStore):
     async def _get_embed_fn(self):
         if self._embed_fn is None:
             from sentence_transformers import SentenceTransformer
+            from transformers.utils import logging as transformers_logging
+
             s = get_settings()
             path = s.embedding_model_path or "all-MiniLM-L6-v2"
-            self._embed_fn = SentenceTransformer(path).encode
+            stdlib_logging.getLogger("sentence_transformers").setLevel(stdlib_logging.WARNING)
+            stdlib_logging.getLogger("transformers").setLevel(stdlib_logging.WARNING)
+            transformers_logging.disable_progress_bar()
+            model = await asyncio.to_thread(SentenceTransformer, path)
+            self._embed_fn = model.encode
             logger.info("嵌入模型加载完成", path=path, dim=_DIM)
         return self._embed_fn
 
     async def _embed(self, text: str) -> list[float]:
-        return (await self._get_embed_fn())(text).tolist()
+        encode = await self._get_embed_fn()
+        result = await asyncio.to_thread(encode, text, show_progress_bar=False)
+        return result.tolist()
 
-    def _to_expr(self, filters: dict[str, Any] | None) -> str | None:
+    def _to_expr(self, filters: MetadataFilters | None) -> str | None:
         """把 metadata 等值条件转换为安全的 Milvus 候选过滤表达式。
 
         Args:
@@ -88,23 +105,21 @@ class MilvusVectorStore(VectorStore):
         """
         logger.debug("构建 Milvus metadata 表达式入口", filter_count=len(filters or {}))
         if not filters:
-            logger.info("构建 Milvus metadata 表达式完成", has_expression=False)
             return None
         parts: list[str] = []
-        for key, value in filters.items():
-            if key.startswith("not:") or (isinstance(value, dict) and "$ne" in value):
-                continue
+        for key, is_not, value in normalize_metadata_filters(filters):
             pattern = (
                 f"%{json.dumps(key, ensure_ascii=False)}: "
                 f"{json.dumps(value, ensure_ascii=False)}%"
             )
-            parts.append(f"metadata like {json.dumps(pattern, ensure_ascii=False)}")
+            predicate = f"metadata like {json.dumps(pattern, ensure_ascii=False)}"
+            parts.append(f"not ({predicate})" if is_not else predicate)
         result = " && ".join(parts) if parts else None
-        logger.info("构建 Milvus metadata 表达式完成", has_expression=bool(result))
+        logger.debug("构建 Milvus metadata 表达式完成", has_expression=bool(result))
         return result
 
     @staticmethod
-    def _metadata_matches(metadata: dict[str, Any], filters: dict[str, Any] | None) -> bool:
+    def _metadata_matches(metadata: dict[str, Any], filters: MetadataFilters | None) -> bool:
         """对 Milvus 候选记录执行 metadata 精确匹配。
 
         Args:
@@ -114,25 +129,41 @@ class MilvusVectorStore(VectorStore):
         Returns:
             全部条件精确满足时返回 True。
         """
-        logger.debug("精确匹配 Milvus metadata 入口", filter_count=len(filters or {}))
-        for raw_key, raw_value in (filters or {}).items():
-            is_not = raw_key.startswith("not:")
-            key = raw_key[4:] if is_not else raw_key
-            expected = raw_value
-            if isinstance(raw_value, dict) and "$ne" in raw_value:
-                is_not = True
-                expected = raw_value["$ne"]
+        for key, is_not, expected in normalize_metadata_filters(filters):
             matched = metadata.get(key) == expected
             if matched == is_not:
-                logger.info("精确匹配 Milvus metadata 完成", matched=False, key=key)
                 return False
-        logger.info("精确匹配 Milvus metadata 完成", matched=True)
         return True
+
+    # 方法作用：通过 Milvus 查询迭代器分批读取候选，避免超过服务端结果窗口。
+    # Args: collection - Milvus Collection；expr - 查询表达式；output_fields - 返回字段。
+    # Returns: 逐条产出的候选记录生成器。
+    @staticmethod
+    def _iter_query_rows(
+        collection: Any,
+        *,
+        expr: str,
+        output_fields: list[str],
+    ) -> Generator[dict[str, Any], None, None]:
+        iterator = collection.query_iterator(
+            batch_size=_QUERY_BATCH_SIZE,
+            limit=-1,
+            expr=expr,
+            output_fields=output_fields,
+        )
+        try:
+            while True:
+                rows = iterator.next()
+                if not rows:
+                    break
+                yield from rows
+        finally:
+            iterator.close()
 
     # ── 检索 ──
 
     async def search(self, query: str, top_k: int = 5,
-                     filters: dict[str, str] | None = None) -> list[VectorSearchResult]:
+                     filters: MetadataFilters | None = None) -> list[VectorSearchResult]:
         """执行语义检索并对 metadata 候选做精确过滤。
 
         Args:
@@ -191,7 +222,7 @@ class MilvusVectorStore(VectorStore):
         logger.info("Milvus ID 查询完成", entry_id=entry_id, found=True)
         return result
 
-    async def get_by_filter(self, filters: dict[str, str], limit: int = 100) -> list[VectorEntry]:
+    async def get_by_filter(self, filters: MetadataFilters, limit: int = 100) -> list[VectorEntry]:
         """按 metadata 精确条件查询记录。
 
         Args:
@@ -202,22 +233,30 @@ class MilvusVectorStore(VectorStore):
             精确匹配的记录列表。
         """
         logger.debug("Milvus metadata 查询入口", filter_count=len(filters), limit=limit)
+        if limit <= 0:
+            return []
         col = self._get_collection()
-        rows = col.query(expr=self._to_expr(filters) or "",
-                         output_fields=["id", "content", "metadata"], limit=100000)
         result: list[VectorEntry] = []
-        for row in rows:
-            raw_metadata = row.get("metadata") or "{}"
-            metadata = (
-                json.loads(raw_metadata) if isinstance(raw_metadata, str) else raw_metadata
-            )
-            if self._metadata_matches(metadata, filters):
-                result.append(VectorEntry(
-                    id=row["id"], content=row.get("content") or "", metadata=metadata,
-                ))
-                if len(result) >= limit:
-                    break
-        logger.info("Milvus metadata 查询完成", count=len(result))
+        rows = self._iter_query_rows(
+            col,
+            expr=self._to_expr(filters) or "",
+            output_fields=["id", "content", "metadata"],
+        )
+        try:
+            for row in rows:
+                raw_metadata = row.get("metadata") or "{}"
+                metadata = (
+                    json.loads(raw_metadata) if isinstance(raw_metadata, str) else raw_metadata
+                )
+                if self._metadata_matches(metadata, filters):
+                    result.append(VectorEntry(
+                        id=row["id"], content=row.get("content") or "", metadata=metadata,
+                    ))
+                    if len(result) >= limit:
+                        break
+        finally:
+            rows.close()
+        logger.debug("Milvus metadata 查询完成", count=len(result))
         return result
 
     # ── 写入 ──
@@ -245,7 +284,7 @@ class MilvusVectorStore(VectorStore):
             self._get_collection().delete(expr=f'id in {json.dumps(ids)}')
         return len(ids)
 
-    async def delete_by_filter(self, filters: dict[str, str]) -> int:
+    async def delete_by_filter(self, filters: MetadataFilters) -> int:
         """仅删除 metadata 精确匹配的记录。
 
         Args:
@@ -260,10 +299,10 @@ class MilvusVectorStore(VectorStore):
             return 0
         async with self._write_lock:
             col = self._get_collection()
-            rows = col.query(
+            rows = self._iter_query_rows(
+                col,
                 expr=self._to_expr(filters) or "",
                 output_fields=["id", "metadata"],
-                limit=100000,
             )
             ids = []
             for row in rows:
@@ -280,7 +319,7 @@ class MilvusVectorStore(VectorStore):
 
     # ── 管理 ──
 
-    async def count(self, filters: dict[str, str] | None = None) -> int:
+    async def count(self, filters: MetadataFilters | None = None) -> int:
         """统计全部记录或 metadata 精确匹配记录。
 
         Args:
@@ -292,10 +331,10 @@ class MilvusVectorStore(VectorStore):
         logger.debug("Milvus count 入口", filter_count=len(filters or {}))
         col = self._get_collection()
         if filters:
-            rows = col.query(
+            rows = self._iter_query_rows(
+                col,
                 expr=self._to_expr(filters) or "",
                 output_fields=["id", "metadata"],
-                limit=100000,
             )
             result = 0
             for row in rows:
@@ -306,16 +345,23 @@ class MilvusVectorStore(VectorStore):
                 result += int(self._metadata_matches(metadata, filters))
         else:
             result = col.num_entities
-        logger.info("Milvus count 完成", count=result)
+        logger.debug("Milvus count 完成", count=result)
         return result
 
+    # 方法作用：检查默认 Milvus 连接是否存在且服务端可响应。
+    # Args: self - 当前 MilvusVectorStore 实例。
+    # Returns: 连接可用时返回 True，否则返回 False。
     async def health_check(self) -> bool:
         logger.debug("MilvusVectorStore 健康检查入口")
         try:
-            from pymilvus import utility
-            result = utility.get_connection_addr("default") is not None
-            logger.info("MilvusVectorStore 健康检查完成", healthy=result)
-            return result
+            from pymilvus import connections, utility
+            if not connections.has_connection("default"):
+                logger.warning("MilvusVectorStore 健康检查完成", healthy=False, reason="连接不存在")
+                return False
+            # 通过轻量 RPC 验证服务端可响应，不能只检查本地连接对象。
+            utility.has_collection(_COLLECTION, using="default")
+            logger.debug("MilvusVectorStore 健康检查完成", healthy=True)
+            return True
         except Exception as exc:
             logger.error(
                 "MilvusVectorStore 健康检查失败",

@@ -40,6 +40,18 @@ class FileStore:
     def __init__(self) -> None:
         self._ready = False
 
+    # 方法作用：通过公开生命周期接口预热知识文件存储。
+    # Args: self - 当前 FileStore。
+    # Returns: 无返回值。
+    async def initialize(self) -> None:
+        logger.debug("知识文件存储公开初始化入口", ready=self._ready)
+        try:
+            await self._ensure()
+        except Exception as exc:
+            logger.error("知识文件存储公开初始化失败", error=str(exc), exc_info=True)
+            raise
+        logger.info("知识文件存储公开初始化完成", ready=self._ready)
+
     async def _ensure(self) -> None:
         """确保知识文件表和身份字段存在。
 

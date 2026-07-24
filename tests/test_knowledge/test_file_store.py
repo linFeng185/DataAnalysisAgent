@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+import logging
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
+
+
+logger = logging.getLogger(__name__)
 
 
 class TestFileStore:
@@ -43,3 +47,20 @@ class TestFileStore:
         assert params[3] == "super_admin"
         assert "tenant_id = $2" in sql
         assert "knowledge_scope IN ('tenant', 'private')" not in sql
+
+    # 方法作用：验证公开初始化入口委托内部幂等建表流程。
+    # Args: self - 测试类实例；monkeypatch - pytest 补丁工具。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    async def test_initialize_uses_store_lifecycle_boundary(self, monkeypatch) -> None:
+        """启动编排不应再直接调用 FileStore 私有方法。"""
+        logger.debug("test_initialize_uses_store_lifecycle_boundary 入口")
+        from src.knowledge.file_store import FileStore
+
+        store = FileStore()
+        ensure = AsyncMock()
+        monkeypatch.setattr(store, "_ensure", ensure)
+
+        await store.initialize()
+
+        ensure.assert_awaited_once_with()
+        logger.info("test_initialize_uses_store_lifecycle_boundary 完成")

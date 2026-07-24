@@ -5,14 +5,13 @@
   业务代码 → get_current_user_id() / get_current_tenant_id() → 获取身份
   PG RLS → current_setting('app.current_tenant_id') → 数据库级强制隔离
 
-多租户开关:
-  multi_tenant=false（默认）→ 不强制登录，所有请求 tenant_id=1，行为不变
-  multi_tenant=true → 必须登录，JWT 校验，RLS 生效
+认证与租户隔离解耦：所有模式都必须登录，multi_tenant 只控制租户数据隔离。
 """
 
 from __future__ import annotations
 
 import asyncio
+import bcrypt
 import os
 import threading
 import time
@@ -34,6 +33,7 @@ from src.security.tenant_policy import (
     ANONYMOUS_USER_ID,
     DEFAULT_TENANT_ID,
     RequestIdentity,
+    SUPER_ADMIN_USER_ID,
 )
 
 logger = get_logger(__name__)
@@ -50,6 +50,9 @@ _current_tenant_id: ContextVar[int] = ContextVar(
 )
 _current_role: ContextVar[str] = ContextVar("current_role", default=ANONYMOUS_ROLE)
 ACCESS_TOKEN_COOKIE = "access_token"
+_DUMMY_PASSWORD_HASH = (
+    "$2b$12$yZTzGXG0vRKu0H18pTJmo.9LXjZUANU747KXcPehet4YrkgPnQKlG"
+)
 _registration_limits: dict[str, list[float]] = {}
 _registration_rate_lock = threading.Lock()
 _login_limits: dict[tuple[str, str], list[float]] = {}
@@ -66,7 +69,7 @@ def get_current_user_id() -> int:
     """
     logger.debug("获取当前用户 ID 入口")
     result = _current_user_id.get()
-    logger.info("获取当前用户 ID 完成", user_id=result)
+    logger.debug("获取当前用户 ID 完成", user_id=result)
     return result
 
 
@@ -79,7 +82,7 @@ def get_current_tenant_id() -> int:
     """
     logger.debug("获取当前租户 ID 入口")
     result = _current_tenant_id.get()
-    logger.info("获取当前租户 ID 完成", tenant_id=result)
+    logger.debug("获取当前租户 ID 完成", tenant_id=result)
     return result
 
 
@@ -91,7 +94,7 @@ def get_current_role() -> str:
     """
     logger.debug("获取当前角色入口")
     result = _current_role.get()
-    logger.info("获取当前角色完成", role=result)
+    logger.debug("获取当前角色完成", role=result)
     return result
 
 
@@ -105,7 +108,7 @@ def get_current_identity() -> RequestIdentity:
         user_id=get_current_user_id(),
         role=get_current_role(),
     )
-    logger.info(
+    logger.debug(
         "获取当前请求身份完成",
         tenant_id=result.tenant_id,
         user_id=result.user_id,
@@ -118,14 +121,34 @@ def get_current_identity() -> RequestIdentity:
 # Args: 无。
 # Returns: 授权成功时无返回值，否则抛出 HTTP 403。
 def require_super_admin() -> None:
-    logger.debug("校验超级管理员权限入口", role=get_current_role())
+    logger.debug(
+        "校验超级管理员权限入口",
+        role=get_current_role(),
+        user_id=get_current_user_id(),
+    )
     from src.knowledge.governance import is_super_admin
 
     role = get_current_role()
-    if not is_super_admin(role):
-        logger.warning("校验超级管理员权限拒绝", role=role)
+    user_id = get_current_user_id()
+    if not is_super_admin(role) or user_id != SUPER_ADMIN_USER_ID:
+        logger.warning("校验超级管理员权限拒绝", role=role, user_id=user_id)
         raise HTTPException(403, "需要超级管理员权限")
-    logger.info("校验超级管理员权限完成", role=role)
+    logger.debug("校验超级管理员权限完成", role=role, user_id=user_id)
+
+
+# 方法作用：判断当前请求是否为数据库保留的平台超级管理员身份。
+# Args: 无。
+# Returns: user_id=1 且角色为 super_admin 时返回 True。
+def is_platform_super_admin() -> bool:
+    logger.debug("判断固定超级管理员入口")
+    from src.knowledge.governance import is_super_admin
+
+    result = (
+        get_current_user_id() == SUPER_ADMIN_USER_ID
+        and is_super_admin(get_current_role())
+    )
+    logger.debug("判断固定超级管理员完成", allowed=result)
+    return result
 
 
 # 要求当前身份具备租户管理权限或更高的平台权限。
@@ -136,10 +159,46 @@ def require_tenant_admin() -> None:
     from src.knowledge.governance import is_super_admin, is_tenant_admin
 
     role = get_current_role()
-    if not (is_super_admin(role) or is_tenant_admin(role)):
+    if is_super_admin(role):
+        require_super_admin()
+        logger.debug("校验租户管理员权限完成", role=role, platform_admin=True)
+        return
+    if not is_tenant_admin(role):
         logger.warning("校验租户管理员权限拒绝", role=role)
         raise HTTPException(403, "需要租户管理员权限")
-    logger.info("校验租户管理员权限完成", role=role)
+    logger.debug("校验租户管理员权限完成", role=role)
+
+
+# 方法作用：使用 bcrypt 生成密码哈希并拒绝超出算法安全边界的输入。
+# Args: password - 待哈希的明文密码。
+# Returns: 可写入数据库的 bcrypt 哈希字符串。
+def _hash_password(password: str) -> str:
+    logger.debug("密码哈希入口", password_chars=len(password))
+    encoded = password.encode("utf-8")
+    if len(encoded) > 72:
+        logger.warning("密码哈希拒绝", reason="超过 bcrypt 72 字节限制")
+        raise ValueError("密码不能超过 72 字节")
+    result = bcrypt.hashpw(encoded, bcrypt.gensalt(rounds=12)).decode("ascii")
+    logger.debug("密码哈希完成")
+    return result
+
+
+# 方法作用：以恒定时间 bcrypt 校验密码且不记录敏感内容。
+# Args: password - 用户提交密码；password_hash - 数据库存储的哈希。
+# Returns: 密码匹配返回 True，非法哈希或超长输入返回 False。
+def _verify_password(password: str, password_hash: str) -> bool:
+    logger.debug("密码校验入口", password_chars=len(password))
+    try:
+        encoded = password.encode("utf-8")
+        if len(encoded) > 72:
+            logger.warning("密码校验拒绝", reason="超过 bcrypt 72 字节限制")
+            return False
+        result = bcrypt.checkpw(encoded, password_hash.encode("ascii"))
+    except (TypeError, ValueError):
+        logger.error("密码校验失败", exc_info=True)
+        return False
+    logger.debug("密码校验完成", matched=result)
+    return result
 
 
 def scope_thread_id(session_id: str) -> str:
@@ -155,7 +214,7 @@ def scope_thread_id(session_id: str) -> str:
     user_id = get_current_user_id()
     logger.debug("会话线程命名空间入口", session_id=session_id[:20], tenant_id=tenant_id, user_id=user_id)
     scoped = f"tenant:{tenant_id}:user:{user_id}:session:{session_id}"
-    logger.info("会话线程命名空间完成", scoped_session=scoped[-40:])
+    logger.debug("会话线程命名空间完成", scoped_session=scoped[-40:])
     return scoped
 
 
@@ -209,7 +268,7 @@ def create_access_token(user_id: int, tenant_id: int, role: str) -> str:
         "user_id": user_id, "tenant_id": tenant_id, "role": role,
         "exp": datetime.now(timezone.utc) + timedelta(hours=s.jwt_access_token_expire_hours),
     }, _secret(), algorithm="HS256")
-    logger.info("创建访问令牌完成", user_id=user_id, tenant_id=tenant_id)
+    logger.debug("创建访问令牌完成", user_id=user_id, tenant_id=tenant_id)
     return token
 
 
@@ -235,7 +294,7 @@ def _set_access_cookie(response: Response, token: str) -> None:
         samesite="lax",
         path="/",
     )
-    logger.info("设置访问 Cookie 完成", secure=settings.env == "prod")
+    logger.debug("设置访问 Cookie 完成", secure=settings.env == "prod")
 
 
 def _unauthorized(detail: str) -> JSONResponse:
@@ -249,7 +308,7 @@ def _unauthorized(detail: str) -> JSONResponse:
     """
     logger.debug("构造认证失败响应入口", detail=detail)
     response = JSONResponse({"detail": detail}, status_code=401)
-    logger.info("构造认证失败响应完成", detail=detail)
+    logger.debug("构造认证失败响应完成", detail=detail)
     return response
 
 
@@ -258,13 +317,13 @@ def _unauthorized(detail: str) -> JSONResponse:
 class LoginRequest(BaseModel):
     """登录请求。"""
     username: str = Field(..., min_length=1)
-    password: str = Field(..., min_length=1)
+    password: str = Field(..., min_length=1, max_length=72)
 
 
 class RegisterRequest(BaseModel):
     """注册请求。"""
     username: str = Field(..., min_length=1, max_length=64)
-    password: str = Field(..., min_length=6)
+    password: str = Field(..., min_length=8, max_length=72)
     tenant_name: str = Field(default="default")
 
 
@@ -288,7 +347,7 @@ def _check_registration_rate_limit(client_key: str, limit: int) -> bool:
             return False
         timestamps.append(now)
         _registration_limits[client_key] = timestamps
-    logger.info("注册限流检查通过", client_key=client_key, used=len(timestamps), limit=limit)
+    logger.debug("注册限流检查通过", client_key=client_key, used=len(timestamps), limit=limit)
     return True
 
 
@@ -320,7 +379,7 @@ def _check_login_rate_limit(client_key: str, username: str, limit: int) -> bool:
             return False
         timestamps.append(now)
         _login_limits[key] = timestamps
-    logger.info(
+    logger.debug(
         "登录限流检查通过",
         client_key=client_key,
         username=normalized_username,
@@ -362,16 +421,59 @@ async def login(req: LoginRequest, response: Response, request: Request = None):
         pool = await get_pg_pool()
         async with pool.acquire() as conn:
             row = await conn.fetchrow(
-                "SELECT id, tenant_id, role, password_hash FROM users WHERE username=$1",
+                "SELECT u.id, u.tenant_id, u.role, u.password_hash, u.is_active, "
+                "u.failed_login_attempts, u.locked_until, t.is_active AS tenant_active "
+                "FROM users u JOIN tenants t ON t.id=u.tenant_id "
+                "WHERE LOWER(u.username)=LOWER($1)",
                 req.username,
             )
-        if not row:
-            logger.warning("登录失败：用户不存在", username=req.username)
-            raise HTTPException(401, "用户名或密码错误")
-        from passlib.hash import bcrypt
-        if not bcrypt.verify(req.password, row["password_hash"]):
-            logger.warning("登录失败：密码错误", username=req.username)
-            raise HTTPException(401, "用户名或密码错误")
+            if not row:
+                await asyncio.to_thread(_verify_password, req.password, _DUMMY_PASSWORD_HASH)
+                logger.warning("登录失败", username=req.username, reason="凭证无效")
+                raise HTTPException(401, "用户名或密码错误")
+            if not bool(row.get("is_active", True)):
+                logger.warning("登录失败", username=req.username, reason="账号停用")
+                raise HTTPException(401, "用户名或密码错误")
+            if not bool(row.get("tenant_active", True)):
+                logger.warning("登录失败", username=req.username, reason="租户停用")
+                raise HTTPException(401, "用户名或密码错误")
+            now = datetime.now(timezone.utc)
+            locked_until = row.get("locked_until")
+            if locked_until is not None and locked_until > now:
+                logger.warning("登录失败", username=req.username, reason="账号锁定")
+                raise HTTPException(429, "登录尝试过于频繁，请稍后重试")
+            password_valid = await asyncio.to_thread(
+                _verify_password,
+                req.password,
+                str(row["password_hash"]),
+            )
+            if not password_valid:
+                threshold = max(1, int(getattr(settings, "login_lockout_threshold", 5)))
+                lock_minutes = max(1, int(getattr(settings, "login_lockout_minutes", 15)))
+                updated = await conn.fetchrow(
+                    "UPDATE users SET failed_login_attempts=failed_login_attempts+1, "
+                    "locked_until=CASE WHEN failed_login_attempts+1 >= $1 "
+                    "THEN $2 ELSE locked_until END WHERE id=$3 "
+                    "RETURNING failed_login_attempts, locked_until",
+                    threshold,
+                    now + timedelta(minutes=lock_minutes),
+                    row["id"],
+                )
+                attempts = int(updated["failed_login_attempts"])
+                next_locked_until = updated["locked_until"]
+                logger.warning(
+                    "登录失败",
+                    username=req.username,
+                    reason="凭证无效",
+                    attempts=attempts,
+                    locked=next_locked_until is not None,
+                )
+                raise HTTPException(401, "用户名或密码错误")
+            await conn.execute(
+                "UPDATE users SET failed_login_attempts=0, locked_until=NULL, "
+                "last_login_at=NOW() WHERE id=$1",
+                row["id"],
+            )
         token = create_access_token(row["id"], row["tenant_id"], row["role"])
         _set_access_cookie(response, token)
         logger.info("登录成功", username=req.username, user_id=row["id"])
@@ -397,6 +499,9 @@ async def register(req: RegisterRequest, response: Response, request: Request = 
     if request is not None and request.client is not None:
         client_key = request.client.host
     settings = get_settings()
+    if not bool(getattr(settings, "registration_enabled", False)):
+        logger.warning("公开注册拒绝", reason="功能已关闭")
+        raise HTTPException(403, "公开注册未开启")
     if not _check_registration_rate_limit(
         client_key,
         max(1, int(getattr(settings, "registration_max_per_hour", 10))),
@@ -404,8 +509,6 @@ async def register(req: RegisterRequest, response: Response, request: Request = 
         raise HTTPException(429, "注册请求过于频繁，请稍后重试")
     logger.debug("注册入口", username=req.username, client_key=client_key)
     try:
-        from passlib.hash import bcrypt
-        policy = get_tenant_policy()
         pool = await get_pg_pool()
         async with pool.acquire() as conn:
             # 方法作用：在事务边界内创建租户和用户。
@@ -413,22 +516,16 @@ async def register(req: RegisterRequest, response: Response, request: Request = 
             # Returns: (user_id, tenant_id) 二元组。
             async def _create_user() -> tuple[int, int]:
                 """在一个事务中创建租户和用户，保证失败时不残留半成品。"""
-                isolation_enabled = policy.datasource_isolation_enabled
                 logger.debug(
                     "注册数据库写入入口",
                     username=req.username,
-                    tenant_isolation=isolation_enabled,
                 )
                 tid = DEFAULT_TENANT_ID
-                if isolation_enabled:
-                    tid = await conn.fetchval(
-                        "INSERT INTO tenants (name) VALUES ($1) RETURNING id", req.tenant_name)
-                    logger.info("新租户创建", tenant_id=tid, name=req.tenant_name)
-                pwd = await asyncio.to_thread(bcrypt.hash, req.password)
+                pwd = await asyncio.to_thread(_hash_password, req.password)
                 uid = await conn.fetchval(
                     "INSERT INTO users (username, password_hash, role, tenant_id) "
                     "VALUES ($1, $2, 'analyst', $3) RETURNING id", req.username, pwd, tid)
-                logger.info("注册数据库写入完成", user_id=uid, tenant_id=tid)
+                logger.debug("注册数据库写入完成", user_id=uid, tenant_id=tid)
                 return uid, tid
 
             transaction_factory = getattr(conn, "transaction", None)
@@ -444,6 +541,8 @@ async def register(req: RegisterRequest, response: Response, request: Request = 
         return {"user_id": uid, "tenant_id": tid, "role": "analyst"}
     except Exception as exc:
         logger.error("注册异常", error=str(exc), exc_info=True)
+        if type(exc).__name__ == "UniqueViolationError":
+            raise HTTPException(409, "用户名已存在") from exc
         raise HTTPException(500, "注册服务暂不可用") from exc
 
 
@@ -479,9 +578,11 @@ async def current_user() -> dict:
     """
     logger.debug("当前身份查询入口")
     user_id = get_current_user_id()
+    settings = get_settings()
     result = {
         "authenticated": user_id > 0,
         "auth_required": get_tenant_policy().requires_authentication(),
+        "registration_enabled": bool(getattr(settings, "registration_enabled", False)),
         "user_id": user_id,
         "tenant_id": get_current_tenant_id(),
         "role": get_current_role(),
@@ -522,7 +623,7 @@ def _requires_admin_api_key(path: str, method: str) -> bool:
         )
     )
     result = exact or prefixed
-    logger.info("判断平台管理 Key 完成", path=path, method=normalized_method, required=result)
+    logger.debug("判断平台管理 Key 完成", path=path, method=normalized_method, required=result)
     return result
 
 
@@ -531,8 +632,8 @@ class AuthMiddleware:
 
     每个请求进入时：
     1. 公开端点直接放行
-    2. 单租户模式不强制登录
-    3. 多租户模式解析 JWT → 注入 ContextVar
+    2. 所有部署模式解析 JWT → 注入 ContextVar
+    3. multi_tenant 仅影响后续租户隔离
     4. Token 过期/无效 → 401
     """
 
@@ -554,24 +655,24 @@ class AuthMiddleware:
         logger.debug("认证 ASGI 调用入口", scope_type=scope_type, path=scope.get("path", ""))
         if scope_type != "http":
             await self.app(scope, receive, send)
-            logger.info("认证 ASGI 调用完成", scope_type=scope_type, mode="passthrough")
+            logger.debug("认证 ASGI 调用完成", scope_type=scope_type, mode="passthrough")
             return
 
         request = Request(scope, receive=receive)
         identity, denial = self._authenticate_request(request)
         if denial is not None:
             await denial(scope, receive, send)
-            logger.info("认证 ASGI 调用完成", path=request.url.path, mode="denied")
+            logger.debug("认证 ASGI 调用完成", path=request.url.path, mode="denied")
             return
         if identity is None:
             await self.app(scope, receive, send)
-            logger.info("认证 ASGI 调用完成", path=request.url.path, mode="public")
+            logger.debug("认证 ASGI 调用完成", path=request.url.path, mode="public")
             return
 
         contexts = self._set_identity(identity)
         try:
             await self.app(scope, receive, send)
-            logger.info("认证 ASGI 调用完成", path=request.url.path, user_id=identity[0])
+            logger.debug("认证 ASGI 调用完成", path=request.url.path, user_id=identity[0])
         except Exception as exc:
             logger.error(
                 "认证后 ASGI 请求异常",
@@ -598,17 +699,17 @@ class AuthMiddleware:
         logger.debug("认证兼容调用入口", path=request.url.path, method=request.method)
         identity, denial = self._authenticate_request(request)
         if denial is not None:
-            logger.info("认证兼容调用完成", path=request.url.path, mode="denied")
+            logger.debug("认证兼容调用完成", path=request.url.path, mode="denied")
             return denial
         if identity is None:
             response = await call_next(request)
-            logger.info("认证兼容调用完成", path=request.url.path, mode="public")
+            logger.debug("认证兼容调用完成", path=request.url.path, mode="public")
             return response
 
         contexts = self._set_identity(identity)
         try:
             response = await call_next(request)
-            logger.info("认证兼容调用完成", path=request.url.path, user_id=identity[0])
+            logger.debug("认证兼容调用完成", path=request.url.path, user_id=identity[0])
             return response
         except Exception as exc:
             logger.error("认证后请求异常", path=request.url.path, error=str(exc), exc_info=True)
@@ -626,30 +727,37 @@ class AuthMiddleware:
         """执行不消费请求体的同步认证决策。"""
         logger.debug("认证决策入口", path=request.url.path, method=request.method)
         if request.url.path in PUBLIC_PATHS:
-            logger.info("认证决策完成", path=request.url.path, mode="public")
+            logger.debug("认证决策完成", path=request.url.path, mode="public")
             return None, None
 
         settings = get_settings()
         policy = get_tenant_policy()
-        # 平台管理端点保护 — 仅保护明确的基础设施写操作。
+        # 平台管理 Key 仅作为无浏览器 Cookie 的自动化身份入口。
         admin_api_key = getattr(settings, "admin_api_key", "")
-        if admin_api_key and _requires_admin_api_key(request.url.path, request.method):
+        authorization = request.headers.get("Authorization", "")
+        bearer_token = authorization[7:].strip() if authorization.startswith("Bearer ") else ""
+        cookie_token = request.cookies.get(ACCESS_TOKEN_COOKIE, "")
+        token = bearer_token or cookie_token
+        if admin_api_key and _requires_admin_api_key(request.url.path, request.method) and not token:
             import hmac
 
             if not hmac.compare_digest(request.headers.get("X-Admin-Key", ""), admin_api_key):
                 logger.warning("管理端点认证失败", path=request.url.path)
                 return None, _unauthorized("管理端点需要 X-Admin-Key")
-
-        authorization = request.headers.get("Authorization", "")
-        bearer_token = authorization[7:].strip() if authorization.startswith("Bearer ") else ""
-        token = request.cookies.get(ACCESS_TOKEN_COOKIE, "") or bearer_token
+            logger.info("管理端点 API Key 认证完成", path=request.url.path)
+            return (SUPER_ADMIN_USER_ID, DEFAULT_TENANT_ID, "super_admin"), None
+        logger.debug(
+            "认证令牌来源已选择",
+            source="bearer" if bearer_token else "cookie" if cookie_token else "missing",
+        )
         is_auth_probe = request.url.path == "/api/v1/auth/me"
 
         if not token:
             if policy.requires_authentication(is_probe=is_auth_probe):
                 logger.warning("认证令牌缺失", path=request.url.path)
                 return None, _unauthorized("未提供认证令牌")
-            logger.info("认证中间件匿名回退", path=request.url.path, probe=is_auth_probe)
+            logger.debug("认证探测匿名放行", path=request.url.path, probe=is_auth_probe)
+            return (ANONYMOUS_USER_ID, DEFAULT_TENANT_ID, ANONYMOUS_ROLE), None
 
         identity = (ANONYMOUS_USER_ID, DEFAULT_TENANT_ID, ANONYMOUS_ROLE)
         try:
@@ -679,7 +787,7 @@ class AuthMiddleware:
             logger.warning("JWT 身份不满足租户策略", error=str(exc))
             return None, _unauthorized("令牌身份无效")
 
-        logger.info(
+        logger.debug(
             "认证决策完成",
             path=request.url.path,
             user_id=identity[0],
@@ -700,7 +808,7 @@ class AuthMiddleware:
         user_context = _current_user_id.set(identity[0])
         tenant_context = _current_tenant_id.set(identity[1])
         role_context = _current_role.set(identity[2])
-        logger.info("请求身份已注入", user_id=identity[0], tenant_id=identity[1], role=identity[2])
+        logger.debug("请求身份已注入", user_id=identity[0], tenant_id=identity[1], role=identity[2])
         return user_context, tenant_context, role_context
 
     # 方法作用：使用请求进入时的 Token 精确恢复三个身份 ContextVar。
@@ -717,4 +825,4 @@ class AuthMiddleware:
         _current_user_id.reset(user_context)
         _current_tenant_id.reset(tenant_context)
         _current_role.reset(role_context)
-        logger.info("请求身份已清理", path=path)
+        logger.debug("请求身份已清理", path=path)

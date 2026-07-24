@@ -205,6 +205,9 @@ async def introspect_foreign_keys(
     ]
 
 
+# 方法作用：使用方言元数据查询估算表行数，失败时回退为零。
+# Args: ds - 数据源配置；table_name - 表名；executor - 异步 SQL 执行器。
+# Returns: 非负行数估算值。
 async def estimate_row_count(
     ds: DataSourceConfig, table_name: str, executor
 ) -> int:
@@ -221,8 +224,14 @@ async def estimate_row_count(
         if result:
             count = result[0].get("count", 0) or result[0].get("table_rows", 0) or 0
             return int(count)
-    except Exception:
-        logger.debug("行数估算失败", table=table_name)
+    except Exception as exc:
+        logger.warning(
+            "行数估算失败，回退为零",
+            table=table_name,
+            dialect=ds.dialect,
+            error=str(exc),
+            exc_info=True,
+        )
     return 0
 
 
@@ -253,6 +262,9 @@ async def introspect_database(
     return SchemaSnapshot(tables=tables)
 
 
+# 方法作用：按明确支持的数据库方言列出当前库中的业务表。
+# Args: ds - 数据源配置；executor - 异步 SQL 执行器。
+# Returns: 表名列表；未知方言抛出 ValueError。
 async def _list_tables(ds: DataSourceConfig, executor) -> list[str]:
     """列出所有表。"""
     sql_map = {
@@ -268,6 +280,9 @@ async def _list_tables(ds: DataSourceConfig, executor) -> list[str]:
         "mssql": "SELECT TABLE_NAME AS name FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_CATALOG = :database AND TABLE_TYPE = 'BASE TABLE' ORDER BY TABLE_NAME",
         "sqlite": "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name",
     }
-    sql = sql_map.get(ds.dialect, sql_map["postgres"])
+    if ds.dialect not in sql_map:
+        logger.error("列出数据表失败", dialect=ds.dialect, reason="未知方言")
+        raise ValueError(f"不支持的数据源方言: {ds.dialect}")
+    sql = sql_map[ds.dialect]
     result = await executor(ds, sql, {"database": ds.database})
     return [r["name"] for r in result]

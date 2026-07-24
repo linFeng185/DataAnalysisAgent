@@ -172,9 +172,7 @@ class KnowledgeTagStore:
     # Args: row - asyncpg Record 或字典。
     # Returns: KnowledgeTag 模型。
     def _to_tag(self, row: Any) -> KnowledgeTag:
-        logger.debug("转换知识标签记录入口", tag_id=row.get("id") if row else None)
         result = KnowledgeTag.model_validate(dict(row))
-        logger.info("转换知识标签记录完成", tag_id=result.id, scope=result.scope)
         return result
 
     # 搜索当前用户可见的全局标签和个人标签。

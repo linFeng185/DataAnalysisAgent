@@ -29,14 +29,28 @@ async def register_datasource(req: DataSourceCreateRequest):
         已注册数据源摘要。
     """
     from src.datasource.providers.external import ExternalDataSourceProvider
+    from src.api.auth import (
+        get_current_tenant_id, get_current_user_id, require_tenant_admin,
+    )
     import src.api.routes as routes_package
 
+    require_tenant_admin()
     registry = routes_package._registry()
     provider = registry.get_provider("external")
     if provider is None:
         provider = ExternalDataSourceProvider()
         registry.register_provider("external", provider)
     ds = await provider.register(req)
+    try:
+        await provider.persist(
+            ds,
+            tenant_id=get_current_tenant_id(),
+            owner_user_id=get_current_user_id(),
+        )
+    except Exception as exc:
+        await provider.unregister(ds.name)
+        logger.error("数据源注册持久化失败", datasource=ds.name, exc_info=True)
+        raise HTTPException(500, "数据源配置保存失败") from exc
     registry.invalidate(ds.name)
     logger.info("数据源注册路由完成", datasource=ds.name)
     return DataSourceInfo(name=ds.name, dialect=ds.dialect, version=ds.version,
@@ -55,8 +69,19 @@ async def delete_datasource(name: str):
         删除状态。
     """
     logger.debug("数据源删除路由入口", datasource=name)
+    from src.api.auth import (
+        get_current_tenant_id, is_platform_super_admin, require_tenant_admin,
+    )
     import src.api.routes as routes_package
 
+    require_tenant_admin()
+    provider = routes_package._registry().get_provider("external")
+    if provider is not None and hasattr(provider, "delete_persisted"):
+        await provider.delete_persisted(
+            name,
+            tenant_id=get_current_tenant_id(),
+            platform_admin=is_platform_super_admin(),
+        )
     if not await routes_package._registry().unregister(name):
         logger.warning("数据源删除目标不存在", datasource=name)
         raise HTTPException(404, f"数据源 '{name}' 未找到")

@@ -41,7 +41,7 @@ def register_node(
         raise ValueError("节点名不能为空")
     definition = NodeDefinition(normalized, handler, progress_message)
     _registry[normalized] = definition
-    logger.info("注册工作流节点完成", node=normalized, has_progress=bool(progress_message))
+    logger.debug("注册工作流节点完成", node=normalized, has_progress=bool(progress_message))
     return definition
 
 
@@ -53,7 +53,7 @@ def _load_default_nodes() -> None:
     global _defaults_loaded
     logger.debug("加载默认工作流节点入口", already_loaded=_defaults_loaded)
     if _defaults_loaded:
-        logger.info("加载默认工作流节点跳过", reason="已加载")
+        logger.debug("加载默认工作流节点跳过", reason="已加载")
         return
     _defaults_loaded = True
     try:
@@ -107,7 +107,7 @@ def get_node_definitions() -> list[NodeDefinition]:
     """供 workflow.py 组装 StateGraph。"""
     _load_default_nodes()
     result = list(_registry.values())
-    logger.info("获取工作流节点定义完成", node_count=len(result))
+    logger.debug("获取工作流节点定义完成", node_count=len(result))
     return result
 
 
@@ -122,5 +122,5 @@ def get_progress_map() -> dict[str, str]:
         for definition in _registry.values()
         if definition.progress_message
     }
-    logger.info("获取节点进度映射完成", node_count=len(result))
+    logger.debug("获取节点进度映射完成", node_count=len(result))
     return result

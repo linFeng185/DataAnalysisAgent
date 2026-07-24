@@ -22,3 +22,4 @@
 | [22-defect-remediation-implementation-plan.md](22-defect-remediation-implementation-plan.md) | 缺陷系统整改实施计划 | 动态 |
 | [23-knowledge-and-data-intelligence-extension-roadmap.md](23-knowledge-and-data-intelligence-extension-roadmap.md) | 知识库优化与通用数据智能扩展路线图 | 动态 |
 | [24-architecture-remediation.md](24-architecture-remediation.md) | 架构整改设计 | 动态 |
+| [25-platform-admin-and-auth.md](25-platform-admin-and-auth.md) | 平台管理、强制认证与统一配置设计 | 动态 |

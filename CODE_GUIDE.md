@@ -23,7 +23,7 @@ LLM 驱动的数据分析智能体。用自然语言提问，自动完成：轮�
 │   ├── tools/            ⑧ 分析工具 — 统计、预测与跨资产分析
 │   ├── market/           ⑨ 行情 Provider 与 PostgreSQL 持久化（当前 Tushare/A 股）
 │   ├── actions/          ⑩ 受控外部动作（人工确认、幂等、审计）
-│   ├── security/         ⑪ 安全模块 — 脱敏 + 限流 + 审计 + 出站地址策略
+│   ├── security/         ⑪ 安全模块 — SQL 统一执行 + 脱敏 + 限流 + 审计 + 出站策略
 │   ├── db/               ⑫ 状态库基础设施 — 版本化迁移 + URL 工具
 │   ├── mcp_client/       ⑬ MCP 集成 — 客户端管理 + 工具暴露
 │   ├── app_context.py        应用级依赖容器 + ASGI 请求绑定 + 资源关闭
@@ -46,17 +46,17 @@ LLM 驱动的数据分析智能体。用自然语言提问，自动完成：轮�
 POST /api/v1/chat {"query": "本月 GMV 排名？", "stream": true}
   │
   ├─ API 安全入口        请求大小/频率限制 → 当前身份数据源授权候选
-  ├─ prepare_turn        保留历史和 previous_turn_snapshot，清理当前轮瞬态状态
+  ├─ prepare_turn        保留轻量历史/快照，清理不落 checkpoint 的当前轮状态
   ├─ classify_intent     关键词匹配 → 7 种意图 + Skill 激活
-  ├─ restore_previous_result  仅 meta 且数据源一致时恢复上轮结构化结果
+  ├─ restore_previous_result  仅 meta 且数据源一致时从 HistoryStore 恢复上轮富结果
   ├─ retrieve_schema     SchemaManager 三级回退 → 表结构 + 知识库上下文
   ├─ generate_sql        LLM 生成 SQL（对话历史注入 + 重试上下文）
-  ├─ layer3_validate     sqlglot 语法校验 + DDL/DML 安全拦截
-  ├─ layer4_explain      复用 Registry 引擎执行方言化 EXPLAIN
-  ├─ execute_sql         连接池执行（空 SQL 跳过 / 限流 / 审计）
+  ├─ layer3_validate     委托统一 SQL 服务做 AST 只读安全校验
+  ├─ layer4_explain      统一 SQL 服务按 Registry 权威方言执行 EXPLAIN
+  ├─ execute_sql         统一有界执行（权限 / 限流 / 脱敏 / 审计）
   ├─ analyze_result      统计计算 + LLM 洞察
   ├─ generate_chart      ECharts 配置生成（桩）
-  └─ build_response      响应组装 + 对话历史持久化（dict + messages 双写）
+  └─ build_response      响应组装 + 轻量会话历史 + HistoryStore 富结果
 ```
 
 ## 各模块说明
@@ -66,11 +66,11 @@ POST /api/v1/chat {"query": "本月 GMV 排名？", "stream": true}
 | 文件 | 职责 |
 |------|------|
 | `routes/__init__.py` | 组合各领域 APIRouter，并保留旧模块导出兼容 |
-| `routes/*.py` | chat、datasource、schema、session、mcp、knowledge、skills、management 领域端点 |
+| `routes/*.py` | chat、datasource、schema、session、mcp、knowledge、skills、management、admin 领域端点 |
 | `schemas.py` | Pydantic 请求/响应模型 |
 | `streaming.py` | SSE 流式（13 种事件类型，LLM 调用按 stream_id 隔离） |
 | `middleware.py` | 异常 → HTTP 状态码映射 |
-| `auth.py` | 纯 ASGI JWT/Cookie 认证，身份 ContextVar 覆盖完整流式响应生命周期 |
+| `auth.py` | 全模式强制 JWT/Cookie 认证、登录限流与原子账号锁定，身份 ContextVar 覆盖完整流式响应生命周期 |
 | `background_tasks.py` | API 后台任务强引用、完成回调和异常记录统一入口 |
 | `security_headers.py` | CSP/HSTS/防嵌入/nosniff 纯 ASGI 响应头 |
 
@@ -78,11 +78,11 @@ POST /api/v1/chat {"query": "本月 GMV 排名？", "stream": true}
 
 | 文件 | 职责 |
 |------|------|
-| `state.py` | `AnalysisState` TypedDict（30+ 字段） |
+| `state.py` | `AnalysisState` TypedDict（会话持久字段 + `UntrackedValue` 请求字段） |
 | `workflow.py` | 从节点目录装配 StateGraph，显式保留条件业务路由 + Checkpointer |
 | `node_registry.py` | 节点 handler 与流式进度文案目录 |
-| `nodes/prepare_turn.py` | 固化上一轮轻量结果快照，保留对话历史并清空当前轮 SQL/错误/结果/分析状态 |
-| `nodes/restore_previous_result.py` | 校验数据源集合后为 meta 追问恢复上轮 SQL、结果样本和统计 |
+| `nodes/prepare_turn.py` | 固化上一轮轻量索引，压缩旧历史并清空当前轮 SQL/错误/结果/分析状态 |
+| `nodes/restore_previous_result.py` | 校验数据源集合后从 HistoryStore 恢复上轮 SQL、结果样本和统计 |
 | `nodes/classify_intent.py` | 意图分类 + Skill 激活 |
 | `nodes/retrieve_schema.py` | Schema 检索 + 知识库上下文 |
 | `nodes/generate_sql.py` | LLM SQL 生成（对话历史注入） |
@@ -90,7 +90,7 @@ POST /api/v1/chat {"query": "本月 GMV 排名？", "stream": true}
 | `nodes/execute_sql.py` | SQL 执行（空 SQL 跳过保护） |
 | `nodes/multi_source.py` | 多源 worker 并行执行、维度/指标列契约对齐和来源失败隔离 |
 | `nodes/analyze_result.py` | 统计 + LLM 分析 |
-| `nodes/build_response.py` | 响应组装、最终 SQL 列表 + 历史记录（dict + messages 双写） |
+| `nodes/build_response.py` | 响应组装、最终 SQL 列表 + 轻量 checkpoint 历史 + 富结果持久化 |
 
 ### ③ `src/llm/` — LLM 调用层
 
@@ -155,6 +155,8 @@ POST /api/v1/chat {"query": "本月 GMV 排名？", "stream": true}
 | `actions/contracts.py` | 人工确认、幂等键、默认拒绝和审计的外部动作注册表 |
 | `security/data_masker.py` | 数据脱敏 + 频率限制 + 审计日志 |
 | `security/network.py` | 数据库出站 DNS/IP 校验，私网默认拒绝并支持部署 allowlist |
+| `security/sql_execution.py` | 权威方言解析、AST 只读校验、EXPLAIN 与有界执行唯一入口 |
+| `failure_policy.py` | SQL/数据库 fail-closed 与 LLM/知识/处理器 fail-open 决策矩阵 |
 | `mcp/client_manager.py` | MCP Client 独立连接栈、自动迁移、system/tenant/private 请求级工具过滤 |
 | `mcp/server.py` | MCP Server（暴露 4 个工具） |
 
@@ -174,7 +176,7 @@ POST /api/v1/chat {"query": "本月 GMV 排名？", "stream": true}
 
 ## 前端
 
-`frontend/` — React 18 + TypeScript 5 + Ant Design 5 + ECharts。6 页面：对话 / 数据源 / 表结构 / 历史 / Skills / 知识库。
+`frontend/` — React 18 + TypeScript 5 + Ant Design 5 + ECharts。登录后按角色展示业务菜单；固定 `users.id=1` 超级管理员可进入平台管理页维护租户、用户、安全摘要以及 system Skills/知识/MCP。
 
 ## 快速上手
 
@@ -204,13 +206,15 @@ POST /api/v1/chat {"query": "本月 GMV 排名？", "stream": true}
 - **出站地址失败关闭**：数据库目标解析为私网、回环或特殊地址时默认阻断；ClickHouse 探针与客户端固定复用已校验 IP
 - **授权候选发现**：未选择数据源时仅把当前用户有权访问的候选交给模型，显式越权与权限服务异常均失败关闭
 - **版本化迁移**：启动时用 advisory lock + checksum + 单文件事务应用 SQL，生产失败停止启动
-- **双重持久化**：`conversation_history`(dict) + `messages`(add_messages) 保证会话跨请求恢复
+- **状态持久化分层**：checkpoint 只保存轻量 `conversation_history/messages/previous_turn_snapshot`；权限、Schema、结果、分析、图表和响应使用 `UntrackedValue`
 - **Windows 异步兼容**：`src.main` 为 Uvicorn 显式创建 SelectorEventLoop，保证 psycopg `AsyncPostgresSaver` 可持久化
-- **会话逐轮恢复**：每轮 `final_response` 双写 `conversation_history[].final_result` 与 `query_history.final_result` JSONB；前端逐轮消费，禁止复用最后一轮富数据
-- **会话恢复回退**：优先读取逐轮 JSONB 和 Checkpointer；旧/缺失状态依次回退 `conversation_history`、输入状态及贫化的 `query_history` 摘要/SQL
+- **会话逐轮恢复**：每轮完整 `final_response` 只写 `query_history.final_result` JSONB；前端逐轮消费，checkpoint 不复制数据与图表
+- **会话恢复回退**：逐轮 JSONB 是富结果权威来源；Checkpointer 只补轻量摘要和消息，旧/缺失状态回退贫化摘要/SQL
 - **单一路径工作流**：执行路由统一走条件边，避免并行分支状态丢失
 - **三级扩展隔离**：Skill/MCP 使用 system/tenant/private 统一作用域；系统写入仅 super_admin，租户写入仅 tenant_admin/super_admin，个人资源仅本人
-- **跨轮结果快照**：当前轮瞬态字段始终清空；只有明确 meta 追问且数据源一致时恢复 previous_turn_snapshot
+- **跨轮结果索引**：`previous_turn_snapshot` 只保存来源、SQL 和可用性标记；明确 meta 追问校验数据源后从 HistoryStore 恢复
+- **统一 SQL 安全执行**：Graph Layer 3/4、执行节点和 DB Tools 均委托 `security/sql_execution.py`，Registry 方言覆盖调用方提示
+- **向量后端一致性**：Chroma/Milvus/pgvector 共享等值、`not:key`、`$ne` 过滤 DSL，空过滤删除统一阻断
 - **节点级模型降级**：轻量任务本地模型不可用 → 确定性规则；远程任务需显式授权；PG 不可用 → MemorySaver
 - **行情先持久化**：MarketDataProvider 请求成功后必须先写入 `market_bars`，写入失败不向分析层返回数据
 - **外部动作安全边界**：动作默认拒绝，必须人工确认和幂等键；本项目不实现自动交易

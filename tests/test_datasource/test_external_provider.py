@@ -6,9 +6,6 @@ import asyncio
 import tempfile
 from pathlib import Path
 
-import pytest
-
-
 class TestYAMLLoading:
     """2.3.6 YAML 加载。"""
 
@@ -68,6 +65,31 @@ class TestYAMLLoading:
             assert sources[0].name == "t"
         finally:
             Path(yaml_path).unlink()
+
+    # 方法作用：验证 YAML 用户名环境变量占位符在创建配置时被解析。
+    # Args: self - pytest 测试类实例；monkeypatch - pytest 补丁工具；tmp_path - 临时目录。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    def test_load_yaml_resolves_username_environment_reference(self, monkeypatch, tmp_path) -> None:
+        """最小权限数据库账号应由部署环境注入，而不是保留字面占位符。"""
+        # Arrange
+        from src.datasource.providers.external import ExternalDataSourceProvider
+
+        monkeypatch.setenv("MSSQL_USERNAME", "data_analysis_reader")
+        path = tmp_path / "datasources.yaml"
+        path.write_text(
+            "datasources:\n"
+            "  mssql:\n"
+            "    dialect: mssql\n"
+            "    username: ${MSSQL_USERNAME}\n"
+            "    password: ${MSSQL_PASSWORD}\n",
+            encoding="utf-8",
+        )
+
+        # Act
+        sources = ExternalDataSourceProvider().load_yaml(str(path))
+
+        # Assert
+        assert sources[0].username == "data_analysis_reader"
 
 
 class TestDynamicRegistration:

@@ -35,23 +35,32 @@ export default function SkillsPage() {
 
   const handleRefresh = async () => {
     try {
-      await fetch('/api/v1/skills/refresh', { method: 'POST', credentials: 'include' });
-      message.success('刷新完成'); load();
+      const res = await fetch('/api/v1/skills/refresh', { method: 'POST', credentials: 'include' });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      message.success('刷新完成');
+      await load();
     } catch { message.error('刷新失败'); }
   };
 
   const handleToggle = async (skill: SkillInfo, enabled: boolean) => {
-    await fetch(`/api/v1/skills/${encodeURIComponent(skill.name)}/toggle?enabled=${enabled}&skill_scope=${skill.scope}`, {
-      method: 'PUT', credentials: 'include',
-    });
-    load();
+    try {
+      const res = await fetch(`/api/v1/skills/${encodeURIComponent(skill.name)}/toggle?enabled=${enabled}&skill_scope=${skill.scope}`, {
+        method: 'PUT', credentials: 'include',
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      await load();
+    } catch { message.error('切换失败'); }
   };
 
   const handleDelete = async (skill: SkillInfo) => {
-    const res = await fetch(`/api/v1/skills/${encodeURIComponent(skill.name)}?skill_scope=${skill.scope}`, {
-      method: 'DELETE', credentials: 'include',
-    });
-    if (res.ok) { message.success(`${skill.name} 已删除`); load(); }
+    try {
+      const res = await fetch(`/api/v1/skills/${encodeURIComponent(skill.name)}?skill_scope=${skill.scope}`, {
+        method: 'DELETE', credentials: 'include',
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      message.success(`${skill.name} 已删除`);
+      await load();
+    } catch { message.error('删除失败'); }
   };
 
   const handleUpload = async (files: FileList | null) => {

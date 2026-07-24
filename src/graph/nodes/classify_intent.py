@@ -98,7 +98,7 @@ async def classify_intent_node(state: AnalysisState) -> dict:
             skill_prompt = mgr.build_skill_prompt(activated_skills)
             skill_tools = mgr.get_active_tools(activated_skills)
     except Exception as e:
-        logger.warning("Skill 匹配失败", error=str(e))
+        logger.error("Skill 匹配失败，当前轮不激活 Skill", error=str(e), exc_info=True)
 
     logger.info("节点完成", node="classify_intent", elapsed_ms=round((time.monotonic() - _start) * 1000))
     return {
@@ -157,6 +157,10 @@ async def _select_authorized_datasource(
                 return selected
             logger.warning("授权候选数据源模型越界", selected=selected[:80])
     except Exception as exc:
+        from src.failure_policy import FailureDomain, fallback_allowed
+
+        if not fallback_allowed(FailureDomain.LLM):
+            raise
         logger.error("授权候选数据源模型选择失败", error=str(exc), exc_info=True)
 
     normalized_query = query.lower()
@@ -201,5 +205,9 @@ async def _llm_classify(query: str) -> str | None:
         logger.warning("LLM 意图分类回退", reason="模型输出不在合法集合", output=text[:80])
         return None
     except Exception as exc:
+        from src.failure_policy import FailureDomain, fallback_allowed
+
+        if not fallback_allowed(FailureDomain.LLM):
+            raise
         logger.error("LLM 意图分类失败，回退规则分类", error=str(exc), exc_info=True)
         return None

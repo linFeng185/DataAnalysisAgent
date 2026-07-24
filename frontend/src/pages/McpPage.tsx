@@ -15,7 +15,7 @@ export default function McpPage() {
   const ld = async () => { setLoading(true); try { const d=await get<{servers:McpServer[]}>('/mcp/servers'); setServers(d.servers||[]); } catch { message.error('加载失败'); } finally { setLoading(false); } };
   useEffect(() => { ld(); }, []);
 
-  const add = async () => { try { const v=await form.validateFields(); await post('/mcp/servers',v as Record<string,unknown>); message.success('已添加'); setOpen(false); form.resetFields(); ld(); } catch {/* */} };
+  const add = async () => { try { const v=await form.validateFields(); await post('/mcp/servers',v as Record<string,unknown>); message.success('已添加'); setOpen(false); form.resetFields(); ld(); } catch { message.error('添加失败'); } };
   const test = async (server:McpServer) => { try { const r=await post<{ok:boolean;error?:string}>(`/mcp/servers/${encodeURIComponent(server.name)}/test?scope=${server.scope}`,{}); message.success(r.ok?'连接成功':'失败: '+(r.error||'')); } catch { message.error('测试失败'); } };
   const delSrv = async (server:McpServer) => { try { await del(`/mcp/servers/${encodeURIComponent(server.name)}?scope=${server.scope}`); message.success('已删除'); ld(); } catch { message.error('删除失败'); } };
 

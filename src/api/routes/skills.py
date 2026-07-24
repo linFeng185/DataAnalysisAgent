@@ -24,7 +24,9 @@ async def list_skills(skill_scope: str | None = None):
     """列出当前身份可见的系统、租户和个人 Skills。"""
     logger.debug("Skill 列表入口", skill_scope=skill_scope or "")
     try:
-        from src.api.auth import get_current_tenant_id, get_current_user_id
+        from src.api.auth import (
+            get_current_tenant_id, get_current_user_id, is_platform_super_admin,
+        )
         from src.knowledge.governance import normalize_knowledge_scope
         from src.skill_manager import get_skill_manager
         mgr = get_skill_manager()
@@ -38,6 +40,8 @@ async def list_skills(skill_scope: str | None = None):
         tenant_id = get_current_tenant_id()
         user_id = get_current_user_id()
         for s in mgr.get_visible_skills(tenant_id, user_id):
+            if s.scope == "system" and not is_platform_super_admin():
+                continue
             if normalized_scope and s.scope != normalized_scope:
                 continue
             triggers = s.triggers or {}
@@ -125,7 +129,7 @@ def _cache_uploaded_skills(
         try:
             manifest_path = os.path.join(skills_dir, item["name"], "SKILL.md")
             if os.path.isfile(manifest_path):
-                skill = manager._parse_skill_manifest(  # noqa: SLF001
+                skill = manager.load_skill_manifest(
                     Path(manifest_path),
                     scope=scope,
                     tenant_id=tenant_id if scope != "system" else 0,
@@ -317,10 +321,14 @@ async def refresh_skills():
     try:
         from src.skill_manager import get_skill_manager
         await get_skill_manager().discover()
-        from src.api.auth import get_current_tenant_id, get_current_user_id
+        from src.api.auth import (
+            get_current_tenant_id, get_current_user_id, is_platform_super_admin,
+        )
         visible = get_skill_manager().get_visible_skills(
             get_current_tenant_id(), get_current_user_id(),
         )
+        if not is_platform_super_admin():
+            visible = [skill for skill in visible if skill.scope != "system"]
         result = {"status": "ok", "total": len(visible)}
         logger.info("Skill 刷新完成", total=len(visible))
         return result
@@ -336,13 +344,18 @@ async def refresh_skills():
 async def get_skill_content(skill_name: str, skill_scope: str | None = None):
     """获取 SKILL.md 文件的原始内容（直接从缓存 source_path 读取）。"""
     from src.skill_manager import get_skill_manager
-    from src.api.auth import get_current_tenant_id, get_current_user_id
+    from src.api.auth import (
+        get_current_tenant_id, get_current_user_id, is_platform_super_admin,
+    )
     mgr = get_skill_manager()
     skill = mgr.get_skill(
         skill_name, scope=skill_scope,
         tenant_id=get_current_tenant_id(), user_id=get_current_user_id(),
     )
     if not skill:
+        raise HTTPException(404, f"Skill '{skill_name}' 未找到")
+    if skill.scope == "system" and not is_platform_super_admin():
+        logger.warning("读取 Skill 内容拒绝", name=skill_name, reason="system 不可见")
         raise HTTPException(404, f"Skill '{skill_name}' 未找到")
     md_path = os.path.join(skill.source_path, "SKILL.md")
     if not os.path.isfile(md_path):

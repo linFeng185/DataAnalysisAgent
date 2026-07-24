@@ -5,10 +5,6 @@ from __future__ import annotations
 import logging
 from types import SimpleNamespace
 from datetime import datetime, timezone
-from unittest.mock import patch
-
-import pytest
-
 from src.knowledge.models import AUTO_TTL_SECONDS, KnowledgeEntry, KnowledgeSource
 
 
@@ -29,7 +25,7 @@ class TestLocalEmbeddingModel:
         try:
             # Arrange
             from chromadb.utils import embedding_functions
-            from src.knowledge.schema_manager import SchemaManager
+            from src.memory.vector_store_chroma import ChromaVectorStore
 
             for name in (
                 "config.json", "model.onnx", "special_tokens_map.json",
@@ -48,7 +44,7 @@ class TestLocalEmbeddingModel:
             settings = SimpleNamespace(embedding_model_path=str(tmp_path))
 
             # Act
-            result = SchemaManager._create_embedding_function(settings)
+            result = ChromaVectorStore._create_embedding_function(settings)
 
             # Assert
             assert result.DOWNLOAD_PATH == str(tmp_path)
@@ -205,7 +201,6 @@ class TestSchemaCacheRecovery:
             KnowledgeSource.AUTO_INTROSPECT, "column", table_name="customers",
             column_name="id", metadata={"type": "NUMBER", "comment": "主键"},
         )
-        monkeypatch.setattr(manager, "_ensure_initialized", lambda: None)
         monkeypatch.setattr(manager, "_query_cache", AsyncMock(return_value=[table]))
         monkeypatch.setattr(manager, "_load_from_docs", lambda _: [])
         introspect = AsyncMock(return_value=[table, column])
@@ -267,7 +262,6 @@ class TestSchemaCacheRecovery:
             )
             manager = SchemaManager(datasource_cache=shared_cache)
             monkeypatch.setattr(manager, "_resolve_datasource", AsyncMock(return_value=None))
-            monkeypatch.setattr(manager, "_ensure_initialized", lambda: None)
             monkeypatch.setattr(
                 manager,
                 "_query_cache",
@@ -434,6 +428,51 @@ class TestSchemaManagerManagement:
         store.delete_by_ids.assert_awaited_once_with(["table:demo.old"])
         manager._upsert_to_cache.assert_awaited_once_with([new_entry])
         assert [table.name for table in snapshot.tables] == ["orders"]
+
+    # 方法作用：验证单批 Schema 转换只读取一次租户和用户身份。
+    # Args: self - pytest 测试类实例；monkeypatch - pytest 补丁工具。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    def test_snapshot_to_entries_reads_identity_once(self, monkeypatch):
+        """字段数量增加时不得重复查询身份或逐字段打印身份日志。"""
+        # Arrange
+        from types import SimpleNamespace
+        from unittest.mock import MagicMock
+
+        from src.knowledge.schema_manager import SchemaManager
+
+        manager = SchemaManager()
+        tenant_id = MagicMock(return_value=7)
+        user_id = MagicMock(return_value=9)
+        monkeypatch.setattr(manager, "_current_tenant_id", tenant_id)
+        monkeypatch.setattr(manager, "_current_user_id", user_id)
+        snapshot = SimpleNamespace(tables=[SimpleNamespace(
+            name="orders",
+            description="",
+            row_count_estimate=1,
+            partition_key="",
+            tags=[],
+            relations=[],
+            columns=[
+                SimpleNamespace(
+                    name="id", type="int", comment="", is_nullable=False,
+                    is_primary_key=True, is_indexed=True, enum_values=[],
+                ),
+                SimpleNamespace(
+                    name="amount", type="decimal", comment="", is_nullable=True,
+                    is_primary_key=False, is_indexed=False, enum_values=[],
+                ),
+            ],
+        )])
+
+        # Act
+        entries = manager._snapshot_to_entries("sales", snapshot)  # noqa: SLF001
+
+        # Assert
+        assert len(entries) == 3
+        assert all(entry.metadata["tenant_id"] == 7 for entry in entries)
+        assert all(entry.metadata["owner_user_id"] == 9 for entry in entries)
+        tenant_id.assert_called_once_with()
+        user_id.assert_called_once_with()
 
     async def test_update_column_comment_upserts_changed_content(self, monkeypatch):
         """字段备注更新应重写指定字段的向量文本。"""

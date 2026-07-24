@@ -109,25 +109,26 @@ result = await app.ainvoke(
 history = await app.aget_state(config)
 ```
 
-同一 `thread_id` 会恢复完整状态，因此入口必须先经过 `prepare_turn`：保留
-`conversation_history/messages`，清空上一轮 SQL、校验错误、执行错误、结果、分析、图表和多源
-结果。API 每轮必须显式传入空的 `allowed_columns/row_filter_sql` 默认值，避免切换数据源时恢复旧权限。
+同一 `thread_id` 只恢复会话级字段：`user_query/datasource/session_id/intent`、精简后的
+`conversation_history`、`messages` 和轻量 `previous_turn_snapshot`。身份权限、Schema、SQL 校验与执行中间态、
+结果样本、多源结果、分析、图表和 `final_response` 使用 `UntrackedValue`，不写入 checkpoint。
+API 每轮必须重新注入当前身份与 `datasource_access/allowed_columns/row_filter_sql`，禁止恢复旧权限。
 
-为支持“分析刚才的数据”这类明确追问，`build_response` 在轮次结束时额外固化
-`previous_turn_snapshot`。该快照只保存 datasource、SQL、最多 200 行结果样本、完整行数、统计、分析和图表，
-不保存执行错误、Schema 对象或权限字段。`prepare_turn` 不把快照恢复到当前轮；只有 `meta` 意图经过
-`restore_previous_result` 且当前数据源集合与快照一致时才恢复。普通查询仍重新生成并执行 SQL，禁止直接读取
-旧瞬态字段。
+`prepare_turn` 仍负责清空当前轮瞬态状态，并在升级后首次请求中删除旧 checkpoint 内
+`conversation_history[].final_result`。`previous_turn_snapshot` 只保存来源问题、意图、数据源集合、最终 SQL 和
+`result_available` 标记，不保存结果、统计、分析、图表或多源数据。
 
-会话 UI 恢复不能只依赖最新 checkpoint。`build_response` 必须把每轮完整 `final_response` 同时写入：
+为支持“分析刚才的数据”类明确追问，`restore_previous_result` 先校验当前数据源集合与轻量快照一致，再按
+`session_id` 从 `HistoryStore.list_session(limit=1)` 读取上一轮 `query_history.final_result`。普通查询仍重新生成并
+执行 SQL；历史存储不可用或富结果缺失时返回明确不可恢复说明，不从旧瞬态字段猜测结果。
 
-1. `conversation_history[].final_result`，供同进程和 Checkpointer 恢复；
-2. `query_history.final_result` JSONB，供服务重启、Checkpointer 降级或迁移后恢复。
+会话 UI 恢复不能依赖最新 checkpoint。`build_response` 只把查询、最终 SQL、成功状态、摘要和图表类型写入
+`conversation_history`，并把每轮完整 `final_response` 写入 `query_history.final_result` JSONB。
 
 `query_history.final_result` 保存该轮 `sql/sql_statements/data/row_count/truncated/analysis/chart/`
 `sql_reasoning_content/success/error_message`。历史 API 以持久化逐轮响应为权威数据，checkpoint 用于补充
-完整摘要和当前状态；禁止使用顶层 `generated_sql` 是否为空来判断 `final_response` 是否有效，因为多源
-查询的顶层 `generated_sql` 合法地为空。历史数据分页首次返回最新一页，再按 `turn_id` 向前加载。
+轻量摘要和消息；禁止使用顶层 `generated_sql` 是否为空来判断富结果是否有效，因为多源查询的顶层
+`generated_sql` 合法地为空。历史数据分页首次返回最新一页，再按 `turn_id` 向前加载。
 
 ### 11.5 多数据源结果与流式展示契约
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import AsyncIterator
 
 import pytest
 from httpx import ASGITransport, AsyncClient
@@ -11,10 +12,50 @@ from httpx import ASGITransport, AsyncClient
 logger = logging.getLogger(__name__)
 
 
+# 方法作用：创建携带固定超级管理员 JWT 的隔离 ASGI 测试客户端。
+# Args: monkeypatch - pytest 补丁工具，用于隔离授权解析和数据源持久化。
+# Returns: 用例结束后自动关闭的 AsyncClient。
 @pytest.fixture
-def client():
+async def client(monkeypatch) -> AsyncIterator[AsyncClient]:
+    logger.debug("client fixture 入口")
+    from unittest.mock import AsyncMock
+
+    import src.api.routes as routes
+    from src.api.auth import create_access_token
+    from src.datasource.providers.external import ExternalDataSourceProvider
     from src.main import create_app
-    return AsyncClient(transport=ASGITransport(app=create_app()), base_url="http://test")
+
+    datasource_names = ("ch", "mysql_test", "clickhouse_test", "demo", "sales", "warehouse")
+    datasource_access = {
+        name: {
+            "name": name,
+            "allowed_columns": [],
+            "row_filter_sql": "",
+            "access_level": "admin",
+        }
+        for name in datasource_names
+    }
+    monkeypatch.setattr(
+        routes,
+        "_resolve_chat_access",
+        AsyncMock(return_value=datasource_access),
+        raising=False,
+    )
+    monkeypatch.setattr(ExternalDataSourceProvider, "persist", AsyncMock())
+    token = create_access_token(1, 1, "super_admin")
+    test_client = AsyncClient(
+        transport=ASGITransport(app=create_app()),
+        base_url="http://test",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    try:
+        logger.info("client fixture 完成")
+        yield test_client
+    except Exception as exc:
+        logger.error("client fixture 异常: %s", exc, exc_info=True)
+        raise
+    finally:
+        await test_client.aclose()
 
 
 class TestSchemas:

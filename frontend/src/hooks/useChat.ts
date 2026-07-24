@@ -107,6 +107,8 @@ export function useChat() {
   }, [turns, sessionId]);
 
   const send = useCallback((query: string, datasource: string, _datasources?: string[], _modelId?: string) => {
+    aborterRef.current?.abort();
+    setRetryInfo(null);
     setLoading(true);
     const turnId = nextId.current++;
     const newTurn: ChatTurn = {
@@ -240,6 +242,7 @@ export function useChat() {
             setRetryInfo({current: (e.retry as number)||0, max: (e.max as number)||3, reason: (e.reason as string)||''});
             break;
           case 'error':
+            setRetryInfo(null);
             setTurns(prev => prev.map(t => t.id === turnId ? {
               ...t, status: 'error', errorMessage: (e.message as string) || '未知错误',
             } : t));
@@ -253,7 +256,7 @@ export function useChat() {
         ));
       },
       (err) => {
-        setLoading(false);
+        setLoading(false); setRetryInfo(null);
         setTurns(prev => prev.map(t =>
           t.id === turnId ? { ...t, status: 'error', errorMessage: err } : t,
         ));
@@ -269,7 +272,12 @@ export function useChat() {
     }
   }, [send]);
 
-  const cancel = useCallback(() => { aborterRef.current?.abort(); setLoading(false); }, []);
+  const cancel = useCallback(() => {
+    aborterRef.current?.abort();
+    aborterRef.current = null;
+    setRetryInfo(null);
+    setLoading(false);
+  }, []);
   const clearSession = useCallback(() => {
     setTurns([]); setSessionId(''); nextId.current = 1;
     setHasMore(false);

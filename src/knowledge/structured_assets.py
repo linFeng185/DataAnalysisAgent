@@ -102,13 +102,7 @@ class StructuredAssetAdapter:
     def inspect_bytes(self, file_name: str, content: bytes) -> StructuredAssetProfile:
         logger.debug("结构化资产检查入口", file_name=file_name, content_size=len(content))
         try:
-            fmt = self._detect_format(file_name)
-            self._check_size(content)
-            if not content:
-                raise StructuredAssetError("文件内容为空")
-            frames = self._load_frames(fmt, content)
-            if not frames:
-                raise StructuredAssetError("文件未包含可分析的数据表")
+            fmt, frames = self.load_tables(file_name, content)
 
             sheets: dict[str, SheetProfile] = {}
             for name, frame in frames.items():
@@ -158,17 +152,15 @@ class StructuredAssetAdapter:
         logger.debug("结构化资产读取行入口", file_name=file_name, limit=limit, sheet_name=sheet_name)
         if limit <= 0 or limit > self.max_rows:
             raise StructuredAssetError(f"行数上限必须在 1 到 {self.max_rows} 之间")
-        fmt = self._detect_format(file_name)
-        self._check_size(content)
         try:
-            frames = self._load_frames(fmt, content, sheet_name=sheet_name, row_limit=limit)
-            if not frames:
-                return []
+            _, frames = self.load_tables(
+                file_name,
+                content,
+                sheet_name=sheet_name,
+                row_limit=limit,
+            )
             frame = next(iter(frames.values())).head(limit)
-            rows = [
-                {str(key): self._json_value(value) for key, value in row.items()}
-                for row in frame.to_dict(orient="records")
-            ]
+            rows = self.serialize_frame(frame)
             logger.info("结构化资产读取行完成", file_name=file_name, count=len(rows))
             return rows
         except StructuredAssetError:
@@ -176,6 +168,68 @@ class StructuredAssetAdapter:
         except Exception as exc:
             logger.error("结构化资产读取行失败", file_name=file_name, error=str(exc), exc_info=True)
             raise StructuredAssetError(f"{file_name} 读取失败: {exc}") from exc
+
+    # 方法作用：通过文件名完成格式识别、资源校验并加载一个或多个逻辑表。
+    # Args: file_name - 原始文件名；content - 文件字节；sheet_name - 可选 Excel sheet；row_limit - 读取上限。
+    # Returns: 格式名称和表名到 DataFrame 的映射。
+    def load_tables(
+        self,
+        file_name: str,
+        content: bytes,
+        *,
+        sheet_name: str | None = None,
+        row_limit: int | None = None,
+    ) -> tuple[str, dict[str, pd.DataFrame]]:
+        logger.debug(
+            "加载结构化资产表入口",
+            file_name=file_name,
+            content_size=len(content),
+            row_limit=row_limit,
+        )
+        try:
+            fmt = self._detect_format(file_name)
+            self._check_size(content)
+            if not content:
+                raise StructuredAssetError("文件内容为空")
+            frames = self._load_frames(
+                fmt,
+                content,
+                sheet_name=sheet_name,
+                row_limit=row_limit,
+            )
+            if not frames:
+                raise StructuredAssetError("文件未包含可分析的数据表")
+        except Exception as exc:
+            logger.error(
+                "加载结构化资产表失败",
+                file_name=file_name,
+                error=str(exc),
+                exc_info=True,
+            )
+            raise
+        logger.info(
+            "加载结构化资产表完成",
+            file_name=file_name,
+            format=fmt,
+            table_count=len(frames),
+        )
+        return fmt, frames
+
+    # 方法作用：把 DataFrame 行转换为 API 可序列化的普通字典。
+    # Args: frame - 待转换的 pandas DataFrame。
+    # Returns: JSON 兼容行字典列表。
+    def serialize_frame(self, frame: pd.DataFrame) -> list[dict[str, Any]]:
+        logger.debug("序列化结构化数据帧入口", rows=len(frame), columns=len(frame.columns))
+        try:
+            result = [
+                {str(key): self._json_value(value) for key, value in row.items()}
+                for row in frame.to_dict(orient="records")
+            ]
+        except Exception as exc:
+            logger.error("序列化结构化数据帧失败", error=str(exc), exc_info=True)
+            raise
+        logger.info("序列化结构化数据帧完成", rows=len(result))
+        return result
 
     # 方法作用：根据扩展名确定解析器，避免让调用方传入不可信的格式标识。
     # Args: file_name - 原始文件名。

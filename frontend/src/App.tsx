@@ -1,10 +1,11 @@
 import { useState, useEffect } from 'react';
 import { BrowserRouter, Routes, Route, NavLink, Navigate, useLocation } from 'react-router-dom';
-import { Layout, Menu, ConfigProvider, Tag, Typography, theme, Grid } from 'antd';
+import { Layout, Menu, ConfigProvider, Tag, Typography, theme, Grid, Button } from 'antd';
 import {
   MessageOutlined, DatabaseOutlined, HistoryOutlined, SettingOutlined,
   CheckCircleOutlined, CloseCircleOutlined, LoadingOutlined,
   ThunderboltOutlined, ReadOutlined, ApiOutlined,
+  SafetyCertificateOutlined, LogoutOutlined, UserOutlined,
 } from '@ant-design/icons';
 import ChatPage from './pages/ChatPage';
 import DatasourcePage from './pages/DatasourcePage';
@@ -13,6 +14,7 @@ import HistoryPage from './pages/HistoryPage';
 import SkillsPage from './pages/SkillsPage';
 import KnowledgePage from './pages/KnowledgePage';
 import McpPage from './pages/McpPage';
+import AdminPage from './pages/AdminPage';
 import LoginPage from './pages/LoginPage';
 import { AuthProvider } from './hooks/AuthContext';
 import { useAuth } from './hooks/AuthContext';
@@ -30,12 +32,25 @@ function ProtectedApp() {
   return <AppContent />;
 }
 
+// 方法作用：仅允许固定角色的前端会话进入平台管理路由。
+// Args: 无，读取 AuthContext 当前身份。
+// Returns: 超级管理员页面或首页重定向。
+function AdminRoute() {
+  const { user } = useAuth();
+  console.debug('AdminRoute 入口', { role: user?.role || '' });
+  const result = user?.role === 'super_admin' && user.user_id === 1
+    ? <AdminPage /> : <Navigate to="/" replace />;
+  console.info('AdminRoute 完成', { allowed: user?.role === 'super_admin' && user.user_id === 1 });
+  return result;
+}
+
 function AppContent() {
   const [collapsed, setCollapsed] = useState(false);
   const [health, setHealth] = useState<HealthResponse | null>(null);
   const location = useLocation();
   const screens = Grid.useBreakpoint();
   const isCompact = screens.md === false;
+  const { user, logout } = useAuth();
 
   useEffect(() => {
     get<HealthResponse>('/health')
@@ -66,6 +81,10 @@ function AppContent() {
           ) : (
             <Tag icon={<LoadingOutlined />} color="default">检查连接中</Tag>
           )}
+          <Tag icon={<UserOutlined />}>{user?.username || `用户 ${user?.user_id ?? ''}`}</Tag>
+          <Tag color={user?.role === 'super_admin' ? 'red' : 'default'}>{user?.role || '-'}</Tag>
+          <Button type="text" icon={<LogoutOutlined />} onClick={() => void logout()}
+            style={{ color: '#fff' }}>退出</Button>
         </div>
       </Header>
       <Layout>
@@ -75,24 +94,27 @@ function AppContent() {
             <Menu.Item key="chat" icon={<MessageOutlined />}>
               <NavLink to="/">对话分析</NavLink>
             </Menu.Item>
-            <Menu.Item key="datasource" icon={<DatabaseOutlined />}>
+            {user?.role !== 'viewer' && <Menu.Item key="datasource" icon={<DatabaseOutlined />}>
               <NavLink to="/datasource">数据源</NavLink>
-            </Menu.Item>
-            <Menu.Item key="schema" icon={<SettingOutlined />}>
+            </Menu.Item>}
+            {user?.role !== 'viewer' && <Menu.Item key="schema" icon={<SettingOutlined />}>
               <NavLink to="/schema">表结构</NavLink>
-            </Menu.Item>
+            </Menu.Item>}
             <Menu.Item key="history" icon={<HistoryOutlined />}>
               <NavLink to="/history">历史</NavLink>
             </Menu.Item>
-            <Menu.Item key="skills" icon={<ThunderboltOutlined />}>
+            {user?.role !== 'viewer' && <Menu.Item key="skills" icon={<ThunderboltOutlined />}>
               <NavLink to="/skills">Skills</NavLink>
-            </Menu.Item>
-            <Menu.Item key="knowledge" icon={<ReadOutlined />}>
+            </Menu.Item>}
+            {user?.role !== 'viewer' && <Menu.Item key="knowledge" icon={<ReadOutlined />}>
               <NavLink to="/knowledge">知识库</NavLink>
-            </Menu.Item>
-            <Menu.Item key="mcp" icon={<ApiOutlined />}>
+            </Menu.Item>}
+            {['super_admin', 'tenant_admin'].includes(user?.role || '') && <Menu.Item key="mcp" icon={<ApiOutlined />}>
               <NavLink to="/mcp">MCP</NavLink>
-            </Menu.Item>
+            </Menu.Item>}
+            {user?.role === 'super_admin' && user.user_id === 1 && <Menu.Item key="admin" icon={<SafetyCertificateOutlined />}>
+              <NavLink to="/admin">平台管理</NavLink>
+            </Menu.Item>}
           </Menu>
         </Sider>
         <Content style={{ background: '#f5f5f5', minWidth: 0 }}>
@@ -105,6 +127,7 @@ function AppContent() {
               <Route path="/skills" element={<SkillsPage />} />
               <Route path="/knowledge" element={<KnowledgePage />} />
               <Route path="/mcp" element={<McpPage />} />
+              <Route path="/admin" element={<AdminRoute />} />
             </Routes>
           </ErrorBoundary>
         </Content>

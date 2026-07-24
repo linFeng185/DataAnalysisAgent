@@ -24,7 +24,7 @@ class KnowledgeScope(StrEnum):
 def normalize_role(role: str | None) -> str:
     logger.debug("规范化角色入口", role=role)
     result = str(role or "anonymous").strip().lower()
-    logger.info("规范化角色完成", role=result)
+    logger.debug("规范化角色完成", role=result)
     return result
 
 
@@ -35,7 +35,7 @@ def normalize_knowledge_scope(scope: str | KnowledgeScope) -> KnowledgeScope:
     logger.debug("规范化知识范围入口", scope=str(scope))
     try:
         result = scope if isinstance(scope, KnowledgeScope) else KnowledgeScope(str(scope).strip().lower())
-        logger.info("规范化知识范围完成", scope=result.value)
+        logger.debug("规范化知识范围完成", scope=result.value)
         return result
     except (TypeError, ValueError) as exc:
         logger.error("规范化知识范围失败", scope=str(scope), error=str(exc), exc_info=True)
@@ -48,7 +48,7 @@ def normalize_knowledge_scope(scope: str | KnowledgeScope) -> KnowledgeScope:
 def is_super_admin(role: str) -> bool:
     logger.debug("检查超级管理员入口", role=role)
     result = normalize_role(role) == "super_admin"
-    logger.info("检查超级管理员完成", role=role, allowed=result)
+    logger.debug("检查超级管理员完成", role=role, allowed=result)
     return result
 
 
@@ -58,7 +58,7 @@ def is_super_admin(role: str) -> bool:
 def is_tenant_admin(role: str) -> bool:
     logger.debug("检查租户管理员入口", role=role)
     result = normalize_role(role) == "tenant_admin"
-    logger.info("检查租户管理员完成", role=role, allowed=result)
+    logger.debug("检查租户管理员完成", role=role, allowed=result)
     return result
 
 
@@ -96,7 +96,7 @@ def can_write_knowledge_scope(
             role=role,
             user_id=user_id,
         )
-    logger.info("检查知识范围写权限完成", scope=normalized.value, role=role, allowed=result)
+    logger.debug("检查知识范围写权限完成", scope=normalized.value, role=role, allowed=result)
     return result
 
 
@@ -141,5 +141,5 @@ def can_manage_knowledge_resource(
             current_tenant_id=current_tenant_id,
             resource_tenant_id=resource_tenant_id,
         )
-    logger.info("检查知识资源管理权限完成", scope=normalized.value, allowed=result)
+    logger.debug("检查知识资源管理权限完成", scope=normalized.value, allowed=result)
     return result

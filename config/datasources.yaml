@@ -1,5 +1,5 @@
-# 外挂模式数据源配置文件
-# 密码使用 ${ENV_VAR} 占位符，运行时从环境变量获取真实值
+# 可选的固定数据源配置文件。动态数据源也可以通过管理页面维护。
+# 文件可删除；保留时密码和高权限用户名必须使用环境变量占位符。
 
 datasources:
   clickhouse_prod:
@@ -79,7 +79,7 @@ datasources:
     host: 192.168.195.133
     port: 1433
     database: master
-    username: sa
+    username: ${MSSQL_USERNAME}
     password: ${MSSQL_PASSWORD}
     description: SQL Server 2019 Express
     tags:

@@ -41,6 +41,7 @@ class TestExecuteSQLSecurity:
             max_queries_per_hour=100,
             multi_tenant=False,
             database_url="",
+            explain_skip_dialects=[],
         )
         monkeypatch.setattr(config_module, "get_settings", lambda: settings)
         monkeypatch.setattr(execute_module, "get_settings", lambda: settings)
@@ -122,7 +123,7 @@ class TestExecuteSQLSecurity:
             def execution_options(self, **kwargs):
                 return self
 
-            def execute(self, statement):
+            def execute(self, statement, params=None):
                 return Result()
 
         class Engine:
@@ -135,6 +136,7 @@ class TestExecuteSQLSecurity:
             max_queries_per_hour=100,
             multi_tenant=False,
             database_url="",
+            explain_skip_dialects=[],
         )
         monkeypatch.setattr(config_module, "get_settings", lambda: settings)
         monkeypatch.setattr(execute_module, "get_settings", lambda: settings)

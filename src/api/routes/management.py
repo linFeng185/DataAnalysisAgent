@@ -2,26 +2,13 @@
 
 from __future__ import annotations
 
-import io
-import html
-import json
-import os
 import time
-import uuid
-from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
 
 from fastapi import APIRouter, Body, File, HTTPException, Query, UploadFile
 
-from src.api.schemas import (
-    ChatRequest, ChatResponse, ColumnCommentRequest,
-    DataSourceCreateRequest, DataSourceInfo, HealthResponse, KnowledgeTagCreateRequest,
-    KnowledgeTagStatusRequest, MCPServerCreate, ModelTestRequest, TableInfo,
-)
-from src.exceptions import DataSourceNotFoundError
+from src.api.schemas import HealthResponse, ModelTestRequest
 from src.llm.client import is_llm_available
 from src.logging_config import get_logger
-from src.api.routes._helpers import _app, _authorize_extension_scope, _registry
 
 logger = get_logger(__name__)
 router = APIRouter()
@@ -53,8 +40,10 @@ async def test_model(req: ModelTestRequest):
         连通状态和请求延迟。
     """
     import time as _t
+    from src.api.auth import require_super_admin
     from src.llm.client import get_provider
     logger.debug("模型连通性测试入口", model_id=req.model_id)
+    require_super_admin()
     try:
         p = get_provider(req.model_id)
         s = _t.monotonic()

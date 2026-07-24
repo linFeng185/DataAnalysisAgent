@@ -87,3 +87,21 @@ class TestStructuredAssetAdapter:
         assert asset.format == "excel"
         assert asset.sheets["sales"].row_count == 2
         assert asset.columns["id"].numeric is True
+
+    # 方法作用：验证查询引擎可通过公共接口加载表并序列化 DataFrame。
+    # Args: self - pytest 测试类实例。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    def test_load_tables_and_serialize_frame_public_contract(self) -> None:
+        """结构化查询不应依赖适配器的格式识别和 JSON 私有方法。"""
+        from src.knowledge.structured_assets import StructuredAssetAdapter
+
+        adapter = StructuredAssetAdapter()
+        format_name, frames = adapter.load_tables(
+            "orders.csv",
+            b"id,amount\n1,10.5\n2,20.0\n",
+            row_limit=1,
+        )
+        rows = adapter.serialize_frame(frames["data"])
+
+        assert format_name == "csv"
+        assert rows == [{"id": 1, "amount": 10.5}]

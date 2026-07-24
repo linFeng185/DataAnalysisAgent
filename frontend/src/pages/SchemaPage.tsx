@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react';
 import { Card, Table, Input, Button, Tag, Drawer, Typography, Form, message, Space, Select } from 'antd';
 import { EditOutlined } from '@ant-design/icons';
-import { get, put } from '../api/client';
+import { get, post, put } from '../api/client';
 import type { TableInfo, ColumnInfo, DatasourceConfig } from '../types';
 
 export default function SchemaPage() {
@@ -36,8 +36,9 @@ export default function SchemaPage() {
 
   const handleRefresh = async () => {
     try {
-      await fetch(`/api/v1/schema/refresh?datasource=${encodeURIComponent(ds)}`, { method: 'POST' });
-      message.success('Schema 已刷新'); load();
+      await post(`/schema/refresh?datasource=${encodeURIComponent(ds)}`, {});
+      message.success('Schema 已刷新');
+      await load();
     } catch { message.error('刷新失败'); }
   };
 

@@ -291,7 +291,7 @@ def get_current_user_id():
 
 | 可见性 | 谁可见 | 典型场景 |
 |--------|--------|---------|
-| `system` | 所有租户和用户 | SQL 方言手册、分析方法、数据质量规则、产品文档 |
+| `system` | 仅超级管理员可通过管理 API 查看；Agent 内部可受信任使用 | SQL 方言手册、分析方法、数据质量规则、产品文档 |
 | `tenant` | 当前租户所有人 | 数据源文档、官方数据字典、指标口径、业务规则 |
 | `private`（用户上传默认） | 仅创建者 | 个人分析笔记、术语别名、临时补充知识 |
 
@@ -303,7 +303,7 @@ ChromaDB 写入统一注入 `metadata.tenant_id`、`metadata.owner_user_id`、`m
 
 | 作用域 | 可见范围 | Skill 存储 | MCP 来源 |
 |--------|----------|------------|----------|
-| `system` | 所有租户和用户 | `skills/` 及超级管理员配置的系统目录 | `config/mcp_servers.yaml` 或超级管理员登记的系统服务 |
+| `system` | 仅超级管理员可通过管理 API 查看；Agent 内部可受信任使用 | `skills/` 及超级管理员配置的系统目录 | `config/app.yaml` 或超级管理员登记的系统服务 |
 | `tenant` | 当前租户所有用户 | `data/skills/tenant/{tenant_id}/` | `mcp_servers.scope=tenant` 且匹配 `tenant_id` |
 | `private` | 当前租户的创建者 | `data/skills/private/{tenant_id}/{user_id}/` | `mcp_servers.scope=private` 且同时匹配 `tenant_id/owner_user_id` |
 

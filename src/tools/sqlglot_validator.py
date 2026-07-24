@@ -8,11 +8,11 @@ from __future__ import annotations
 
 from typing import Any
 
-import sqlglot
 from sqlglot import exp
 from langchain_core.tools import BaseTool
 
 from src.logging_config import get_logger
+from src.security.sql_execution import extract_sql_function_names, validate_sql
 
 logger = get_logger(__name__)
 
@@ -79,7 +79,7 @@ def _get_dialect_functions(dialect: str) -> set[str]:
                 if hasattr(dialect_cls, "generator_class"):
                     generator = dialect_cls.generator_class()
                     funcs: set[str] = set()
-                    funcs.update(k.lower() for k in vars(generator.TRANSFORMS))
+                    funcs.update(str(k).lower() for k in generator.TRANSFORMS)
                     funcs.update(k.lower() for k in vars(exp.Func))
                     return funcs
         return set()
@@ -105,7 +105,7 @@ def _suggest_correct_function(func_name: str, dialect: str) -> str | None:
 
 
 def validate_with_sqlglot(sql: str, dialect: str) -> dict:
-    """5.2.1 sqlglot 三层校验。
+    """5.2.1 统一只读安全校验与函数兼容性提示。
 
     1. 语法解析 → 拦截语法错误
     2. 函数名白名单 → 拦截 LLM 幻觉函数
@@ -113,32 +113,26 @@ def validate_with_sqlglot(sql: str, dialect: str) -> dict:
 
     返回: {"valid": bool, "errors": list, "warnings": list, "transpiled_sql": str}
     """
-    result: dict[str, Any] = {
-        "valid": True, "errors": [], "warnings": [], "transpiled_sql": sql,
-    }
-
-    # ---- 1. 语法解析 ----
+    logger.debug("兼容 SQL 校验入口", dialect=dialect, sql_chars=len(sql))
     try:
-        parsed = sqlglot.parse(sql, dialect=dialect)
-        if not parsed or not parsed[0]:
-            result["valid"] = False
-            result["errors"].append("无法解析: SQL 解析返回空")
+        validation = validate_sql(sql, dialect)
+        result: dict[str, Any] = {
+            "valid": validation.valid,
+            "errors": validation.errors,
+            "warnings": [],
+            "transpiled_sql": validation.sql,
+        }
+        if not validation.valid:
+            logger.info(
+                "兼容 SQL 校验完成",
+                dialect=dialect,
+                valid=False,
+                error_count=len(validation.errors),
+            )
             return result
-    except sqlglot.errors.ParseError as e:
-        result["valid"] = False
-        result["errors"].append({
-            "type": "syntax_error",
-            "message": str(e),
-            "line": e.errors[0].get("line") if hasattr(e, "errors") and e.errors else None,
-            "suggestion": "请检查关键字拼写、括号匹配、引号配对",
-        })
-        return result
 
-    # ---- 2. 函数白名单校验 ----
-    dialect_funcs = _get_dialect_functions(dialect)
-    for node in parsed[0].walk():
-        if isinstance(node, (exp.Anonymous, exp.Func)):
-            func_name = (node.sql_name() or "").upper()
+        dialect_funcs = _get_dialect_functions(dialect)
+        for func_name in extract_sql_function_names(sql, dialect):
             if func_name and not _is_universal_func(func_name) and func_name.lower() not in dialect_funcs:
                 suggestion = _suggest_correct_function(func_name, dialect)
                 result["warnings"].append({
@@ -147,20 +141,15 @@ def validate_with_sqlglot(sql: str, dialect: str) -> dict:
                     "suggestion": suggestion or f"'{func_name}' 在 {dialect} 中不存在，请替换为等价函数",
                 })
 
-    # ---- 3. 方言转译 ----
-    if dialect != "mysql":
-        try:
-            result["transpiled_sql"] = sqlglot.transpile(
-                sql, read="mysql", write=dialect
-            )[0]
-        except Exception as exc:
-            logger.warning(
-                "SQL 方言转译失败，保留原始校验结果",
-                dialect=dialect,
-                error=str(exc),
-                exc_info=True,
-            )
-
+    except Exception as exc:
+        logger.error("兼容 SQL 校验失败", dialect=dialect, error=str(exc), exc_info=True)
+        raise
+    logger.info(
+        "兼容 SQL 校验完成",
+        dialect=dialect,
+        valid=True,
+        warning_count=len(result["warnings"]),
+    )
     return result
 
 
