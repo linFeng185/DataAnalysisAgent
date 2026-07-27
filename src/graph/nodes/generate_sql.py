@@ -21,6 +21,7 @@ generate_sql 节点 — LLM 生成 SQL，支持错误回注重试。
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 import time
@@ -318,7 +319,8 @@ async def _llm_generate(
         schema_chars=len(schema_text),
         grounding_chars=len(grounding_context),
     )
-    llm = get_llm(temperature=0)
+    # 在线程池构造同步 ChatModel，避免多源并发时阻塞事件循环。
+    llm = await asyncio.to_thread(get_llm, 0)
 
     system = SQL_GENERATION_SYSTEM.format(
         dialect=dialect,

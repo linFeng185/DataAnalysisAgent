@@ -6,6 +6,7 @@ from fastapi import APIRouter
 
 from src.api.schemas import ColumnCommentRequest, DataSourceCreateRequest
 from src.api.routes.admin import router as admin_router
+from src.api.routes.access_policy import router as access_policy_router
 from src.api.routes._helpers import _app, _authorize_extension_scope, _registry
 from src.api.routes.chat import (
     _enforce_chat_request_quota,
@@ -93,6 +94,7 @@ from src.api.routes.skills import (
 router = APIRouter()
 for domain_router in (
     admin_router,
+    access_policy_router,
     chat_router,
     schema_router,
     datasource_router,

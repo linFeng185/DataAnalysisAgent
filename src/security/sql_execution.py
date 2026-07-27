@@ -102,7 +102,7 @@ def _precheck_sql(sql: str, dialect: str) -> list[dict[str, Any]]:
         result = [{"type": "security_block", "message": f"禁止: {operation}"}]
         logger.warning("SQL 连接前预检拒绝", operation=operation)
         return result
-    logger.info("SQL 连接前预检完成", valid=True)
+    logger.debug("SQL 连接前预检完成", valid=True)
     return []
 
 

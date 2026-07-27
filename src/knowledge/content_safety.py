@@ -49,7 +49,7 @@ def sanitize_untrusted_text(text: str, max_chars: int = 6000) -> SanitizedText:
             flags.append(name)
             normalized = pattern.sub("[潜在指令内容]", normalized)
     result = SanitizedText(text=normalized, flags=flags)
-    logger.info("不可信文本清理完成", flags=flags, output_size=len(result.text))
+    logger.debug("不可信文本清理完成", flags=flags, output_size=len(result.text))
     return result
 
 
@@ -69,5 +69,5 @@ def render_evidence_context(evidence: Evidence, max_chars: int = 6000) -> str:
         f"\n<evidence source_id=\"{safe_source_id}\" version=\"{safe_version}\" locator=\"{locator}\" flags=\"{flags}\">"
         f"\n<untrusted_data>\n{safe_content}\n</untrusted_data>\n</evidence>"
     )
-    logger.info("证据上下文渲染完成", source_id=evidence.source_id, flags=flags)
+    logger.debug("证据上下文渲染完成", source_id=evidence.source_id, flags=flags)
     return result

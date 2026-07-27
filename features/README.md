@@ -25,4 +25,5 @@
 | [19-extensions.md](19-extensions.md) | 19. 扩展能力 | 183 行 |
 | [20-architecture-remediation.md](20-architecture-remediation.md) | 20. 架构整改 | 动态 |
 | [21-platform-admin.md](21-platform-admin.md) | 21. 平台管理与强制认证 | 动态 |
+| [22-api-access-policy.md](22-api-access-policy.md) | 22. API 访问策略与 IP 控制 | 动态 |
 | [99-summary.md](99-summary.md) | 附录 | 145 行 |

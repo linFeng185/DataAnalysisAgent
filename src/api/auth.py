@@ -591,40 +591,23 @@ async def current_user() -> dict:
     return result
 
 
-# ── 无需认证的公开端点 ──
+# 方法作用：读取访问策略中间件写入的策略，兼容直接单测时按 YAML 基线解析。
+# Args: request - 当前 HTTP 请求。
+# Returns: 当前方法和路径命中的访问策略。
+def _request_access_policy(request: Request):
+    from src.security.api_access_policy import AccessPolicy, ApiAccessPolicyManager
 
-PUBLIC_PATHS = {
-    "/api/v1/health",
-    "/api/v1/auth/login",
-    "/api/v1/auth/register",
-    "/api/v1/auth/logout",
-}
-_ADMIN_KEY_EXACT_ROUTES = {
-    ("POST", "/api/v1/datasources"),
-    ("POST", "/api/v1/schema/refresh"),
-    ("POST", "/api/v1/models/test"),
-}
-
-
-# 方法作用：判断请求是否属于需要平台 ADMIN_API_KEY 的管理写操作。
-# Args: path - 请求路径；method - HTTP 方法。
-# Returns: 数据源、Schema 或模型探测管理操作返回 True。
-def _requires_admin_api_key(path: str, method: str) -> bool:
-    logger.debug("判断平台管理 Key 入口", path=path, method=method)
-    normalized_method = str(method or "").upper()
-    exact = (normalized_method, path) in _ADMIN_KEY_EXACT_ROUTES
-    prefixed = (
-        (normalized_method == "DELETE" and path.startswith("/api/v1/datasources/"))
-        or (
-            normalized_method == "PUT"
-            and path.startswith("/api/v1/schema/tables/")
-            and "/columns/" in path
-            and path.endswith("/comment")
-        )
-    )
-    result = exact or prefixed
-    logger.debug("判断平台管理 Key 完成", path=path, method=normalized_method, required=result)
-    return result
+    state = request.scope.get("state", {})
+    policy = state.get("api_access_policy") if isinstance(state, dict) else None
+    if isinstance(policy, AccessPolicy):
+        return policy
+    settings = get_settings()
+    client_ip = request.client.host if request.client is not None else "0.0.0.0"
+    return ApiAccessPolicyManager(settings).resolve(
+        request.url.path,
+        request.method,
+        client_ip,
+    ).policy
 
 
 class AuthMiddleware:
@@ -725,8 +708,12 @@ class AuthMiddleware:
         request: Request,
     ) -> tuple[tuple[int, int, str] | None, JSONResponse | None]:
         """执行不消费请求体的同步认证决策。"""
+        from src.security.api_access_policy import AuthMode
+
         logger.debug("认证决策入口", path=request.url.path, method=request.method)
-        if request.url.path in PUBLIC_PATHS:
+        access_policy = _request_access_policy(request)
+        auth_mode = access_policy.auth_mode
+        if auth_mode is AuthMode.PUBLIC:
             logger.debug("认证决策完成", path=request.url.path, mode="public")
             return None, None
 
@@ -738,7 +725,7 @@ class AuthMiddleware:
         bearer_token = authorization[7:].strip() if authorization.startswith("Bearer ") else ""
         cookie_token = request.cookies.get(ACCESS_TOKEN_COOKIE, "")
         token = bearer_token or cookie_token
-        if admin_api_key and _requires_admin_api_key(request.url.path, request.method) and not token:
+        if admin_api_key and auth_mode is AuthMode.JWT_OR_ADMIN_KEY and not token:
             import hmac
 
             if not hmac.compare_digest(request.headers.get("X-Admin-Key", ""), admin_api_key):
@@ -750,14 +737,12 @@ class AuthMiddleware:
             "认证令牌来源已选择",
             source="bearer" if bearer_token else "cookie" if cookie_token else "missing",
         )
-        is_auth_probe = request.url.path == "/api/v1/auth/me"
-
         if not token:
-            if policy.requires_authentication(is_probe=is_auth_probe):
-                logger.warning("认证令牌缺失", path=request.url.path)
-                return None, _unauthorized("未提供认证令牌")
-            logger.debug("认证探测匿名放行", path=request.url.path, probe=is_auth_probe)
-            return (ANONYMOUS_USER_ID, DEFAULT_TENANT_ID, ANONYMOUS_ROLE), None
+            if auth_mode is AuthMode.OPTIONAL:
+                logger.debug("可选认证匿名放行", path=request.url.path)
+                return (ANONYMOUS_USER_ID, DEFAULT_TENANT_ID, ANONYMOUS_ROLE), None
+            logger.warning("认证令牌缺失", path=request.url.path, auth_mode=auth_mode.value)
+            return None, _unauthorized("未提供认证令牌")
 
         identity = (ANONYMOUS_USER_ID, DEFAULT_TENANT_ID, ANONYMOUS_ROLE)
         try:
@@ -786,6 +771,17 @@ class AuthMiddleware:
         except PermissionError as exc:
             logger.warning("JWT 身份不满足租户策略", error=str(exc))
             return None, _unauthorized("令牌身份无效")
+
+        if auth_mode is AuthMode.SUPER_ADMIN and not (
+            identity[0] == SUPER_ADMIN_USER_ID and identity[2] == "super_admin"
+        ):
+            logger.warning(
+                "接口要求固定超级管理员",
+                path=request.url.path,
+                user_id=identity[0],
+                role=identity[2],
+            )
+            return None, _unauthorized("接口需要平台超级管理员")
 
         logger.debug(
             "认证决策完成",

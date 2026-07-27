@@ -59,5 +59,5 @@ def rerank_evidence(evidence: list[Evidence], query: str, top_k: int = 5) -> lis
 def _tokenize(text: str) -> list[str]:
     logger.debug("重排器分词入口", text_size=len(text))
     tokens = re.findall(r"[A-Za-z0-9_]+|[\u4e00-\u9fff]", text.lower())
-    logger.info("重排器分词完成", token_count=len(tokens))
+    logger.debug("重排器分词完成", token_count=len(tokens))
     return tokens

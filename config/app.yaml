@@ -48,6 +48,82 @@ credential_encryption_key: ""
 
 cors_allowed_origins: ""
 security_hsts_seconds: 31536000
+api_access:
+  default_auth: jwt
+  default_access_log: standard
+  trusted_proxy_cidrs: []
+  emergency_ip_deny: []
+  bootstrap_policies:
+    - id: health
+      path: /api/v1/health
+      path_type: exact
+      methods: [GET]
+      auth: public
+      access_log: none
+      description: 健康检查
+    - id: login
+      path: /api/v1/auth/login
+      path_type: exact
+      methods: [POST]
+      auth: public
+      access_log: security
+      description: 登录
+    - id: register
+      path: /api/v1/auth/register
+      path_type: exact
+      methods: [POST]
+      auth: public
+      access_log: security
+      description: 公开注册
+    - id: logout
+      path: /api/v1/auth/logout
+      path_type: exact
+      methods: [POST]
+      auth: public
+      access_log: standard
+      description: 退出登录
+    - id: auth_probe
+      path: /api/v1/auth/me
+      path_type: exact
+      methods: [GET]
+      auth: optional
+      access_log: standard
+      description: 认证状态探测
+    - id: datasource_create
+      path: /api/v1/datasources
+      path_type: exact
+      methods: [POST]
+      auth: jwt_or_admin_key
+      access_log: audit
+      description: 创建数据源
+    - id: datasource_delete
+      path: /api/v1/datasources/{name}
+      path_type: template
+      methods: [DELETE]
+      auth: jwt_or_admin_key
+      access_log: audit
+      description: 删除数据源
+    - id: schema_refresh
+      path: /api/v1/schema/refresh
+      path_type: exact
+      methods: [POST]
+      auth: jwt_or_admin_key
+      access_log: audit
+      description: 刷新 Schema
+    - id: schema_column_comment
+      path: /api/v1/schema/tables/{table}/columns/{column}/comment
+      path_type: template
+      methods: [PUT]
+      auth: jwt_or_admin_key
+      access_log: audit
+      description: 更新字段注释
+    - id: model_test
+      path: /api/v1/models/test
+      path_type: exact
+      methods: [POST]
+      auth: jwt_or_admin_key
+      access_log: audit
+      description: 模型连通性测试
 llm_fallback_chain: ""
 
 context_max_tokens: 50000

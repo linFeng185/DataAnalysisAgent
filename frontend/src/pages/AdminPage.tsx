@@ -1,14 +1,14 @@
 import { useEffect, useMemo, useState } from 'react';
 import {
-  Alert, Button, Descriptions, Form, Input, Modal, Select, Space, Switch,
-  Table, Tabs, Tag, Typography, message,
+  Alert, Button, Descriptions, Divider, Form, Input, InputNumber, Modal, Select,
+  Space, Switch, Table, Tabs, Tag, Tooltip, Typography, message,
 } from 'antd';
 import {
-  KeyOutlined, PlusOutlined, ReloadOutlined, SettingOutlined,
-  SafetyCertificateOutlined, TeamOutlined,
+  DeleteOutlined, EditOutlined, KeyOutlined, PlusOutlined, ReloadOutlined,
+  SafetyCertificateOutlined, SettingOutlined, TeamOutlined,
 } from '@ant-design/icons';
 import { useNavigate } from 'react-router-dom';
-import { get, patch, post } from '../api/client';
+import { del, get, patch, post } from '../api/client';
 
 interface Tenant {
   id: number;
@@ -45,10 +45,52 @@ interface ConfigSummary {
   mcp_server_count: number;
 }
 
+interface AccessPolicy {
+  id: number | null;
+  policy_key: string;
+  path: string;
+  path_type: 'exact' | 'template';
+  methods: string[];
+  auth_mode: 'public' | 'optional' | 'jwt' | 'jwt_or_admin_key' | 'super_admin';
+  access_log_mode: 'standard' | 'security' | 'audit' | 'none';
+  source: 'yaml' | 'database';
+  priority: number;
+  enabled: boolean;
+  description: string;
+}
+
+interface AccessIpRule {
+  id: number;
+  policy_key: string;
+  action: 'allow' | 'deny';
+  cidr: string;
+  enabled: boolean;
+  description: string;
+}
+
+interface AccessPolicySnapshot {
+  policies: AccessPolicy[];
+  ip_rules: AccessIpRule[];
+  defaults: { auth_mode: string; access_log_mode: string };
+}
+
 const ROLE_OPTIONS = [
   { value: 'tenant_admin', label: '租户管理员' },
   { value: 'analyst', label: '分析员' },
   { value: 'viewer', label: '只读用户' },
+];
+
+const AUTH_MODE_OPTIONS = [
+  { value: 'jwt', label: 'JWT' },
+  { value: 'jwt_or_admin_key', label: 'JWT / Admin Key' },
+  { value: 'super_admin', label: '固定超级管理员' },
+];
+
+const ACCESS_LOG_OPTIONS = [
+  { value: 'standard', label: '普通访问日志' },
+  { value: 'security', label: '安全日志' },
+  { value: 'audit', label: '审计日志' },
+  { value: 'none', label: '静默成功访问' },
 ];
 
 // 方法作用：提供超级管理员的租户、用户和安全配置工作台。
@@ -60,14 +102,21 @@ export default function AdminPage() {
   const [tenants, setTenants] = useState<Tenant[]>([]);
   const [users, setUsers] = useState<ManagedUser[]>([]);
   const [config, setConfig] = useState<ConfigSummary | null>(null);
+  const [accessPolicies, setAccessPolicies] = useState<AccessPolicy[]>([]);
+  const [accessIpRules, setAccessIpRules] = useState<AccessIpRule[]>([]);
   const [loading, setLoading] = useState(false);
   const [tenantModal, setTenantModal] = useState(false);
   const [userModal, setUserModal] = useState(false);
   const [passwordUser, setPasswordUser] = useState<ManagedUser | null>(null);
+  const [policyModal, setPolicyModal] = useState(false);
+  const [editingPolicy, setEditingPolicy] = useState<AccessPolicy | null>(null);
+  const [rulePolicy, setRulePolicy] = useState<AccessPolicy | null>(null);
   const [tenantFilter, setTenantFilter] = useState<number | undefined>();
   const [tenantForm] = Form.useForm();
   const [userForm] = Form.useForm();
   const [passwordForm] = Form.useForm();
+  const [policyForm] = Form.useForm();
+  const [ruleForm] = Form.useForm();
 
   // 方法作用：并行加载平台管理所需的租户、用户和脱敏配置摘要。
   // Args: 无。
@@ -77,14 +126,17 @@ export default function AdminPage() {
     setLoading(true);
     try {
       const query = tenantFilter ? `?tenant_id=${tenantFilter}` : '';
-      const [tenantData, userData, configData] = await Promise.all([
+      const [tenantData, userData, configData, accessData] = await Promise.all([
         get<{ tenants: Tenant[] }>('/admin/tenants?page_size=100'),
         get<{ users: ManagedUser[] }>(`/admin/users${query}${query ? '&' : '?'}page_size=100`),
         get<ConfigSummary>('/admin/config'),
+        get<AccessPolicySnapshot>('/admin/access-policies'),
       ]);
       setTenants(tenantData.tenants || []);
       setUsers(userData.users || []);
       setConfig(configData);
+      setAccessPolicies(accessData.policies || []);
+      setAccessIpRules(accessData.ip_rules || []);
       console.info('AdminPage.load 完成', { tenants: tenantData.tenants.length, users: userData.users.length });
     } catch (error) {
       console.error('AdminPage.load 异常', error);
@@ -179,6 +231,130 @@ export default function AdminPage() {
     } catch (error) { console.error('AdminPage.resetPassword 异常', error); }
   };
 
+  // 方法作用：打开动态访问策略创建或编辑表单。
+  // Args: policy - 可选数据库策略，缺失时进入创建模式。
+  // Returns: 无返回值。
+  const openPolicyEditor = (policy?: AccessPolicy) => {
+    console.debug('AdminPage.openPolicyEditor 入口', { policyKey: policy?.policy_key || '' });
+    setEditingPolicy(policy || null);
+    policyForm.setFieldsValue(policy ? {
+      policy_key: policy.policy_key,
+      path: policy.path,
+      path_type: policy.path_type,
+      methods: policy.methods,
+      auth_mode: policy.auth_mode,
+      access_log_mode: policy.access_log_mode,
+      priority: policy.priority,
+      description: policy.description,
+    } : {
+      path_type: 'exact', methods: ['GET'], auth_mode: 'jwt',
+      access_log_mode: 'standard', priority: 0,
+    });
+    setPolicyModal(true);
+    console.info('AdminPage.openPolicyEditor 完成', { editing: Boolean(policy) });
+  };
+
+  // 方法作用：创建或更新数据库动态访问策略。
+  // Args: 无，读取 policyForm 和 editingPolicy。
+  // Returns: 保存完成后无返回值。
+  const saveAccessPolicy = async () => {
+    console.debug('AdminPage.saveAccessPolicy 入口', { policyId: editingPolicy?.id || null });
+    try {
+      const values = await policyForm.validateFields();
+      if (editingPolicy?.id) {
+        const { policy_key: _policyKey, ...updates } = values;
+        await patch(`/admin/access-policies/${editingPolicy.id}`, updates);
+      } else {
+        await post('/admin/access-policies', values);
+      }
+      message.success(editingPolicy ? '访问策略已更新' : '访问策略已创建');
+      setPolicyModal(false);
+      setEditingPolicy(null);
+      policyForm.resetFields();
+      await load();
+      console.info('AdminPage.saveAccessPolicy 完成');
+    } catch (error) { console.error('AdminPage.saveAccessPolicy 异常', error); }
+  };
+
+  // 方法作用：启用或停用数据库动态访问策略。
+  // Args: policy - 数据库策略；enabled - 目标状态。
+  // Returns: 更新完成后无返回值。
+  const toggleAccessPolicy = async (policy: AccessPolicy, enabled: boolean) => {
+    console.debug('AdminPage.toggleAccessPolicy 入口', { policyId: policy.id, enabled });
+    if (!policy.id) return;
+    try {
+      await patch(`/admin/access-policies/${policy.id}`, { enabled });
+      await load();
+      console.info('AdminPage.toggleAccessPolicy 完成', { policyId: policy.id });
+    } catch (error) { console.error('AdminPage.toggleAccessPolicy 异常', error); message.error('策略状态更新失败'); }
+  };
+
+  // 方法作用：删除数据库动态访问策略及其 IP 规则。
+  // Args: policy - 待删除数据库策略。
+  // Returns: 删除完成后无返回值。
+  const deleteAccessPolicy = async (policy: AccessPolicy) => {
+    console.debug('AdminPage.deleteAccessPolicy 入口', { policyId: policy.id });
+    if (!policy.id) return;
+    try {
+      await del(`/admin/access-policies/${policy.id}`);
+      message.success('访问策略已删除');
+      await load();
+      console.info('AdminPage.deleteAccessPolicy 完成', { policyId: policy.id });
+    } catch (error) { console.error('AdminPage.deleteAccessPolicy 异常', error); message.error('访问策略删除失败'); }
+  };
+
+  // 方法作用：打开指定策略的 IP 黑白名单创建表单。
+  // Args: policy - 目标 YAML 或数据库策略。
+  // Returns: 无返回值。
+  const openIpRuleEditor = (policy: AccessPolicy) => {
+    console.debug('AdminPage.openIpRuleEditor 入口', { policyKey: policy.policy_key });
+    setRulePolicy(policy);
+    ruleForm.setFieldsValue({ action: 'deny', enabled: true });
+    console.info('AdminPage.openIpRuleEditor 完成', { policyKey: policy.policy_key });
+  };
+
+  // 方法作用：为选中策略创建 CIDR allow 或 deny 规则。
+  // Args: 无，读取 rulePolicy 和 ruleForm。
+  // Returns: 创建完成后无返回值。
+  const createIpRule = async () => {
+    console.debug('AdminPage.createIpRule 入口', { policyKey: rulePolicy?.policy_key || '' });
+    if (!rulePolicy) return;
+    try {
+      const values = await ruleForm.validateFields();
+      await post(`/admin/access-policies/${rulePolicy.policy_key}/ip-rules`, values);
+      message.success('IP 规则已创建');
+      setRulePolicy(null);
+      ruleForm.resetFields();
+      await load();
+      console.info('AdminPage.createIpRule 完成');
+    } catch (error) { console.error('AdminPage.createIpRule 异常', error); }
+  };
+
+  // 方法作用：启用或停用接口 IP 规则。
+  // Args: rule - IP 规则；enabled - 目标状态。
+  // Returns: 更新完成后无返回值。
+  const toggleIpRule = async (rule: AccessIpRule, enabled: boolean) => {
+    console.debug('AdminPage.toggleIpRule 入口', { ruleId: rule.id, enabled });
+    try {
+      await patch(`/admin/access-ip-rules/${rule.id}`, { enabled });
+      await load();
+      console.info('AdminPage.toggleIpRule 完成', { ruleId: rule.id });
+    } catch (error) { console.error('AdminPage.toggleIpRule 异常', error); message.error('IP 规则状态更新失败'); }
+  };
+
+  // 方法作用：删除接口 IP 黑白名单规则。
+  // Args: rule - 待删除规则。
+  // Returns: 删除完成后无返回值。
+  const deleteIpRule = async (rule: AccessIpRule) => {
+    console.debug('AdminPage.deleteIpRule 入口', { ruleId: rule.id });
+    try {
+      await del(`/admin/access-ip-rules/${rule.id}`);
+      message.success('IP 规则已删除');
+      await load();
+      console.info('AdminPage.deleteIpRule 完成', { ruleId: rule.id });
+    } catch (error) { console.error('AdminPage.deleteIpRule 异常', error); message.error('IP 规则删除失败'); }
+  };
+
   const tenantNames = useMemo(
     () => new Map(tenants.map(tenant => [tenant.id, tenant.name])),
     [tenants],
@@ -241,6 +417,44 @@ export default function AdminPage() {
     </Space>
   </Space> : null;
 
+  const accessPolicyWorkspace = <div style={{ width: '100%', minWidth: 0, maxWidth: 'calc(100vw - 48px)', overflow: 'hidden' }}>
+    <Table<AccessPolicy> rowKey={policy => `${policy.source}:${policy.policy_key}`}
+      dataSource={accessPolicies} loading={loading} pagination={{ pageSize: 15 }} scroll={{ x: 1080 }}
+      title={() => <Space>
+        <Button type="primary" icon={<PlusOutlined />} onClick={() => openPolicyEditor()}>创建策略</Button>
+        <Tooltip title="刷新访问策略"><Button icon={<ReloadOutlined />} onClick={() => void load()} aria-label="刷新访问策略" /></Tooltip>
+      </Space>}
+      columns={[
+        { title: '策略', dataIndex: 'policy_key', width: 180 },
+        { title: '来源', dataIndex: 'source', width: 90, render: source => <Tag color={source === 'yaml' ? 'blue' : 'green'}>{source === 'yaml' ? 'YAML' : '数据库'}</Tag> },
+        { title: '方法', dataIndex: 'methods', width: 150, render: methods => <Space size={4} wrap>{methods.map((method: string) => <Tag key={method}>{method}</Tag>)}</Space> },
+        { title: '路径', dataIndex: 'path', width: 300, ellipsis: true },
+        { title: '认证', dataIndex: 'auth_mode', width: 150 },
+        { title: '访问日志', dataIndex: 'access_log_mode', width: 120 },
+        { title: '状态', width: 80, render: (_, policy) => <Switch checked={policy.enabled} disabled={policy.source === 'yaml'} onChange={value => void toggleAccessPolicy(policy, value)} /> },
+        { title: '操作', width: 150, render: (_, policy) => <Space size={4}>
+          <Tooltip title="添加 IP 规则"><Button icon={<SafetyCertificateOutlined />} onClick={() => openIpRuleEditor(policy)} aria-label={`为 ${policy.policy_key} 添加 IP 规则`} /></Tooltip>
+          {policy.source === 'database' && <>
+            <Tooltip title="编辑策略"><Button icon={<EditOutlined />} onClick={() => openPolicyEditor(policy)} aria-label={`编辑 ${policy.policy_key}`} /></Tooltip>
+            <Tooltip title="删除策略"><Button danger icon={<DeleteOutlined />} aria-label={`删除 ${policy.policy_key}`}
+              onClick={() => Modal.confirm({ title: '删除访问策略', content: `同时删除 ${policy.policy_key} 的 IP 规则。`, okButtonProps: { danger: true }, onOk: () => deleteAccessPolicy(policy) })} /></Tooltip>
+          </>}
+        </Space> },
+      ]} />
+    <Divider style={{ margin: '4px 0' }} />
+    <Typography.Title level={5} style={{ margin: 0 }}>IP 黑白名单</Typography.Title>
+    <Table<AccessIpRule> rowKey="id" dataSource={accessIpRules} loading={loading}
+      pagination={{ pageSize: 15 }} scroll={{ x: 760 }} columns={[
+        { title: '策略', dataIndex: 'policy_key', width: 180 },
+        { title: '动作', dataIndex: 'action', width: 100, render: action => <Tag color={action === 'deny' ? 'red' : 'green'}>{action === 'deny' ? '拒绝' : '允许'}</Tag> },
+        { title: 'CIDR', dataIndex: 'cidr', width: 220 },
+        { title: '说明', dataIndex: 'description', ellipsis: true },
+        { title: '状态', width: 90, render: (_, rule) => <Switch checked={rule.enabled} onChange={value => void toggleIpRule(rule, value)} /> },
+        { title: '操作', width: 72, render: (_, rule) => <Tooltip title="删除 IP 规则"><Button danger icon={<DeleteOutlined />} aria-label={`删除 IP 规则 ${rule.id}`}
+          onClick={() => Modal.confirm({ title: '删除 IP 规则', content: `${rule.action} ${rule.cidr}`, okButtonProps: { danger: true }, onOk: () => deleteIpRule(rule) })} /></Tooltip> },
+      ]} />
+  </div>;
+
   console.info('AdminPage 完成', { tenantCount: tenants.length, userCount: users.length });
   return <div style={{ padding: 24, maxWidth: 1280, margin: '0 auto' }}>
     <Typography.Title level={3} style={{ marginTop: 0 }}>平台管理</Typography.Title>
@@ -248,6 +462,7 @@ export default function AdminPage() {
       { key: 'tenants', label: '租户管理', children: tenantWorkspace },
       { key: 'users', label: '用户管理', children: userWorkspace },
       { key: 'security', label: '安全配置', children: configWorkspace },
+      { key: 'access', label: '访问策略', children: accessPolicyWorkspace },
     ]} />
 
     <Modal title="创建租户" open={tenantModal} onOk={() => void createTenant()} onCancel={() => setTenantModal(false)} destroyOnClose>
@@ -271,6 +486,33 @@ export default function AdminPage() {
       onCancel={() => setPasswordUser(null)} destroyOnClose>
       <Form form={passwordForm} layout="vertical">
         <Form.Item name="password" label="新密码" rules={[{ required: true, min: 8, max: 72 }]}><Input.Password /></Form.Item>
+      </Form>
+    </Modal>
+
+    <Modal title={editingPolicy ? '编辑访问策略' : '创建访问策略'} open={policyModal}
+      onOk={() => void saveAccessPolicy()} onCancel={() => { setPolicyModal(false); setEditingPolicy(null); }} destroyOnClose>
+      <Form form={policyForm} layout="vertical">
+        <Form.Item name="policy_key" label="策略编号" rules={[{ required: true, pattern: /^[a-z][a-z0-9_-]+$/ }]}> <Input disabled={Boolean(editingPolicy)} /> </Form.Item>
+        <Form.Item name="path" label="接口路径" rules={[{ required: true, pattern: /^\// }]}><Input placeholder="/api/v1/reports" /></Form.Item>
+        <Space size={12} style={{ width: '100%' }} align="start">
+          <Form.Item name="path_type" label="匹配方式" rules={[{ required: true }]}><Select style={{ width: 130 }} options={[{ value: 'exact', label: '精确路径' }, { value: 'template', label: '路径模板' }]} /></Form.Item>
+          <Form.Item name="methods" label="HTTP 方法" rules={[{ required: true }]}><Select mode="multiple" style={{ width: 220 }} options={['GET', 'POST', 'PUT', 'PATCH', 'DELETE'].map(value => ({ value, label: value }))} /></Form.Item>
+        </Space>
+        <Space size={12} style={{ width: '100%' }} align="start">
+          <Form.Item name="auth_mode" label="认证模式" rules={[{ required: true }]}><Select style={{ width: 190 }} options={AUTH_MODE_OPTIONS} /></Form.Item>
+          <Form.Item name="access_log_mode" label="访问日志" rules={[{ required: true }]}><Select style={{ width: 180 }} options={ACCESS_LOG_OPTIONS} /></Form.Item>
+          <Form.Item name="priority" label="优先级" rules={[{ required: true }]}><InputNumber min={-100000} max={100000} style={{ width: 110 }} /></Form.Item>
+        </Space>
+        <Form.Item name="description" label="说明"><Input.TextArea maxLength={500} rows={2} /></Form.Item>
+      </Form>
+    </Modal>
+
+    <Modal title={`为 ${rulePolicy?.policy_key || ''} 添加 IP 规则`} open={Boolean(rulePolicy)}
+      onOk={() => void createIpRule()} onCancel={() => setRulePolicy(null)} destroyOnClose>
+      <Form form={ruleForm} layout="vertical">
+        <Form.Item name="action" label="规则动作" rules={[{ required: true }]}><Select options={[{ value: 'deny', label: '拒绝' }, { value: 'allow', label: '允许' }]} /></Form.Item>
+        <Form.Item name="cidr" label="IP / CIDR" rules={[{ required: true }]}><Input placeholder="203.0.113.0/24" /></Form.Item>
+        <Form.Item name="description" label="说明"><Input maxLength={500} /></Form.Item>
       </Form>
     </Modal>
   </div>;

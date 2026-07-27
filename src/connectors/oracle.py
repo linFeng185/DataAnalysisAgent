@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 from typing import Any
 
 import sqlalchemy as sa
@@ -12,6 +13,8 @@ from src.connectors.registry import register_connector
 from src.logging_config import get_logger
 
 logger = get_logger(__name__)
+
+_ORACLE_SCHEMA_PATTERN = re.compile(r"[A-Za-z][A-Za-z0-9_$#]{0,127}\Z")
 
 
 @register_connector("oracle")
@@ -54,7 +57,26 @@ class OracleConnector(ConnectorBase):
         """
         return None
 
-    async def execute(self, sql: str, params: dict | None = None):
+    # 方法作用：读取并校验 Oracle 会话要切换到的业务 schema。
+    # Args: 无，使用数据源 extra_params.schema 配置。
+    # Returns: 合法 schema 名称；未配置时返回空字符串。
+    def _get_current_schema(self) -> str:
+        """返回可安全写入 ALTER SESSION 的 Oracle schema 标识符。"""
+        schema = str(self.config.extra_params.get("schema", "") or "").strip()
+        if schema and not _ORACLE_SCHEMA_PATTERN.fullmatch(schema):
+            logger.error(
+                "Oracle schema 配置非法",
+                datasource=self.config.name,
+                schema=schema[:128],
+            )
+            raise ValueError("Oracle schema 必须是合法的未引用标识符")
+        return schema
+
+    async def execute(
+        self,
+        sql: str,
+        params: dict[str, Any] | None = None,
+    ) -> list[dict[str, Any]]:
         """在线程池中执行 SQL 并转换为统一行字典。
 
         Args:
@@ -69,10 +91,21 @@ class OracleConnector(ConnectorBase):
         if self._engine is None:
             await self.create_engine()
 
-        def _run():
+        # 方法作用：在同步 Oracle 连接中执行语句并按结果集类型提取行。
+        # Args: 无，使用外层 sql 和 params 参数。
+        # Returns: 查询行字典列表，无结果集语句返回空列表。
+        def _run() -> list[dict[str, Any]]:
             with self._engine.connect() as conn:
                 result = conn.execute(sa.text(sql), params or {})
-                rows = result.fetchall() if hasattr(result, "fetchall") else []
+                returns_rows = bool(
+                    getattr(result, "returns_rows", hasattr(result, "fetchall"))
+                )
+                logger.info(
+                    "Oracle 执行结果边界",
+                    datasource=self.config.name,
+                    returns_rows=returns_rows,
+                )
+                rows = result.fetchall() if returns_rows else []
                 return [dict(row._mapping) for row in rows]
 
         try:
@@ -145,6 +178,7 @@ class OracleConnector(ConnectorBase):
         """
         logger.debug("Oracle 引擎创建入口", datasource=self.config.name)
         try:
+            current_schema = self._get_current_schema()
             self._engine = sa.create_engine(
                 self._build_url(),
                 pool_size=2,
@@ -152,6 +186,25 @@ class OracleConnector(ConnectorBase):
                 pool_pre_ping=True,
                 pool_recycle=1800,
             )
+            if current_schema:
+                # 方法作用：在每个新 Oracle DBAPI 连接上切换业务 schema。
+                # Args: dbapi_connection - 原生连接；connection_record - SQLAlchemy 连接记录。
+                # Returns: 无返回值。
+                def _set_current_schema(dbapi_connection, connection_record) -> None:
+                    cursor = dbapi_connection.cursor()
+                    try:
+                        cursor.execute(
+                            f'ALTER SESSION SET CURRENT_SCHEMA = "{current_schema}"'
+                        )
+                    finally:
+                        cursor.close()
+
+                sa.event.listen(self._engine, "connect", _set_current_schema)
+                logger.info(
+                    "Oracle 会话 schema 配置完成",
+                    datasource=self.config.name,
+                    schema=current_schema,
+                )
         except Exception as exc:
             logger.error(
                 "Oracle 引擎创建失败",

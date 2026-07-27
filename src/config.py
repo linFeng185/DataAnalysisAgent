@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import logging
 import os
+import ipaddress
 from pathlib import Path
 from typing import Any, Literal, cast
 from urllib.parse import unquote, urlsplit
 
 from dotenv import load_dotenv
-from pydantic import Field
+from pydantic import BaseModel, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from pydantic_settings import YamlConfigSettingsSource
 
@@ -27,6 +28,122 @@ if not _ENV_FILE.exists() and _ENV_EXAMPLE.exists():
 
 # 将 .env 中所有键值注入 os.environ，确保 CredentialManager.resolve_env_ref 能解析 ${VAR} 占位符
 load_dotenv(_ENV_FILE)
+
+
+class ApiAccessRouteConfig(BaseModel):
+    """单条 YAML API 访问基线策略。"""
+
+    id: str = Field(..., min_length=2, max_length=64, pattern=r"^[a-z][a-z0-9_-]+$")
+    path: str = Field(..., min_length=1, max_length=512, pattern=r"^/")
+    path_type: Literal["exact", "template"] = "exact"
+    methods: list[str] = Field(min_length=1)
+    auth: Literal["public", "optional", "jwt", "jwt_or_admin_key", "super_admin"]
+    access_log: Literal["standard", "security", "audit", "none"] = "standard"
+    description: str = Field(default="", max_length=500)
+
+    # 方法作用：把 HTTP 方法规范化为大写并拒绝空值和重复项。
+    # Args: methods - YAML 中声明的方法列表。
+    # Returns: 去重后的大写 HTTP 方法列表。
+    @field_validator("methods")
+    @classmethod
+    def normalize_methods(cls, methods: list[str]) -> list[str]:
+        normalized: list[str] = []
+        for method in methods:
+            value = str(method).strip().upper()
+            if not value or not value.replace("-", "").isalpha():
+                raise ValueError("HTTP 方法格式无效")
+            if value not in normalized:
+                normalized.append(value)
+        if not normalized:
+            raise ValueError("至少需要一个 HTTP 方法")
+        return normalized
+
+
+# 方法作用：返回系统不可缺失的公开、可选认证和管理 Key 启动策略。
+# Args: 无。
+# Returns: 默认 API 访问基线策略列表。
+def _default_api_access_policies() -> list[ApiAccessRouteConfig]:
+    return [
+        ApiAccessRouteConfig(
+            id="health", path="/api/v1/health", methods=["GET"], auth="public",
+            access_log="none", description="健康检查",
+        ),
+        ApiAccessRouteConfig(
+            id="login", path="/api/v1/auth/login", methods=["POST"], auth="public",
+            access_log="security", description="登录",
+        ),
+        ApiAccessRouteConfig(
+            id="register", path="/api/v1/auth/register", methods=["POST"], auth="public",
+            access_log="security", description="公开注册",
+        ),
+        ApiAccessRouteConfig(
+            id="logout", path="/api/v1/auth/logout", methods=["POST"], auth="public",
+            access_log="standard", description="退出登录",
+        ),
+        ApiAccessRouteConfig(
+            id="auth_probe", path="/api/v1/auth/me", methods=["GET"], auth="optional",
+            access_log="standard", description="认证状态探测",
+        ),
+        ApiAccessRouteConfig(
+            id="datasource_create", path="/api/v1/datasources", methods=["POST"],
+            auth="jwt_or_admin_key", access_log="audit", description="创建数据源",
+        ),
+        ApiAccessRouteConfig(
+            id="datasource_delete", path="/api/v1/datasources/{name}", path_type="template",
+            methods=["DELETE"], auth="jwt_or_admin_key", access_log="audit",
+            description="删除数据源",
+        ),
+        ApiAccessRouteConfig(
+            id="schema_refresh", path="/api/v1/schema/refresh", methods=["POST"],
+            auth="jwt_or_admin_key", access_log="audit", description="刷新 Schema",
+        ),
+        ApiAccessRouteConfig(
+            id="schema_column_comment",
+            path="/api/v1/schema/tables/{table}/columns/{column}/comment",
+            path_type="template", methods=["PUT"], auth="jwt_or_admin_key",
+            access_log="audit", description="更新字段注释",
+        ),
+        ApiAccessRouteConfig(
+            id="model_test", path="/api/v1/models/test", methods=["POST"],
+            auth="jwt_or_admin_key", access_log="audit", description="模型连通性测试",
+        ),
+    ]
+
+
+class ApiAccessConfig(BaseModel):
+    """API 认证基线、访问日志和紧急 IP 策略配置。"""
+
+    default_auth: Literal["jwt", "super_admin"] = "jwt"
+    default_access_log: Literal["standard", "security", "audit", "none"] = "standard"
+    trusted_proxy_cidrs: list[str] = Field(default_factory=list)
+    emergency_ip_deny: list[str] = Field(default_factory=list)
+    bootstrap_policies: list[ApiAccessRouteConfig] = Field(
+        default_factory=_default_api_access_policies,
+    )
+
+    # 方法作用：规范化并校验可信代理和紧急黑名单 CIDR。
+    # Args: entries - IP 或 CIDR 字符串列表。
+    # Returns: 规范化后的 CIDR 列表。
+    @field_validator("trusted_proxy_cidrs", "emergency_ip_deny")
+    @classmethod
+    def normalize_cidrs(cls, entries: list[str]) -> list[str]:
+        normalized: list[str] = []
+        for entry in entries:
+            network = ipaddress.ip_network(str(entry).strip(), strict=False)
+            value = str(network)
+            if value not in normalized:
+                normalized.append(value)
+        return normalized
+
+    # 方法作用：确保启动策略编号唯一，避免数据库 IP 规则引用歧义。
+    # Args: self - 已完成字段校验的配置实例。
+    # Returns: 校验通过的配置实例。
+    @model_validator(mode="after")
+    def validate_unique_policy_ids(self) -> "ApiAccessConfig":
+        ids = [policy.id for policy in self.bootstrap_policies]
+        if len(ids) != len(set(ids)):
+            raise ValueError("bootstrap_policies 策略编号不能重复")
+        return self
 
 
 class Settings(BaseSettings):
@@ -128,6 +245,7 @@ class Settings(BaseSettings):
     # ---- API 浏览器安全 ----
     cors_allowed_origins: str = ""
     security_hsts_seconds: int = 31_536_000
+    api_access: ApiAccessConfig = Field(default_factory=ApiAccessConfig)
 
     # ---- LLM 降级 ----
     llm_fallback_chain: str = ""             # 降级链 "gpt-4o,claude-sonnet-4-6"

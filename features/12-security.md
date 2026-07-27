@@ -9,7 +9,7 @@
 | 12.1.1 | DDL/DML AST 拦截 | `src/graph/nodes/layer3_validate.py` | 拒绝写/管理语句、SELECT INTO 和已知状态变更函数 | 单测完成 |
 | 12.1.2 | 危险语句拦截 | 同上 | 拒绝 CALL / VACUUM / SET ROLE 及 EXPLAIN 包裹的写语句 | 单测完成 |
 | 12.1.3 | 只读白名单模式 | 同上 | 默认只允许 SELECT / SHOW / DESCRIBE / EXPLAIN SELECT | 单测完成 |
-| 12.1.4 | 只读数据库账号 | 各 Connector | 所有数据源连接使用只读账号（运维层面，代码已支持） | 开发完成 |
+| 12.1.4 | 数据库账号权限告警 | `src/datasource/registry.py`、各 Connector | 优先使用只读账号；已知高权限账号记录 warning 后继续连接，应用层只读 SQL 校验保持强制 | 单测完成 |
 | 12.1.5 | SQL 注入防护 | 同上 | LLM 输出的 SQL 已结构化，不拼接用户输入 | 开发完成 |
 | 12.1.6 | LLM 输出二次校验 | `src/graph/nodes/generate_sql.py` | sqlglot 提取表引用 → 比对 relevant_tables，拦截幻觉 | 开发完成 |
 

@@ -114,6 +114,8 @@ def setup_logging() -> None:
     # 移除 SQLAlchemy 自带的 handler，防止与 structlog handler 重复输出
     logging.getLogger("sqlalchemy.engine").handlers.clear()
     logging.getLogger("sqlalchemy.engine").propagate = True
+    # 接口访问摘要由 ApiAccessPolicyMiddleware 统一输出，避免 Uvicorn 重复记录。
+    logging.getLogger("uvicorn.access").disabled = True
     structlog.get_logger(__name__).info(
         "日志配置完成", log_file=str(log_path), backup_days=file_handler.backupCount,
     )

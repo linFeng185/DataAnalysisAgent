@@ -119,7 +119,7 @@ def vector_result_to_evidence(result: Any, default_version: str = "v1") -> Evide
         scores={"relevance": float(getattr(result, "score", 0.0) or 0.0)},
         metadata=metadata,
     )
-    logger.info(
+    logger.debug(
         "转换知识检索证据完成",
         source_id=evidence.source_id,
         version=evidence.version,

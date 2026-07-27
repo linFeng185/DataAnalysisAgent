@@ -243,6 +243,7 @@ class TestLoggingRetention:
         assert len(handlers) == 1
         assert handlers[0].backupCount == 7
         assert handlers[0].when == "D"
+        assert logging.getLogger("uvicorn.access").disabled is True
 
     # 方法作用：验证普通应用日志中的查询和 SQL 字段会被哈希替换。
     # Args: self - pytest 测试类实例。
@@ -393,6 +394,7 @@ class TestDockerSecrets:
             # Assert
             assert set(datasources) == expected_names
             assert datasources["clickhouse_test"]["database"] == "analytics"
+            assert datasources["oracle_xe"]["username"] == "${ORACLE_USERNAME}"
             assert datasources["mssql_express"]["username"] == "${MSSQL_USERNAME}"
             logger.info(
                 "test_datasource_yaml_preserves_default_sources 完成",
@@ -406,12 +408,12 @@ class TestDockerSecrets:
             )
             raise
 
-    # 方法作用：验证 SQL Server 示例不再默认使用 sysadmin 的 sa 账号。
+    # 方法作用：验证高权限数据库用户名只能由部署环境注入。
     # Args: self - pytest 测试类实例。
     # Returns: 无返回值，断言失败时由 pytest 报告。
-    def test_mssql_datasource_requires_external_readonly_username(self) -> None:
-        """存在 SQL Server 固定配置时，用户名必须由部署环境注入只读账号。"""
-        logger.debug("test_mssql_datasource_requires_external_readonly_username 入口")
+    def test_elevated_datasource_usernames_use_environment_references(self) -> None:
+        """SYSTEM 和 sa 可连接，但不得作为固定明文写入仓库 YAML。"""
+        logger.debug("test_elevated_datasource_usernames_use_environment_references 入口")
         try:
             # Arrange
             import yaml
@@ -419,20 +421,24 @@ class TestDockerSecrets:
             config = yaml.safe_load(Path("config/datasources.yaml").read_text(encoding="utf-8"))
 
             # Act
-            mssql_config = config.get("datasources", {}).get("mssql_express")
-            username = str(mssql_config.get("username", "")) if mssql_config else ""
+            datasources = config.get("datasources", {})
+            usernames = {
+                name: str(datasources.get(name, {}).get("username", ""))
+                for name in ("oracle_xe", "mssql_express")
+            }
 
             # Assert
-            assert mssql_config is not None
-            assert username != "sa"
-            assert username.startswith("${") and username.endswith("}")
+            assert all(
+                username.startswith("${") and username.endswith("}")
+                for username in usernames.values()
+            )
             logger.info(
-                "test_mssql_datasource_requires_external_readonly_username 完成",
-                extra={"configured": bool(mssql_config)},
+                "test_elevated_datasource_usernames_use_environment_references 完成",
+                extra={"configured": sorted(usernames)},
             )
         except Exception as exc:
             logger.error(
-                "test_mssql_datasource_requires_external_readonly_username 异常: %s",
+                "test_elevated_datasource_usernames_use_environment_references 异常: %s",
                 exc,
                 exc_info=True,
             )

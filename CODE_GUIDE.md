@@ -10,7 +10,7 @@ LLM 驱动的数据分析智能体。用自然语言提问，自动完成：轮�
 
 ```
 ├── src/
-│   ├── api/              ① Web 接口层 — 领域路由/纯 ASGI 认证/安全头 + SSE 流式
+│   ├── api/              ① Web 接口层 — 访问策略/领域路由/纯 ASGI 认证/安全头 + SSE 流式
 │   ├── graph/            ② 核心流水线 — LangGraph 16 节点 DAG
 │   │   └── nodes/           状态准备、SQL 主链、直接回答与多源节点
 │   ├── llm/              ③ LLM 调用层 — Provider 注册表 + 适配器 + Prompt
@@ -23,7 +23,7 @@ LLM 驱动的数据分析智能体。用自然语言提问，自动完成：轮�
 │   ├── tools/            ⑧ 分析工具 — 统计、预测与跨资产分析
 │   ├── market/           ⑨ 行情 Provider 与 PostgreSQL 持久化（当前 Tushare/A 股）
 │   ├── actions/          ⑩ 受控外部动作（人工确认、幂等、审计）
-│   ├── security/         ⑪ 安全模块 — SQL 统一执行 + 脱敏 + 限流 + 审计 + 出站策略
+│   ├── security/         ⑪ 安全模块 — API/IP 策略 + SQL 统一执行 + 脱敏 + 限流 + 审计 + 出站策略
 │   ├── db/               ⑫ 状态库基础设施 — 版本化迁移 + URL 工具
 │   ├── mcp_client/       ⑬ MCP 集成 — 客户端管理 + 工具暴露
 │   ├── app_context.py        应用级依赖容器 + ASGI 请求绑定 + 资源关闭
@@ -45,7 +45,8 @@ LLM 驱动的数据分析智能体。用自然语言提问，自动完成：轮�
 ```
 POST /api/v1/chat {"query": "本月 GMV 排名？", "stream": true}
   │
-  ├─ API 安全入口        请求大小/频率限制 → 当前身份数据源授权候选
+  ├─ API 访问策略        YAML/PG 策略 → 可信代理 IP → deny/allow → 分级访问日志
+  ├─ API 安全入口        public/optional/JWT/Admin Key/超级管理员认证 → 请求预算 → 数据源授权候选
   ├─ prepare_turn        保留轻量历史/快照，清理不落 checkpoint 的当前轮状态
   ├─ classify_intent     关键词匹配 → 7 种意图 + Skill 激活
   ├─ restore_previous_result  仅 meta 且数据源一致时从 HistoryStore 恢复上轮富结果
@@ -66,11 +67,12 @@ POST /api/v1/chat {"query": "本月 GMV 排名？", "stream": true}
 | 文件 | 职责 |
 |------|------|
 | `routes/__init__.py` | 组合各领域 APIRouter，并保留旧模块导出兼容 |
-| `routes/*.py` | chat、datasource、schema、session、mcp、knowledge、skills、management、admin 领域端点 |
+| `routes/*.py` | chat、datasource、schema、session、mcp、knowledge、skills、management、admin、access_policy 领域端点 |
 | `schemas.py` | Pydantic 请求/响应模型 |
 | `streaming.py` | SSE 流式（13 种事件类型，LLM 调用按 stream_id 隔离） |
 | `middleware.py` | 异常 → HTTP 状态码映射 |
 | `auth.py` | 全模式强制 JWT/Cookie 认证、登录限流与原子账号锁定，身份 ContextVar 覆盖完整流式响应生命周期 |
+| `access_policy.py` | 纯 ASGI 接口 IP 阻断、策略下传和 standard/security/audit/none 聚合访问日志 |
 | `background_tasks.py` | API 后台任务强引用、完成回调和异常记录统一入口 |
 | `security_headers.py` | CSP/HSTS/防嵌入/nosniff 纯 ASGI 响应头 |
 
@@ -155,6 +157,7 @@ POST /api/v1/chat {"query": "本月 GMV 排名？", "stream": true}
 | `actions/contracts.py` | 人工确认、幂等键、默认拒绝和审计的外部动作注册表 |
 | `security/data_masker.py` | 数据脱敏 + 频率限制 + 审计日志 |
 | `security/network.py` | 数据库出站 DNS/IP 校验，私网默认拒绝并支持部署 allowlist |
+| `security/api_access_policy.py` | YAML 基线 + PostgreSQL 动态策略原子快照、模板匹配、可信代理与 CIDR 黑白名单 |
 | `security/sql_execution.py` | 权威方言解析、AST 只读校验、EXPLAIN 与有界执行唯一入口 |
 | `failure_policy.py` | SQL/数据库 fail-closed 与 LLM/知识/处理器 fail-open 决策矩阵 |
 | `mcp/client_manager.py` | MCP Client 独立连接栈、自动迁移、system/tenant/private 请求级工具过滤 |
@@ -164,7 +167,8 @@ POST /api/v1/chat {"query": "本月 GMV 排名？", "stream": true}
 
 `migrations.py` 在应用启动早期按编号扫描 `migrations/*.sql`，使用 PostgreSQL advisory lock
 避免多实例并发，按文件事务执行，并在 `schema_migrations` 记录版本、文件名与 checksum。
-生产环境迁移失败会阻断启动；开发环境记录错误后允许使用既有回退能力。
+`007_api_access_policy.sql` 为动态策略和 CIDR 规则启用强制 RLS。API 策略加载属于必需启动步骤，
+任一环境加载失败均阻断启动，防止数据库规则静默失效。
 
 ## Skills 系统
 
@@ -176,7 +180,7 @@ POST /api/v1/chat {"query": "本月 GMV 排名？", "stream": true}
 
 ## 前端
 
-`frontend/` — React 18 + TypeScript 5 + Ant Design 5 + ECharts。登录后按角色展示业务菜单；固定 `users.id=1` 超级管理员可进入平台管理页维护租户、用户、安全摘要以及 system Skills/知识/MCP。
+`frontend/` — React 18 + TypeScript 5 + Ant Design 5 + ECharts。登录后按角色展示业务菜单；固定 `users.id=1` 超级管理员可进入平台管理页维护租户、用户、安全摘要、API 访问策略、接口 IP 黑白名单以及 system Skills/知识/MCP。
 
 ## 快速上手
 
@@ -200,9 +204,11 @@ POST /api/v1/chat {"query": "本月 GMV 排名？", "stream": true}
 - **最终 SQL 展示**：多源 worker 返回 execute_sql 方言重写/权限注入后的 SQL，响应通过 sql_statements 按来源展示
 - **并行流隔离**：SSE 使用 LangChain run_id 派生 stream_id，前端按调用实例缓冲 thinking/token
 - **安全阻断**：layer3 使用 sqlglot AST 只读白名单，阻断 DDL/DML、SELECT INTO 和状态变更函数；表/列解析异常失败关闭
+- **高权限连接告警**：DataSourceRegistry 识别 Oracle `SYS/SYSTEM` 和 SQL Server `sa` 时记录 warning 但继续连接；数据库账号权限不改变 layer3 的只读失败关闭策略
 - **向量过滤精确化**：Milvus LIKE 仅缩小候选集，解析 metadata 后再次精确校验，搜索、计数和删除共享同一过滤语义
 - **生产密钥门禁**：生产禁止默认数据库凭证、默认凭证主密钥和临时 JWT；Docs、Redoc、OpenAPI 同时关闭
-- **API 中间件安全**：纯 ASGI 认证保持 SSE 身份上下文；CORS 默认拒绝跨域；生产 HTTPS 启用 CSP/HSTS
+- **API 中间件安全**：访问策略先解析可信客户端 IP 并执行 deny/allow，再把认证模式下传纯 ASGI Auth；CORS 默认拒绝跨域；生产 HTTPS 启用 CSP/HSTS
+- **访问策略混合存储**：公开/可选认证仅由版本化 YAML 声明；数据库动态策略只能保持或收紧认证，IP 规则写入后原子刷新 AppContext 快照
 - **出站地址失败关闭**：数据库目标解析为私网、回环或特殊地址时默认阻断；ClickHouse 探针与客户端固定复用已校验 IP
 - **授权候选发现**：未选择数据源时仅把当前用户有权访问的候选交给模型，显式越权与权限服务异常均失败关闭
 - **版本化迁移**：启动时用 advisory lock + checksum + 单文件事务应用 SQL，生产失败停止启动

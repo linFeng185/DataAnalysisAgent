@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
+import time
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -178,6 +180,46 @@ class TestSQLPromptGrounding:
         assert sql == "SELECT COUNT(*) FROM orders"
         assert explanation == "ok"
         logger.info("test_llm_generate_uses_real_dialect_and_strong_constraints 完成")
+
+    # 方法作用：验证同步 LLM 工厂冷启动不会阻塞多数据源 worker 共用的事件循环。
+    # Args: self - pytest 测试类实例；monkeypatch - pytest 补丁工具。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    async def test_llm_factory_does_not_block_event_loop(self, monkeypatch):
+        """模型构造较慢时，事件循环中的其他协程仍应按时获得执行机会。"""
+        # Arrange
+        import src.graph.nodes.generate_sql as generate_module
+
+        llm = _StreamingLLM()
+
+        # 方法作用：模拟真实环境中耗时的同步模型冷启动。
+        # Args: temperature - 生成温度。
+        # Returns: 固定流式测试模型。
+        def slow_get_llm(temperature=0):
+            time.sleep(0.15)
+            return llm
+
+        monkeypatch.setattr(generate_module, "get_llm", slow_get_llm)
+        started = time.monotonic()
+
+        # Act
+        task = asyncio.create_task(generate_module._llm_generate(
+            schema_text="### 表: orders",
+            dialect_hint="PostgreSQL 方言",
+            dialect="postgres",
+            query="统计订单数",
+            error_ctx="",
+            skill_prompt="",
+            grounding_context="",
+            config={},
+            conversation_history=None,
+        ))
+        await asyncio.sleep(0.02)
+        heartbeat_elapsed = time.monotonic() - started
+        result = await task
+
+        # Assert
+        assert heartbeat_elapsed < 0.1
+        assert result[0] == "SELECT COUNT(*) FROM orders"
 
 
 class TestAnalysisPromptGrounding:

@@ -19,6 +19,10 @@ _ClickHouseConnection = _clickhouse._ClickHouseConnection
 _ClickHouseEngine = _clickhouse._ClickHouseEngine
 _ClickHouseResult = _clickhouse._ClickHouseResult
 _ClickHouseRow = _clickhouse._ClickHouseRow
+_ELEVATED_DATABASE_ACCOUNTS = {
+    "oracle": frozenset({"sys", "system"}),
+    "mssql": frozenset({"sa"}),
+}
 
 
 # 方法作用：从当前 AppContext 获取数据源 Registry，兼容既有调用入口。
@@ -165,6 +169,18 @@ class DataSourceRegistry:
             config = await provider.lookup(name)
             if config is None:
                 continue
+
+            dialect = config.dialect.strip().casefold()
+            username = config.username.strip()
+            elevated_accounts = _ELEVATED_DATABASE_ACCOUNTS.get(dialect, frozenset())
+            if username.casefold() in elevated_accounts:
+                logger.warning(
+                    "数据源使用高权限数据库账号，继续连接",
+                    datasource=config.name,
+                    dialect=config.dialect,
+                    username=username,
+                    protection="应用层只读 SQL 校验仍启用",
+                )
 
             if config.password:
                 config.password = self._credential.resolve_env_ref(config.password)

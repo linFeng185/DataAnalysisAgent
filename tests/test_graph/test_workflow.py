@@ -431,6 +431,7 @@ class TestMultiSource:
             worker_query = worker_state["user_query"]
             assert result["success"] is True
             assert "当前只负责数据源 `mysql_test`" in worker_query
+            assert "不要输出数据源名称列" in worker_query
             assert "不要因为缺少其他数据源的 Schema 而返回空 SQL" in worker_query
             assert global_query in worker_query
             logger.info(
@@ -658,6 +659,96 @@ class TestMultiSource:
         except Exception as exc:
             logger.error(
                 "test_merge_results_treats_difference_query_as_comparison 异常: %s",
+                exc,
+                exc_info=True,
+            )
+            raise
+
+    # 方法作用：验证单行销售额比较会忽略冗余来源列并统一指标别名。
+    # Args: self - pytest 测试类实例；monkeypatch - pytest 补丁工具。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    async def test_merge_results_aligns_single_metric_with_redundant_source_column(
+        self,
+        monkeypatch,
+    ):
+        """本次真实三库列形态应归一为每个来源都有 total_sales。"""
+        logger.debug(
+            "test_merge_results_aligns_single_metric_with_redundant_source_column 入口"
+        )
+        try:
+            # Arrange：复刻 ClickHouse 多出 source、MySQL 指标别名不同的结果。
+            from decimal import Decimal
+            from unittest.mock import AsyncMock
+
+            import src.graph.nodes.analyze_result as analyze_module
+            import src.graph.nodes.generate_chart as chart_module
+            import src.graph.nodes.multi_source as multi_source_module
+            import src.llm.client as llm_module
+
+            captured_states: list[dict] = []
+
+            # 方法作用：捕获跨源分析收到的规范化数据。
+            # Args: state - 跨源分析状态。
+            # Returns: 固定的测试分析结果。
+            async def _capture_analysis(state: dict) -> dict:
+                captured_states.append(state)
+                return {
+                    "analysis_result": {
+                        "summary": "三库销售额已对齐",
+                        "recommended_chart_type": "bar",
+                    }
+                }
+
+            monkeypatch.setattr(llm_module, "is_task_llm_available", lambda task: False)
+            monkeypatch.setattr(analyze_module, "analyze_result_node", _capture_analysis)
+            monkeypatch.setattr(
+                chart_module,
+                "generate_chart_node",
+                AsyncMock(return_value={"chart_config": {"type": "bar", "option": {}}}),
+            )
+            state = {
+                "user_query": "汇总所有数据库中2024年的总销售额并做对比",
+                "intent": "query",
+                "multi_source_results": [
+                    {
+                        "datasource": "clickhouse_test",
+                        "success": True,
+                        "data": [{
+                            "source": "clickhouse_test",
+                            "total_sales": Decimal("300.00"),
+                        }],
+                    },
+                    {
+                        "datasource": "mysql_test",
+                        "success": True,
+                        "data": [{"total_sales_2024": Decimal("200.00")}],
+                    },
+                    {
+                        "datasource": "postgres_main",
+                        "success": True,
+                        "data": [{"total_sales": Decimal("100.00")}],
+                    },
+                ],
+            }
+
+            # Act
+            result = await multi_source_module.merge_results_node(state)
+
+            # Assert：冗余 source 被 _datasource 替代，三个指标统一为 total_sales。
+            rows = result["query_result_sample"]
+            assert rows == [
+                {"_datasource": "clickhouse_test", "total_sales": Decimal("300.00")},
+                {"_datasource": "mysql_test", "total_sales": Decimal("200.00")},
+                {"_datasource": "postgres_main", "total_sales": Decimal("100.00")},
+            ]
+            assert captured_states[0]["query_result_sample"] == rows
+            logger.info(
+                "test_merge_results_aligns_single_metric_with_redundant_source_column 完成",
+                extra={"row_count": len(rows)},
+            )
+        except Exception as exc:
+            logger.error(
+                "test_merge_results_aligns_single_metric_with_redundant_source_column 异常: %s",
                 exc,
                 exc_info=True,
             )

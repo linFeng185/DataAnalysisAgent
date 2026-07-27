@@ -6,7 +6,8 @@
 
 - 白名单模式：默认只允许 SELECT / SHOW / DESCRIBE / EXPLAIN
 - 所有 SQL 执行前经过正则校验 + AST 解析双重检查
-- 使用只读数据库账号，权限最小化
+- 优先使用只读数据库账号并遵循最小权限；Oracle `SYS/SYSTEM`、SQL Server `sa` 等已知高权限账号允许连接，但 Registry 必须记录 `warning`，不得因此中断查询
+- 数据库账号权限不替代应用层防线：无论连接账号权限高低，所有 SQL 仍必须经过只读白名单和 AST 校验，DDL/DML 继续失败关闭
 - SQL 注入基础防护（LLM 输出的 SQL 已经参数化，不会拼接用户输入）
 
 ### 7.2 数据安全

@@ -18,6 +18,7 @@ logger = get_logger(__name__)
 _BOOTSTRAP_STEPS: tuple[tuple[str, str], ...] = (
     ("_run_migrations", "数据库迁移"),
     ("_ensure_super_admin", "平台超级管理员"),
+    ("_load_api_access_policies", "API 访问策略"),
     ("_init_workflow", "LangGraph 工作流"),
     ("_ensure_demo_datasource", "演示数据源"),
     ("_warmup_knowledge", "知识库预热"),
@@ -28,7 +29,9 @@ _BOOTSTRAP_STEPS: tuple[tuple[str, str], ...] = (
     ("_load_external_datasources", "外部数据源加载"),
 )
 
-_REQUIRED_BOOTSTRAP_STEPS = {"_run_migrations", "_ensure_super_admin"}
+_REQUIRED_BOOTSTRAP_STEPS = {
+    "_run_migrations", "_ensure_super_admin", "_load_api_access_policies",
+}
 
 
 # 方法作用：执行数据库版本化迁移并返回已应用迁移数量。
@@ -108,6 +111,22 @@ async def _ensure_super_admin(settings: Settings) -> None:
             logger.warning("超级管理员连接不支持事务，使用兼容路径")
             created = await _upsert()
     logger.info("_ensure_super_admin 完成", created=created, user_id=SUPER_ADMIN_USER_ID)
+
+
+# 方法作用：加载 YAML 基线和 PostgreSQL 动态 API 访问策略快照。
+# Args: settings - 当前应用配置，由 AppContext 中的同一实例持有。
+# Returns: 无返回值。
+async def _load_api_access_policies(settings: Settings) -> None:
+    logger.debug("_load_api_access_policies 入口", env=settings.env)
+    from src.security.api_access_policy import initialize_api_access_policy_manager
+
+    manager = await initialize_api_access_policy_manager()
+    snapshot = manager.export_snapshot()
+    logger.info(
+        "_load_api_access_policies 完成",
+        policy_count=len(snapshot["policies"]),
+        rule_count=len(snapshot["ip_rules"]),
+    )
 
 
 # 方法作用：初始化 LangGraph 工作流及其 Checkpointer。

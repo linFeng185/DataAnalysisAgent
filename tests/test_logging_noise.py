@@ -48,4 +48,4 @@ class TestRequestLoggingNoise:
             if entry.get("log_level") == "info"
         ]
         assert response.status_code == 200
-        assert info_events == ["Skill 列表完成"]
+        assert info_events == ["Skill 列表完成", "API 访问完成"]

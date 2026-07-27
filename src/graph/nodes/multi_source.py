@@ -19,6 +19,9 @@ from src.logging_config import get_logger
 logger = get_logger(__name__)
 
 _SOURCES_KEY = "multi_source_results"
+_SOURCE_LABEL_COLUMNS = frozenset({
+    "source", "datasource", "data_source", "database", "database_name",
+})
 
 
 async def multi_source_dispatch_node(state: AnalysisState) -> dict:
@@ -124,6 +127,7 @@ async def _analyze_one(datasource: str, state: AnalysisState) -> dict | None:
             "其他已选数据源由独立 worker 查询，最终由合并节点统一比较。"
             "请只基于当前 Schema 生成回答全局问题所需的本数据源查询；"
             "多个指标按全局问题中的顺序输出，并使用跨源稳定的英文 snake_case 指标别名；"
+            "不要输出数据源名称列，合并节点会统一注入 `_datasource`；"
             "不要尝试跨库查询，也不要因为缺少其他数据源的 Schema 而返回空 SQL。"
             f"\n全局问题：{global_query}"
         )
@@ -403,6 +407,42 @@ def _choose_canonical_column(aliases: list[str]) -> str:
     return canonical
 
 
+# 方法作用：删除与合并节点 `_datasource` 完全重复的来源标签列。
+# Args: result - 当前数据源结果；rows - 当前数据源的结果行。
+# Returns: 保留业务维度和指标、移除冗余来源标签后的新行列表。
+def _strip_redundant_source_columns(
+    result: dict,
+    rows: list[dict],
+) -> list[dict]:
+    """只删除名称明确且每行值都等于当前数据源名称的来源标签。"""
+    datasource = str(result.get("datasource", ""))
+    removable = {
+        column
+        for column in rows[0]
+        if column.casefold() in _SOURCE_LABEL_COLUMNS
+        and datasource
+        and all(
+            value is not None
+            and str(value).casefold() == datasource.casefold()
+            for value in (row.get(column) for row in rows)
+        )
+    }
+    if removable:
+        logger.info(
+            "跨源冗余来源列移除完成",
+            datasource=datasource,
+            columns=sorted(removable),
+        )
+    return [
+        {
+            column: value
+            for column, value in row.items()
+            if column != "_datasource" and column not in removable
+        }
+        for row in rows
+    ]
+
+
 # 按维度/指标角色序列对齐跨源结果，支持任意数量结果行和数值指标。
 # Args: successful_results - 已成功执行且包含结果数据的来源列表。
 # Returns: 每个来源对应的规范化结果行；结构不兼容时返回 None。
@@ -416,13 +456,23 @@ def _normalize_cross_source_rows(
             logger.info("跨源结果列契约对齐跳过", reason="成功来源少于两个")
             return None
 
-        source_rows = [list(result.get("data", []) or []) for result in successful_results]
-        if any(not rows for rows in source_rows):
+        raw_source_rows = [
+            list(result.get("data", []) or []) for result in successful_results
+        ]
+        if any(not rows for rows in raw_source_rows):
             logger.info("跨源结果列契约对齐跳过", reason="存在空来源结果")
             return None
-        if any(any(not isinstance(row, dict) for row in rows) for rows in source_rows):
+        if any(any(not isinstance(row, dict) for row in rows) for rows in raw_source_rows):
             logger.info("跨源结果列契约对齐跳过", reason="来源行不是字典")
             return None
+        source_rows = [
+            _strip_redundant_source_columns(result, rows)
+            for result, rows in zip(
+                successful_results,
+                raw_source_rows,
+                strict=True,
+            )
+        ]
 
         source_columns = [
             [column for column in rows[0] if column != "_datasource"]

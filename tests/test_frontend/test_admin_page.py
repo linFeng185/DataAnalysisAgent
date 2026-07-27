@@ -56,3 +56,19 @@ class TestAdminFrontend:
         assert "用户管理" in source
         assert "安全配置" in source
         logger.info("test_admin_page_has_required_workspaces 完成")
+
+    # 方法作用：验证平台管理页包含访问策略和接口 IP 黑白名单维护入口。
+    # Args: self - pytest 测试类实例。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    def test_admin_page_manages_access_policies_and_ip_rules(self) -> None:
+        """超级管理员应能在页面维护动态策略和 CIDR 黑白名单。"""
+        logger.debug("test_admin_page_manages_access_policies_and_ip_rules 入口")
+        source = Path("frontend/src/pages/AdminPage.tsx").read_text(encoding="utf-8")
+
+        assert "/admin/access-policies" in source
+        assert "/ip-rules" in source
+        assert "访问策略" in source
+        assert "IP 黑白名单" in source
+        assert "auth_mode" in source
+        assert "access_log_mode" in source
+        logger.info("test_admin_page_manages_access_policies_and_ip_rules 完成")

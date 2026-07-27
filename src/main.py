@@ -107,6 +107,7 @@ def create_app() -> FastAPI:
     app.state.app_context = context
 
     from src.api.auth import AuthMiddleware, auth_router
+    from src.api.access_policy import ApiAccessPolicyMiddleware
     from src.api.security_headers import SecurityHeadersMiddleware
 
     allowed_origins = [
@@ -115,6 +116,7 @@ def create_app() -> FastAPI:
         if origin.strip()
     ]
     app.add_middleware(AuthMiddleware)
+    app.add_middleware(ApiAccessPolicyMiddleware)
     app.add_middleware(
         CORSMiddleware,
         allow_origins=allowed_origins,
@@ -144,4 +146,5 @@ if __name__ == "__main__":
     uvicorn.run(
         "src.main:app", host="0.0.0.0", port=8000, reload=True,
         loop="src.main:selector_event_loop_factory",
+        access_log=False,
     )

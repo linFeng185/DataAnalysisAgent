@@ -121,6 +121,91 @@ class TestConnectionURL:
         assert engine is connector.engine
         assert "service_name=XEPDB1" in str(captured["url"])
 
+    # 方法作用：验证 Oracle 高权限登录后把每个新会话切换到配置的业务 schema。
+    # Args: self - pytest 测试类实例；monkeypatch - pytest 补丁工具。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    @pytest.mark.asyncio
+    async def test_oracle_create_engine_sets_configured_schema(self, monkeypatch):
+        """SYSTEM 登录必须在查询前切换到 TEST_USER，避免业务表 ORA-00942。"""
+        # Arrange
+        from src.connectors import oracle as oracle_module
+        from src.connectors.oracle import OracleConnector
+
+        engine = object()
+        captured: dict[str, object] = {}
+
+        # 方法作用：返回固定测试引擎。
+        # Args: url - SQLAlchemy URL；kwargs - 引擎参数。
+        # Returns: 固定测试引擎。
+        def fake_create_engine(url, **kwargs):
+            return engine
+
+        # 方法作用：捕获注册到 SQLAlchemy 引擎的连接事件。
+        # Args: target - 目标引擎；event_name - 事件名；callback - 事件回调。
+        # Returns: 无返回值。
+        def fake_listen(target, event_name, callback):
+            captured.update(target=target, event_name=event_name, callback=callback)
+
+        monkeypatch.setattr(oracle_module.sa, "create_engine", fake_create_engine)
+        monkeypatch.setattr(oracle_module.sa.event, "listen", fake_listen)
+        connector = OracleConnector(_ds(
+            "oracle",
+            username="SYSTEM",
+            extra_params={"schema": "TEST_USER"},
+        ))
+
+        # Act
+        await connector.create_engine()
+
+        # Assert
+        assert captured["target"] is engine
+        assert captured["event_name"] == "connect"
+
+        statements: list[str] = []
+
+        class Cursor:
+            # 方法作用：记录连接事件执行的 Oracle 会话 SQL。
+            # Args: self - 测试游标；statement - 待执行 SQL。
+            # Returns: 无返回值。
+            def execute(self, statement):
+                statements.append(statement)
+
+            # 方法作用：模拟关闭 Oracle 测试游标。
+            # Args: self - 测试游标。
+            # Returns: 无返回值。
+            def close(self):
+                return None
+
+        class Connection:
+            # 方法作用：创建测试游标。
+            # Args: self - 测试连接。
+            # Returns: 测试游标。
+            def cursor(self):
+                return Cursor()
+
+        captured["callback"](Connection(), None)
+        assert statements == ['ALTER SESSION SET CURRENT_SCHEMA = "TEST_USER"']
+
+    # 方法作用：验证 Oracle 业务 schema 拒绝可能注入 SQL 的非法标识符。
+    # Args: self - pytest 测试类实例；monkeypatch - pytest 补丁工具。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    @pytest.mark.asyncio
+    async def test_oracle_create_engine_rejects_invalid_schema(self, monkeypatch):
+        """非法 schema 必须在创建引擎边界被拒绝。"""
+        # Arrange
+        from src.connectors import oracle as oracle_module
+        from src.connectors.oracle import OracleConnector
+
+        monkeypatch.setattr(oracle_module.sa, "create_engine", lambda *args, **kwargs: object())
+        connector = OracleConnector(_ds(
+            "oracle",
+            extra_params={"schema": 'TEST_USER"; DROP USER TEST_USER'},
+        ))
+
+        # Act / Assert
+        with pytest.raises(ValueError, match="schema"):
+            await connector.create_engine()
+
     @pytest.mark.asyncio
     async def test_oracle_execute_returns_dict_rows(self):
         """Oracle execute 应在线程池中运行并返回 list[dict]。"""
@@ -154,6 +239,61 @@ class TestConnectionURL:
 
         # Assert
         assert result == [{"id": 1}]
+
+    # 方法作用：验证 Oracle EXPLAIN PLAN 成功时不要求语句返回结果集。
+    # Args: self - pytest 测试类实例。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    @pytest.mark.asyncio
+    async def test_oracle_explain_accepts_successful_no_row_result(self):
+        """EXPLAIN PLAN 是无结果集语句，执行成功后应通过语义校验。"""
+        # Arrange
+        from src.connectors.oracle import OracleConnector
+
+        class Result:
+            returns_rows = False
+
+            # 方法作用：在测试中阻止无结果集语句被错误读取。
+            # Args: self - 测试结果对象。
+            # Returns: 不返回，调用即抛出断言错误。
+            def fetchall(self):
+                raise AssertionError("无结果集语句不得调用 fetchall")
+
+        class Connection:
+            # 方法作用：进入测试连接上下文。
+            # Args: self - 测试连接对象。
+            # Returns: 当前测试连接。
+            def __enter__(self):
+                return self
+
+            # 方法作用：退出测试连接上下文且不吞异常。
+            # Args: self - 测试连接对象；exc_type - 异常类型；exc - 异常；tb - 堆栈。
+            # Returns: 固定返回 False。
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            # 方法作用：模拟 Oracle 成功执行无结果集的 EXPLAIN PLAN。
+            # Args: self - 测试连接对象；statement - SQLAlchemy 语句；params - 参数映射。
+            # Returns: 标记为无结果集的测试结果。
+            def execute(self, statement, params):
+                assert str(statement) == "EXPLAIN PLAN FOR SELECT 1 FROM DUAL"
+                assert params == {}
+                return Result()
+
+        class Engine:
+            # 方法作用：创建测试连接上下文。
+            # Args: self - 测试引擎对象。
+            # Returns: 测试连接对象。
+            def connect(self):
+                return Connection()
+
+        connector = OracleConnector(_ds("oracle"))
+        connector._engine = Engine()  # noqa: SLF001
+
+        # Act
+        result = await connector.explain("SELECT 1 FROM DUAL")
+
+        # Assert
+        assert result == {"valid": True, "errors": []}
 
     @pytest.mark.asyncio
     async def test_oracle_health_check_uses_dual(self):
