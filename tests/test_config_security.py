@@ -53,7 +53,7 @@ class TestProductionSettings:
     # Args: self - pytest 测试类实例；monkeypatch - pytest 环境变量补丁。
     # Returns: 无返回值，断言失败时由 pytest 报告。
     def test_environment_uses_unified_yaml_default(self, monkeypatch):
-        """开发模板的 env 值应来自 config/app.yaml 而非第二份代码默认。"""
+        """开发模板的 env 值应来自 config/app.example.yaml 而非第二份代码默认。"""
         logger.debug("test_environment_uses_unified_yaml_default 入口")
         try:
             # Arrange
@@ -308,23 +308,25 @@ class TestDockerSecrets:
         # Arrange
         from pathlib import Path
 
-        compose = Path("docker-compose.yml").read_text(encoding="utf-8")
+        compose = Path("docker-compose.example.yml").read_text(encoding="utf-8")
 
         # Act / Assert
         assert "1Qaz@2wsx124" not in compose
-        assert "${MYSQL_ROOT_PASSWORD:" in compose
+        assert "${POSTGRES_PASSWORD:" in compose
 
     # 方法作用：验证 Compose 提供带认证、持久化和健康检查的 Redis 7 服务。
     # Args: self - pytest 测试类实例。
     # Returns: 无返回值，断言失败时由 pytest 报告。
     def test_compose_provides_secured_redis_service(self) -> None:
-        """开发环境编排应可直接启动安全的 Redis 缓存服务。"""
+        """生产示例编排应提供仅内部可见且持久化的 Redis 缓存服务。"""
         logger.debug("test_compose_provides_secured_redis_service 入口")
         try:
             # Arrange
             import yaml
 
-            config = yaml.safe_load(Path("docker-compose.yml").read_text(encoding="utf-8"))
+            config = yaml.safe_load(
+                Path("docker-compose.example.yml").read_text(encoding="utf-8")
+            )
 
             # Act
             redis_service = config["services"]["redis"]
@@ -338,8 +340,8 @@ class TestDockerSecrets:
             assert "--requirepass" in command
             assert "--appendonly yes" in command
             assert redis_service["healthcheck"]["test"]
-            assert "redis_data:/data" in redis_service["volumes"]
-            assert "redis_data" in config["volumes"]
+            assert "./data/redis:/data" in redis_service["volumes"]
+            assert not redis_service.get("ports")
             logger.info("test_compose_provides_secured_redis_service 完成")
         except Exception as exc:
             logger.error(
@@ -355,7 +357,9 @@ class TestDockerSecrets:
         from pathlib import Path
         import yaml
 
-        config = yaml.safe_load(Path("config/datasources.yaml").read_text(encoding="utf-8"))
+        config = yaml.safe_load(
+            Path("config/datasources.example.yaml").read_text(encoding="utf-8")
+        )
 
         # Act
         passwords = [
@@ -365,37 +369,26 @@ class TestDockerSecrets:
         ]
 
         # Assert
-        assert passwords
         assert all(value.startswith("${") and value.endswith("}") for value in passwords)
 
     # 方法作用：验证仓库默认配置保留历史固定数据源及关键连接信息。
     # Args: self - pytest 测试类实例。
     # Returns: 无返回值，断言失败时由 pytest 报告。
-    def test_datasource_yaml_preserves_default_sources(self) -> None:
-        """可选配置机制不得清空仓库原有的六个固定数据源。"""
+    def test_datasource_yaml_example_is_optional(self) -> None:
+        """可选配置示例应保持合法映射，允许生产环境完全使用管理页面。"""
         logger.debug("test_datasource_yaml_preserves_default_sources 入口")
         try:
             # Arrange
             import yaml
 
-            expected_names = {
-                "clickhouse_prod",
-                "clickhouse_test",
-                "mysql_test",
-                "postgres_main",
-                "oracle_xe",
-                "mssql_express",
-            }
-
             # Act
-            config = yaml.safe_load(Path("config/datasources.yaml").read_text(encoding="utf-8"))
+            config = yaml.safe_load(
+                Path("config/datasources.example.yaml").read_text(encoding="utf-8")
+            )
             datasources = config.get("datasources", {})
 
             # Assert
-            assert set(datasources) == expected_names
-            assert datasources["clickhouse_test"]["database"] == "analytics"
-            assert datasources["oracle_xe"]["username"] == "${ORACLE_USERNAME}"
-            assert datasources["mssql_express"]["username"] == "${MSSQL_USERNAME}"
+            assert isinstance(datasources, dict)
             logger.info(
                 "test_datasource_yaml_preserves_default_sources 完成",
                 extra={"count": len(datasources)},
@@ -418,7 +411,9 @@ class TestDockerSecrets:
             # Arrange
             import yaml
 
-            config = yaml.safe_load(Path("config/datasources.yaml").read_text(encoding="utf-8"))
+            config = yaml.safe_load(
+                Path("config/datasources.example.yaml").read_text(encoding="utf-8")
+            )
 
             # Act
             datasources = config.get("datasources", {})
@@ -431,6 +426,7 @@ class TestDockerSecrets:
             assert all(
                 username.startswith("${") and username.endswith("}")
                 for username in usernames.values()
+                if username
             )
             logger.info(
                 "test_elevated_datasource_usernames_use_environment_references 完成",

@@ -88,7 +88,7 @@ dataAnalysisAgent/
 │   └── fixtures/                    # 测试用的 schema + 数据 fixtures
 ├── tests/
 ├── frontend/                    # 前端项目 (Phase 3)
-├── docker-compose.yml
+├── docker-compose.example.yml
 ├── requirements.txt
 └── SPEC.md
 ```

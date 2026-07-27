@@ -1,4 +1,4 @@
-# 应用统一配置。密钥值保持为空，由部署环境使用同名大写环境变量覆盖。
+# 应用统一配置示例。复制为 app.yaml 后按环境修改；密钥由 .env 注入。
 env: dev
 log_level: INFO
 log_format: console
@@ -51,7 +51,8 @@ security_hsts_seconds: 31536000
 api_access:
   default_auth: jwt
   default_access_log: standard
-  trusted_proxy_cidrs: []
+  trusted_proxy_cidrs:
+    - 172.30.0.0/24
   emergency_ip_deny: []
   bootstrap_policies:
     - id: health
@@ -124,8 +125,8 @@ api_access:
       auth: jwt_or_admin_key
       access_log: audit
       description: 模型连通性测试
-llm_fallback_chain: ""
 
+llm_fallback_chain: ""
 context_max_tokens: 50000
 context_hot_turns: 5
 context_warm_turns: 20

@@ -33,9 +33,9 @@
 
 | # | 功能 | 描述 | 状态 |
 |---|------|------|------|
-| 17.4.1 | Dockerfile | 多阶段构建 (builder + runtime) | 待开发 |
-| 17.4.2 | docker-compose.yml | PostgreSQL 17 + ChromaDB + Redis 7 + App 开发环境编排 | 待开发 |
-| 17.4.3 | .dockerignore | 排除 .venv / __pycache__ / .git / tests / .claude | 待开发 |
+| 17.4.1 | Dockerfile | 后端 Python builder/runtime + 前端 Node/Nginx 多阶段镜像，非 root 后端运行 | 单测完成 |
+| 17.4.2 | `docker-compose.example.yml` | 根目录前后端分离模板 + PostgreSQL 17 + Redis 7 + 嵌入式 Chroma；实际 Compose 与配置忽略 | 单测完成 |
+| 17.4.3 | `.dockerignore` | 后端/前端分别排除虚拟环境、依赖、缓存、测试、密钥和运行数据 | 单测完成 |
 
 ### 17.5 启动与供应链安全
 
@@ -45,7 +45,7 @@
 
 ### 模块收尾
 
-模块功能点共 16 项，已完成 8 项，待开发 8 项。
+模块功能点共 16 项，已完成 11 项，待开发 5 项。
 
 | 功能点 | 不开发原因 | 可开发条件 | 预计开发时机 |
 |--------|------------|------------|--------------|
@@ -54,8 +54,5 @@
 | 17.3.1 LangSmith 全链路追踪 | 仅提供环境变量示例，未验证 Node 追踪和敏感字段裁剪 | 配置 LangSmith 项目、脱敏回调和隔离环境验收 | Phase 3，可观测性批次 |
 | 17.3.2 Prometheus metrics | 尚未引入 collector 和 `/metrics` 端点 | 确定指标命名、标签基数和认证策略 | Phase 3，可观测性批次 |
 | 17.3.3 Grafana Dashboard | 缺少 Prometheus 数据源和稳定指标定义 | 17.3.2 完成并积累基线数据 | Phase 3，Prometheus 上线后 |
-| 17.4.1 Dockerfile | 仓库当前没有应用镜像构建文件 | 明确前端静态资源交付方式和 Python 运行时依赖 | Phase 3，容器部署批次 |
-| 17.4.2 docker-compose.yml | 当前已编排开发数据库、带认证持久化的 Redis 7 与 Milvus，但仍未包含 App、ChromaDB 和应用健康依赖 | 完成 Dockerfile，并拆分最小应用栈与可选数据库 profiles | Phase 3，Dockerfile 完成后 |
-| 17.4.3 .dockerignore | 仓库当前没有 .dockerignore | Dockerfile 路径和构建上下文确定后补齐并验证镜像上下文 | Phase 3，Dockerfile 同批次 |
 
 ---

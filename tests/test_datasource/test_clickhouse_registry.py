@@ -144,36 +144,35 @@ class TestClickHouseRegistryAdapter:
         # Assert
         assert rows[0]._mapping["name"] == "orders"
 
-    # 验证仓库内置 ClickHouse 测试数据源指向实际承载测试数据的 analytics 库。
+    # 验证仓库数据源示例允许保持为空，由管理页面维护生产数据源。
     # Args: self - pytest 测试类实例。
     # Returns: 无返回值，断言失败时由 pytest 报告。
-    def test_clickhouse_test_config_uses_analytics_database(self):
-        """仓库内置 clickhouse_test 必须连接含测试数据的 analytics 数据库。"""
-        logger.debug("test_clickhouse_test_config_uses_analytics_database 入口")
+    def test_datasource_example_is_optional(self):
+        """仓库示例不得强制绑定开发者本地的 ClickHouse 地址。"""
+        logger.debug("test_datasource_example_is_optional 入口")
         try:
             # Arrange / Act：只解析配置，不建立真实连接。
             from pathlib import Path
 
             import yaml
 
-            datasource_path = Path("config/datasources.yaml")
+            datasource_path = Path("config/datasources.example.yaml")
             config = (
                 yaml.safe_load(datasource_path.read_text(encoding="utf-8"))
                 if datasource_path.exists()
                 else {}
             )
-            datasource = (config or {}).get("datasources", {}).get("clickhouse_test")
+            datasources = (config or {}).get("datasources", {})
 
             # Assert
-            assert datasource is not None
-            assert datasource["database"] == "analytics"
+            assert isinstance(datasources, dict)
             logger.info(
-                "test_clickhouse_test_config_uses_analytics_database 完成",
-                extra={"database": datasource["database"]},
+                "test_datasource_example_is_optional 完成",
+                extra={"count": len(datasources)},
             )
         except Exception as exc:
             logger.error(
-                "test_clickhouse_test_config_uses_analytics_database 异常: %s",
+                "test_datasource_example_is_optional 异常: %s",
                 exc,
                 exc_info=True,
             )

@@ -52,12 +52,44 @@ class TestUnifiedConfig:
 
         from src.config import Settings
 
-        config = yaml.safe_load(Path("config/app.yaml").read_text(encoding="utf-8"))
+        config = yaml.safe_load(Path("config/app.example.yaml").read_text(encoding="utf-8"))
 
         assert set(Settings.model_fields).issubset(config)
         assert "mcp_servers" in config
         assert not Path("config/mcp_servers.yaml").exists()
         logger.info("test_repository_app_yaml_is_complete 完成")
+
+    # 方法作用：验证实际配置缺失时自动读取仓库 example，保证全新 clone 可启动测试。
+    # Args: self - pytest 测试类实例；tmp_path - 临时目录；monkeypatch - 环境变量补丁。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    def test_example_yaml_is_fallback_when_local_config_is_missing(
+        self,
+        tmp_path,
+        monkeypatch,
+    ) -> None:
+        """被 Git 忽略的 app.yaml 不存在时应使用 app.example.yaml。"""
+        logger.debug("test_example_yaml_is_fallback_when_local_config_is_missing 入口")
+        # Arrange
+        from src import config as config_module
+
+        missing_config = tmp_path / "app.yaml"
+        example_config = tmp_path / "app.example.yaml"
+        example_config.write_text("max_retry_count: 9\n", encoding="utf-8")
+        monkeypatch.delenv("APP_CONFIG_PATH", raising=False)
+        monkeypatch.delenv("MAX_RETRY_COUNT", raising=False)
+        monkeypatch.setattr(config_module, "_DEFAULT_APP_CONFIG_FILE", missing_config)
+        monkeypatch.setattr(
+            config_module,
+            "_DEFAULT_APP_CONFIG_EXAMPLE_FILE",
+            example_config,
+        )
+
+        # Act
+        settings = config_module.Settings(_env_file=None)
+
+        # Assert
+        assert settings.max_retry_count == 9
+        logger.info("test_example_yaml_is_fallback_when_local_config_is_missing 完成")
 
     # 方法作用：验证可选数据源文件缺失时 Provider 返回空列表。
     # Args: self - pytest 测试类实例；tmp_path - 临时目录。

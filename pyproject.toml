@@ -67,6 +67,13 @@ testdata = [
 clickhouse = ["clickhouse-connect>=0.8.0"]
 sqlite = ["aiosqlite>=0.20.0"]
 mysql = ["aiomysql>=0.2.0"]
+connectors = [
+    "aiomysql>=0.2.0",
+    "aiosqlite>=0.20.0",
+    "clickhouse-connect>=0.8.0",
+    "oracledb>=2.5.0",
+    "pymssql>=2.3.0",
+]
 
 [build-system]
 requires = ["setuptools>=75.0"]

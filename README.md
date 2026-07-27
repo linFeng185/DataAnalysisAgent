@@ -52,14 +52,17 @@ pip install -e ".[dev]"
 
 ### 3. 配置
 
-系统配置统一维护在 `config/app.yaml`。加载优先级为：构造参数 > 环境变量 > `.env` >
-`config/app.yaml` > 代码默认值；可通过 `APP_CONFIG_PATH` 指向其他 YAML。`config/datasources.yaml`
-是可选的固定数据源清单，页面创建的数据源会加密保存到 PostgreSQL。
+系统实际配置维护在 Git 忽略的 `config/app.yaml`，仓库提供 `config/app.example.yaml`。
+加载优先级为：构造参数 > 环境变量 > `.env` > YAML > 代码默认值；实际配置不存在时自动读取
+example，也可通过 `APP_CONFIG_PATH` 指向其他 YAML。`config/datasources.yaml` 是可选固定数据源
+清单，模板为 `config/datasources.example.yaml`，页面创建的数据源会加密保存到 PostgreSQL。
 
 密钥建议通过部署环境或本地 `.env` 覆盖，不要提交真实值：
 
 ```bash
 cp .env.example .env
+cp config/app.example.yaml config/app.yaml
+cp config/datasources.example.yaml config/datasources.yaml
 ```
 
 首次启动至少配置状态库、固定超级管理员密码和 LLM：
@@ -109,37 +112,76 @@ npm run dev
 
 ## Docker Compose 本地依赖
 
-仓库根目录的 `docker-compose.yml` 编排 MySQL、PostgreSQL、Oracle、SQL Server、ClickHouse、Redis 和 Milvus。应用镜像尚未纳入 Compose，后端与前端仍按上面的命令在宿主机运行。
+开发者个人使用的 `docker-compose.yml` 只用于按需启动本地数据库与中间件，已加入
+`.gitignore`，不属于仓库部署交付物。现有本地文件可以继续使用；生产部署统一从
+`docker-compose.example.yml` 创建实际编排。
 
-首次启动前创建 `.env` 并修改所有 `change-me` 密码：
+## Linux Docker Compose 生产部署
+
+生产栈包含独立前端、后端、PostgreSQL 和 Redis 容器。浏览器只访问前端 Nginx，`/api/`
+通过 Compose 内部网络转发到 FastAPI；后端、数据库和 Redis 不发布宿主机端口。
 
 ```bash
 cp .env.example .env
-docker compose --env-file .env config
+cp docker-compose.example.yml docker-compose.yml
+cp config/app.example.yaml config/app.yaml
+cp config/datasources.example.yaml config/datasources.yaml
+
+# 生成 URL 安全密码和生产密钥，把结果写入 .env
+openssl rand -hex 24   # POSTGRES_PASSWORD
+openssl rand -hex 24   # REDIS_PASSWORD
+openssl rand -hex 32   # JWT_SECRET
+openssl rand -hex 32   # CREDENTIAL_ENCRYPTION_KEY
+openssl rand -hex 24   # SUPER_ADMIN_PASSWORD
 ```
 
-日常开发通常只需要 PostgreSQL 和 Redis：
+`POSTGRES_PASSWORD` 与 `DATABASE_URL`、`REDIS_PASSWORD` 与 `REDIS_URL` 必须保持一致：
+
+```dotenv
+POSTGRES_DB=data_agent
+POSTGRES_USER=data_agent
+POSTGRES_PASSWORD=<postgres-password>
+DATABASE_URL=postgresql+asyncpg://data_agent:<postgres-password>@postgres:5432/data_agent
+
+REDIS_PASSWORD=<redis-password>
+REDIS_URL=redis://:<redis-password>@redis:6379/0
+```
+
+检查配置并启动：
 
 ```bash
-docker compose --env-file .env up -d postgres redis
+docker compose config
+docker compose build --pull
+docker compose up -d
 docker compose ps
-docker compose exec redis sh -c 'redis-cli --no-auth-warning -a "$REDIS_PASSWORD" ping'
+curl http://127.0.0.1:8080/healthz
+curl http://127.0.0.1:8080/api/v1/health
 ```
 
-预期 Redis 返回 `PONG`。该服务使用 `redis:7.4-alpine`，仅将 `6379` 绑定到宿主机 `127.0.0.1`，启用密码认证和 AOF 持久化，数据保存在 `redis_data` volume。停止和恢复命令：
+运行数据均挂载在宿主机，升级或重建容器不会删除：
+
+| 路径 | 内容 |
+|------|------|
+| `config/app.yaml` | 后端应用配置，只读挂载 |
+| `config/datasources.yaml` | 可选固定数据源配置，只读挂载 |
+| `data/postgres/` | PostgreSQL 状态数据 |
+| `data/redis/` | Redis AOF 数据 |
+| `data/backend/` | Chroma、受管 Skills、系统知识与本地缓存 |
+| `data/model-cache/` | Chroma ONNX 模型缓存 |
+| `logs/backend/` | 后端七天轮转日志 |
 
 ```bash
-docker compose stop postgres redis
-docker compose start postgres redis
+# 查看日志和滚动升级
+docker compose logs -f backend frontend
+docker compose build --pull
+docker compose up -d --remove-orphans
+
+# 停止服务但保留全部 bind mount 数据
+docker compose down
 ```
 
-`docker compose down` 只移除容器和网络；只有显式执行 `docker compose down -v` 才会删除 `redis_data`。该操作会清空 Redis 数据，执行前应确认不需要保留缓存。
-
-启动全部数据库和 Milvus 会占用较多内存，并要求 `.env` 中的所有服务密码均已设置：
-
-```bash
-docker compose --env-file .env up -d
-```
+公网部署必须在宿主机 Nginx/Caddy、负载均衡或 Ingress 配置 HTTPS，再转发到
+`127.0.0.1:8080`。完整拓扑、备份和网段约束见 `spec/27-container-deployment.md`。
 
 ## 配置项全表
 
@@ -326,8 +368,11 @@ DataAnalysisAgent/
 ├── features/           # 模块化功能清单和完成状态
 ├── tests/              # 测试
 ├── docs/metrics/       # 业务指标文档（GMV 等）
-├── config/             # 外部配置（MCP、数据源）
-├── docker-compose.yml  # 本地数据库、Redis 和 Milvus 编排
+├── config/             # app/datasources example；实际配置由部署方复制且忽略
+├── docker-compose.example.yml # Linux 生产 Compose 模板
+├── docker-compose.yml  # 本地实际 Compose，Git 忽略
+├── Dockerfile          # 后端 Python 多阶段镜像
+├── .dockerignore       # 后端构建上下文过滤
 └── scripts/            # 辅助脚本
 ```
 
@@ -394,6 +439,7 @@ coverage 配置位于 `pyproject.toml`，当前门禁要求 branch coverage 不�
 5. 私网数据源必须显式加入 `DATASOURCE_HOST_ALLOWLIST`，避免开放任意内网目标。
 6. Redis 不应直接暴露公网；生产使用强密码、网络 ACL，并根据备份要求管理 AOF/快照。
 7. 将日志目录挂载到持久存储。应用日志每日轮转并保留 7 天，审计合规需要更长留存时应由日志平台归档。
+8. Compose 仅发布前端端口；使用 HTTPS 入口反向代理 `127.0.0.1:8080`，禁止直接发布后端、PostgreSQL 和 Redis。
 
 生产启动会执行配置门禁；认证、凭证密钥或状态数据库配置不完整时会直接失败，不会降级到匿名模式。
 

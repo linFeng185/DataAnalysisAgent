@@ -19,6 +19,7 @@ _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 _ENV_FILE = _PROJECT_ROOT / ".env"
 _ENV_EXAMPLE = _PROJECT_ROOT / ".env.example"
 _DEFAULT_APP_CONFIG_FILE = _PROJECT_ROOT / "config" / "app.yaml"
+_DEFAULT_APP_CONFIG_EXAMPLE_FILE = _PROJECT_ROOT / "config" / "app.example.yaml"
 
 logger = logging.getLogger(__name__)
 
@@ -168,7 +169,16 @@ class Settings(BaseSettings):
         file_secret_settings,
     ):
         logger.debug("统一配置源装配入口")
-        config_path = Path(os.getenv("APP_CONFIG_PATH", str(_DEFAULT_APP_CONFIG_FILE)))
+        configured_path = os.getenv("APP_CONFIG_PATH", "").strip()
+        config_path = (
+            Path(configured_path)
+            if configured_path
+            else (
+                _DEFAULT_APP_CONFIG_FILE
+                if _DEFAULT_APP_CONFIG_FILE.exists()
+                else _DEFAULT_APP_CONFIG_EXAMPLE_FILE
+            )
+        )
         yaml_settings = YamlConfigSettingsSource(
             settings_cls,
             yaml_file=config_path,

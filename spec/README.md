@@ -24,3 +24,4 @@
 | [24-architecture-remediation.md](24-architecture-remediation.md) | 架构整改设计 | 动态 |
 | [25-platform-admin-and-auth.md](25-platform-admin-and-auth.md) | 平台管理、强制认证与统一配置设计 | 动态 |
 | [26-api-access-policy.md](26-api-access-policy.md) | API 访问策略、日志与 IP 控制设计 | 动态 |
+| [27-container-deployment.md](27-container-deployment.md) | Linux 前后端分离容器部署 | 动态 |

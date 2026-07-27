@@ -40,7 +40,7 @@
 - [ ] 限流与并发控制
 - [ ] 数据脱敏
 - [ ] 监控与日志（Prometheus + Grafana）
-- [ ] Docker 容器化部署
+- [x] Docker 容器化部署
 
 ### Phase 4 — 进阶（持续迭代）
 

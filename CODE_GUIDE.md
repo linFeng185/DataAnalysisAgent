@@ -31,13 +31,18 @@ LLM 驱动的数据分析智能体。用自然语言提问，自动完成：轮�
 │   ├── bootstrap.py          分阶段启动/关闭编排
 │   └── skill_manager.py      技能引擎
 ├── frontend/                 React SPA (Vite + Ant Design + ECharts)
+│   ├── Dockerfile               Node builder + Nginx runtime
+│   └── nginx.conf               SPA、API 代理和 SSE 配置
 ├── skills/                   system 内置 Skills
 ├── data/skills/              tenant/private 受管 Skills
 ├── spec/                     技术规格（15 个章节）
 ├── features/                 功能清单（19 个模块）
 ├── tests/                    测试
 ├── migrations/               按编号执行的 PostgreSQL SQL 迁移
-└── docs/metrics/             业务指标文档
+├── docs/metrics/             业务指标文档
+├── Dockerfile                Python builder/runtime 后端镜像
+├── docker-compose.example.yml Linux 生产编排模板（实际 compose 文件忽略）
+└── .dockerignore             后端构建上下文过滤
 ```
 
 ## 核心数据流
@@ -212,6 +217,7 @@ POST /api/v1/chat {"query": "本月 GMV 排名？", "stream": true}
 - **出站地址失败关闭**：数据库目标解析为私网、回环或特殊地址时默认阻断；ClickHouse 探针与客户端固定复用已校验 IP
 - **授权候选发现**：未选择数据源时仅把当前用户有权访问的候选交给模型，显式越权与权限服务异常均失败关闭
 - **版本化迁移**：启动时用 advisory lock + checksum + 单文件事务应用 SQL，生产失败停止启动
+- **容器部署边界**：`docker-compose.example.yml` 只发布前端端口，Nginx 同源代理后端；实际 Compose/配置文件忽略，PG/Redis/Chroma/Skills/日志使用宿主机持久化目录
 - **状态持久化分层**：checkpoint 只保存轻量 `conversation_history/messages/previous_turn_snapshot`；权限、Schema、结果、分析、图表和响应使用 `UntrackedValue`
 - **Windows 异步兼容**：`src.main` 为 Uvicorn 显式创建 SelectorEventLoop，保证 psycopg `AsyncPostgresSaver` 可持久化
 - **会话逐轮恢复**：每轮完整 `final_response` 只写 `query_history.final_result` JSONB；前端逐轮消费，checkpoint 不复制数据与图表

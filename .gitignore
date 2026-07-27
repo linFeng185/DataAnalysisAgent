@@ -1,6 +1,11 @@
 # 环境变量（含密钥）
 .env
 
+# 本地部署与应用配置（仓库仅提交 example）
+/docker-compose.yml
+/config/app.yaml
+/config/datasources.yaml
+
 # Python
 __pycache__/
 *.pyc
@@ -60,3 +65,7 @@ test_data.sql
 # 运行时数据缓存和生成文件
 data/cache/
 data/generated/
+/data/backend/
+/data/model-cache/
+/data/postgres/
+/data/redis/
