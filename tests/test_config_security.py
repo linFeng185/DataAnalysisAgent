@@ -270,6 +270,30 @@ class TestLoggingRetention:
         assert len(redacted["sql_preview_hash"]) == 64
         assert redacted["datasource"] == "prod"
 
+    # 方法作用：验证 JSON 文件日志直接保留中文字符而不是 Unicode 转义序列。
+    # Args: self - pytest 测试类实例；tmp_path - pytest 临时目录；monkeypatch - pytest 运行时替换工具。
+    # Returns: 无返回值，断言日志文件包含原始中文文本。
+    def test_json_logging_preserves_chinese_text(self, tmp_path, monkeypatch) -> None:
+        """JSONRenderer 应使用 ensure_ascii=False 输出可读中文。"""
+        # Arrange
+        from src import logging_config
+        from src.config import Settings
+
+        log_file = tmp_path / "logs" / "app.log"
+        settings = Settings(log_file=str(log_file), log_format="json", log_level="INFO")
+        monkeypatch.setattr(logging_config, "get_settings", lambda: settings)
+        logging_config.setup_logging()
+
+        # Act
+        logging_config.get_logger("tests.logging").info("中文日志验证")
+        for handler in logging.getLogger().handlers:
+            handler.flush()
+
+        # Assert
+        content = log_file.read_text(encoding="utf-8")
+        assert "中文日志验证" in content
+        assert "\\u4e2d\\u6587" not in content
+
 
 class TestMCPStartupSafety:
     """覆盖默认 MCP 服务禁用行为。"""

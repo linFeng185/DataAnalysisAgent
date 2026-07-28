@@ -31,13 +31,18 @@ class MoMProcessor(DataProcessor):
 @register
 class TrendProcessor(DataProcessor):
     name = "trend"; intents = ["trend"]; prefer_sql = False
+
+    # 方法作用：使用 Decimal 计算移动平均和趋势方向。
+    # Args: rows - 查询结果；params - 时间列、数值列和窗口配置。
+    # Returns: 趋势处理结果。
     def process(self, rows, params):
         vc, tc = params.get("value_col",""), params.get("time_col","")
         if not vc or len(rows)<3: return ProcessorResult("数据不足",[],"table",rows,"low")
         vals=[self._f(r.get(vc)) for r in rows]; w=min(params.get("window",3),len(vals))
         ma=[round(sum(vals[max(0,i-w+1):i+1])/(i-max(0,i-w+1)+1),2) for i in range(len(vals))]
         fh=sum(vals[:len(vals)//2])/max(len(vals)//2,1); sh=sum(vals[len(vals)//2:])/max(len(vals)-len(vals)//2,1)
-        d="上升" if sh>fh*1.05 else "下降" if fh>sh*1.05 else "平稳"
+        trend_threshold = self._f("1.05")
+        d="上升" if sh>fh*trend_threshold else "下降" if fh>sh*trend_threshold else "平稳"
         data=[{"value":vals[i],"moving_avg":ma[i]} for i in range(len(vals))]
         return ProcessorResult(f"{w}期移动均{d}趋势",[f"前均值{round(fh,2)}，后均值{round(sh,2)}"],"line",data)
 
@@ -234,13 +239,17 @@ class GrowthRateProcessor(DataProcessor):
     """复合增长率 — CAGR 和逐期增长率。"""
     name = "growth_rate"; intents = ["trend"]; prefer_sql = False
 
+    # 方法作用：使用 Decimal 指数计算逐期增长率和 CAGR。
+    # Args: rows - 查询结果；params - 时间列和数值列配置。
+    # Returns: 增长率处理结果。
     def process(self, rows, params):
         vc, tc = params.get("value_col", ""), params.get("time_col", "")
         if not vc or len(rows) < 2: return ProcessorResult("数据不足", [], "table", rows, "low")
         vals = [self._f(r.get(vc)) for r in rows]; times = [self._s(r.get(tc)) for r in rows]
         if vals[0] == 0: return ProcessorResult("基期为零", [], "table", rows, "low")
         periods = len(vals) - 1
-        cagr = round(((vals[-1] / vals[0]) ** (1 / periods) - 1) * 100, 2) if periods > 0 else 0
+        exponent = self._f(1) / self._f(periods)
+        cagr = round(((vals[-1] / vals[0]) ** exponent - 1) * 100, 2) if periods > 0 else 0
         data = [{"period": times[i], "value": vals[i], "growth": round((vals[i]-vals[i-1])/max(abs(vals[i-1]),1)*100,2) if i > 0 else 0} for i in range(len(vals))]
         avg_growth = round(sum(d["growth"] for d in data[1:]) / periods, 2) if periods else 0
         vol = round(self._std([d["growth"] for d in data[1:]]) / max(abs(avg_growth), 1), 2) if avg_growth else 0
@@ -252,6 +261,9 @@ class SeasonalDecompositionProcessor(DataProcessor):
     """季节分解 — 简单移动平均剥离趋势，残差 = 原始 - 趋势。"""
     name = "seasonal"; intents = ["trend"]; prefer_sql = False
 
+    # 方法作用：使用 Decimal 完成移动平均、残差和季节性阈值判断。
+    # Args: rows - 查询结果；params - 时间列、数值列和窗口配置。
+    # Returns: 季节分解处理结果。
     def process(self, rows, params):
         vc, tc = params.get("value_col", ""), params.get("time_col", "")
         if not vc or len(rows) < 6: return ProcessorResult("数据不足（需≥6期）", [], "table", rows, "low")
@@ -266,10 +278,12 @@ class SeasonalDecompositionProcessor(DataProcessor):
         # 趋势方向
         fh = sum(trend[:len(trend)//2]) / max(len(trend)//2, 1)
         sh = sum(trend[len(trend)//2:]) / max(len(trend)-len(trend)//2, 1)
-        direction = "上升" if sh > fh * 1.03 else "下降" if fh > sh * 1.03 else "平稳"
+        direction_threshold = self._f("1.03")
+        direction = "上升" if sh > fh * direction_threshold else "下降" if fh > sh * direction_threshold else "平稳"
         # 季节性检测 —— 周期波动
         volatility = round(self._std(residual), 2)
-        seasonality = "有" if volatility > self._std(vals) * 0.3 else "不明显"
+        seasonality_threshold = self._f("0.3")
+        seasonality = "有" if volatility > self._std(vals) * seasonality_threshold else "不明显"
         data = [{"period": times[i] if i < len(times) else str(i), "value": vals[i], "trend": trend[i], "residual": residual[i]} for i in range(len(vals))]
         return ProcessorResult(f"{direction}趋势，季节性{seasonality}（波动{volatility}）", [f"趋势均值 {round(sum(trend)/len(trend),2)}", f"残差标准差 {volatility}"], "line", data)
 
@@ -319,6 +333,9 @@ class ABTestProcessor(DataProcessor):
     """A/B 对比 — 两组数据的均值差和置信度估算。group_col 组标识, value_col 指标。"""
     name = "ab_test"; intents = ["attribution", "aggregation"]; prefer_sql = False
 
+    # 方法作用：使用 Decimal 方差平方根计算 A/B 测试标准误和近似 t 值。
+    # Args: rows - 查询结果；params - 分组列和数值列配置。
+    # Returns: A/B 对比处理结果。
     def process(self, rows, params):
         gc, vc = params.get("group_col",""), params.get("value_col","")
         if not gc or not vc or len(rows)<4: return ProcessorResult("数据不足",[],"table",rows,"low")
@@ -331,7 +348,8 @@ class ABTestProcessor(DataProcessor):
         sa, sb = self._std(va), self._std(vb)
         diff = round(ma - mb, 4); diff_pct = round(diff / max(abs(mb), 1) * 100, 2)
         # Welch t-test 近似
-        se = ((sa**2/len(va)) + (sb**2/len(vb))) ** 0.5 if (sa or sb) else 1
+        variance = (sa**2 / len(va)) + (sb**2 / len(vb))
+        se = variance.sqrt() if variance > 0 else self._f(1)
         t = abs(diff) / se if se > 0 else 0
         sig = "显著" if t > 2 else "边缘显著" if t > 1 else "不显著"
         data = [{"group": a, "mean": round(ma,2), "std": round(sa,2), "count": len(va)},
@@ -424,16 +442,21 @@ class SimplePredictionProcessor(DataProcessor):
     警告: 线性模型只适用于简单趋势，复杂模式预测不可靠。"""
     name = "prediction"; intents = ["trend"]; prefer_sql = False
 
+    # 方法作用：使用 Decimal 线性回归核生成有限步数的简单预测。
+    # Args: rows - 查询结果；params - 时间列、数值列和预测步数配置。
+    # Returns: 线性预测处理结果。
     def process(self, rows, params):
         vc, tc = params.get("value_col",""), params.get("time_col","")
         if not vc or len(rows) < 3: return ProcessorResult("数据不足",[],"table",rows,"low")
         vals = [self._f(r.get(vc)) for r in rows]; times = [self._s(r.get(tc)) for r in rows] if tc else [str(i) for i in range(len(rows))]
-        n = len(vals); x_mean = (n - 1) / 2; y_mean = sum(vals) / n
-        sxy = sum((i - x_mean) * (vals[i] - y_mean) for i in range(n))
-        sxx = sum((i - x_mean) ** 2 for i in range(n))
+        n = len(vals); x_mean = self._f(n - 1) / self._f(2); y_mean = sum(vals) / n
+        sxy = sum((self._f(i) - x_mean) * (vals[i] - y_mean) for i in range(n))
+        sxx = sum((self._f(i) - x_mean) ** 2 for i in range(n))
         if sxx == 0: return ProcessorResult("方差为零",[],"table",rows,"low")
         slope = round(sxy / sxx, 4); intercept = round(y_mean - slope * x_mean, 4)
-        r_squared = round((sxy / ((sxx * sum((v - y_mean)**2 for v in vals))**0.5)) ** 2, 4) if sxx else 0
+        denominator_squared = sxx * sum((v - y_mean) ** 2 for v in vals)
+        denominator = denominator_squared.sqrt() if denominator_squared > 0 else self._f(0)
+        r_squared = round((sxy / denominator) ** 2, 4) if denominator else self._f(0)
         steps = params.get("forecast_steps", 3)
         forecast = [round(intercept + slope * (n + i), 2) for i in range(steps)]
         data = [{"index": i, "label": times[i] if i < len(times) else f"预测{i-n+1}", "value": vals[i] if i < n else forecast[i-n]} for i in range(n + steps)]

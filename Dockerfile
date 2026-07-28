@@ -21,6 +21,8 @@ RUN python -m pip wheel --wheel-dir=/wheels ".[${INSTALL_EXTRAS}]"
 
 FROM python:3.14-slim AS runtime
 
+ARG INSTALL_EXTRAS="connectors,documents,structured"
+
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONPATH=/app
@@ -34,7 +36,7 @@ RUN apt-get update \
     && useradd --uid 10001 --gid app --create-home --shell /usr/sbin/nologin app
 
 COPY --from=builder /wheels /wheels
-RUN python -m pip install --no-index --find-links=/wheels data-analysis-agent \
+RUN python -m pip install --no-index --find-links=/wheels "data-analysis-agent[${INSTALL_EXTRAS}]" \
     && rm -rf /wheels
 
 COPY --chown=app:app src ./src

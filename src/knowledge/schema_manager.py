@@ -574,6 +574,9 @@ class SchemaManager:
             return []
 
 
+    # 方法作用：复用启动阶段恢复的外部 Provider，仅在 Registry 为空时从 YAML 懒加载。
+    # Args: 无。
+    # Returns: 无返回值。
     def _ensure_external_provider(self) -> None:
         """确保外部数据源 Provider 已注册（启动后首次调用时懒加载）。"""
         if getattr(self, "_ext_provider_registered", False):
@@ -582,8 +585,27 @@ class SchemaManager:
             from src.datasource.providers.external import ExternalDataSourceProvider
             from src.datasource.registry import get_registry
 
+            registry = get_registry()
+            existing_provider = registry.get_provider("external")
+            logger.info(
+                "外部数据源 Provider 注册边界",
+                existing=existing_provider is not None,
+                existing_type=(
+                    type(existing_provider).__name__
+                    if existing_provider is not None
+                    else ""
+                ),
+            )
+            if existing_provider is not None:
+                self._ext_provider_registered = True
+                logger.info(
+                    "外部数据源 Provider 已复用",
+                    provider_type=type(existing_provider).__name__,
+                )
+                return
+
             provider = ExternalDataSourceProvider.from_yaml("config/datasources.yaml")
-            get_registry().register_provider("external", provider)
+            registry.register_provider("external", provider)
             self._ext_provider_registered = True
             logger.info("外部数据源 Provider 已注册")
         except Exception as e:

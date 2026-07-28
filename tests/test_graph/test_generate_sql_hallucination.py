@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from unittest.mock import AsyncMock
 
 from src.graph.nodes.generate_sql import _check_table_hallucination
 
@@ -93,3 +94,60 @@ class TestGenerateSQLHallucination:
         assert result
         assert "解析失败" in result[0]
         logger.info("test_parser_failure_is_closed 完成")
+
+    # 方法作用：验证 MySQL 反引号引用的已知表不会被误判为幻觉。
+    # Args: self - pytest 测试类实例。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    def test_mysql_quoted_known_table_is_allowed(self) -> None:
+        """MySQL 方言解析应接受反引号包裹的已知表和字段。"""
+        logger.debug("test_mysql_quoted_known_table_is_allowed 入口")
+        # Arrange
+        sql = (
+            "SELECT `f_date`, `f_value` "
+            "FROM `mogu_daily_electricity_consumption` ORDER BY `f_date`"
+        )
+        tables = [{"name": "mogu_daily_electricity_consumption"}]
+
+        # Act
+        result = _check_table_hallucination(sql, tables, "mysql")
+
+        # Assert
+        assert result == []
+        logger.info("test_mysql_quoted_known_table_is_allowed 完成")
+
+    # 方法作用：验证 SQL 生成节点把当前 MySQL 方言传给表名幻觉校验。
+    # Args: self - pytest 测试类实例；monkeypatch - pytest 运行时替换工具。
+    # Returns: 无返回值，断言节点输出合法 SQL 且无幻觉错误。
+    async def test_generate_node_forwards_mysql_dialect(self, monkeypatch) -> None:
+        """节点处理 MySQL 反引号 SQL 时应使用真实方言完成二次校验。"""
+        logger.debug("test_generate_node_forwards_mysql_dialect 入口")
+        # Arrange
+        import src.graph.nodes.generate_sql as generate_module
+
+        sql = (
+            "SELECT `f_date`, `f_value` "
+            "FROM `mogu_daily_electricity_consumption` ORDER BY `f_date`"
+        )
+        llm_generate = AsyncMock(return_value=(sql, "", ""))
+        monkeypatch.setattr(generate_module, "is_llm_available", lambda: True)
+        monkeypatch.setattr(generate_module, "_llm_generate", llm_generate)
+        state = {
+            "user_query": "列出每日用电量",
+            "dialect": "mysql",
+            "relevant_tables": [{
+                "name": "mogu_daily_electricity_consumption",
+                "columns": [
+                    {"name": "f_date", "type": "date"},
+                    {"name": "f_value", "type": "decimal"},
+                ],
+            }],
+        }
+
+        # Act
+        result = await generate_module.generate_sql_node(state, {})
+
+        # Assert
+        assert result["generated_sql"] == sql
+        assert result["validation_errors"] == []
+        assert llm_generate.await_args.kwargs["dialect"] == "mysql"
+        logger.info("test_generate_node_forwards_mysql_dialect 完成")

@@ -33,6 +33,7 @@ from src.llm.client import get_task_llm as _get_task_llm
 from src.llm.client import is_task_llm_available as _is_task_llm_available
 from src.llm.prompts import SQL_GENERATION_SYSTEM, get_dialect_cheatsheet
 from src.logging_config import get_logger
+from src.security.sql_execution import normalize_sql_dialect
 
 logger = get_logger(__name__)
 
@@ -181,7 +182,7 @@ async def generate_sql_node(state: AnalysisState, config: RunnableConfig) -> dic
 
     # 12.1.6 LLM 输出二次校验 — 拦截表名幻觉
     if sql.strip() and not sql.startswith("-- "):  # 跳过空回退和错误占位符
-        hallucination = _check_table_hallucination(sql, tables)
+        hallucination = _check_table_hallucination(sql, tables, dialect)
         if hallucination:
             logger.warning("LLM 幻觉拦截", sql=sql[:200], unknown_tables=hallucination)
             result = {"generated_sql": sql, "retry_count": retry + 1,
@@ -543,7 +544,14 @@ def _missing_time_filter(sql: str, query: str) -> bool:
     return True
 
 
-def _check_table_hallucination(sql: str, tables: list[dict]) -> list[str]:
+# 方法作用：按真实数据库方言解析 SQL，并拦截 Schema 或 CTE 之外的表引用。
+# Args: sql - 待校验 SQL；tables - Schema 已知表；dialect - 数据源真实方言。
+# Returns: 未知表名列表；解析失败时返回失败关闭标记。
+def _check_table_hallucination(
+    sql: str,
+    tables: list[dict],
+    dialect: str = "",
+) -> list[str]:
     """12.1.6 检查 SQL 中引用的表名是否在 relevant_tables 中存在。
 
     使用 sqlglot 提取 FROM/JOIN 子句中的表引用，与已知表名比对，拦截 LLM 幻觉。
@@ -554,21 +562,24 @@ def _check_table_hallucination(sql: str, tables: list[dict]) -> list[str]:
     known = {t["name"].lower() for t in tables if t.get("name")}
     known_bases = {name.rsplit(".", 1)[-1] for name in known}
     unknown: list[str] = []
+    parser_dialect = normalize_sql_dialect(dialect)
     logger.info(
         "表名幻觉校验边界输入",
         known_tables=sorted(known),
+        parser_dialect=parser_dialect or "default",
         sql=sql,
     )
     try:
         import sqlglot
         from sqlglot import exp
 
-        parsed = sqlglot.parse(sql)
+        parsed = sqlglot.parse(sql, read=parser_dialect or None)
         logger.info(
             "表名幻觉校验解析完成",
             parsed_type=type(parsed).__name__,
             statement_count=len(parsed),
             has_walk=hasattr(parsed, "walk"),
+            parser_dialect=parser_dialect or "default",
         )
         for statement in parsed:
             cte_names = {
@@ -593,7 +604,8 @@ def _check_table_hallucination(sql: str, tables: list[dict]) -> list[str]:
         logger.error(
             "表名幻觉校验异常",
             error=str(exc),
-            parsed_input_tables=sorted(known),
+            parser_dialect=parser_dialect or "default",
+            known_tables=sorted(known),
             exc_info=True,
         )
         unknown.append("SQL 解析失败，已阻断执行")

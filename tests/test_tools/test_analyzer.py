@@ -72,6 +72,24 @@ class TestTrend:
     def test_empty(self):
         assert compute_trend([], "t", "v")["trend"] == "flat"
 
+    # 方法作用：验证趋势分析可以直接处理数据库返回的 Decimal 数值。
+    # Args: self - pytest 测试类实例。
+    # Returns: 无返回值，断言趋势方向和环比结果正确。
+    def test_decimal_values_are_supported(self) -> None:
+        """Decimal 输入不得与浮点阈值混算而抛出 TypeError。"""
+        # Arrange
+        rows = [
+            {"t": "2026-01", "v": Decimal("10")},
+            {"t": "2026-02", "v": Decimal("20")},
+        ]
+
+        # Act
+        result = compute_trend(rows, "t", "v")
+
+        # Assert
+        assert result["trend"] == "up"
+        assert result["change_pct"] == Decimal("100.00")
+
 
 class TestOutliers:
     """13.3-4"""
@@ -96,6 +114,38 @@ class TestOutliers:
         r = detect_outliers_iqr([1, 2, 3, 4, 5, 2, 3, 500])
         assert len(r) >= 1
 
+    # 方法作用：验证 Z-Score 在统一数值域中处理 Decimal 输入。
+    # Args: self - pytest 测试类实例。
+    # Returns: 无返回值，断言离群值可被识别。
+    def test_zscore_decimal_values(self) -> None:
+        """Decimal 序列计算均值和标准差时不得发生类型混算。"""
+        # Arrange
+        values = [Decimal("1"), Decimal("2"), Decimal("2"), Decimal("100")]
+
+        # Act
+        result = detect_outliers_zscore(values, threshold=1.0)
+
+        # Assert
+        assert result[-1]["index"] == 3
+        assert result[-1]["value"] == 100.0
+
+    # 方法作用：验证 IQR 在统一数值域中处理 Decimal 输入。
+    # Args: self - pytest 测试类实例。
+    # Returns: 无返回值，断言上界离群值可被识别。
+    def test_iqr_decimal_values(self) -> None:
+        """Decimal 四分位数与浮点系数不得在同一表达式中混算。"""
+        # Arrange
+        values = [
+            Decimal("1"), Decimal("2"), Decimal("3"), Decimal("4"),
+            Decimal("5"), Decimal("2"), Decimal("3"), Decimal("500"),
+        ]
+
+        # Act
+        result = detect_outliers_iqr(values)
+
+        # Assert
+        assert result == [{"index": 7, "value": 500.0, "bound": "upper"}]
+
 
 class TestConcentration:
     """13.5"""
@@ -118,6 +168,21 @@ class TestCorrelation:
 
     def test_too_few(self):
         assert compute_correlation([1, 2], [3, 4]) == 0
+
+    # 方法作用：验证 Pearson 相关系数可以接收两列 Decimal 数值。
+    # Args: self - pytest 测试类实例。
+    # Returns: 无返回值，断言完全正相关结果为 1.0。
+    def test_decimal_values_are_supported(self) -> None:
+        """相关系数入口应统一 Decimal 数值域后再执行近似统计。"""
+        # Arrange
+        left = [Decimal("1"), Decimal("2"), Decimal("3")]
+        right = [Decimal("2"), Decimal("4"), Decimal("6")]
+
+        # Act
+        result = compute_correlation(left, right)
+
+        # Assert
+        assert result == 1.0
 
 
 class TestAnalyzeResultNode:

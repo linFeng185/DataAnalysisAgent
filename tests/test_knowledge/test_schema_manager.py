@@ -504,3 +504,42 @@ class TestSchemaManagerManagement:
         saved = store.upsert.await_args.args[0][0]
         assert saved.id == "column:demo.orders.amount"
         assert "订单金额" in saved.content
+
+
+class TestExternalProviderOwnership:
+    """覆盖功能 2.1.4、6.1.1：Schema 懒加载不得覆盖启动恢复的数据源。"""
+
+    # 方法作用：验证重启恢复的外部 Provider 在首次 Schema 请求时被原样复用。
+    # Args: self - pytest 测试类实例；monkeypatch - pytest 运行时替换工具。
+    # Returns: 无返回值，断言 Provider 身份和已恢复数据源保持不变。
+    async def test_existing_provider_is_reused_after_restart(self, monkeypatch) -> None:
+        """启动阶段恢复的动态数据源不得被空 YAML Provider 覆盖。"""
+        logger.debug("test_existing_provider_is_reused_after_restart 入口")
+        # Arrange
+        import src.datasource.registry as registry_module
+        from src.datasource.config import DataSourceConfig
+        from src.datasource.providers.external import ExternalDataSourceProvider
+        from src.datasource.registry import DataSourceRegistry
+        from src.knowledge.schema_manager import SchemaManager
+
+        provider = ExternalDataSourceProvider()
+        provider._register(DataSourceConfig(  # noqa: SLF001
+            name="managed",
+            dialect="mysql",
+            mode="external",
+            host="127.0.0.1",
+            port=3306,
+            database="analytics",
+        ))
+        registry = DataSourceRegistry()
+        registry.register_provider("external", provider)
+        monkeypatch.setattr(registry_module, "get_registry", lambda: registry)
+        manager = SchemaManager()
+
+        # Act
+        manager._ensure_external_provider()  # noqa: SLF001
+
+        # Assert
+        assert registry.get_provider("external") is provider
+        assert await provider.lookup("managed") is not None
+        logger.info("test_existing_provider_is_reused_after_restart 完成")

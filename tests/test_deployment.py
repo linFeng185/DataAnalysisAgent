@@ -20,8 +20,10 @@ class TestContainerDeployment:
         normalized = source.lower()
 
         # Assert
-        assert "from python:3.12-slim as builder" in normalized
-        assert "from python:3.12-slim as runtime" in normalized
+        assert "from python:3.14-slim as builder" in normalized
+        assert "from python:3.14-slim as runtime" in normalized
+        assert normalized.count('arg install_extras="connectors,documents,structured"') == 2
+        assert '"data-analysis-agent[${install_extras}]"' in normalized
         assert "user app" in normalized
         assert "healthcheck" in normalized
         assert '"src.main:app"' in source
@@ -40,8 +42,10 @@ class TestContainerDeployment:
         assert "FROM node:22-alpine AS builder" in dockerfile
         assert "FROM nginxinc/nginx-unprivileged:1.27-alpine AS runtime" in dockerfile
         assert "npm ci" in dockerfile
+        assert "COPY public ./public" not in dockerfile
         assert "location /api/" in nginx
-        assert "proxy_pass http://backend:8000" in nginx
+        assert "proxy_pass http://backend;" in nginx
+        assert "proxy_pass http://backend:8000" not in nginx
         assert "proxy_buffering off" in nginx
         assert "try_files $uri $uri/ /index.html" in nginx
 

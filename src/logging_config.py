@@ -42,6 +42,9 @@ def _redact_sensitive_fields(logger, method_name: str, event_dict: dict) -> dict
     return redacted
 
 
+# 方法作用：初始化 structlog 与控制台、七天轮转文件日志。
+# Args: 无。
+# Returns: 无返回值。
 def setup_logging() -> None:
     """初始化 structlog，并配置控制台及保留七天的文件日志。
 
@@ -64,7 +67,7 @@ def setup_logging() -> None:
     ]
 
     if settings.log_format == "json":
-        renderer = structlog.processors.JSONRenderer()
+        renderer = structlog.processors.JSONRenderer(ensure_ascii=False)
     else:
         renderer = structlog.dev.ConsoleRenderer()
 
@@ -121,6 +124,9 @@ def setup_logging() -> None:
     )
 
 
+# 方法作用：按模块名称获取已配置的结构化日志实例。
+# Args: name - 日志器名称，通常使用模块的 __name__。
+# Returns: 可记录结构化字段的 BoundLogger。
 def get_logger(name: str) -> structlog.stdlib.BoundLogger:
     """获取结构化日志实例。"""
     return structlog.get_logger(name)
