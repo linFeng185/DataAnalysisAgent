@@ -70,6 +70,10 @@ def _default_api_access_policies() -> list[ApiAccessRouteConfig]:
             access_log="none", description="健康检查",
         ),
         ApiAccessRouteConfig(
+            id="metrics", path="/api/v1/metrics", methods=["GET"], auth="public",
+            access_log="none", description="Prometheus 指标抓取",
+        ),
+        ApiAccessRouteConfig(
             id="login", path="/api/v1/auth/login", methods=["POST"], auth="public",
             access_log="security", description="登录",
         ),
@@ -222,6 +226,10 @@ class Settings(BaseSettings):
     database_url: str = ""
     run_migrations_on_startup: bool = True
 
+    # ---- 记忆维护 ----
+    memory_maintenance_enabled: bool = True
+    memory_maintenance_interval_seconds: int = 24 * 60 * 60
+
     # ---- 向量存储 ----
     vector_store_type: str = "chroma"
     vector_store_abstract_enabled: bool = True
@@ -240,6 +248,25 @@ class Settings(BaseSettings):
     datasource_cache_dir: str = "./data/cache/datasource"
     datasource_cache_ttl_seconds: int = 7 * 24 * 60 * 60
     datasource_cache_redis_prefix: str = "data-agent:datasource-cache"
+    schema_cache_refresh_enabled: bool = True
+    schema_cache_refresh_interval_seconds: int = 60 * 60
+
+    # ---- Skill Registry ----
+    skill_registry_url: str = ""
+    skill_registry_trusted_hosts: str = ""
+    skill_registry_max_package_bytes: int = 10 * 1024 * 1024
+
+    # ---- 主动洞察与定时报告 ----
+    automation_enabled: bool = True
+    automation_poll_interval_seconds: int = Field(default=60, ge=10, le=3600)
+    automation_smtp_host: str = ""
+    automation_smtp_port: int = Field(default=587, ge=1, le=65535)
+    automation_smtp_starttls: bool = True
+    automation_smtp_username: str = ""
+    automation_smtp_password: str = ""
+    automation_email_from: str = ""
+    automation_feishu_webhook_url: str = ""
+    automation_slack_webhook_url: str = ""
 
     # ---- 多租户与认证 ----
     multi_tenant: bool = False               # 是否启用多租户
@@ -295,8 +322,13 @@ class Settings(BaseSettings):
     """允许访问私网的可信数据库主机、IP 或 CIDR，逗号分隔。"""
 
     # ---- LangSmith ----
+    langsmith_tracing: bool = False
     langsmith_api_key: str = ""
     langsmith_project: str = "data-analysis-agent"
+    langsmith_endpoint: str = "https://api.smith.langchain.com"
+    langsmith_hide_inputs: bool = True
+    langsmith_hide_outputs: bool = True
+    langsmith_sampling_rate: float = Field(default=1.0, ge=0.0, le=1.0)
 
     # ---- MCP ----
     mcp_config_path: str = "config/app.yaml"

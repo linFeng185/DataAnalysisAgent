@@ -155,6 +155,19 @@ class TestEndpoints:
         assert r.status_code == 200
         assert r.json()["status"] == "ok"
 
+    # 方法作用：验证 Prometheus 指标端点返回标准 exposition 文本。
+    # Args: self - pytest 测试类实例；client - 携带认证的 ASGI 测试客户端。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    async def test_metrics(self, client):
+        """监控系统必须能抓取稳定指标名且响应类型正确。"""
+        # Act
+        response = await client.get("/api/v1/metrics")
+
+        # Assert
+        assert response.status_code == 200
+        assert response.headers["content-type"].startswith("text/plain")
+        assert "data_agent_http_requests_total" in response.text
+
     async def test_chat(self, client, monkeypatch):
         from types import SimpleNamespace
         from unittest.mock import AsyncMock
@@ -613,7 +626,7 @@ class TestEndpoints:
             assert result["analysis"] == {"summary": "完整结论"}
             assert result["chart"]["type"] == "bar"
             assert result["row_count"] == 35
-            assert result["sql_reasoning_content"] == "处理后的 SQL 推理"
+            assert "sql_reasoning_content" not in result
             history.list_session.assert_not_awaited()
             logger.info("test_load_latest_state_preserves_multi_source_final_response 完成")
         except Exception as exc:
@@ -623,6 +636,43 @@ class TestEndpoints:
                 exc_info=True,
             )
             raise
+
+    # 方法作用：验证会话恢复完整保留跨源部分成功状态。
+    # Args: self - pytest 测试类实例；monkeypatch - pytest 补丁工具。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    async def test_load_latest_state_preserves_partial_status(
+        self, monkeypatch,
+    ) -> None:
+        """部分数据源失败的历史响应不能在恢复时升级为完全成功。"""
+        # Arrange
+        from types import SimpleNamespace
+        from unittest.mock import AsyncMock
+
+        import src.api.routes as routes
+
+        checkpoint = SimpleNamespace(checkpoint={"channel_values": {
+            "final_response": {
+                "success": True,
+                "status": "partial",
+                "source": "multi_source_query",
+                "error_code": "MULTI_SOURCE_PARTIAL",
+                "error_message": "部分数据源查询失败，当前结果仅包含成功的数据源",
+                "data": [{"value": 1}],
+            },
+        }})
+        monkeypatch.setattr(
+            routes,
+            "_load_checkpoint_tuple",
+            AsyncMock(return_value=checkpoint),
+        )
+
+        # Act
+        result = await routes._load_latest_state("session-partial")
+
+        # Assert
+        assert result["success"] is True
+        assert result["status"] == "partial"
+        assert result["error_code"] == "MULTI_SOURCE_PARTIAL"
 
     # 方法作用：验证每一轮会话都合并自身持久化的结构化响应。
     # Args: self - pytest 测试类实例；monkeypatch - pytest 补丁工具。

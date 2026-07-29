@@ -83,13 +83,22 @@ export function streamChat(
   onError: (err: string) => void,
   datasources?: string[],
   modelId?: string,
+  enabledSkillIds?: string[],
 ): AbortController {
   const controller = new AbortController();
   fetch(`${BASE}/chat`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     credentials: 'include',
-    body: JSON.stringify({ query, datasource, datasources: datasources || [datasource], model_id: modelId || '', stream: true, session_id: sessionId }),
+    body: JSON.stringify({
+      query,
+      datasource,
+      datasources: datasources || [datasource],
+      model_id: modelId || '',
+      enabled_skill_ids: enabledSkillIds || [],
+      stream: true,
+      session_id: sessionId,
+    }),
     signal: controller.signal,
   }).then(async (res) => {
     if (res.status === 401) redirectToLogin();

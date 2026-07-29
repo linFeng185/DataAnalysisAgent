@@ -7,3 +7,26 @@ body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sa
 .sql-block { background: #0d1117; color: #c9d1d9; padding: 12px; border-radius: 6px; overflow-x: auto; font-size: 13px; }
 .sql-block .hljs { background: transparent; padding: 0; }
 .chart-container { width: 100%; height: 400px; margin: 12px 0; }
+.automation-form-row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); width: 100%; gap: 16px; }
+.automation-form-row > .ant-space-item { min-width: 0; }
+.automation-notification-body { white-space: pre-wrap; overflow-wrap: anywhere; margin-bottom: 0 !important; }
+
+@media (max-width: 767px) {
+  .app-header { padding: 0 8px !important; }
+  .app-title { font-size: 14px !important; white-space: nowrap; }
+  .mobile-health, .role-tag, .logout-label { display: none !important; }
+  .app-header .ant-tag { margin-inline-end: 0; max-width: 112px; overflow: hidden; text-overflow: ellipsis; }
+  .app-content { width: 100%; overflow-x: hidden; }
+  .chat-page { height: calc(100dvh - 64px) !important; width: 100%; }
+  .chat-messages { padding-left: 10px !important; padding-right: 10px !important; }
+  .chat-input-area { padding: 8px 10px 10px !important; }
+  .chart-container { height: 280px !important; min-height: 240px; margin: 8px 0; }
+  .ant-table-wrapper { max-width: 100%; overflow: hidden; }
+  .ant-modal { max-width: calc(100vw - 20px); margin: 10px auto; }
+  .ant-modal-content { padding: 16px; }
+  .automation-page { width: 100%; }
+  .automation-page > .ant-card { border-radius: 0; border-left: 0; border-right: 0; }
+  .automation-page .ant-card-head { padding: 0 12px; }
+  .automation-page .ant-card-body { padding: 12px; }
+  .automation-form-row { grid-template-columns: minmax(0, 1fr); gap: 0; }
+}

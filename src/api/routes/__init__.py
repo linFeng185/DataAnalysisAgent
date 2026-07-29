@@ -4,8 +4,16 @@ from __future__ import annotations
 
 from fastapi import APIRouter
 
-from src.api.schemas import ColumnCommentRequest, DataSourceCreateRequest
+from src.api.schemas import ColumnCommentRequest, DataSourceCreateRequest, DataSourceUpdateRequest
 from src.api.routes.admin import router as admin_router
+from src.api.routes.automation import (
+    create_automation_schedule,
+    delete_automation_schedule,
+    list_automation_notifications,
+    list_automation_schedules,
+    run_automation_schedule,
+    router as automation_router,
+)
 from src.api.routes.access_policy import router as access_policy_router
 from src.api.routes._helpers import _app, _authorize_extension_scope, _registry
 from src.api.routes.chat import (
@@ -20,6 +28,8 @@ from src.api.routes.datasource import (
     delete_datasource,
     list_datasources,
     register_datasource,
+    test_datasource_connection,
+    update_datasource,
     router as datasource_router,
 )
 from src.api.routes.knowledge import (
@@ -84,17 +94,21 @@ from src.api.routes.skills import (
     delete_skill,
     get_skill_content,
     list_skills,
+    list_skill_registry,
+    install_registry_skill,
     refresh_skills,
     router as skills_router,
     toggle_skill,
     upload_skills,
 )
+from src.api.routes.visualization import adjust_chart, router as visualization_router
 
 
 router = APIRouter()
 for domain_router in (
     admin_router,
     access_policy_router,
+    automation_router,
     chat_router,
     schema_router,
     datasource_router,
@@ -102,6 +116,7 @@ for domain_router in (
     session_router,
     management_router,
     skills_router,
+    visualization_router,
     knowledge_router,
 ):
     router.include_router(domain_router)
@@ -109,6 +124,11 @@ for domain_router in (
 
 __all__ = [
     "router",
+    "create_automation_schedule",
+    "list_automation_schedules",
+    "delete_automation_schedule",
+    "run_automation_schedule",
+    "list_automation_notifications",
     "chat",
     "chat_stream",
     "list_tables",
@@ -116,6 +136,8 @@ __all__ = [
     "refresh_schema",
     "update_column_comment",
     "register_datasource",
+    "test_datasource_connection",
+    "update_datasource",
     "delete_datasource",
     "list_datasources",
     "list_mcp_servers",
@@ -130,11 +152,14 @@ __all__ = [
     "list_models",
     "test_model",
     "list_skills",
+    "list_skill_registry",
+    "install_registry_skill",
     "upload_skills",
     "refresh_skills",
     "get_skill_content",
     "toggle_skill",
     "delete_skill",
+    "adjust_chart",
     "profile_structured_asset",
     "query_structured_asset",
     "forecast_asset",

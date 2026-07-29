@@ -536,3 +536,27 @@ evaluation:
 首批只做四件事：知识检索 ACL、VectorStore 全面收口、`DataAsset/Evidence` 契约、CSV/Excel
 结构化摄取原型。这个批次能同时降低当前知识库风险，并为后续文章、行情、预测和 Skill 提供
 稳定底座；不应在同一批次引入深度预测、知识图谱、OpenSearch 或自动执行方案。
+
+## 11. 主动洞察与定时报告
+
+### 11.1 调度与存储
+
+`analysis_schedules` 保存租户/用户归属、只读 SQL、真实方言、固定频率、变化阈值、通知渠道和下次运行时间；
+`analysis_schedule_runs` 保存成功 payload 或截断后的失败摘要；`analysis_notifications` 保存用户私有站内通知。
+三表启用 RLS。多实例调度通过 PostgreSQL `FOR UPDATE SKIP LOCKED` 原子认领到期任务，认领时提前推进
+`next_run_at`，避免同一任务被并发实例重复执行。
+
+### 11.2 执行与安全
+
+任务创建时校验数据源可见性和只读 SQL，但持久化的授权快照不作为执行依据。每次运行根据任务所有者的
+当前角色重新解析数据源访问策略、列白名单和行过滤，再进入 `validate_and_execute_sql()`；结果统一脱敏后
+才能参与指标聚合、报告渲染和通知。用户停用、数据源撤权或 SQL 失效时记录失败运行，不投递陈旧结果。
+
+主动洞察只比较当前与最近一次成功运行的数值指标，首次运行建立基线；零基线变化按 100% 处理。
+定时报告使用确定性 Markdown 模板并限制明细行数，不依赖 LLM 自行计算数值。
+
+### 11.3 通知与生命周期
+
+站内通知始终落 PostgreSQL；SMTP、飞书和 Slack 只使用 `Settings` 中的服务端固定配置，任务不能携带
+外部 URL 或渠道凭证。各渠道独立失败，分发状态写入运行 payload。`AutomationService` 由
+`src/bootstrap.py` 启停，轮询开关和周期由 `automation_enabled/automation_poll_interval_seconds` 控制。

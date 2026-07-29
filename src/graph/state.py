@@ -51,9 +51,14 @@ class AnalysisState(TypedDict, total=False):
     —— classify_intent 写，route_by_intent / analyze_result 读"""
 
     # ── 扩展层（技能/工具 注入，Phase 2）──────────
+    enabled_skill_ids: Annotated[list[str], UntrackedValue]
+    """用户在当前请求显式授权的 Skill 复合资源 ID；空列表保留自动匹配。"""
+
     activated_skills: Annotated[list[str], UntrackedValue]
     skill_prompt_override: Annotated[str, UntrackedValue]
     skill_tools: Annotated[list[Any], UntrackedValue]
+    skill_tool_budget: Annotated[int, UntrackedValue]
+    skill_tool_calls: Annotated[int, UntrackedValue]
     conversation_history: list[dict]
     previous_turn_snapshot: dict[str, Any]
     """上一轮响应完成时固化的结构化结果，只供明确的跨轮结果追问恢复。"""
@@ -63,6 +68,8 @@ class AnalysisState(TypedDict, total=False):
 
     selected_datasources: Annotated[list[str], UntrackedValue]
     multi_source_results: Annotated[list[dict], UntrackedValue]
+    multi_source_analysis_precomputed: Annotated[bool, UntrackedValue]
+    """多源合并节点是否已生成精确分析，结果展示子图据此跳过重复统计。"""
     datasource_access: Annotated[dict[str, dict[str, Any]], UntrackedValue]
     """API 完成授权后的候选数据源及各自行列权限，模型只能在这些候选中选择。"""
     allowed_columns: Annotated[list[str], UntrackedValue]
@@ -94,8 +101,11 @@ class AnalysisState(TypedDict, total=False):
     enum_dictionary: Annotated[dict[str, list[str]], UntrackedValue]
     """字段合法枚举值，键优先使用 table.column。—— retrieve_schema 写，generate_sql 读"""
 
+    user_preferences: Annotated[dict[str, Any], UntrackedValue]
+    """当前用户的私有偏好，由 prepare_turn 按认证身份加载。"""
+
     long_term_memories_text: Annotated[str, UntrackedValue]
-    """长期记忆文本，从记忆系统检索后注入 Prompt。—— retrieve_schema 初始化为空"""
+    """长期记忆与知识库文本，由 prepare_turn / retrieve_schema 合并后注入 Prompt。"""
 
     # ── SQL 生成层 ─────────────────────────────────
     generated_sql: Annotated[str, UntrackedValue]
@@ -108,7 +118,7 @@ class AnalysisState(TypedDict, total=False):
     """时间范围补充提示文本。—— generate_sql 写，build_response 读"""
 
     sql_reasoning_content: Annotated[str, UntrackedValue]
-    """SQL 生成时的模型推理链（DeepSeek thinking）。—— generate_sql 写，build_response 读"""
+    """SQL 生成时的内部推理诊断；不跟踪、不写入响应、历史或会话恢复。"""
 
     retry_count: Annotated[int, UntrackedValue]
     """当前重试次数（0-3）。—— generate_sql 递增写，条件路由读"""

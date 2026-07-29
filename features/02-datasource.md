@@ -63,7 +63,7 @@
 | 2.5.7 | estimate_row_count() — ClickHouse | 同上 | `SELECT COUNT(*)` | 单测完成 | P0 |
 | 2.5.8 | estimate_row_count() — MySQL | 同上 | `INFORMATION_SCHEMA.TABLES` 行数估算 | 单测完成 | P0 |
 | 2.5.9 | estimate_row_count() — PostgreSQL | 同上 | `pg_class.reltuples` 估算 | 单测完成 | P0 |
-| 2.5.10 | _query_metadata() 权限告警 | 同上 | INFORMATION_SCHEMA 权限不足时写入 SYSTEM_WARNING 类型的 KnowledgeEntry | 待开发 | P1 |
+| 2.5.10 | _query_metadata() 权限告警 | 同上 | 归一化各方言元数据权限错误，在 SchemaManager 边界写入租户级 SYSTEM_WARNING 并累计 Prometheus 指标 | 单测完成 | P1 |
 | 2.5.11 | Oracle Schema 内省 | `src/datasource/introspection.py` | 使用 `ALL_TABLES`、`ALL_TAB_COLUMNS` 和当前 schema 查询表、字段、外键及行数 | 单测完成 | P1 |
 
 ### 2.6 Schema 数据结构
@@ -79,11 +79,10 @@
 
 ### 模块收尾
 
-模块功能点共 47 项，已完成 45 项，待开发 2 项。
+模块功能点共 47 项，已完成 46 项，待开发 1 项。
 
 | 功能点 | 不开发原因 | 可开发条件 | 预计开发时机 |
 |--------|------------|------------|--------------|
 | 2.4.3 KMS 集成 | 当前 PBKDF2 + Fernet 已满足本地部署，外部 Vault/KMS 需要额外运维依赖 | 确定生产密钥托管平台和轮换流程 | Phase 3，生产密钥治理批次 |
-| 2.5.10 _query_metadata() 权限告警 | 当前只返回可用元数据，权限不足告警需要统一 SYSTEM_WARNING 知识条目契约 | 固化各方言权限错误映射并接入知识库告警 | Phase 2，Schema 权限治理批次 |
 
 ---

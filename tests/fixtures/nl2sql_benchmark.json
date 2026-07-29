@@ -1,0 +1,98 @@
+[
+  {
+    "id": "basic_count",
+    "question": "订单总数是多少？",
+    "tables": ["orders"],
+    "expected_sql": "SELECT COUNT(*) AS total_orders FROM orders",
+    "expected_analysis": "返回订单总数",
+    "dialect": "sqlite"
+  },
+  {
+    "id": "group_sum",
+    "question": "按客户统计订单金额",
+    "tables": ["orders"],
+    "expected_sql": "SELECT customer, SUM(amount) AS total_amount FROM orders GROUP BY customer ORDER BY total_amount DESC",
+    "expected_analysis": "比较各客户订单金额",
+    "dialect": "sqlite"
+  },
+  {
+    "id": "top_products",
+    "question": "销售额最高的 10 个商品",
+    "tables": ["order_items", "products"],
+    "expected_sql": "SELECT p.name, SUM(i.quantity * i.unit_price) AS sales FROM order_items AS i JOIN products AS p ON p.id = i.product_id GROUP BY p.name ORDER BY sales DESC LIMIT 10",
+    "expected_analysis": "输出商品销售额 Top 10",
+    "dialect": "mysql"
+  },
+  {
+    "id": "monthly_trend",
+    "question": "查看每月订单金额趋势",
+    "tables": ["orders"],
+    "expected_sql": "SELECT DATE_TRUNC('month', created_at) AS month, SUM(amount) AS total_amount FROM orders GROUP BY month ORDER BY month",
+    "expected_analysis": "按月展示金额趋势",
+    "dialect": "postgres"
+  },
+  {
+    "id": "status_filter",
+    "question": "已支付订单的平均金额",
+    "tables": ["orders"],
+    "expected_sql": "SELECT AVG(amount) AS average_amount FROM orders WHERE status = 'paid'",
+    "expected_analysis": "返回已支付订单平均金额",
+    "dialect": "mysql"
+  },
+  {
+    "id": "join_customer",
+    "question": "列出每个客户的订单数",
+    "tables": ["customers", "orders"],
+    "expected_sql": "SELECT c.id, c.name, COUNT(o.id) AS order_count FROM customers AS c LEFT JOIN orders AS o ON o.customer_id = c.id GROUP BY c.id, c.name",
+    "expected_analysis": "包含没有订单的客户",
+    "dialect": "postgres"
+  },
+  {
+    "id": "having",
+    "question": "订单金额超过一万元的客户",
+    "tables": ["orders"],
+    "expected_sql": "SELECT customer_id, SUM(amount) AS total_amount FROM orders GROUP BY customer_id HAVING SUM(amount) > 10000",
+    "expected_analysis": "筛选累计金额超过阈值的客户",
+    "dialect": "mysql"
+  },
+  {
+    "id": "window_rank",
+    "question": "按销售额给商品排名",
+    "tables": ["order_items", "products"],
+    "expected_sql": "SELECT product_id, sales, RANK() OVER (ORDER BY sales DESC) AS sales_rank FROM (SELECT product_id, SUM(quantity * unit_price) AS sales FROM order_items GROUP BY product_id) AS product_sales",
+    "expected_analysis": "输出商品销售额和排名",
+    "dialect": "postgres"
+  },
+  {
+    "id": "clickhouse_daily",
+    "question": "最近七天每天的访问量",
+    "tables": ["website_traffic"],
+    "expected_sql": "SELECT toDate(event_time) AS day, COUNT(*) AS visits FROM website_traffic WHERE event_time >= now() - INTERVAL 7 DAY GROUP BY day ORDER BY day",
+    "expected_analysis": "展示最近七天访问趋势",
+    "dialect": "clickhouse"
+  },
+  {
+    "id": "case_segment",
+    "question": "按金额区间统计订单数量",
+    "tables": ["orders"],
+    "expected_sql": "SELECT CASE WHEN amount < 100 THEN 'low' WHEN amount < 1000 THEN 'medium' ELSE 'high' END AS amount_segment, COUNT(*) AS order_count FROM orders GROUP BY amount_segment",
+    "expected_analysis": "展示低中高金额订单分布",
+    "dialect": "mysql"
+  },
+  {
+    "id": "subquery",
+    "question": "查找金额高于平均值的订单",
+    "tables": ["orders"],
+    "expected_sql": "SELECT id, customer_id, amount FROM orders WHERE amount > (SELECT AVG(amount) FROM orders)",
+    "expected_analysis": "返回高于总体平均金额的订单",
+    "dialect": "sqlite"
+  },
+  {
+    "id": "distinct_customers",
+    "question": "今年有下单的客户数",
+    "tables": ["orders"],
+    "expected_sql": "SELECT COUNT(DISTINCT customer_id) AS customer_count FROM orders WHERE created_at >= DATE_TRUNC('year', CURRENT_DATE)",
+    "expected_analysis": "返回本年度下单客户去重数",
+    "dialect": "postgres"
+  }
+]

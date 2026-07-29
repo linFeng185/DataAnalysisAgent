@@ -109,6 +109,7 @@ def create_app() -> FastAPI:
     from src.api.auth import AuthMiddleware, auth_router
     from src.api.access_policy import ApiAccessPolicyMiddleware
     from src.api.security_headers import SecurityHeadersMiddleware
+    from src.observability import PrometheusMiddleware, get_metrics_registry
 
     allowed_origins = [
         origin.strip()
@@ -117,6 +118,7 @@ def create_app() -> FastAPI:
     ]
     app.add_middleware(AuthMiddleware)
     app.add_middleware(ApiAccessPolicyMiddleware)
+    app.add_middleware(PrometheusMiddleware, metrics=get_metrics_registry())
     app.add_middleware(
         CORSMiddleware,
         allow_origins=allowed_origins,

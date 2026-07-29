@@ -8,7 +8,7 @@ import {
 } from '@ant-design/icons';
 import { useChat, ChatTurn } from '../hooks/useChat';
 import { get, fetchSession } from '../api/client';
-import type { DatasourceConfig, SessionInfo } from '../types';
+import type { DatasourceConfig, SessionInfo, SkillInfo } from '../types';
 import ProgressBar from '../components/ProgressBar';
 import ReasoningPanel from '../components/ReasoningPanel';
 import ResultCard from '../components/ResultCard';
@@ -23,19 +23,30 @@ const SUGGESTIONS = [
 
 const DS_STORAGE_KEY = 'selected_datasource';
 
+// 方法作用：从会话存储恢复上次选择的主数据源。
+// Args: 无。
+// Returns: 数据源名称，读取失败返回空字符串。
 function loadDs(): string {
   try { return sessionStorage.getItem(DS_STORAGE_KEY) || ''; } catch { return ''; }
 }
-function saveDs(name: string) {
+// 方法作用：把主数据源选择写入当前浏览器会话。
+// Args: name - 数据源名称。
+// Returns: 无返回值。
+function saveDs(name: string): void {
   try { sessionStorage.setItem(DS_STORAGE_KEY, name); } catch { /* */ }
 }
 
+// 方法作用：渲染流式数据分析对话、数据源与 Skill 请求控制。
+// Args: 无。
+// Returns: 对话分析页面。
 export default function ChatPage() {
   const [query, setQuery] = useState('');
   const [ds, setDs] = useState<string[]>(() => { const v = loadDs(); return v ? [v] : []; });
   const [modelId, setModelId] = useState('');
   const [models, setModels] = useState<{id:string;name:string}[]>([]);
   const [datasources, setDatasources] = useState<DatasourceConfig[]>([]);
+  const [skills, setSkills] = useState<SkillInfo[]>([]);
+  const [selectedSkillIds, setSelectedSkillIds] = useState<string[]>([]);
   const [drawerOpen, setDrawerOpen] = useState(false);
   const {
     turns, loading, sessionId, send, cancel, clearSession,
@@ -62,6 +73,9 @@ export default function ChatPage() {
     get<{models:{id:string;name:string}[],default:string}>('/models')
       .then(data => { setModels(data.models||[]); if (!modelId) setModelId(data.default||''); })
       .catch(() => message.warning('无法加载模型列表'));
+    get<{skills:SkillInfo[]}>('/skills')
+      .then(data => setSkills((data.skills || []).filter(skill => skill.enabled)))
+      .catch(() => message.warning('无法加载 Skill 列表'));
   }, []);
 
   // 新消息时自动滚到底部
@@ -79,13 +93,16 @@ export default function ChatPage() {
     }
   }, [sessionId]);
 
-  const handleSend = () => {
+  // 方法作用：校验当前输入并携带数据源、模型和显式 Skill 发起流式分析。
+  // Args: 无。
+  // Returns: 无返回值。
+  const handleSend = (): void => {
     if (!query.trim() || loading) return;
     if (ds.length === 0 || !datasources.some(item => item.name === ds[0])) {
       message.warning('请选择有效的数据源');
       return;
     }
-    send(query, ds[0], ds.length > 1 ? ds : undefined, modelId || undefined);
+    send(query, ds[0], ds.length > 1 ? ds : undefined, modelId || undefined, selectedSkillIds);
     setQuery('');
   };
 
@@ -125,9 +142,9 @@ export default function ChatPage() {
   const isEmpty = turns.length === 0 && !loading;
 
   return (
-    <div style={{ height: 'calc(100vh - 64px)', display: 'flex', flexDirection: 'column', maxWidth: 960, margin: '0 auto' }}>
+    <div className="chat-page" style={{ height: 'calc(100vh - 64px)', display: 'flex', flexDirection: 'column', maxWidth: 960, margin: '0 auto' }}>
       {/* 消息区 */}
-      <div ref={msgAreaRef} onScroll={handleMsgScroll}
+      <div className="chat-messages" ref={msgAreaRef} onScroll={handleMsgScroll}
         style={{ flex: 1, overflow: 'auto', padding: isEmpty ? 0 : '16px 20px 0' }}>
         {/* 重试状态提示 */}
         {retryInfo && (
@@ -188,13 +205,13 @@ export default function ChatPage() {
         ) : (
           /* 对话列表 */
           turns.map((t) => <TurnBubble key={t.id} turn={t}
-            onSendMessage={(msg: string) => { send(`${t.userQuery} - ${msg}`, ds[0] || 'demo', ds.length > 1 ? ds : undefined, modelId || undefined); }} />)
+            onSendMessage={(msg: string) => { send(`${t.userQuery} - ${msg}`, ds[0] || 'demo', ds.length > 1 ? ds : undefined, modelId || undefined, selectedSkillIds); }} />)
         )}
         <div ref={bottomRef} />
       </div>
 
       {/* 输入栏 */}
-      <div style={{
+      <div className="chat-input-area" style={{
         padding: '12px 20px 16px', borderTop: '1px solid #ececec',
         background: 'linear-gradient(180deg, rgba(255,255,255,0) 0%, #fff 20%)',
       }}>
@@ -202,7 +219,7 @@ export default function ChatPage() {
           <div style={{ marginBottom: 8, display: 'flex', flexWrap: 'wrap', gap: 4 }}>
             {(lastAnalysis.follow_up_questions as string[])?.slice(0, 4).map((q, i) => (
               <Tag key={i} color="processing" style={{ cursor: 'pointer', fontSize: 12, borderRadius: 6 }}
-                onClick={() => send(q, ds[0] || '')}>{q}</Tag>
+                onClick={() => send(q, ds[0] || '', undefined, modelId || undefined, selectedSkillIds)}>{q}</Tag>
             ))}
           </div>
         )}
@@ -258,6 +275,25 @@ export default function ChatPage() {
               <Select size="small" value={modelId || undefined} onChange={v => setModelId(v || '')}
                 options={models.map(m => ({ value: m.id, label: m.name }))}
                 style={{ minWidth: 140 }} dropdownMatchSelectWidth={false} />
+            )}
+            {skills.length > 0 && (
+              <Select
+                aria-label="选择 Skills"
+                mode="multiple"
+                size="small"
+                value={selectedSkillIds}
+                onChange={setSelectedSkillIds}
+                maxTagCount={1}
+                allowClear
+                placeholder="Skills"
+                suffixIcon={<ThunderboltOutlined />}
+                options={skills.map(skill => ({
+                  value: skill.resource_id,
+                  label: `${skill.name} (${skill.scope})`,
+                }))}
+                style={{ minWidth: 150, maxWidth: 260 }}
+                dropdownMatchSelectWidth={false}
+              />
             )}
           </Space>
           <Space size={4}>

@@ -7,7 +7,10 @@ from typing import Any
 
 from src.connectors import clickhouse as _clickhouse  # noqa: F401
 from src.datasource.config import DataSourceConfig
-from src.datasource.credential_manager import CredentialManager
+from src.datasource.credential_manager import (
+    CredentialManager,
+    describe_credential_reference as _credential_reference_kind,
+)
 from src.datasource.providers.base import DataSourceProvider
 from src.exceptions import DataSourceNotFoundError
 from src.logging_config import get_logger
@@ -183,8 +186,20 @@ class DataSourceRegistry:
                 )
 
             if config.password:
+                logger.info(
+                    "数据源凭证解密边界",
+                    datasource=config.name,
+                    credential_format=_credential_reference_kind(config.password),
+                    phase="before",
+                )
                 config.password = self._credential.resolve_env_ref(config.password)
                 config.password = self._credential.decrypt(config.password)
+                logger.info(
+                    "数据源凭证解密边界",
+                    datasource=config.name,
+                    credential_configured=bool(config.password),
+                    phase="after",
+                )
 
             try:
                 config.engine = await self._create_engine(config)
@@ -253,8 +268,16 @@ class DataSourceRegistry:
                 seen.add(ds.name)
                 result.append({
                     "name": ds.name, "dialect": ds.dialect,
+                    "version": ds.version,
                     "mode": ds.mode, "host": ds.host,
+                    "port": ds.port, "database": ds.database,
+                    "username": ds.username,
                     "description": ds.description,
+                    "schema": ds.extra_params.get("schema", ""),
+                    "tablespace": ds.extra_params.get("tablespace", ""),
+                    "service_name": ds.extra_params.get("service_name", ""),
+                    "instance": ds.extra_params.get("instance", ""),
+                    "file_path": ds.database if ds.dialect == "sqlite" else "",
                     "connected": ds.name in self._cache,
                 })
         # 包含直接注入缓存的 demo 数据源（不通过 Provider 注册）
@@ -262,8 +285,16 @@ class DataSourceRegistry:
             if name not in seen:
                 result.append({
                     "name": config.name, "dialect": config.dialect,
+                    "version": config.version,
                     "mode": config.mode, "host": config.host or "localhost",
+                    "port": config.port, "database": config.database,
+                    "username": config.username,
                     "description": config.description or "",
+                    "schema": config.extra_params.get("schema", ""),
+                    "tablespace": config.extra_params.get("tablespace", ""),
+                    "service_name": config.extra_params.get("service_name", ""),
+                    "instance": config.extra_params.get("instance", ""),
+                    "file_path": config.database if config.dialect == "sqlite" else "",
                     "connected": True,
                 })
         logger.info("列出数据源完成", count=len(result))

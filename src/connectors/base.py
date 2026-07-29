@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import asyncio
-import math
 import inspect
+import math
 from abc import ABC, abstractmethod
+from collections.abc import Mapping
 from decimal import Decimal
 from typing import Any
 
@@ -317,11 +318,15 @@ class ConnectorBase(ABC):
     @staticmethod
     def _row_to_dict(row: Any) -> dict:
         """保持执行节点原有的数值精度契约。"""
-        mapping = dict(row._mapping)
+        mapping = dict(row) if isinstance(row, Mapping) else dict(row._mapping)
         non_finite_columns = [
             key
             for key, value in mapping.items()
-            if isinstance(value, float) and not isinstance(value, bool) and not math.isfinite(value)
+            if (
+                isinstance(value, float)
+                and not isinstance(value, bool)
+                and not math.isfinite(value)
+            ) or (isinstance(value, Decimal) and not value.is_finite())
         ]
         if non_finite_columns:
             logger.warning(
@@ -332,7 +337,11 @@ class ConnectorBase(ABC):
         result = {
             key: (
                 None
-                if isinstance(value, float) and not isinstance(value, bool) and not math.isfinite(value)
+                if (
+                    isinstance(value, float)
+                    and not isinstance(value, bool)
+                    and not math.isfinite(value)
+                ) or (isinstance(value, Decimal) and not value.is_finite())
                 else Decimal(str(value))
                 if isinstance(value, float) and not isinstance(value, bool)
                 else value

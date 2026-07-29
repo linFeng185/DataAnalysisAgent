@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from decimal import Decimal
 
 import pytest
 
@@ -78,3 +79,22 @@ class TestChartGeneratorTool:
         assert result["recommended_chart_type"] == "pie"
         assert result["option"]["series"][0]["data"][-1]["value"] == 6.0
         logger.info("test_type_inference_skips_leading_nulls 完成")
+
+    # 方法作用：验证 Decimal 指标被图表工具识别为数值。
+    # Args: self - pytest 测试类实例。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    def test_type_inference_accepts_decimal(self) -> None:
+        """数据库 Decimal 指标应被识别为数值列并生成图表。"""
+        # Arrange
+        from src.tools.chart_generator import ChartGeneratorTool
+
+        rows = [
+            {"category": "A", "amount": Decimal("1.25")},
+            {"category": "B", "amount": Decimal("2.75")},
+        ]
+
+        # Act
+        result = ChartGeneratorTool()._run(rows, chart_type="auto")  # noqa: SLF001
+
+        # Assert
+        assert result["recommended_chart_type"] == "pie"

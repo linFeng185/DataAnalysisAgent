@@ -150,3 +150,16 @@ async def forecast_asset(payload: dict = Body(...)):
 async def health():
     return HealthResponse(status="ok", llm_available=is_llm_available(),
                           uptime_seconds=round(time.time() - _started_at, 2))
+
+
+# 方法作用：返回 Prometheus exposition 文本供受信任监控系统抓取。
+# Args: 无。
+# Returns: Prometheus 文本响应。
+@router.get("/metrics", include_in_schema=False)
+async def metrics():
+    from fastapi import Response
+
+    from src.observability import render_metrics
+
+    content, media_type = render_metrics()
+    return Response(content=content, media_type=media_type)

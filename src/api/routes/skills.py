@@ -7,6 +7,7 @@ import time
 
 from fastapi import APIRouter, File, HTTPException, Query, UploadFile
 
+from src.api.schemas import SkillRegistryInstallRequest
 from src.logging_config import get_logger
 
 logger = get_logger(__name__)
@@ -62,6 +63,7 @@ async def list_skills(skill_scope: str | None = None):
                 "scope": s.scope,
                 "tenant_id": s.tenant_id,
                 "owner_user_id": s.owner_user_id,
+                "resource_id": s.resource_id,
             })
         result = {"skills": skills, "total": len(skills)}
         logger.info("Skill 列表完成", total=len(skills), tenant_id=tenant_id, user_id=user_id)
@@ -71,6 +73,107 @@ async def list_skills(skill_scope: str | None = None):
     except Exception as e:
         logger.error("Skills 列表加载失败", error=str(e), exc_info=True)
         return {"skills": [], "total": 0}
+
+
+@router.get("/skills/registry")
+# 方法作用：列出中心 Registry 中审核通过且与当前版本兼容的 Skill 包。
+# Args: 无。
+# Returns: Registry 配置状态、包列表和数量。
+async def list_skill_registry():
+    from src.config import get_settings
+
+    settings = get_settings()
+    if not str(settings.skill_registry_url or "").strip():
+        logger.info("Skill Registry 列表跳过", reason="未配置")
+        return {"configured": False, "skills": [], "total": 0}
+    try:
+        from src.api.auth import get_current_tenant_id, get_current_user_id
+        from src.skill_manager import get_skill_manager
+        from src.skill_registry import get_skill_registry_client
+
+        packages = await get_skill_registry_client().list_packages()
+        manager = get_skill_manager()
+        installed = {
+            (skill.name, skill.version)
+            for skill in manager.get_visible_skills(
+                get_current_tenant_id(),
+                get_current_user_id(),
+            )
+        }
+        items = [{
+            "name": package.name,
+            "version": package.version,
+            "description": package.description,
+            "api_version": package.api_version,
+            "sha256": package.sha256,
+            "installed": (package.name, package.version) in installed,
+        } for package in packages]
+        result = {"configured": True, "skills": items, "total": len(items)}
+        logger.info("Skill Registry 列表完成", total=len(items))
+        return result
+    except Exception as exc:
+        logger.error("Skill Registry 列表失败", error=str(exc), exc_info=True)
+        raise HTTPException(502, "Skill Registry 暂时不可用") from exc
+
+
+@router.post("/skills/registry/{skill_name}/install")
+# 方法作用：下载并校验指定审核版本后安装到当前身份有权管理的作用域。
+# Args: skill_name - Registry Skill 名称；req - 版本和目标作用域。
+# Returns: 已安装名称、版本、作用域和复合资源 ID。
+async def install_registry_skill(skill_name: str, req: SkillRegistryInstallRequest):
+    from src.api.routes._helpers import _authorize_extension_scope
+    from src.config import get_settings
+
+    settings = get_settings()
+    if not str(settings.skill_registry_url or "").strip():
+        raise HTTPException(503, "Skill Registry 未配置")
+    scope, tenant_id, user_id, _role = _authorize_extension_scope(req.scope)
+    try:
+        from src.skill_manager import get_skill_manager
+        from src.skill_registry import get_skill_registry_client
+
+        client = get_skill_registry_client()
+        packages = await client.list_packages()
+        package = next(
+            (
+                item for item in packages
+                if item.name == skill_name and item.version == req.version
+            ),
+            None,
+        )
+        if package is None:
+            raise HTTPException(404, "Registry 中未找到指定审核版本")
+        archive = await client.download_package(package)
+        installed = get_skill_manager().install_registry_package(
+            package,
+            archive,
+            scope=scope,
+            tenant_id=tenant_id,
+            user_id=user_id,
+        )
+    except HTTPException:
+        raise
+    except FileExistsError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    except ValueError as exc:
+        logger.warning("Registry Skill 安装输入无效", skill=skill_name, error=str(exc))
+        raise HTTPException(422, str(exc)) from exc
+    except Exception as exc:
+        logger.error("Registry Skill 安装失败", skill=skill_name, exc_info=True)
+        raise HTTPException(502, "Registry Skill 下载或安装失败") from exc
+    logger.info(
+        "Registry Skill 安装路由完成",
+        skill=installed.name,
+        version=installed.version,
+        scope=scope,
+    )
+    return {
+        "status": "ok",
+        "name": installed.name,
+        "version": installed.version,
+        "scope": scope,
+        "resource_id": installed.resource_id,
+    }
 
 
 # 方法作用：按配置限制读取 Skill 上传内容并检查单文件与累计大小。

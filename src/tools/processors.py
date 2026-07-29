@@ -293,21 +293,71 @@ class ContributionProcessor(DataProcessor):
     """贡献度分析 — 各维度对总体变化的贡献百分比。"""
     name = "contribution"; intents = ["attribution"]; prefer_sql = False
 
+    # 方法作用：按维度比较当前值与上期值，计算总体净变化贡献率和绝对影响份额。
+    # Args: self - 处理器实例；rows - 维度对比行；params - 维度、当前值和上期值列名。
+    # Returns: 可直接绘制瀑布图的确定性归因结果。
     def process(self, rows, params):
-        vc, nc = params.get("value_col", ""), params.get("name_col", "")
-        if not vc or not nc or len(rows) < 2: return ProcessorResult("数据不足", [], "table", rows, "low")
+        dimension_col = params.get("dimension_col") or params.get("name_col", "")
+        current_col = params.get("current_value_col") or params.get("value_col", "")
+        previous_col = params.get("previous_value_col", "")
+        if not dimension_col or not current_col or not previous_col or not rows:
+            return ProcessorResult(
+                "归因需要维度、当前值和上期值三类字段",
+                [],
+                "table",
+                rows,
+                "low",
+            )
+
         changes = []
-        for i, r in enumerate(rows):
-            val = self._f(r.get(vc))
-            # 与前一行比较的变化量
-            prev_val = self._f(rows[i-1].get(vc)) if i > 0 else val
-            changes.append({"name": self._s(r.get(nc)), "value": val, "change": round(val - prev_val, 2)})
-        total_change = sum(abs(c["change"]) for c in changes[1:]) if len(changes) > 1 else 1
-        if total_change == 0: return ProcessorResult("无变化", [], "table", rows, "low")
-        for c in changes[1:]:
-            c["contribution_pct"] = round(c["change"] / total_change * 100, 1)
-        top_contributors = sorted(changes[1:], key=lambda x: abs(x["contribution_pct"]), reverse=True)[:3]
-        return ProcessorResult(f"最大贡献: {top_contributors[0]['name']} ({top_contributors[0]['contribution_pct']}%)" if top_contributors else "", [f"{c['name']}: {c['contribution_pct']}%" for c in top_contributors], "waterfall", changes, "high" if total_change > 0 else "medium")
+        for row in rows:
+            current = self._f(row.get(current_col))
+            previous = self._f(row.get(previous_col))
+            change = current - previous
+            changes.append({
+                "name": self._s(row.get(dimension_col), "未命名维度"),
+                "current_value": current,
+                "previous_value": previous,
+                "change": round(change, 2),
+            })
+
+        net_change = sum(item["change"] for item in changes)
+        absolute_change = sum(abs(item["change"]) for item in changes)
+        if absolute_change == 0:
+            return ProcessorResult("各维度均无变化", [], "waterfall", changes, "high")
+
+        for item in changes:
+            item["contribution_pct"] = (
+                round(item["change"] / net_change * 100, 1)
+                if net_change != 0
+                else None
+            )
+            item["impact_share_pct"] = round(
+                abs(item["change"]) / absolute_change * 100,
+                1,
+            )
+
+        top_contributors = sorted(
+            changes,
+            key=lambda item: abs(item["change"]),
+            reverse=True,
+        )[:3]
+        if net_change == 0:
+            summary = "总体净变化为零，正负变化完全抵消"
+            insights = [
+                f"{item['name']}: 变化 {item['change']}，影响份额 {item['impact_share_pct']}%"
+                for item in top_contributors
+            ]
+        else:
+            summary = (
+                f"总体净变化 {net_change}，最大贡献维度为 "
+                f"{top_contributors[0]['name']}"
+            )
+            insights = [
+                f"{item['name']}: 变化 {item['change']}，贡献率 {item['contribution_pct']}%"
+                for item in top_contributors
+            ]
+        return ProcessorResult(summary, insights, "waterfall", changes, "high")
 
 
 @register

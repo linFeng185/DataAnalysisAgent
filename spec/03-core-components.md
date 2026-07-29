@@ -1067,7 +1067,8 @@ LLM 驱动的多维度自动分析：
 
 **实现方式**：
 - 规则引擎处理确定性分析（描述统计、趋势计算）
-- LLM 处理开放性分析（归因、异常解读）
+- 归因数值必须由规则引擎按 `dimension/current_value/previous_value` 计算；贡献率使用总体净变化作分母，净变化为零时只输出绝对影响份额
+- LLM 处理开放性解释（业务原因假设、异常解读），不得改写归因数值或把相关性描述为因果性
 - Python pandas/numpy 执行计算层面操作
 
 ### 3.7 可视化引擎
@@ -2102,7 +2103,10 @@ async def classify_intent_node(state: AnalysisState) -> dict:
 |------|------|
 | 本地 `skills/` 目录 | 项目级 Skill，随代码仓库管理，安装即用 |
 | Git 子模块 | `skills/community/` 下的社区 Skill，通过 git submodule 引入 |
-| Skill Registry (远期) | 中心化的 Skill 市场，类似 VS Code Extension Marketplace |
+| Skill Registry | 中心化审核目录；客户端只接受 `approved`、`data-agent/v1`、HTTPS 受信主机和 SHA-256 匹配的 ZIP，并在安全解压后安装到 API 授权的 system/tenant/private 目录 |
+
+显式 Skill 选择使用不可混淆的 `resource_id=(scope, tenant_id, owner_user_id, name)`。API 在进入
+LangGraph 前重新校验当前身份可见性和启用状态；请求未选择 Skill 时才保留关键词/意图/表名自动匹配。
 
 ---
 
@@ -2569,7 +2573,6 @@ App (ConfigProvider + BrowserRouter)
 | `progress` | 关键 Node 内 | `node, message` | 带中文消息的进度更新 |
 | `node_end` | 任意 Node 完成时 | `node: string` | 节点执行完成 |
 | `llm_start` | LLM 调用开始时 | `node: string` | LLM 开始生成 |
-| `thinking` | LLM 流式期间 | `reasoning_content: string` | 推理/思维链 token |
 | `token` | LLM 流式期间 | `content: string, node?: string` | 内容 token |
 | `llm_end` | LLM 调用结束时 | `node: string` | LLM 生成完成 |
 | `sql` | generate_sql 完成后 | `sql: string` | 生成的 SQL 语句 |
@@ -2608,7 +2611,7 @@ interface ChatTurn {
 }
 
 interface AssistantContent {
-  reasoning: string;             // thinking 事件累积
+  reasoning: string;             // 仅兼容旧记录，新请求不再接收 reasoning_content
   tokens: string;                // token 事件累积
   sql: string;                   // 生成的 SQL
   progressNodes: Record<string, { status: 'pending'|'running'|'done'|'error'; message: string }>;

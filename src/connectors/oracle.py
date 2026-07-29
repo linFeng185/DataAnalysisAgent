@@ -106,7 +106,7 @@ class OracleConnector(ConnectorBase):
                     returns_rows=returns_rows,
                 )
                 rows = result.fetchall() if returns_rows else []
-                return [dict(row._mapping) for row in rows]
+                return self.rows_to_dict_list(rows)
 
         try:
             result = await asyncio.to_thread(_run)

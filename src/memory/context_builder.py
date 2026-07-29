@@ -107,6 +107,19 @@ async def _summarize_turns_llm(turns: list[ConversationTurn]) -> str:
         + (f"\n结论: {_g(t, 'analysis_summary')}" if _g(t, 'analysis_summary') else "")
         for i, t in enumerate(turns)
     )
+    from src.llm.prompt_budget import PromptSection, build_budgeted_prompt
+    prompt = build_budgeted_prompt(
+        "context.summary",
+        [
+            PromptSection(
+                "conversation",
+                f"## 对话\n{turns_text}\n\n请生成摘要。",
+                priority=100,
+                min_chars=1000,
+                max_chars=2800,
+            ),
+        ],
+    )
 
     try:
         import aiohttp
@@ -125,8 +138,8 @@ async def _summarize_turns_llm(turns: list[ConversationTurn]) -> str:
         payload = {
             "model": summary_model,
             "messages": [
-                {"role": "system", "content": "将以下多轮数据查询对话压缩为一段中文摘要（1-3句话），保留核心业务问题、数据查询目的和关键结论。"},
-                {"role": "user", "content": f"对话:\n{turns_text}\n\n摘要:"},
+                {"role": "system", "content": prompt.system},
+                {"role": "user", "content": prompt.human},
             ],
             "temperature": 0,
             "max_tokens": 200,

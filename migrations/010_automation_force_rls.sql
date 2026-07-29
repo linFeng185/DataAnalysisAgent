@@ -1,0 +1,3 @@
+ALTER TABLE analysis_schedules FORCE ROW LEVEL SECURITY;
+ALTER TABLE analysis_schedule_runs FORCE ROW LEVEL SECURITY;
+ALTER TABLE analysis_notifications FORCE ROW LEVEL SECURITY;

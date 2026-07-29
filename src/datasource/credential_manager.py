@@ -19,6 +19,20 @@ _TOKEN_VERSION = "v2"
 _EPHEMERAL_NON_PROD_KEY = secrets.token_urlsafe(48)
 
 
+# 方法作用：把凭证引用归类为可安全记录的固定标签。
+# Args: value - 加密令牌、环境变量引用或已配置的明文值。
+# Returns: 不含任何凭证内容的类别名称。
+def describe_credential_reference(value: str) -> str:
+    """日志只记录类别，不根据分隔符截取可能的明文密码。"""
+    if not value:
+        return "empty"
+    if value.startswith("${") and value.endswith("}"):
+        return "environment_reference"
+    if value.startswith(f"{_TOKEN_VERSION}:"):
+        return "encrypted_v2"
+    return "configured"
+
+
 class CredentialManager:
     """使用 PBKDF2 随机 salt 加密凭证，并兼容历史固定 salt 密文。"""
 
@@ -27,13 +41,41 @@ class CredentialManager:
     # Returns: 无返回值。
     def __init__(self, key: str | None = None) -> None:
         try:
-            environment = os.getenv("ENV", "prod").strip().lower()
-            raw = key or os.getenv("CREDENTIAL_ENCRYPTION_KEY", "")
+            from src.app_context import get_bound_app_context
+
+            context = get_bound_app_context()
+            settings = context.settings if context is not None else None
+            settings_environment = str(getattr(settings, "env", "")).strip().lower()
+            settings_key = str(
+                getattr(settings, "credential_encryption_key", "") or ""
+            )
+            environment = settings_environment or os.getenv("ENV", "prod").strip().lower()
+            environment_key = os.getenv("CREDENTIAL_ENCRYPTION_KEY", "")
+            raw = key or settings_key or environment_key
+            key_source = (
+                "explicit"
+                if key
+                else "app_context"
+                if settings_key
+                else "environment"
+                if environment_key
+                else "missing"
+            )
+            logger.info(
+                "CredentialManager 主密钥选择边界",
+                environment=environment,
+                app_context_bound=context is not None,
+                settings_key_configured=bool(settings_key),
+                explicit_key_configured=bool(key),
+                environment_key_configured=bool(environment_key),
+                selected_source=key_source,
+            )
             if not raw:
                 if environment == "prod":
                     logger.error("CredentialManager.__init__ 失败", error="生产主密钥未配置")
                     raise ValueError("生产环境必须配置 CREDENTIAL_ENCRYPTION_KEY")
                 raw = _EPHEMERAL_NON_PROD_KEY
+                key_source = "ephemeral"
                 logger.warning(
                     "非生产环境使用进程级临时凭证密钥，重启后无法解密持久化密文",
                     environment=environment,
@@ -43,6 +85,12 @@ class CredentialManager:
                 raise ValueError("生产环境 CREDENTIAL_ENCRYPTION_KEY 至少需要 32 字符")
             self._raw_key = raw.encode("utf-8")
             self._legacy_fernet = self._derive_fernet(_LEGACY_SALT)
+            logger.info(
+                "CredentialManager 初始化完成",
+                environment=environment,
+                selected_source=key_source,
+                key_length=len(raw),
+            )
         except Exception as exc:
             logger.error("CredentialManager.__init__ 失败", error=str(exc), exc_info=True)
             raise

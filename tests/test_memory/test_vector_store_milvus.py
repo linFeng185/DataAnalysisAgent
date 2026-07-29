@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import importlib.util
 import logging
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -13,6 +14,10 @@ import pytest
 logger = logging.getLogger(__name__)
 
 
+@pytest.mark.skipif(
+    importlib.util.find_spec("pymilvus") is None,
+    reason="未安装可选 pymilvus SDK",
+)
 class TestMilvusHealthCheck:
     """覆盖功能 19.17：Milvus 连接与服务端健康检查。"""
 

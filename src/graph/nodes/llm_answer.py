@@ -43,33 +43,21 @@ async def llm_direct_answer_node(state: AnalysisState) -> dict:
         history_turns=len(state.get("conversation_history", []) or []),
     )
 
-    # 组装上下文：知识库参考 + 对话历史
-    parts = []
-    if schema_text:
-        parts.append(f"## 当前数据源 Schema\n{schema_text}")
-    if knowledge_text:
-        parts.append(f"## 知识库参考\n{knowledge_text[:2000]}")
+    # 对话历史先转为紧凑文本，再交由统一预算器分配。
     history = state.get("conversation_history", []) or []
+    history_text = ""
     if history:
-        ctx = "\n".join(
+        history_text = "\n".join(
             f"Q: {t.get('user_query','')}\nA: {t.get('analysis_summary','')[:200]}"
             for t in history[-3:] if t.get("user_query"))
-        if ctx:
-            parts.append(f"## 历史对话\n{ctx}")
-    context = "\n\n".join(parts) if parts else ""
 
-    # 按意图构建 Prompt
     if intent == "metadata":
-        prompt = (
-            f"用户询问数据库结构信息。{context}\n\n"
-            f"用户问题: {query}\n\n"
-            "请根据知识库参考信息回答。如果知识库中有相关表结构或字段信息，列出具体内容。如果没有找到，告知用户。"
+        task_instruction = (
+            "用户询问数据库结构信息。请根据当前 Schema 和知识库证据回答；"
+            "有相关结构时列出具体内容，没有证据时明确说明。"
         )
     else:
-        prompt = (
-            f"用户进行闲聊或咨询。{context}\n\n"
-            f"用户问题: {query}\n\n请简洁友好地回答。如果用户询问系统功能，告知能做什么。"
-        )
+        task_instruction = "用户进行闲聊或咨询。请简洁回答；询问系统功能时说明可用能力。"
 
     # LLM 调用
     try:
@@ -77,11 +65,56 @@ async def llm_direct_answer_node(state: AnalysisState) -> dict:
         if is_task_llm_available("direct_answer"):
             llm = get_task_llm("direct_answer", temperature=0, reasoning=False)
             from langchain_core.messages import SystemMessage, HumanMessage
+            from src.llm.prompt_budget import PromptSection, build_budgeted_prompt
+            prompt = build_budgeted_prompt(
+                "direct.answer",
+                [
+                    PromptSection(
+                        "query",
+                        f"## 用户问题\n{query}",
+                        priority=100,
+                        min_chars=300,
+                        max_chars=1600,
+                    ),
+                    PromptSection(
+                        "task",
+                        f"## 当前任务\n{task_instruction}",
+                        priority=95,
+                        min_chars=100,
+                        max_chars=400,
+                    ),
+                    PromptSection(
+                        "schema",
+                        f"## 当前数据源 Schema\n{schema_text}" if schema_text else "",
+                        priority=90,
+                        min_chars=1000,
+                        max_chars=2800,
+                    ),
+                    PromptSection(
+                        "knowledge",
+                        f"## 知识库参考\n{knowledge_text}" if knowledge_text else "",
+                        priority=60,
+                        min_chars=300,
+                        max_chars=1600,
+                    ),
+                    PromptSection(
+                        "history",
+                        f"## 历史对话\n{history_text}" if history_text else "",
+                        priority=30,
+                        max_chars=800,
+                    ),
+                ],
+            )
             resp = await llm.ainvoke([
-                SystemMessage(content="你是数据分析助手。简洁用中文回答，不编造。"),
-                HumanMessage(content=prompt),
+                SystemMessage(content=prompt.system),
+                HumanMessage(content=prompt.human),
             ])
-            answer = resp.content.strip() if resp.content else ""
+            try:
+                from src.llm.output_contracts import TextAnswerOutput, parse_json_model
+
+                answer = parse_json_model(resp.content, TextAnswerOutput).answer
+            except Exception:
+                answer = resp.content.strip() if resp.content else ""
         else:
             answer = _fallback_answer(intent, query, knowledge_text, schema_text)
     except Exception as e:

@@ -27,11 +27,15 @@ def build_turn_snapshot(state: AnalysisState) -> dict:
     source_query = last_turn.get("user_query", "") or state.get("user_query", "")
     source_datasource = last_turn.get("datasource", "") or state.get("datasource", "")
     multi_source_results = state.get("multi_source_results", []) or []
-    success = not bool(
-        state.get("execution_error")
-        or state.get("validation_errors")
-        or state.get("explain_errors")
-    )
+    final_response = state.get("final_response", {}) or {}
+    if isinstance(final_response, dict) and "success" in final_response:
+        success = bool(final_response.get("success"))
+    else:
+        success = not bool(
+            state.get("execution_error")
+            or state.get("validation_errors")
+            or state.get("explain_errors")
+        )
     result_available = success and bool(
         state.get("generated_sql")
         or state.get("query_result_sample")
@@ -85,11 +89,58 @@ async def prepare_turn_node(state: AnalysisState) -> dict:
         previous_snapshot = build_turn_snapshot(state)
         logger.info("旧 checkpoint 结果已迁移为轮次快照")
 
+    user_preferences: dict = {}
+    long_term_memories_text = ""
+    tenant_id = int(state.get("tenant_id", 0) or 0)
+    user_id = int(state.get("user_id", 0) or 0)
+    if tenant_id > 0 and user_id > 0:
+        try:
+            from src.memory.long_term_store import get_long_term_memory_store
+            from src.security.tenant_policy import RequestIdentity
+
+            identity = RequestIdentity(
+                tenant_id=tenant_id,
+                user_id=user_id,
+                role=str(state.get("user_role", "analyst") or "analyst"),
+            )
+            memory_store = await get_long_term_memory_store()
+            user_preferences = await memory_store.get_preferences(identity=identity)
+            memories = await memory_store.search(
+                state.get("user_query", "") or "",
+                top_k=5,
+                identity=identity,
+            )
+            memory_sections = [str(item.content).strip() for item in memories if item.content]
+            if user_preferences:
+                preferences_text = "\n".join(
+                    f"{key}: {value}" for key, value in sorted(user_preferences.items())
+                )
+                memory_sections.insert(0, f"用户偏好:\n{preferences_text}")
+            long_term_memories_text = "\n\n---\n\n".join(memory_sections)
+            logger.info(
+                "长期记忆加载边界完成",
+                tenant_id=tenant_id,
+                user_id=user_id,
+                preference_count=len(user_preferences),
+                memory_count=len(memories),
+                memory_chars=len(long_term_memories_text),
+            )
+        except Exception as exc:
+            logger.error(
+                "长期记忆加载失败，降级为空上下文",
+                tenant_id=tenant_id,
+                user_id=user_id,
+                error=str(exc),
+                exc_info=True,
+            )
+
     result = {
         "intent": "",
         "activated_skills": [],
         "skill_prompt_override": "",
         "skill_tools": [],
+        "skill_tool_budget": 0,
+        "skill_tool_calls": 0,
         "multi_source_results": [],
         "previous_turn_snapshot": previous_snapshot,
         "previous_result_restored": False,
@@ -99,7 +150,8 @@ async def prepare_turn_node(state: AnalysisState) -> dict:
         "few_shot_examples": [],
         "business_rules_text": "",
         "enum_dictionary": {},
-        "long_term_memories_text": "",
+        "user_preferences": user_preferences,
+        "long_term_memories_text": long_term_memories_text,
         "needs_decompose": False,
         "decompose_steps": [],
         "generated_sql": "",
@@ -126,9 +178,14 @@ async def prepare_turn_node(state: AnalysisState) -> dict:
         "final_response": {},
     }
     # 升级后首次请求顺手移除旧 checkpoint 中重复保存的富结果。
+    history_items = list(state.get("conversation_history", []) or [])
+    if len(history_items) >= 50:
+        from src.memory.session_archive import compact_turn_history
+
+        history_items = await compact_turn_history(history_items)
     compact_history = []
     history_compacted = False
-    for item in state.get("conversation_history", []) or []:
+    for item in history_items:
         if not isinstance(item, dict):
             compact_history.append(item)
             continue
@@ -136,7 +193,7 @@ async def prepare_turn_node(state: AnalysisState) -> dict:
         history_compacted = "final_result" in compact_item or history_compacted
         compact_item.pop("final_result", None)
         compact_history.append(compact_item)
-    if history_compacted:
+    if history_compacted or history_items != list(state.get("conversation_history", []) or []):
         result["conversation_history"] = compact_history
         logger.info("旧 checkpoint 对话富结果已移除", history_turns=len(compact_history))
     logger.info(

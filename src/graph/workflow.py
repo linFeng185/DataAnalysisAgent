@@ -212,9 +212,23 @@ async def build_workflow() -> StateGraph:
     # Step 1: 创建图，指定状态类型
     workflow = StateGraph(AnalysisState)
 
-    # Step 2: 从显式节点目录注册执行函数，拓扑边仍在本文件审计。
+    from src.graph.subgraphs import sql_analysis as sql_flow
+
+    # Step 2: 注册非 SQL 节点；SQL 节点与条件边由共享装配函数统一注册。
     for definition in get_node_definitions():
-        workflow.add_node(definition.name, definition.handler)
+        if definition.name not in sql_flow.SQL_ANALYSIS_NODE_NAMES:
+            workflow.add_node(definition.name, definition.handler)
+    sql_flow.add_sql_analysis_flow(
+        workflow,
+        after_retrieve_schema=after_retrieve_schema,
+        after_generate_sql=after_generate_sql,
+        after_layer3=after_layer3,
+        after_layer4=after_layer4,
+        should_retry=should_retry,
+        direct_target="llm_direct_answer",
+        failure_target="build_response",
+        success_target="analyze_result",
+    )
 
     # Step 3: 设置入口节点（用户请求从这里开始）
     workflow.set_entry_point("prepare_turn")
@@ -239,44 +253,6 @@ async def build_workflow() -> StateGraph:
     workflow.add_edge("multi_source_dispatch", "merge_results")
     workflow.add_edge("merge_results", "build_response")
 
-    # Schema 检索 → 查询分解 → SQL 生成
-    workflow.add_conditional_edges(
-        "retrieve_schema", after_retrieve_schema,
-        {"llm_direct_answer": "llm_direct_answer", "decompose_query": "decompose_query"},
-    )
-    workflow.add_edge("decompose_query", "generate_sql")
-    # SQL 生成后：需要时间范围 → 直接 build_response / 正常 → 继续校验
-    workflow.add_conditional_edges(
-        "generate_sql", after_generate_sql,
-        {
-            "generate_sql": "generate_sql",
-            "layer3_validate": "layer3_validate",
-            "build_response": "build_response",
-        }
-    )
-
-    # 安全校验路由：通过 → EXPLAIN / 安全拦截 → 终止 / 语法错 → 重试
-    workflow.add_conditional_edges(
-        "layer3_validate", after_layer3,
-        {"generate_sql": "generate_sql", "layer4_explain": "layer4_explain", "build_response": "build_response"}
-    )
-
-    # EXPLAIN 路由：通过 → 执行 / 错误 → 重试或终止
-    workflow.add_conditional_edges(
-        "layer4_explain", after_layer4,
-        {"generate_sql": "generate_sql", "execute_sql": "execute_sql", "build_response": "build_response"}
-    )
-
-    # 执行路由：成功 → analyze_result / 瞬态错误 → 重试 / 配置错误 → 终止
-    workflow.add_conditional_edges(
-        "execute_sql", should_retry,
-        {
-            "analyze_result": "analyze_result",
-            "execute_sql": "execute_sql",
-            "generate_sql": "generate_sql",
-            "build_response": "build_response",
-        }
-    )
     workflow.add_edge("analyze_result", "generate_chart")
     workflow.add_edge("generate_chart", "build_response")
     workflow.add_edge("build_response", END)

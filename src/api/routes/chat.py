@@ -135,12 +135,44 @@ async def _resolve_chat_access(req: ChatRequest) -> dict[str, dict]:
         raise HTTPException(403, str(exc)) from exc
 
 
+# 方法作用：在进入工作流前校验用户显式选择的 Skill 可见性和启用状态。
+# Args: req - 聊天请求模型。
+# Returns: 去重后保持顺序的 Skill 复合资源 ID。
+def _validated_skill_ids(req: ChatRequest) -> list[str]:
+    requested = list(dict.fromkeys(
+        str(resource_id or "").strip()
+        for resource_id in req.enabled_skill_ids
+        if str(resource_id or "").strip()
+    ))
+    if not requested:
+        return []
+    from src.api.auth import get_current_tenant_id, get_current_user_id
+    from src.skill_manager import get_skill_manager
+
+    try:
+        selected = get_skill_manager().resolve_requested_skills(
+            requested,
+            tenant_id=get_current_tenant_id(),
+            user_id=get_current_user_id(),
+        )
+    except PermissionError as exc:
+        logger.warning("聊天显式 Skill 授权拒绝", requested_count=len(requested))
+        raise HTTPException(403, str(exc)) from exc
+    except ValueError as exc:
+        logger.warning("聊天显式 Skill 状态无效", requested_count=len(requested))
+        raise HTTPException(409, str(exc)) from exc
+    result = [skill.resource_id for skill in selected]
+    logger.info("聊天显式 Skill 校验完成", selected_count=len(result))
+    return result
+
+
 # ---- Chat (11.1.1-2) ----
 
 @router.post("/chat")
 async def chat(req: ChatRequest):
     """统一 chat 端点：stream=False 返回 JSON，stream=True 返回 SSE 流式。"""
     _enforce_chat_request_quota(req)
+    enabled_skill_ids = _validated_skill_ids(req)
     selected_datasources = _requested_chat_datasources(req)
     import src.api.routes as routes_package
 
@@ -168,6 +200,7 @@ async def chat(req: ChatRequest):
                 user_id=get_current_user_id(),
                 user_role=get_current_role(),
                 datasource_access=datasource_access,
+                enabled_skill_ids=enabled_skill_ids,
                 request_rate_limit_checked=True,
             ),
             media_type="text/event-stream",
@@ -213,10 +246,14 @@ async def chat(req: ChatRequest):
         "user_id": get_current_user_id(),
         "user_role": get_current_role(),
         "request_rate_limit_checked": True,
+        "enabled_skill_ids": enabled_skill_ids,
     }, cfg)
-    f = result.get("final_response", {})
+    from src.graph.outcome import sanitize_public_output
+
+    f = sanitize_public_output(result.get("final_response", {}))
     return ChatResponse(
-        success=f.get("success", True), session_id=sid,
+        success=f.get("success", True), status=f.get("status", "success"),
+        source=f.get("source", "sql_query"), session_id=sid,
         user_query=req.query,
         sql=f.get("sql", result.get("generated_sql", "")),
         sql_statements=f.get("sql_statements", []),
@@ -225,6 +262,8 @@ async def chat(req: ChatRequest):
         truncated=bool(f.get("truncated", result.get("query_result_truncated", False))),
         analysis=f.get("analysis", result.get("analysis_result", {})),
         chart=f.get("chart", result.get("chart_config", {})),
+        error_code=f.get("error_code", ""),
+        error_message=f.get("error_message", ""),
     )
 
 
@@ -232,6 +271,7 @@ async def chat(req: ChatRequest):
 async def chat_stream(req: ChatRequest):
     """（保留向后兼容）独立流式端点，等价于 /chat + stream=True。"""
     _enforce_chat_request_quota(req)
+    enabled_skill_ids = _validated_skill_ids(req)
     logger.debug(
         "兼容流式 Chat 入口",
         datasource=req.datasource,
@@ -254,6 +294,7 @@ async def chat_stream(req: ChatRequest):
             user_id=get_current_user_id(),
             user_role=get_current_role(),
             datasource_access=datasource_access,
+            enabled_skill_ids=enabled_skill_ids,
             request_rate_limit_checked=True,
         ),
         media_type="text/event-stream",

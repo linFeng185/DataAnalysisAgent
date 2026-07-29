@@ -1,8 +1,8 @@
 import { useState, useEffect, useRef } from 'react';
 import { Card, Table, Tag, Typography, Empty, Button, message, Space, Switch, Popconfirm, Modal, Descriptions, Select } from 'antd';
-import { ToolOutlined, UploadOutlined, DeleteOutlined, ReloadOutlined } from '@ant-design/icons';
-import { get } from '../api/client';
-import type { SkillInfo } from '../types';
+import { AppstoreOutlined, CloudDownloadOutlined, ToolOutlined, UploadOutlined, DeleteOutlined, ReloadOutlined } from '@ant-design/icons';
+import { get, post } from '../api/client';
+import type { RegistrySkillInfo, SkillInfo } from '../types';
 import type { KnowledgeScope } from '../types';
 import { useAuth } from '../hooks/AuthContext';
 
@@ -12,6 +12,9 @@ const nodeColors: Record<string, string> = {
   'sales-analysis': 'volcano',
 };
 
+// 方法作用：管理本地受管 Skills 并浏览安装中心 Registry 审核版本。
+// Args: 无。
+// Returns: Skills 管理页面。
 export default function SkillsPage() {
   const { user } = useAuth();
   const [skills, setSkills] = useState<SkillInfo[]>([]);
@@ -21,6 +24,11 @@ export default function SkillsPage() {
   const [detail, setDetail] = useState<SkillInfo | null>(null);
   const [fileContent, setFileContent] = useState('');
   const [uploadScope, setUploadScope] = useState<KnowledgeScope>('private');
+  const [registryOpen, setRegistryOpen] = useState(false);
+  const [registryConfigured, setRegistryConfigured] = useState(false);
+  const [registrySkills, setRegistrySkills] = useState<RegistrySkillInfo[]>([]);
+  const [registryLoading, setRegistryLoading] = useState(false);
+  const [installing, setInstalling] = useState('');
   const fileRef = useRef<HTMLInputElement>(null);
 
   const load = async () => {
@@ -32,6 +40,47 @@ export default function SkillsPage() {
     setLoading(false);
   };
   useEffect(() => { load(); }, []);
+
+  // 方法作用：打开 Registry 并加载审核通过的兼容 Skill 列表。
+  // Args: 无。
+  // Returns: 请求完成后无返回值。
+  const openRegistry = async (): Promise<void> => {
+    setRegistryOpen(true);
+    setRegistryLoading(true);
+    try {
+      const data = await get<{
+        configured: boolean;
+        skills: RegistrySkillInfo[];
+      }>('/skills/registry');
+      setRegistryConfigured(data.configured);
+      setRegistrySkills(data.skills || []);
+      if (!data.configured) message.info('Skill Registry 未配置');
+    } catch {
+      message.error('Skill Registry 加载失败');
+    } finally {
+      setRegistryLoading(false);
+    }
+  };
+
+  // 方法作用：把 Registry 审核版本安装到当前选择的可信作用域。
+  // Args: registrySkill - 待安装的 Registry Skill。
+  // Returns: 请求完成后无返回值。
+  const installRegistrySkill = async (registrySkill: RegistrySkillInfo): Promise<void> => {
+    const installKey = `${registrySkill.name}@${registrySkill.version}`;
+    setInstalling(installKey);
+    try {
+      await post(`/skills/registry/${encodeURIComponent(registrySkill.name)}/install`, {
+        version: registrySkill.version,
+        scope: uploadScope,
+      });
+      message.success(`${registrySkill.name} ${registrySkill.version} 已安装`);
+      await Promise.all([load(), openRegistry()]);
+    } catch (error) {
+      message.error(error instanceof Error ? error.message : '安装失败');
+    } finally {
+      setInstalling('');
+    }
+  };
 
   const handleRefresh = async () => {
     try {
@@ -116,6 +165,9 @@ export default function SkillsPage() {
       <Card title="Skills 管理" extra={
         <Space>
           <Typography.Text type="secondary">共 {skills.length} 个</Typography.Text>
+          <Button icon={<AppstoreOutlined />} size="small" onClick={() => void openRegistry()}>
+            Skill Registry
+          </Button>
           <Button icon={<ReloadOutlined />} size="small" onClick={handleRefresh}>刷新</Button>
           <Select<KnowledgeScope> value={uploadScope} options={scopeOptions}
             style={{ width: 92 }} onChange={setUploadScope} />
@@ -133,6 +185,7 @@ export default function SkillsPage() {
         </Space>
       }>
         <Table<SkillInfo> dataSource={skills} rowKey={r => `${r.scope}:${r.tenant_id}:${r.owner_user_id}:${r.name}`} loading={loading}
+          scroll={{ x: 860 }}
           locale={{ emptyText: <Empty description="暂无 Skill" /> }}
           size="small"
           onRow={r => ({ onClick: () => openDetail(r), style: { cursor: 'pointer' } })}
@@ -213,6 +266,47 @@ export default function SkillsPage() {
               <Tag key={i} color="blue">{(s as Record<string, string>).name}</Tag>
             ))}
           </div>
+        )}
+      </Modal>
+
+      <Modal
+        title="Skill Registry"
+        open={registryOpen}
+        onCancel={() => setRegistryOpen(false)}
+        footer={null}
+        width={760}
+      >
+        {!registryConfigured && !registryLoading ? (
+          <Empty description="Registry 未配置" />
+        ) : (
+          <Table<RegistrySkillInfo>
+            rowKey={item => `${item.name}@${item.version}`}
+            dataSource={registrySkills}
+            loading={registryLoading}
+            pagination={false}
+            scroll={{ x: 640 }}
+            columns={[
+              { title: '名称', dataIndex: 'name', width: 150 },
+              { title: '版本', dataIndex: 'version', width: 90 },
+              { title: '描述', dataIndex: 'description', ellipsis: true },
+              { title: 'API', dataIndex: 'api_version', width: 120 },
+              {
+                title: '操作', key: 'action', width: 100,
+                render: (_: unknown, item: RegistrySkillInfo) => (
+                  <Button
+                    size="small"
+                    type="primary"
+                    icon={<CloudDownloadOutlined />}
+                    disabled={item.installed}
+                    loading={installing === `${item.name}@${item.version}`}
+                    onClick={() => void installRegistrySkill(item)}
+                  >
+                    {item.installed ? '已安装' : '安装'}
+                  </Button>
+                ),
+              },
+            ]}
+          />
         )}
       </Modal>
     </div>

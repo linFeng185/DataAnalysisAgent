@@ -1,6 +1,6 @@
 # 10. LLM 管理层
 
-## 10. LLM 管理层 (llm/) `[P0:10 P1:7]`
+## 10. LLM 管理层 (llm/) `[P0:10 P1:4 P2:1]`
 
 ### 10.1 客户端工厂
 
@@ -24,6 +24,11 @@
 | 10.2.3 | DATA_ANALYSIS_PROMPT | 同上 | 数据分析 Prompt | 单测完成 | P0 |
 | 10.2.4 | CHART_RECOMMEND_PROMPT | 同上 | 图表推荐 Prompt | 单测完成 | P0 |
 | 10.2.7 | get_dialect_cheatsheet() | 同上 | 3 种方言速查表 | 单测完成 | P0 |
-| 10.2.8 | Prompt 版本号管理 | 同上 | Phase 3: LangSmith A/B 测试 | 待开发[^6] | P2 |
+| 10.2.8 | Prompt 版本号管理 | `src/llm/prompts.py`、`src/llm/output_contracts.py` | Prompt ID/版本/变量校验、扩展注册和 Pydantic 输出契约；LangSmith A/B 仍属后续增强 | 单测完成 | P2 |
+| 10.2.9 | Prompt 统一总预算 | `src/llm/prompt_budget.py`、各 LLM 调用节点 | System、用户问题、Schema、知识、Skill、示例、结果和历史共享字符预算，按优先级保留与裁剪 | 单测完成 | P1 |
+
+### 模块收尾
+
+模块功能点共 15 项，已完成 15 项，待开发 0 项。
 
 ---

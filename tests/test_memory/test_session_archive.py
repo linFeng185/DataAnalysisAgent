@@ -100,18 +100,52 @@ class TestSessionMaintenance:
     # Args: self - pytest 测试类实例。
     # Returns: 无返回值，断言失败时由 pytest 报告。
     async def test_archive_and_run_all(self) -> None:
-        """数据库状态计数应转成 int，维护结果包含三类任务。"""
+        """数据库状态计数应转成 int，维护结果包含全部生命周期任务。"""
         logger.debug("test_archive_and_run_all 入口")
         from src.memory.session_archive import SessionMaintenance
 
         pool = SimpleNamespace(execute=AsyncMock(return_value="INSERT 0 3"))
         store = SimpleNamespace(
+            prune_expired=AsyncMock(return_value=4),
             decay_old_templates=AsyncMock(return_value=2),
             prune_low_confidence=AsyncMock(return_value=1),
+            reconcile_pending_sync=AsyncMock(return_value=3),
         )
         maintenance = SessionMaintenance(pool, store)
 
         assert await maintenance.archive_sessions() == 3
-        assert await maintenance.run_all() == {"decayed": 2, "pruned": 1, "archived": 3}
+        assert await maintenance.run_all() == {
+            "expired": 4,
+            "decayed": 2,
+            "pruned": 1,
+            "reconciled": 3,
+            "archived": 3,
+        }
+        archive_sql = pool.execute.await_args.args[0]
+        assert "FROM active_sessions" not in archive_sql
+        assert "DELETE FROM sessions" in archive_sql
+        assert "INSERT INTO sessions_archive" in archive_sql
         assert await SessionMaintenance().archive_sessions() == 0
         logger.info("test_archive_and_run_all 完成")
+
+    # 方法作用：验证周期维护服务启动后执行任务并在关闭时停止循环。
+    # Args: self - pytest 测试类实例。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    async def test_periodic_service_runs_and_closes(self) -> None:
+        """维护服务必须纳入应用生命周期，不能成为无法关闭的孤立任务。"""
+        # Arrange
+        import asyncio
+
+        from src.memory.session_archive import MemoryMaintenanceService
+
+        maintenance = SimpleNamespace(run_all=AsyncMock(return_value={"archived": 0}))
+        service = MemoryMaintenanceService(maintenance, interval_seconds=60)
+
+        # Act
+        await service.start()
+        await asyncio.sleep(0)
+        await service.close()
+
+        # Assert
+        maintenance.run_all.assert_awaited_once()
+        assert service.running is False

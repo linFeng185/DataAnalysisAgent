@@ -107,11 +107,13 @@ class TestProductionSettings:
             from src.config import Settings, validate_production_settings
 
             settings = Settings(
+                _env_file=None,
                 env="prod",
                 multi_tenant=True,
                 jwt_secret="j" * 32,
                 admin_api_key="a" * 32,
                 credential_encryption_key="c" * 32,
+                database_url="postgresql+asyncpg://app:strong-secret@db/app",
             )
 
             # Act

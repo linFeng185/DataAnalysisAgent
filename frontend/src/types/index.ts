@@ -87,6 +87,11 @@ export interface DatasourceCreatePayload {
   file_path?: string;
 }
 
+export interface DatasourceConnectionResult {
+  success: boolean;
+  message: string;
+}
+
 export interface TableInfo {
   name: string;
   description: string;
@@ -121,6 +126,7 @@ export interface HistoryItem {
 }
 
 export interface SkillInfo {
+  resource_id: string;
   name: string;
   version: string;
   enabled: boolean;
@@ -133,6 +139,45 @@ export interface SkillInfo {
   scope: KnowledgeScope;
   tenant_id: number;
   owner_user_id: number;
+}
+
+export interface RegistrySkillInfo {
+  name: string;
+  version: string;
+  description: string;
+  api_version: string;
+  sha256: string;
+  installed: boolean;
+}
+
+export type AutomationKind = 'insight' | 'report';
+export type AutomationFrequency = 'hourly' | 'daily' | 'weekly' | 'monthly';
+export type AutomationChannel = 'in_app' | 'email' | 'feishu' | 'slack';
+
+export interface AutomationSchedule {
+  id: string;
+  name: string;
+  kind: AutomationKind;
+  datasource: string;
+  sql: string;
+  dialect: string;
+  frequency: AutomationFrequency;
+  threshold_pct: number;
+  channels: AutomationChannel[];
+  recipient_email: string;
+  enabled: boolean;
+  next_run_at: string;
+  last_run_at: string | null;
+}
+
+export interface AutomationNotification {
+  id: string;
+  schedule_id: string;
+  kind: AutomationKind;
+  title: string;
+  body: string;
+  is_read: boolean;
+  created_at: string;
 }
 
 export type KnowledgeScope = 'system' | 'tenant' | 'private';

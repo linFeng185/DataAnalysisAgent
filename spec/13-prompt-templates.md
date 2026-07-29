@@ -86,4 +86,17 @@ Prompt 的强度通过上下文完备度、结构化输出、代码层校验和�
 5. 单元、回归与回测只 Mock 任务模型工厂并断言 prompt/messages/参数/状态；真实远程模型只在
    `RUN_LIVE_LLM_TESTS=1` 下运行。
 
+### 12.5 Prompt 注册与输出契约
+
+1. 每个 System Prompt 使用稳定 `prompt_id` 和语义化 `version` 注册为 `PromptDefinition`，节点禁止
+   通过未注册字符串选择系统角色。扩展可调用 `register_prompt()`，默认拒绝静默覆盖同 ID 定义。
+2. `PromptDefinition.render()` 负责模板变量完整性检查，并统一前置系统安全策略和请求能力边界。
+3. 每个 LLM 任务优先绑定 `src/llm/output_contracts.py` 中的 Pydantic 输出模型；业务节点只消费契约字段，
+   未知字段不得进入状态、响应或历史。兼容旧模型纯文本只能走显式回退并记录日志。
+4. `context_budget` 以字符数声明单次 Prompt 的统一总预算，计入固定 System Prompt、动态 Skill 指令和
+   Human 上下文。固定安全策略不可截断；若固定 System Prompt 自身超限，必须在调用模型前失败。
+5. 动态上下文使用统一 `PromptSection` 分配器，按优先级、最低保留量和单节上限裁剪。用户当前问题、
+   重试错误和 Schema 优先于业务知识、示例及历史；任何节点不得在预算器之后继续拼接未计量文本。
+6. 预算日志只记录 Prompt ID、总字符数和被截断的 section 名称，不记录 Prompt 正文、凭证或模型推理。
+
 ---

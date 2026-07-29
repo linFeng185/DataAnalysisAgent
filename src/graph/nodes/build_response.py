@@ -5,9 +5,26 @@ from __future__ import annotations
 import time
 
 from src.graph.state import AnalysisState
+from src.graph.outcome import (
+    is_successful_response,
+    public_error_message,
+    sanitize_public_output,
+    status_from_response,
+)
 from src.logging_config import get_logger
 
 logger = get_logger(__name__)
+
+
+# 方法作用：限制公开知识文本长度并标记截断。
+# Args: value - 待输出值；max_chars - 最大字符数。
+# Returns: 未超限原文本或带省略号的截断文本。
+def _bounded_text(value: object, max_chars: int = 500) -> str:
+    """限制可返回给客户端和历史存储的知识文本，避免原文泄漏和响应膨胀。"""
+    text = str(value or "")
+    if len(text) <= max_chars:
+        return text
+    return text[:max_chars] + "..."
 
 
 # 收集单源或多源执行完成后的最终 SQL 列表。
@@ -104,6 +121,8 @@ async def build_response_node(state: AnalysisState) -> dict:
         and not state.get("execution_error")
         and not state.get("validation_errors")
     )
+    multi_source_results = state.get("multi_source_results", []) or []
+    successful_sources = [item for item in multi_source_results if item.get("success")]
 
     existing_response = state.get("final_response", {}) or {}
     is_direct_response = (
@@ -113,28 +132,63 @@ async def build_response_node(state: AnalysisState) -> dict:
 
     if is_direct_response:
         final_result = dict(existing_response)
+        if final_result.get("success") is False:
+            final_result.setdefault(
+                "error_code",
+                "MCP_AGENT_FAILED" if final_result.get("source") == "mcp_agent" else "TASK_FAILED",
+            )
+            final_result["error_message"] = public_error_message(
+                str(final_result["error_code"]),
+                fallback="直接回答失败",
+            )
+            final_result["status"] = "failed"
+        else:
+            final_result.setdefault("status", "success")
         logger.info("保留直接响应", source=final_result.get("source", ""))
     elif is_time_prompt:
         explanation = state.get("time_range_explanation") or "请指定查询的时间范围（最近一周/一月/一年/两年/三年/五年）"
         logger.info("提示用户指定时间范围", explanation=explanation[:100])
         final_result = {
-            "success": True, "source": "prompt", "needs_time_range": True,
+            "success": True, "status": "needs_input", "source": "prompt", "needs_time_range": True,
             "user_query": state.get("user_query", ""), "sql": "", "data": [],
             "sql_statements": [],
             "analysis": {"summary": explanation, "insights": [], "recommended_chart_type": "table"},
             "chart": {"type": "table", "option": {}},
         }
+    elif multi_source_results and not successful_sources:
+        final_result = {
+            "success": False,
+            "status": "failed",
+            "source": "multi_source_query",
+            "error_code": "MULTI_SOURCE_FAILED",
+            "error_message": public_error_message("MULTI_SOURCE_FAILED"),
+            "user_query": state.get("user_query", ""),
+            "sql": "",
+            "sql_statements": [],
+            "data": [],
+            "analysis": state.get("analysis_result", {}) or {},
+            "chart": {"type": "table", "option": {}},
+        }
     elif state.get("validation_errors"):
         final_result = {
-            "success": False, "source": "sql_query", "error_code": "VALIDATION_FAILED",
-            "error_message": str(state["validation_errors"]),
+            "success": False, "status": "failed", "source": "sql_query", "error_code": "VALIDATION_FAILED",
+            "error_message": public_error_message("VALIDATION_FAILED"),
+            "user_query": state.get("user_query", ""), "sql": "",
+            "sql_statements": [], "data": [], "analysis": {}, "chart": {},
+        }
+    elif state.get("explain_errors"):
+        final_result = {
+            "success": False, "status": "failed", "source": "sql_query", "error_code": "EXPLAIN_FAILED",
+            "error_message": public_error_message("EXPLAIN_FAILED"),
             "user_query": state.get("user_query", ""), "sql": "",
             "sql_statements": [], "data": [], "analysis": {}, "chart": {},
         }
     else:
         exec_error = state.get("execution_error", "")
+        success = not bool(exec_error)
         final_result = {
-            "success": not exec_error, "source": "sql_query", "session_id": "",
+            "success": success, "status": "success" if success else "failed",
+            "source": "sql_query", "session_id": "",
             "user_query": state.get("user_query", ""),
             "sql": sql,
             "sql_statements": sql_statements,
@@ -146,10 +200,14 @@ async def build_response_node(state: AnalysisState) -> dict:
         }
         if exec_error:
             final_result["error_code"] = "SQL_EXECUTION_FAILED"
-            final_result["error_message"] = exec_error
-        reasoning = state.get("sql_reasoning_content", "")
-        if reasoning:
-            final_result["sql_reasoning_content"] = reasoning
+            final_result["error_message"] = public_error_message("SQL_EXECUTION_FAILED")
+
+    if multi_source_results and successful_sources:
+        final_result["source"] = "multi_source_query"
+        if len(successful_sources) < len(multi_source_results):
+            final_result["status"] = "partial"
+            final_result["error_code"] = "MULTI_SOURCE_PARTIAL"
+            final_result["error_message"] = public_error_message("MULTI_SOURCE_PARTIAL")
 
     final_result.setdefault("sql_statements", sql_statements)
     if not final_result.get("sql") and sql_statements:
@@ -157,7 +215,10 @@ async def build_response_node(state: AnalysisState) -> dict:
 
     # 附加技能与知识库
     final_result["activated_skills"] = state.get("activated_skills", []) or []
-    final_result["activated_knowledge"] = state.get("long_term_memories_text", "") or ""
+    final_result["activated_knowledge"] = _bounded_text(
+        state.get("long_term_memories_text", "") or "",
+    )
+    final_result = sanitize_public_output(final_result)
 
     # 追加对话历史（所有路径共用，含时间提示路径）
     history = []
@@ -190,16 +251,17 @@ async def build_response_node(state: AnalysisState) -> dict:
         turn_entry = {
             "turn_id": len(history) + 1, "user_query": query,
             "generated_sql": gen_sql,
-            "execution_success": not state.get("execution_error"),
+            "execution_success": is_successful_response(final_result),
             "analysis_summary": analysis_summary,
             "chart_type": analysis.get("recommended_chart_type") or state.get("chart_config", {}).get("type", ""),
         }
         history.append(turn_entry)
         logger.info("对话历史已追加", turns=len(history), query=query[:60])
         from langchain_core.messages import HumanMessage, AIMessage
+        answer_prefix = "查询结论" if final_result.get("source") == "sql_query" else "回答"
         new_messages = [
             HumanMessage(content=query),
-            AIMessage(content=f"SQL: {gen_sql}\n结论: {analysis_summary}" if analysis_summary else f"SQL: {gen_sql}"),
+            AIMessage(content=f"{answer_prefix}: {analysis_summary}" if analysis_summary else answer_prefix),
         ]
 
     # 写入查询历史
@@ -210,7 +272,7 @@ async def build_response_node(state: AnalysisState) -> dict:
             await get_history_store().add(
                 user_query=query, datasource=state.get("datasource", ""),
                 session_id=state.get("session_id", "") or "",
-                generated_sql=gen_sql, success=not state.get("execution_error"),
+                generated_sql=gen_sql, success=is_successful_response(final_result),
                 row_count=row_count,
                 final_result=final_result,
             )
@@ -222,12 +284,61 @@ async def build_response_node(state: AnalysisState) -> dict:
                 exc_info=True,
             )
 
+    # 仅学习当前身份下成功执行的 SQL，避免把失败语句和安全短路结果污染模板库。
+    tenant_id = int(state.get("tenant_id", 0) or 0)
+    user_id = int(state.get("user_id", 0) or 0)
+    if (
+        query.strip()
+        and gen_sql.strip()
+        and tenant_id > 0
+        and user_id > 0
+        and is_successful_response(final_result)
+        and final_result.get("source") == "sql_query"
+    ):
+        try:
+            from src.memory.long_term_store import get_long_term_memory_store
+            from src.security.tenant_policy import RequestIdentity
+
+            identity = RequestIdentity(
+                tenant_id=tenant_id,
+                user_id=user_id,
+                role=str(state.get("user_role", "analyst") or "analyst"),
+            )
+            memory_store = await get_long_term_memory_store()
+            await memory_store.save_sql_template(
+                query,
+                gen_sql,
+                str(state.get("dialect", "") or "unknown"),
+                identity=identity,
+                visibility="private",
+            )
+            logger.info(
+                "成功 SQL 长期记忆写入完成",
+                tenant_id=tenant_id,
+                user_id=user_id,
+                dialect=state.get("dialect", "") or "unknown",
+            )
+        except Exception as exc:
+            logger.error(
+                "成功 SQL 长期记忆写入失败",
+                tenant_id=tenant_id,
+                user_id=user_id,
+                error=str(exc),
+                exc_info=True,
+            )
+
     logger.info("节点完成", node="build_response", elapsed_ms=round((time.monotonic() - _start) * 1000))
     from src.graph.nodes.prepare_turn import build_turn_snapshot
 
     snapshot_state = dict(state)
     snapshot_state["conversation_history"] = history
     previous_turn_snapshot = build_turn_snapshot(snapshot_state)
+    logger.info(
+        "统一结果状态完成",
+        status=status_from_response(final_result),
+        success=is_successful_response(final_result),
+        source=final_result.get("source", ""),
+    )
     return {
         "final_response": final_result,
         "conversation_history": history,

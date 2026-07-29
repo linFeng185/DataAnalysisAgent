@@ -465,6 +465,50 @@ class SchemaManager:
             logger.error("向量存储缓存查询失败，降级到 DB 内省", error=str(exc), exc_info=True)
             return []
 
+    # 方法作用：使用已完成内省的快照原子替换指定数据源的共享和向量缓存。
+    # Args: self - SchemaManager 实例；datasource_name - 数据源名称；snapshot - 实时 Schema 快照。
+    # Returns: 输入的 SchemaSnapshot。
+    async def refresh_from_snapshot(self, datasource_name: str, snapshot):
+        logger.debug("使用实时快照刷新 Schema 入口", datasource=datasource_name)
+        datasource = await self._resolve_datasource(datasource_name)
+        fingerprint = ""
+        if datasource is not None:
+            from src.knowledge.datasource_cache import build_connection_fingerprint
+
+            fingerprint = build_connection_fingerprint(datasource)
+        entries = self._snapshot_to_entries(datasource_name, snapshot)
+        await self._delete_shared_cache(fingerprint)
+        try:
+            from src.memory.vector_store import get_vector_store
+
+            store = await get_vector_store()
+            cached = await self._query_cache(datasource_name)
+            stale_ids = [entry.id for entry in cached]
+            if stale_ids:
+                deleted = await store.delete_by_ids(stale_ids)
+                logger.info(
+                    "Schema 快照替换旧缓存完成",
+                    datasource=datasource_name,
+                    deleted=deleted,
+                )
+        except Exception as exc:
+            logger.warning(
+                "Schema 快照替换清理失败，继续写入",
+                datasource=datasource_name,
+                error=str(exc),
+                exc_info=True,
+            )
+        if entries:
+            await self._upsert_to_cache(entries)
+            await self._write_shared_cache(fingerprint, entries)
+        logger.info(
+            "使用实时快照刷新 Schema 完成",
+            datasource=datasource_name,
+            tables=len(snapshot.tables),
+            entries=len(entries),
+        )
+        return snapshot
+
     async def refresh(self, datasource_name: str):
         """清理指定数据源缓存并执行真实 DB Schema 刷新。
 
@@ -614,36 +658,85 @@ class SchemaManager:
 
     # ── 私有：DB 内省 ──────────────────────────────────
 
+    # 方法作用：绕过缓存读取实时数据库 Schema，并让权限异常继续传播到治理边界。
+    # Args: self - SchemaManager 实例；datasource_name - 数据源名称。
+    # Returns: 当前数据库的 SchemaSnapshot。
+    async def inspect_live_schema(self, datasource_name: str):
+        from src.datasource.introspection import introspect_database
+        from src.datasource.registry import get_registry
+
+        self._ensure_external_provider()
+        datasource = await get_registry().resolve(datasource_name)
+        if datasource is None:
+            raise LookupError(f"数据源 '{datasource_name}' 未找到")
+
+        # 方法作用：统一同步和异步 SQLAlchemy 引擎的元数据查询结果。
+        # Args: datasource_config - 数据源配置；sql - 元数据 SQL；params - 绑定参数。
+        # Returns: 字典行列表。
+        async def executor(datasource_config, sql: str, params: dict):
+            import sqlalchemy as sa
+
+            if datasource_config.engine is None:
+                raise RuntimeError(f"数据源 {datasource_config.name} 无可用引擎")
+            from sqlalchemy.ext.asyncio import AsyncEngine
+            if isinstance(datasource_config.engine, AsyncEngine):
+                async with datasource_config.engine.connect() as connection:
+                    result = await connection.execute(sa.text(sql), params)
+                    return [dict(row._mapping) for row in result]
+            with datasource_config.engine.connect() as connection:
+                result = connection.execute(sa.text(sql), params)
+                return [dict(row._mapping) for row in result]
+
+        snapshot = await introspect_database(datasource, executor)
+        logger.info(
+            "实时 Schema 内省完成",
+            datasource=datasource_name,
+            tables=len(snapshot.tables),
+        )
+        return snapshot
+
+    # 方法作用：将 Schema 权限异常持久化为租户可见的系统告警并累计指标。
+    # Args: self - SchemaManager 实例；error - 统一元数据权限异常。
+    # Returns: 无返回值。
+    async def _store_schema_permission_warning(self, error) -> None:
+        tenant_id = self._current_tenant_id()
+        owner_user_id = self._current_user_id()
+        warning = KnowledgeEntry(
+            id=f"warning:schema-permission:{tenant_id}:{error.datasource}",
+            content=(
+                f"数据源 {error.datasource} 缺少 Schema 元数据读取权限，"
+                "请为只读账号授予系统表或 INFORMATION_SCHEMA 查询权限。"
+            ),
+            source=KnowledgeSource.SYSTEM_WARNING,
+            category="system_warning",
+            created_at=datetime.now(timezone.utc),
+            ttl=24 * 60 * 60,
+            metadata={
+                "datasource": error.datasource,
+                "dialect": error.dialect,
+                "operation": error.operation,
+                "tenant_id": tenant_id,
+                "owner_user_id": owner_user_id,
+                "visibility": "tenant",
+                "warning_type": "schema_permission",
+            },
+        )
+        await self._upsert_to_cache([warning])
+        from src.observability import get_metrics_registry
+
+        get_metrics_registry().record_schema_warning(error.dialect, error.operation)
+        logger.warning(
+            "Schema 权限告警已持久化",
+            datasource=error.datasource,
+            dialect=error.dialect,
+            operation=error.operation,
+            tenant_id=tenant_id,
+        )
+
     async def _introspect_from_db(self, datasource_name: str) -> list[KnowledgeEntry]:
         """从数据库系统表自动拉取表结构，转为 KnowledgeEntry 列表。"""
         try:
-            from src.datasource.introspection import introspect_database
-            from src.datasource.registry import get_registry
-
-            self._ensure_external_provider()
-
-            ds = await get_registry().resolve(datasource_name)
-            if ds is None:
-                logger.warning("数据源未找到，无法内省", datasource=datasource_name)
-                return []
-
-            # 构建 executor：匹配 introspection 的 3 参数签名 (ds, sql, params)
-            async def _executor(_ds, sql: str, params: dict):
-                import sqlalchemy as sa
-
-                if _ds.engine is None:
-                    raise RuntimeError(f"数据源 {_ds.name} 无可用引擎")
-                from sqlalchemy.ext.asyncio import AsyncEngine
-                if isinstance(_ds.engine, AsyncEngine):
-                    async with _ds.engine.connect() as conn:
-                        result = await conn.execute(sa.text(sql), params)
-                        return [dict(row._mapping) for row in result]
-                else:
-                    with _ds.engine.connect() as conn:
-                        result = conn.execute(sa.text(sql), params)
-                        return [dict(row._mapping) for row in result]
-
-            snapshot = await introspect_database(ds, _executor)
+            snapshot = await self.inspect_live_schema(datasource_name)
             entries = self._snapshot_to_entries(datasource_name, snapshot)
             logger.info(
                 "DB 内省完成",
@@ -653,6 +746,11 @@ class SchemaManager:
             )
             return entries
         except Exception as exc:
+            from src.datasource.introspection import MetadataPermissionError
+
+            if isinstance(exc, MetadataPermissionError):
+                await self._store_schema_permission_warning(exc)
+                return []
             logger.error(
                 "DB 内省失败",
                 datasource=datasource_name,

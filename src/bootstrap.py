@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 from collections.abc import Awaitable, Callable
 from typing import Any
 
@@ -19,14 +20,18 @@ _BOOTSTRAP_STEPS: tuple[tuple[str, str], ...] = (
     ("_run_migrations", "数据库迁移"),
     ("_ensure_super_admin", "平台超级管理员"),
     ("_load_api_access_policies", "API 访问策略"),
+    ("_configure_observability", "可观测性"),
     ("_init_workflow", "LangGraph 工作流"),
     ("_ensure_demo_datasource", "演示数据源"),
     ("_warmup_knowledge", "知识库预热"),
     ("_warmup_llm", "LLM 客户端预热"),
     ("_warmup_stores", "会话存储预热"),
+    ("_start_memory_maintenance", "记忆维护服务"),
     ("_load_skills", "Skills 加载"),
     ("_connect_mcp_servers", "MCP 连接"),
     ("_load_external_datasources", "外部数据源加载"),
+    ("_start_schema_cache_refresh", "Schema 缓存刷新服务"),
+    ("_start_automation", "主动洞察与定时报告服务"),
 )
 
 _REQUIRED_BOOTSTRAP_STEPS = {
@@ -129,6 +134,18 @@ async def _load_api_access_policies(settings: Settings) -> None:
     )
 
 
+# 方法作用：在工作流初始化前配置 LangSmith 和 Prometheus 共享注册器。
+# Args: settings - 当前应用配置。
+# Returns: 无返回值。
+async def _configure_observability(settings: Settings) -> None:
+    logger.debug("_configure_observability 入口")
+    from src.observability import configure_langsmith, get_metrics_registry
+
+    tracing_enabled = configure_langsmith(settings)
+    get_metrics_registry()
+    logger.info("_configure_observability 完成", langsmith=tracing_enabled)
+
+
 # 方法作用：初始化 LangGraph 工作流及其 Checkpointer。
 # Args: settings - 当前应用配置。
 # Returns: 无返回值。
@@ -206,6 +223,48 @@ async def _warmup_stores(settings: Settings) -> None:
     logger.info("_warmup_stores 完成")
 
 
+# 方法作用：关闭 AppContext 持有的周期记忆维护服务。
+# Args: service - 待停止的维护服务。
+# Returns: 无返回值。
+async def _close_memory_maintenance(service: Any) -> None:
+    await service.close()
+
+
+# 方法作用：创建并注册绑定应用生命周期的周期记忆维护服务。
+# Args: settings - 当前应用配置。
+# Returns: 无返回值。
+async def _start_memory_maintenance(settings: Settings) -> None:
+    logger.debug(
+        "_start_memory_maintenance 入口",
+        enabled=settings.memory_maintenance_enabled,
+        interval_seconds=settings.memory_maintenance_interval_seconds,
+    )
+    if not settings.memory_maintenance_enabled:
+        logger.info("_start_memory_maintenance 完成", skipped=True)
+        return
+    from src.app_context import get_app_context
+    from src.memory.long_term_store import get_long_term_memory_store
+    from src.memory.session_archive import MemoryMaintenanceService, SessionMaintenance
+
+    store = await get_long_term_memory_store()
+    maintenance = SessionMaintenance(pg_pool=store.pg_pool, memory_store=store)
+    service = MemoryMaintenanceService(
+        maintenance,
+        interval_seconds=settings.memory_maintenance_interval_seconds,
+    )
+    await service.start()
+    get_app_context().set_resource(
+        "memory_maintenance_service",
+        service,
+        closer=_close_memory_maintenance,
+    )
+    logger.info(
+        "_start_memory_maintenance 完成",
+        skipped=False,
+        has_pg=store.pg_pool is not None,
+    )
+
+
 # 方法作用：发现并加载配置目录下的 Skills。
 # Args: settings - 当前应用配置。
 # Returns: 无返回值。
@@ -239,7 +298,13 @@ async def _connect_mcp_servers(settings: Settings) -> None:
 # Args: settings - 当前应用配置。
 # Returns: 无返回值。
 async def _load_external_datasources(settings: Settings) -> None:
-    logger.debug("_load_external_datasources 入口", config_path="config/datasources.yaml")
+    logger.info(
+        "_load_external_datasources 配置边界",
+        config_path="config/datasources.yaml",
+        environment=settings.env,
+        settings_key_configured=bool(settings.credential_encryption_key),
+        environment_key_configured=bool(os.getenv("CREDENTIAL_ENCRYPTION_KEY", "")),
+    )
     from src.datasource.providers.external import ExternalDataSourceProvider
     from src.datasource.registry import get_registry
 
@@ -253,6 +318,105 @@ async def _load_external_datasources(settings: Settings) -> None:
         persisted_count=persisted_count,
         yaml_optional=True,
         env=settings.env,
+    )
+
+
+# 方法作用：关闭 AppContext 持有的 Schema 缓存周期刷新服务。
+# Args: service - 待关闭的周期刷新服务。
+# Returns: 无返回值。
+async def _close_schema_cache_refresh(service: Any) -> None:
+    await service.close()
+
+
+# 方法作用：在数据源恢复完成后启动 Schema TTL 清理和 DDL 指纹轮询服务。
+# Args: settings - 当前应用配置。
+# Returns: 无返回值。
+async def _start_schema_cache_refresh(settings: Settings) -> None:
+    logger.debug(
+        "_start_schema_cache_refresh 入口",
+        enabled=settings.schema_cache_refresh_enabled,
+        interval_seconds=settings.schema_cache_refresh_interval_seconds,
+        cache_backend=settings.datasource_cache_backend,
+    )
+    if not settings.schema_cache_refresh_enabled:
+        logger.info("_start_schema_cache_refresh 完成", skipped=True)
+        return
+    redis_client = None
+    if settings.datasource_cache_backend == "redis":
+        from redis.asyncio import Redis
+
+        redis_client = Redis.from_url(settings.redis_url)
+    from src.app_context import get_app_context
+    from src.datasource.registry import get_registry
+    from src.knowledge.cache_refresher import CacheRefresher, CacheRefreshService
+    from src.knowledge.schema_manager import SchemaManager
+
+    manager = SchemaManager()
+    refresher = CacheRefresher(
+        schema_manager=manager,
+        redis_client=redis_client,
+    )
+    service = CacheRefreshService(
+        refresher,
+        get_registry(),
+        settings.schema_cache_refresh_interval_seconds,
+    )
+    await service.start()
+    get_app_context().set_resource(
+        "schema_cache_refresh_service",
+        service,
+        closer=_close_schema_cache_refresh,
+    )
+    logger.info(
+        "_start_schema_cache_refresh 完成",
+        skipped=False,
+        distributed_lock=redis_client is not None,
+    )
+
+
+# 方法作用：关闭 AppContext 持有的自动化调度服务。
+# Args: service - 待关闭的 AutomationService。
+# Returns: 无返回值。
+async def _close_automation(service: Any) -> None:
+    await service.close()
+
+
+# 方法作用：按配置创建并启动主动洞察与定时报告轮询服务。
+# Args: settings - 当前应用配置。
+# Returns: 无返回值。
+async def _start_automation(settings: Settings) -> None:
+    logger.debug(
+        "_start_automation 入口",
+        enabled=settings.automation_enabled,
+        interval_seconds=settings.automation_poll_interval_seconds,
+    )
+    if not settings.automation_enabled:
+        logger.info("_start_automation 完成", skipped=True)
+        return
+    from src.app_context import get_app_context
+    from src.automation.runner import ScheduledAnalysisRunner
+    from src.automation.service import AutomationService
+    from src.automation.store import get_automation_store
+
+    store = get_automation_store()
+    runner = ScheduledAnalysisRunner(store)
+    service = AutomationService(
+        store,
+        runner,
+        interval_seconds=settings.automation_poll_interval_seconds,
+    )
+    context = get_app_context()
+    context.set_resource("automation_runner", runner)
+    context.set_resource(
+        "automation_service",
+        service,
+        closer=_close_automation,
+    )
+    await service.start()
+    logger.info(
+        "_start_automation 完成",
+        skipped=False,
+        interval_seconds=settings.automation_poll_interval_seconds,
     )
 
 

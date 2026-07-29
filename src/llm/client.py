@@ -242,6 +242,9 @@ def get_task_llm(
     else:
         logger.error("创建任务 LLM 失败", task=task, reason="没有授权的可用模型")
         raise RuntimeError(f"任务 {task} 没有授权的可用模型")
+    from src.observability import attach_llm_metrics
+
+    model = attach_llm_metrics(model, task)
     logger.info("创建任务 LLM 完成", task=task, target=target)
     return model
 

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import time
-from decimal import Decimal
 
 from src.app_context import get_tenant_policy
 from src.config import get_settings
@@ -11,17 +10,6 @@ from src.graph.state import AnalysisState
 from src.logging_config import get_logger
 
 logger = get_logger(__name__)
-
-
-def _row_to_dict(row) -> dict:
-    """Row → dict，float→Decimal 保证后续运算精度。"""
-    d = {}
-    for k, v in dict(row._mapping).items():
-        if isinstance(v, float) and not isinstance(v, bool):
-            d[k] = Decimal(str(v))
-        else:
-            d[k] = v
-    return d
 
 
 # 方法作用：用显式状态身份同步记录一次 SQL 尝试，避免后台任务或 ContextVar 清理导致审计丢失。

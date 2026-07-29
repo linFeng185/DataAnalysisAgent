@@ -247,6 +247,17 @@ def create_app_context(settings: Any) -> AppContext:
     return result
 
 
+# 方法作用：读取当前协程已绑定的 AppContext，不触发默认 Context 创建。
+# Args: 无。
+# Returns: 当前已绑定 AppContext；未绑定时返回 None。
+def get_bound_app_context() -> AppContext | None:
+    """返回当前协程显式绑定的应用 Context。"""
+    logger.debug("读取已绑定 AppContext 入口")
+    result = _current_app_context.get()
+    logger.info("读取已绑定 AppContext 完成", found=result is not None)
+    return result
+
+
 # 方法作用：读取当前请求 Context，缺失时惰性创建兼容 Context。
 # Args: 无。
 # Returns: 当前或默认 AppContext。

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -91,3 +91,74 @@ class TestBootstrap:
 
         close_context.assert_awaited_once()
         logger.info("test_shutdown_all_closes_resources 完成")
+
+    # 方法作用：验证启动阶段注册可关闭的周期记忆维护服务。
+    # Args: self - pytest 测试类实例；monkeypatch - pytest 补丁工具。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    @pytest.mark.asyncio
+    async def test_start_memory_maintenance_registers_lifecycle_resource(self, monkeypatch) -> None:
+        """维护服务必须由 AppContext 持有，应用关闭时才能可靠停止。"""
+        # Arrange
+        from src import app_context, bootstrap
+        import src.memory.long_term_store as store_module
+        import src.memory.session_archive as archive_module
+
+        context = SimpleNamespace(set_resource=MagicMock())
+        monkeypatch.setattr(app_context, "get_app_context", lambda: context)
+        store = SimpleNamespace(pg_pool="pg-pool")
+        monkeypatch.setattr(
+            store_module,
+            "get_long_term_memory_store",
+            AsyncMock(return_value=store),
+        )
+        service = SimpleNamespace(start=AsyncMock(), close=AsyncMock())
+        service_factory = MagicMock(return_value=service)
+        monkeypatch.setattr(archive_module, "MemoryMaintenanceService", service_factory)
+        settings = SimpleNamespace(
+            memory_maintenance_enabled=True,
+            memory_maintenance_interval_seconds=3600,
+        )
+
+        # Act
+        await bootstrap._start_memory_maintenance(settings)
+
+        # Assert
+        service.start.assert_awaited_once()
+        context.set_resource.assert_called_once()
+        assert context.set_resource.call_args.args[:2] == ("memory_maintenance_service", service)
+
+    # 方法作用：验证自动化调度服务按配置启动并注册 Runner 与关闭器。
+    # Args: self - pytest 测试类实例；monkeypatch - pytest 补丁工具。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    @pytest.mark.asyncio
+    async def test_start_automation_registers_lifecycle_resources(self, monkeypatch) -> None:
+        """启用自动化后后台轮询必须随 AppContext 一起关闭。"""
+        # Arrange
+        from src import app_context, bootstrap
+        import src.automation.runner as runner_module
+        import src.automation.service as service_module
+        import src.automation.store as store_module
+
+        context = SimpleNamespace(set_resource=MagicMock())
+        monkeypatch.setattr(app_context, "get_app_context", lambda: context)
+        store = object()
+        runner = object()
+        service = SimpleNamespace(start=AsyncMock(), close=AsyncMock())
+        monkeypatch.setattr(store_module, "get_automation_store", lambda: store)
+        monkeypatch.setattr(runner_module, "ScheduledAnalysisRunner", MagicMock(return_value=runner))
+        service_factory = MagicMock(return_value=service)
+        monkeypatch.setattr(service_module, "AutomationService", service_factory)
+        settings = SimpleNamespace(
+            automation_enabled=True,
+            automation_poll_interval_seconds=45,
+        )
+
+        # Act
+        await bootstrap._start_automation(settings)
+
+        # Assert
+        service_factory.assert_called_once_with(store, runner, interval_seconds=45)
+        service.start.assert_awaited_once()
+        assert context.set_resource.call_args_list[0].args == ("automation_runner", runner)
+        assert context.set_resource.call_args_list[1].args == ("automation_service", service)
+        assert context.set_resource.call_args_list[1].kwargs["closer"] is bootstrap._close_automation

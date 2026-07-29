@@ -48,9 +48,14 @@ export default function SchemaPage() {
 
   const handleSaveComment = async (values: { comment: string }) => {
     if (!selectedTable || !editingCol) return;
+    console.info('字段备注保存请求边界', {
+      datasource: ds,
+      table: selectedTable.name,
+      column: editingCol,
+    });
     try {
       await put(
-        `/schema/tables/${encodeURIComponent(selectedTable.name)}/columns/${encodeURIComponent(editingCol)}/comment`,
+        `/schema/tables/${encodeURIComponent(selectedTable.name)}/columns/${encodeURIComponent(editingCol)}/comment?datasource=${encodeURIComponent(ds)}`,
         { comment: values.comment } as Record<string, unknown>,
       );
       message.success('注释已更新'); setEditingCol(null); load();

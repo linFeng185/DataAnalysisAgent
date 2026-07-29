@@ -74,6 +74,31 @@ class TestSkillManifestV2:
         assert validate_skill_request(skill, asset_kind="table_file", tool_calls=3) is False
         assert validate_skill_request(skill, asset_kind="table_file", tool_calls=1) is True
 
+    # 方法作用：验证零工具预算在模块加载前即拒绝下一次调用。
+    # Args: self - pytest 测试类实例。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    def test_validate_skill_request_rejects_zero_budget(self) -> None:
+        """max_tool_calls=0 不能授权第一个工具调用或加载工具模块。"""
+        # Arrange
+        from src.skill_manager import Skill, validate_skill_request
+
+        skill = Skill(
+            name="disabled-tools",
+            version="2.0.0",
+            description="",
+            triggers={},
+            depends_on={},
+            tools=[{"name": "unsafe_import"}],
+            system_prompt_override="",
+            resources={"max_tool_calls": 0},
+        )
+
+        # Act
+        allowed = validate_skill_request(skill, asset_kind="", tool_calls=0)
+
+        # Assert
+        assert allowed is False
+
 
 class TestSkillScopeIsolation:
     """覆盖功能 9.1.11：Skill system/tenant/private 三级隔离。"""

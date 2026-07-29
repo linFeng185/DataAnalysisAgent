@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from decimal import Decimal
+
 import pytest
 from sqlalchemy.engine import make_url
 
@@ -213,7 +215,7 @@ class TestConnectionURL:
         from src.connectors.oracle import OracleConnector
 
         class Row:
-            _mapping = {"id": 1}
+            _mapping = {"id": 1, "amount": 1.25}
 
         class Connection:
             def __enter__(self):
@@ -238,7 +240,7 @@ class TestConnectionURL:
         result = await connector.execute("SELECT 1")
 
         # Assert
-        assert result == [{"id": 1}]
+        assert result == [{"id": 1, "amount": Decimal("1.25")}]
 
     # 方法作用：验证 Oracle EXPLAIN PLAN 成功时不要求语句返回结果集。
     # Args: self - pytest 测试类实例。
@@ -361,7 +363,7 @@ class TestConnectionURL:
 
         class QueryResult:
             column_names = ["value"]
-            result_rows = [(1,)]
+            result_rows = [(1.25,)]
 
         class FakeClient:
             def __init__(self):
@@ -398,7 +400,7 @@ class TestConnectionURL:
         result = await connector.execute("SELECT 1")
 
         # Assert
-        assert result == [{"value": 1}]
+        assert result == [{"value": Decimal("1.25")}]
         assert client.queries[0][0] == "SELECT 1"
         assert client.queries[0][2]["max_execution_time"] > 0
 
@@ -468,7 +470,12 @@ class TestRowsToDictList:
         from src.connectors.base import ConnectorBase
 
         class Row:
-            _mapping = {"nan": float("nan"), "positive_inf": float("inf"), "value": 1.25}
+            _mapping = {
+                "nan": float("nan"),
+                "positive_inf": float("inf"),
+                "decimal_nan": Decimal("NaN"),
+                "value": 1.25,
+            }
 
         # Act
         result = ConnectorBase.rows_to_dict_list([Row()])
@@ -476,6 +483,7 @@ class TestRowsToDictList:
         # Assert
         assert result[0]["nan"] is None
         assert result[0]["positive_inf"] is None
+        assert result[0]["decimal_nan"] is None
         assert str(result[0]["value"]) == "1.25"
 
 

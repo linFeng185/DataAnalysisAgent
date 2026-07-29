@@ -165,7 +165,7 @@ class TestStreamTerminalState:
         ]
 
         # Assert
-        assert events[-2] == {"type": "error", "message": "stream failed"}
+        assert events[-2] == {"type": "error", "message": "流式处理失败，请稍后重试"}
         assert events[-1] == {"type": "done", "status": "error"}
         assert not any(event.get("status") == "complete" for event in events)
         logger.info("test_stream_error_is_not_followed_by_complete_done 完成")

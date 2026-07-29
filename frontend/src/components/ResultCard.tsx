@@ -52,7 +52,7 @@ export default function ResultCard({ sql, reasoning, tokens, finalResult, valida
       children: sqlContent,
     }] : []),
     ...(data ? [{ key: 'data', label: `数据 (${data.length} 行)`, children: <DataTable data={data} /> }] : []),
-    ...(chartConfig && chartConfig.type !== 'table' ? [{ key: 'chart', label: `图表 (${chartConfig.type})`, children: <ChartPanel chartConfig={chartConfig} /> }] : []),
+    ...(chartConfig && chartConfig.type !== 'table' ? [{ key: 'chart', label: `图表 (${chartConfig.type})`, children: <ChartPanel chartConfig={chartConfig} rows={data || []} /> }] : []),
     ...(reasoning ? [{ key: 'reasoning', label: '思考过程', children: <div className="thinking-block">{reasoning}</div> }] : []),
     ...(tokens ? [{ key: 'raw', label: '完整响应', children: <div style={{ background: '#f5f5f5', padding: 12, borderRadius: 6, whiteSpace: 'pre-wrap', maxHeight: 300, overflow: 'auto', fontSize: 13 }}>{tokens}</div> }] : []),
   ];

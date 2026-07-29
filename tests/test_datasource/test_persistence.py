@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 
@@ -87,6 +88,76 @@ class TestDatasourcePersistence:
         assert datasource.owner_user_id == 9
         assert datasource.password == "v2:salt:ciphertext"
         logger.info("test_load_persisted_restores_datasource 完成")
+
+    # 方法作用：验证服务重启恢复的数据源可使用稳定应用密钥完成解析。
+    # Args: self - pytest 测试类实例；monkeypatch - pytest 补丁工具。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    async def test_restart_restored_datasource_can_be_resolved(self, monkeypatch) -> None:
+        """恢复记录不能只出现在列表中，还必须能解密凭证并建立连接。"""
+        logger.debug("test_restart_restored_datasource_can_be_resolved 入口")
+        # Arrange
+        import src.datasource.credential_manager as credential_module
+        import src.memory.pg_pool as pg_pool
+        from src.app_context import AppContext, use_app_context
+        from src.datasource.providers.external import (
+            DataSourceCreateRequest,
+            ExternalDataSourceProvider,
+        )
+        from src.datasource.registry import DataSourceRegistry
+
+        stable_key = "stable-settings-key-with-at-least-32-bytes"
+        settings = SimpleNamespace(
+            env="dev",
+            multi_tenant=False,
+            credential_encryption_key=stable_key,
+        )
+        monkeypatch.setenv("ENV", "dev")
+        monkeypatch.delenv("CREDENTIAL_ENCRYPTION_KEY", raising=False)
+        with use_app_context(AppContext(settings)):
+            original_provider = ExternalDataSourceProvider()
+            original = await original_provider.register(DataSourceCreateRequest(
+                name="managed",
+                dialect="postgres",
+                host="db.internal",
+                port=5432,
+                database="analytics",
+                username="reader",
+                password="persisted-password",
+            ))
+
+        pool, connection = _fake_pool()
+        connection.fetch.return_value = [{
+            "name": "managed", "tenant_id": 2, "owner_user_id": 9,
+            "dialect": "postgres", "version": "16", "host": "db.internal",
+            "port": 5432, "database_name": "analytics", "username": "reader",
+            "encrypted_password": original.password, "description": "生产只读库",
+            "extra_params": {},
+        }]
+        monkeypatch.setattr(pg_pool, "get_pg_pool", AsyncMock(return_value=pool))
+        monkeypatch.setattr(
+            credential_module,
+            "_EPHEMERAL_NON_PROD_KEY",
+            "different-process-ephemeral-key-with-32-bytes",
+        )
+
+        # Act
+        with use_app_context(AppContext(settings)):
+            restored_provider = ExternalDataSourceProvider()
+            await restored_provider.load_persisted()
+            registry = DataSourceRegistry()
+            registry.register_provider("external", restored_provider)
+            monkeypatch.setattr(registry, "_create_engine", AsyncMock(return_value=object()))
+            monkeypatch.setattr(
+                restored_provider,
+                "test_connection",
+                AsyncMock(return_value=True),
+            )
+            resolved = await registry.resolve("managed")
+
+        # Assert
+        assert resolved.password == "persisted-password"
+        restored_provider.test_connection.assert_awaited_once_with(resolved)
+        logger.info("test_restart_restored_datasource_can_be_resolved 完成")
 
     # 方法作用：验证删除持久化配置时同时删除对应租户权限。
     # Args: self - pytest 测试类实例；monkeypatch - PG 池补丁。

@@ -46,11 +46,11 @@
 
 | # | 功能 | 文件 | 描述 | 状态 |
 |---|------|------|------|------|
-| 6.4.1 | CacheRefresher 类 | `src/knowledge/cache_refresher.py` | 定期刷新自动拉取的缓存 | 待开发 |
-| 6.4.2 | refresh_expired() | 同上 | 清理 source=auto 且超过 7 天未更新的条目 | 待开发 |
-| 6.4.3 | refresh_on_schema_change() | 同上 | DDL 变更监听 → 主动刷新 (轮询 INFORMATION_SCHEMA.TABLES UPDATE_TIME) | 待开发 |
+| 6.4.1 | CacheRefresher 类 | `src/knowledge/cache_refresher.py` | 绑定应用生命周期的周期刷新服务，按配置间隔清理和轮询 | 单测完成 |
+| 6.4.2 | refresh_expired() | 同上 | 批量清理过期 AUTO_INTROSPECT 条目并主动重载受影响数据源 | 单测完成 |
+| 6.4.3 | refresh_on_schema_change() | 同上 | 对规范化实时 Schema 计算稳定指纹，DDL 变化时复用快照刷新 | 单测完成 |
 | 6.4.4 | DDL 触发器/CDC 集成 (远期) | 同上 | 接入数据库原生 DDL 变更通知 | 待开发 | P3 |
-| 6.4.5 | Redis 分布式锁 | 同上 | SETNX 防止多请求同时触发同一表的缓存刷新 | 待开发 | P1 |
+| 6.4.5 | Redis 分布式锁 | 同上 | SET NX EX 租约和令牌校验释放，防止多实例重复刷新同一数据源 | 单测完成 | P1 |
 
 ### 6.5 枚举值发现
 
@@ -107,14 +107,10 @@
 
 ### 模块收尾
 
-模块功能点共 57 项，已完成 52 项，待开发 5 项。
+模块功能点共 57 项，已完成 56 项，待开发 1 项。
 
 | 功能点 | 不开发原因 | 可开发条件 | 预计开发时机 |
 |--------|------------|------------|--------------|
-| 6.4.1 CacheRefresher 类 | 本轮只完成按请求 TTL 失效，后台刷新需要持久化任务和进程生命周期设计 | 确定调度器、任务状态表和多实例主节点策略 | Phase 3，知识摄取任务持久化批次 |
-| 6.4.2 refresh_expired() | 当前本地/Redis 精确缓存会在读取时删除过期项，批量扫描需要后端统一索引 | CacheRefresher 和可分页缓存索引完成 | Phase 3，随 6.4.1 开发 |
-| 6.4.3 refresh_on_schema_change() | 各数据库 DDL 更新时间与权限差异较大，尚无统一变更指纹契约 | 完成五种方言的 Schema fingerprint 和轮询成本评测 | Phase 3，Schema 新鲜度治理批次 |
 | 6.4.4 DDL 触发器/CDC 集成 | 依赖数据库侧权限和外部 CDC 基础设施，不适合默认部署 | 选定 CDC 平台并明确各数据源授权方式 | Phase 4，生产实时元数据阶段 |
-| 6.4.5 Redis 分布式锁 | 当前 Redis 后端已共享载荷，但并发刷新锁需与后台刷新/租约续期共同设计 | Redis 作为生产缓存且 CacheRefresher 方案确认 | Phase 3，多实例刷新批次 |
 
 ---

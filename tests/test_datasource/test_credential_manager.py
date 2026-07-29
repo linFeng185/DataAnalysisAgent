@@ -46,6 +46,31 @@ class TestCredentialManagerRandomSalt:
             logger.error("test_encrypt_uses_random_persisted_salt 异常: %s", exc, exc_info=True)
             raise
 
+    # 方法作用：验证凭证日志分类不会返回明文或密文主体。
+    # Args: self - pytest 测试类实例。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    def test_credential_reference_description_never_contains_secret(self) -> None:
+        """日志只能记录安全类别，不能记录无冒号明文密码。"""
+        # Arrange
+        from src.datasource.credential_manager import describe_credential_reference
+
+        values = {
+            "": "empty",
+            "${DATABASE_PASSWORD}": "environment_reference",
+            "v2:salt:ciphertext": "encrypted_v2",
+            "plain-secret-password": "configured",
+        }
+
+        # Act
+        descriptions = {
+            value: describe_credential_reference(value)
+            for value in values
+        }
+
+        # Assert
+        assert descriptions == values
+        assert all("secret" not in description for description in descriptions.values())
+
     # 方法作用：验证升级后仍能解密使用历史固定 salt 生成的 Fernet 密文。
     # Args: self - pytest 测试类实例。
     # Returns: 无返回值，断言失败时由 pytest 报告。
@@ -77,6 +102,51 @@ class TestCredentialManagerRandomSalt:
         except Exception as exc:
             logger.error(
                 "test_decrypt_supports_legacy_fixed_salt_token 异常: %s",
+                exc,
+                exc_info=True,
+            )
+            raise
+
+    # 方法作用：验证统一 Settings 中的稳定主密钥可跨进程级临时密钥变化解密。
+    # Args: self - pytest 测试类实例；monkeypatch - pytest 补丁工具。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    def test_app_context_key_survives_process_restart(self, monkeypatch) -> None:
+        """应用已加载稳定主密钥时，重启不得退回随机临时密钥。"""
+        logger.debug("test_app_context_key_survives_process_restart 入口")
+        try:
+            # Arrange
+            from types import SimpleNamespace
+
+            import src.datasource.credential_manager as credential_module
+            from src.app_context import AppContext, use_app_context
+
+            stable_key = "stable-settings-key-with-at-least-32-bytes"
+            context = AppContext(SimpleNamespace(
+                env="dev",
+                multi_tenant=False,
+                credential_encryption_key=stable_key,
+            ))
+            monkeypatch.setenv("ENV", "dev")
+            monkeypatch.delenv("CREDENTIAL_ENCRYPTION_KEY", raising=False)
+
+            # Act
+            with use_app_context(context):
+                first = credential_module.CredentialManager()
+                token = first.encrypt("persisted-password")
+                monkeypatch.setattr(
+                    credential_module,
+                    "_EPHEMERAL_NON_PROD_KEY",
+                    "different-process-ephemeral-key-with-32-bytes",
+                )
+                second = credential_module.CredentialManager()
+                result = second.decrypt(token)
+
+            # Assert
+            assert result == "persisted-password"
+            logger.info("test_app_context_key_survives_process_restart 完成")
+        except Exception as exc:
+            logger.error(
+                "test_app_context_key_survives_process_restart 异常: %s",
                 exc,
                 exc_info=True,
             )

@@ -79,7 +79,7 @@
 | 11.3.5 | SSE 格式化 | 同上 | `data: {json}\n\n` 格式包装 | 开发完成 |
 | 11.3.6 | Decimal JSON 精度 `[P1]` | 同上 `_json_serialize()` | Decimal 归一化→int或精确float | 开发完成 |
 | 11.3.7 | 全局 PrecisionResponse `[P1]` | `src/main.py` | FastAPI 默认响应类替换，float→Decimal | 开发完成 |
-| 11.3.8 | 并行 LLM 流隔离 `[P1]` | `src/api/streaming.py` | thinking/token 携带 run_id 派生的 stream_id，后端按调用实例隔离缓冲 | 单测完成 |
+| 11.3.8 | 并行 LLM 流隔离 `[P1]` | `src/api/streaming.py` | token 携带 run_id 派生的 stream_id 并按调用实例隔离；reasoning_content 仅服务端计数，不生成 thinking 事件 | 单测完成 |
 | 11.3.9 | 后台任务异常跟踪 | `src/api/background_tasks.py`、`src/api/routes/` | API 后台任务持有强引用并通过 done callback 记录异常 | 单测完成 | P0 |
 
 ### 模块收尾

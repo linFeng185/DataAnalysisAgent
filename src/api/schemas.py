@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -12,11 +12,46 @@ class ChatRequest(BaseModel):
     session_id: str = Field(default="", max_length=128)
     datasource: str = Field(default="", max_length=64)
     datasources: list[str] = Field(default_factory=list, max_length=20)
+    model_id: str = Field(default="", max_length=128)
+    enabled_skill_ids: list[str] = Field(default_factory=list, max_length=20)
     stream: bool = False
+
+
+class ChartAdjustRequest(BaseModel):
+    """使用已有查询结果重生成图表的请求。"""
+
+    rows: list[dict[str, Any]] = Field(..., min_length=1, max_length=500)
+    instruction: str = Field(..., min_length=1, max_length=100)
+
+
+class SkillRegistryInstallRequest(BaseModel):
+    """从中心 Registry 安装指定审核版本的请求。"""
+
+    version: str = Field(..., min_length=1, max_length=64)
+    scope: str = Field(default="private", pattern="^(system|tenant|private)$")
+
+
+class AutomationScheduleCreateRequest(BaseModel):
+    """创建主动洞察或定时报告任务的请求。"""
+
+    name: str = Field(..., min_length=1, max_length=128)
+    kind: Literal["insight", "report"]
+    datasource: str = Field(..., min_length=1, max_length=64)
+    sql: str = Field(..., min_length=1, max_length=20_000)
+    frequency: Literal["hourly", "daily", "weekly", "monthly"]
+    threshold_pct: float = Field(default=10.0, ge=0, le=10_000)
+    channels: list[Literal["in_app", "email", "feishu", "slack"]] = Field(
+        default_factory=lambda: ["in_app"],
+        min_length=1,
+        max_length=4,
+    )
+    recipient_email: str = Field(default="", max_length=320)
 
 
 class ChatResponse(BaseModel):
     success: bool
+    status: str = "success"
+    source: str = "sql_query"
     session_id: str = ""
     user_query: str = ""
     sql: str = ""
@@ -26,6 +61,8 @@ class ChatResponse(BaseModel):
     truncated: bool = False
     analysis: dict = Field(default_factory=dict)
     chart: dict = Field(default_factory=dict)
+    error_code: str = ""
+    error_message: str = ""
 
 
 class ErrorResponse(BaseModel):
@@ -43,6 +80,26 @@ class DataSourceCreateRequest(BaseModel):
     database: str = ""
     username: str = ""
     password: str = ""
+    version: str = ""
+    description: str = ""
+    db_schema: str = Field(default="", alias="schema")
+    tablespace: str = ""
+    service_name: str = ""
+    instance: str = ""
+    file_path: str = ""
+    tags: list[str] = Field(default_factory=list)
+    extra_params: dict[str, Any] = Field(default_factory=dict)
+
+
+class DataSourceUpdateRequest(BaseModel):
+    """数据源更新请求，空密码表示沿用原凭证。"""
+
+    dialect: str = Field(..., pattern="^(clickhouse|mysql|postgres|oracle|mssql|sqlite)$")
+    host: str = "localhost"
+    port: int = 0
+    database: str = ""
+    username: str = ""
+    password: str | None = None
     version: str = ""
     description: str = ""
     db_schema: str = Field(default="", alias="schema")
@@ -75,7 +132,9 @@ class DataSourceInfo(BaseModel):
     version: str = ""
     mode: str
     host: str
+    port: int = 0
     database: str = ""
+    username: str = ""
     description: str = ""
     connected: bool = False
 

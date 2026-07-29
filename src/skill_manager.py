@@ -6,9 +6,14 @@
 from __future__ import annotations
 
 import importlib.util
+import io
+import os
+import shutil
 import sys
+import tempfile
+import zipfile
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import yaml
 
@@ -173,6 +178,80 @@ class SkillManager:
             )
         self.skills[skill.resource_id] = skill
         logger.info("Skill 已注入缓存", name=skill.name, resource_id=skill.resource_id)
+
+    # 方法作用：验证并安装 Registry ZIP 到 API 授权的可信作用域目录。
+    # Args: self - 管理器；package - Registry 元数据；archive_bytes - 已验签 ZIP；scope - 作用域；tenant_id - 租户；user_id - 用户。
+    # Returns: 解析并注入缓存的 Skill。
+    def install_registry_package(
+        self,
+        package,
+        archive_bytes: bytes,
+        *,
+        scope: str,
+        tenant_id: int,
+        user_id: int,
+    ) -> Skill:
+        logger.debug(
+            "Registry Skill 安装入口",
+            skill=package.name,
+            version=package.version,
+            scope=scope,
+            tenant_id=tenant_id,
+            user_id=user_id,
+        )
+        target_root = self.get_upload_dir(scope, tenant_id=tenant_id, user_id=user_id)
+        target_root.mkdir(parents=True, exist_ok=True)
+        destination = target_root / package.name
+        if destination.exists():
+            raise FileExistsError(f"Skill '{package.name}' 已安装，请先删除旧版本")
+        with zipfile.ZipFile(io.BytesIO(archive_bytes)) as archive:
+            members = archive.infolist()
+            if not members or len(members) > 100:
+                raise ValueError("Skill ZIP 文件数量无效")
+            total_size = 0
+            for member in members:
+                path = PurePosixPath(member.filename)
+                mode = (member.external_attr >> 16) & 0o170000
+                if path.is_absolute() or ".." in path.parts or mode == 0o120000:
+                    raise ValueError("Skill ZIP 包含非法路径或符号链接")
+                total_size += int(member.file_size)
+                if total_size > 40 * 1024 * 1024:
+                    raise ValueError("Skill ZIP 解压后超过大小限制")
+            with tempfile.TemporaryDirectory(prefix="skill-registry-", dir=target_root) as temp_dir:
+                archive.extractall(temp_dir)
+                manifests = list(Path(temp_dir).rglob("SKILL.md"))
+                if len(manifests) != 1:
+                    raise ValueError("Skill ZIP 必须且只能包含一个 SKILL.md")
+                source_root = manifests[0].parent
+                shutil.copytree(source_root, destination)
+        try:
+            installed = self.load_skill_manifest(
+                destination / "SKILL.md",
+                scope=scope,
+                tenant_id=tenant_id if scope != "system" else 0,
+                owner_user_id=user_id if scope == "private" else 0,
+            )
+            if installed.name != package.name or installed.version != package.version:
+                raise ValueError("Skill Manifest 名称或版本与 Registry 元数据不一致")
+            self.add_skill(installed)
+        except Exception:
+            if destination.exists():
+                shutil.rmtree(destination)
+            logger.error(
+                "Registry Skill 安装失败",
+                skill=package.name,
+                version=package.version,
+                scope=scope,
+                exc_info=True,
+            )
+            raise
+        logger.info(
+            "Registry Skill 安装完成",
+            skill=installed.name,
+            version=installed.version,
+            resource_id=installed.resource_id,
+        )
+        return installed
 
     # 方法作用：判断指定可见 Skill 是否来自代码仓库内置目录。
     # Args: name - Skill 名称；tenant_id - 当前租户；user_id - 当前用户；scope - 可选精确作用域。
@@ -344,6 +423,54 @@ class SkillManager:
             logger.debug("Skill 匹配完成", names=[])
         return activated
 
+    # 方法作用：按当前身份精确解析用户显式选择的 Skill 复合资源 ID。
+    # Args: self - 管理器；resource_ids - 前端选择的复合 ID；tenant_id - 租户；user_id - 用户。
+    # Returns: 保持请求顺序且去重的已启用可见 Skill。
+    def resolve_requested_skills(
+        self,
+        resource_ids: list[str],
+        *,
+        tenant_id: int | None = None,
+        user_id: int | None = None,
+    ) -> list[Skill]:
+        resolved_tenant, resolved_user = self._resolve_identity(tenant_id, user_id)
+        visible = {
+            skill.resource_id: skill
+            for skill in self.get_visible_skills(resolved_tenant, resolved_user)
+        }
+        selected: list[Skill] = []
+        seen: set[str] = set()
+        for raw_resource_id in resource_ids:
+            resource_id = str(raw_resource_id or "").strip()
+            if not resource_id or resource_id in seen:
+                continue
+            skill = visible.get(resource_id)
+            if skill is None:
+                logger.warning(
+                    "显式 Skill 选择拒绝",
+                    resource_id=resource_id,
+                    tenant_id=resolved_tenant,
+                    user_id=resolved_user,
+                    reason="不可见",
+                )
+                raise PermissionError(f"Skill '{resource_id}' 不可见")
+            if not skill.enabled:
+                logger.warning(
+                    "显式 Skill 选择拒绝",
+                    resource_id=resource_id,
+                    reason="已禁用",
+                )
+                raise ValueError(f"Skill '{resource_id}' 已禁用")
+            seen.add(resource_id)
+            selected.append(skill)
+        logger.info(
+            "显式 Skill 选择完成",
+            selected_count=len(selected),
+            tenant_id=resolved_tenant,
+            user_id=resolved_user,
+        )
+        return selected
+
     # ── 9.1.7 获取工具 ──────────────────────────────
 
     # 方法作用：加载已激活 Skill 声明的 LangChain 工具。
@@ -368,6 +495,22 @@ class SkillManager:
                 logger.warning("Skill 工具加载失败", skill=skill.name, error=str(e))
         logger.debug("获取 Skill 工具完成", tool_count=len(tools))
         return tools
+
+    # 方法作用：计算当前请求可使用的最小 Skill 工具预算。
+    # Args: activated_skills - 当前身份已激活的 Skill。
+    # Returns: 非零 Skill 的最小调用次数；没有 Skill 时返回 0。
+    def get_tool_budget(self, activated_skills: list[Skill]) -> int:
+        """把 Manifest 中的调用预算收敛为请求级上限。"""
+        budgets: list[int] = []
+        for skill in activated_skills:
+            try:
+                budgets.append(max(0, int((skill.resources or {}).get("max_tool_calls", 50))))
+            except (TypeError, ValueError):
+                logger.error("Skill 调用预算非法", skill=skill.name, exc_info=True)
+                budgets.append(0)
+        budget = min(budgets) if budgets else 0
+        logger.info("Skill 工具预算完成", skill_count=len(activated_skills), tool_budget=budget)
+        return budget
 
     # ── 9.1.8 构建 Prompt ───────────────────────────
 
@@ -584,7 +727,7 @@ def validate_skill_request(skill: Skill, asset_kind: str, tool_calls: int = 0,
     except (TypeError, ValueError):
         logger.error("Skill 调用预算配置非法", skill=skill.name, exc_info=True)
         return False
-    if tool_calls < 0 or tool_calls > max_calls:
+    if tool_calls < 0 or tool_calls >= max_calls:
         logger.warning("Skill 调用预算超限", skill=skill.name, tool_calls=tool_calls, max_calls=max_calls)
         return False
     if network_host:

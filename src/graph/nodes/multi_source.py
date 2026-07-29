@@ -12,6 +12,9 @@ from __future__ import annotations
 import asyncio
 import time
 from decimal import Decimal, InvalidOperation
+from typing import Any
+
+from langchain_core.runnables import RunnableConfig
 
 from src.graph.state import AnalysisState
 from src.logging_config import get_logger
@@ -24,7 +27,13 @@ _SOURCE_LABEL_COLUMNS = frozenset({
 })
 
 
-async def multi_source_dispatch_node(state: AnalysisState) -> dict:
+# 方法作用：并行调度所有已选数据源进入共用 SQL 子图。
+# Args: state - 多源分析状态；config - 父级 RunnableConfig。
+# Returns: 每个来源的成功数据或隔离失败结果。
+async def multi_source_dispatch_node(
+    state: AnalysisState,
+    config: RunnableConfig = None,
+) -> dict:
     """多数据源调度节点——对每个源并行执行独立分析流水线。
 
     仅在 state.selected_datasources 长度 > 1 时生效。
@@ -52,8 +61,11 @@ async def multi_source_dispatch_node(state: AnalysisState) -> dict:
         scheduled_count=len(sources),
     )
 
-    # 并行执行各数据源分析
-    coros = [_analyze_one(s, state) for s in sources]
+    # 所有来源共用同一个 SQL 子图，避免每个来源维护一套隐藏边。
+    from src.graph.subgraphs.sql_analysis import build_sql_analysis_subgraph
+
+    subgraph = build_sql_analysis_subgraph()
+    coros = [_analyze_one(s, state, config=config, subgraph=subgraph) for s in sources]
     raw = await asyncio.gather(*coros, return_exceptions=True)
 
     # 收集有效结果
@@ -71,29 +83,25 @@ async def multi_source_dispatch_node(state: AnalysisState) -> dict:
     return {_SOURCES_KEY: collected}
 
 
-async def _analyze_one(datasource: str, state: AnalysisState) -> dict | None:
-    """单数据源完整分析流水线。
-
-    对指定数据源执行：Schema 检索 → SQL 生成 → 方言重写 → 执行。
-    异常在此捕获并返回 error dict，不向上传播。
-
-    Args:
-        datasource: 数据源名称
-        state: AnalysisState
-
-    Returns: {"datasource", "success", "sql", "data", "dialect", "tables"} 或 None
-    """
+# 方法作用：为单个数据源注入权限并运行完整 SQL 子图。
+# Args: datasource - 数据源名；state - 父级状态；config - 父级配置；subgraph - 可复用子图。
+# Returns: 来源级成功结果、失败结果或 None。
+async def _analyze_one(
+    datasource: str,
+    state: AnalysisState,
+    config: RunnableConfig | None = None,
+    subgraph: Any | None = None,
+) -> dict | None:
+    """运行单个数据源的统一 SQL 子图。"""
     logger.debug("单源分析入口", datasource=datasource, query=state.get("user_query", "")[:60])
     try:
-        # 在进入 Schema 与 LLM 链路前只做一次连接解析，失败立即返回。
         from src.datasource.registry import get_registry
+
         resolved = await get_registry().resolve_or_none(datasource)
         if resolved is None:
             logger.warning("单源分析跳过", datasource=datasource, reason="数据源连接失败或不存在")
             return {"datasource": datasource, "success": False, "error": "数据源连接失败或不存在"}
 
-        # Schema 检索
-        from src.graph.nodes.retrieve_schema import retrieve_schema_node
         s1 = dict(state)
         s1["datasource"] = datasource
         datasource_access = state.get("datasource_access", {}) or {}
@@ -112,16 +120,8 @@ async def _analyze_one(datasource: str, state: AnalysisState) -> dict | None:
             )
         s1["resolved_schema"] = resolved.schema
         s1["dialect"] = resolved.dialect
-        r1 = await retrieve_schema_node(s1)
-        if not r1.get("relevant_tables"):
-            logger.info("单源分析完成", datasource=datasource, success=False, reason="无可用表结构")
-            return {"datasource": datasource, "success": False, "error": "无可用表结构"}
-
-        # SQL 生成
-        from src.graph.nodes.generate_sql import generate_sql_node
-        s2 = {**s1, **r1}
         global_query = str(state.get("user_query", "") or "")
-        s2["user_query"] = (
+        s1["user_query"] = (
             "这是多数据源并行分析中的单源 SQL 子任务。"
             f"当前只负责数据源 `{datasource}`，当前 Schema 也只属于该数据源；"
             "其他已选数据源由独立 worker 查询，最终由合并节点统一比较。"
@@ -132,95 +132,80 @@ async def _analyze_one(datasource: str, state: AnalysisState) -> dict | None:
             f"\n全局问题：{global_query}"
         )
         logger.info(
-            "多源单库 SQL 生成状态",
+            "多源单库 SQL 子图边界输入",
             datasource=datasource,
             selected_sources=state.get("selected_datasources", []) or [],
             global_query=global_query[:200],
-            worker_query=str(s2.get("user_query", ""))[:200],
-            worker_table_count=len(s2.get("relevant_tables", []) or []),
         )
-        r2 = await generate_sql_node(s2, {})
-        sql = r2.get("generated_sql", "") if isinstance(r2, dict) else ""
-        if not sql:
-            logger.info("单源分析完成", datasource=datasource, success=False, reason="SQL 生成失败")
-            return {"datasource": datasource, "success": False, "error": "SQL 生成失败"}
 
-        # 安全校验
-        dialect = r1.get("dialect", "mysql")
-        from src.graph.nodes.layer3_validate import layer3_validate_node
-        v3 = await layer3_validate_node({**s2, "generated_sql": sql, "dialect": dialect})
-        validation_errors = v3.get("validation_errors", []) or []
-        if validation_errors:
+        if subgraph is None:
+            from src.graph.subgraphs.sql_analysis import build_sql_analysis_subgraph
+
+            subgraph = build_sql_analysis_subgraph()
+        worker_config = dict(config or {})
+        metadata = dict(worker_config.get("metadata", {}) or {})
+        metadata.update({"datasource": datasource, "worker": "multi_source_sql"})
+        worker_config["metadata"] = metadata
+        worker_config["tags"] = [
+            *(worker_config.get("tags", []) or []),
+            "multi_source",
+            f"datasource:{datasource}",
+        ]
+        result = await subgraph.ainvoke(s1, config=worker_config)
+        if not isinstance(result, dict):
+            return {"datasource": datasource, "success": False, "error": "SQL 子图未返回结果"}
+
+        dialect = str(result.get("dialect", resolved.dialect or "mysql"))
+        sql = str(result.get("generated_sql", "") or "")
+        validation_errors = result.get("validation_errors", []) or []
+        explain_errors = result.get("explain_errors", []) or []
+        execution_error = str(result.get("execution_error", "") or "")
+        if validation_errors or explain_errors or execution_error or not sql:
+            errors = validation_errors or explain_errors
             error_message = "; ".join(
-                str(error.get("message", "SQL 校验失败"))
-                for error in validation_errors
-            )
+                str(error.get("message", "SQL 子图执行失败"))
+                for error in errors
+                if isinstance(error, dict)
+            ) or execution_error or "SQL 生成失败"
             logger.warning(
-                "多源 SQL 校验失败，终止来源执行",
+                "多源 SQL 子图失败",
                 datasource=datasource,
                 dialect=dialect,
-                error=error_message[:500],
+                validation_error_count=len(validation_errors),
+                explain_error_count=len(explain_errors),
+                execution_error_type=result.get("execution_error_type", ""),
             )
             return {
                 "datasource": datasource,
                 "success": False,
                 "error": error_message,
                 "validation_errors": validation_errors,
-            }
-
-        # 真实 EXPLAIN 语义校验，与单源主链保持一致。
-        from src.graph.nodes.layer4_explain import layer4_explain_node
-        v4 = await layer4_explain_node({
-            **s2,
-            "generated_sql": sql,
-            "dialect": dialect,
-            "datasource": datasource,
-        })
-        explain_errors = v4.get("explain_errors", []) or []
-        if explain_errors:
-            error_message = "; ".join(
-                str(error.get("message", "EXPLAIN 校验失败"))
-                for error in explain_errors
-            )
-            logger.warning(
-                "多源 EXPLAIN 失败，终止来源执行",
-                datasource=datasource,
-                dialect=dialect,
-                error=error_message[:500],
-            )
-            return {
-                "datasource": datasource,
-                "success": False,
-                "error": error_message,
                 "explain_errors": explain_errors,
+                "sql": sql,
+                "dialect": dialect,
             }
-        sql = str(v4.get("generated_sql", "") or sql)
 
-        # 执行
-        from src.graph.nodes.execute_sql import execute_sql_node
-        r4 = await execute_sql_node({
-            **s2,
-            "generated_sql": sql,
+        data = result.get("query_result_sample", []) or []
+        final_sql = str(result.get("generated_sql", "") or sql)
+        output = {
+            "datasource": datasource,
+            "success": True,
+            "sql": final_sql,
+            "data": data[:50],
             "dialect": dialect,
-            "sql_explain_checked": True,
-        })
-        data = r4.get("query_result_sample", []) or []
-
-        final_sql = str(r4.get("generated_sql", "") or sql)
-        result = {"datasource": datasource, "success": not r4.get("execution_error"),
-                  "sql": final_sql, "data": data[:50], "dialect": dialect,
-                  "tables": len(r1.get("relevant_tables", []))}
+            "tables": len(result.get("relevant_tables", []) or []),
+        }
         logger.info(
             "单源分析完成",
             datasource=datasource,
-            success=result["success"],
-            data_rows=len(result["data"]),
+            success=True,
+            data_rows=len(output["data"]),
             final_sql_chars=len(final_sql),
         )
-        return result
-    except Exception as e:
-        logger.error("单源分析异常", datasource=datasource, error=str(e), exc_info=True)
-        return {"datasource": datasource, "success": False, "error": str(e)}
+        return output
+    except Exception as exc:
+        logger.error("单源分析异常", datasource=datasource, error=str(exc), exc_info=True)
+        return {"datasource": datasource, "success": False, "error": str(exc)}
 
 
 # 识别跨源单行可加指标，并用 Decimal 生成确定性总计。
@@ -642,7 +627,13 @@ def _append_source_failures(analysis: dict, failed_results: list[dict]) -> dict:
     return result
 
 
-async def merge_results_node(state: AnalysisState) -> dict:
+# 方法作用：合并多源数据并通过结果展示子图生成统一分析与图表。
+# Args: state - 多源 worker 结果状态；config - 父级 RunnableConfig。
+# Returns: 合并后的分析、图表、样本和统计状态增量。
+async def merge_results_node(
+    state: AnalysisState,
+    config: RunnableConfig = None,
+) -> dict:
     """多数据源结果合并节点——用 LLM 综合分析所有源的结果。
 
     将各数据源的查询结果 + SQL 拼入 Prompt，
@@ -697,17 +688,41 @@ async def merge_results_node(state: AnalysisState) -> dict:
             if is_task_llm_available("multi_source_merge"):
                 llm = get_task_llm("multi_source_merge", temperature=0, reasoning=False)
                 from langchain_core.messages import SystemMessage, HumanMessage
+                from src.llm.prompt_budget import PromptSection, build_budgeted_prompt
+                prompt = build_budgeted_prompt(
+                    "multi_source.merge",
+                    [
+                        PromptSection(
+                            "query",
+                            f"## 用户问题\n{query}\n请综合分析并回答用户问题。",
+                            priority=100,
+                            min_chars=300,
+                            max_chars=1400,
+                        ),
+                        PromptSection(
+                            "source_results",
+                            ctx,
+                            priority=90,
+                            min_chars=2500,
+                            max_chars=6500,
+                        ),
+                    ],
+                )
                 resp = await llm.ainvoke([
-                    SystemMessage(content=(
-                        "你是数据分析师。综合来自多个数据库的结果生成分析报告。"
-                        "标注每个结论的数据来源。中文输出。")),
-                    HumanMessage(content=f"{ctx}\n请综合分析并回答用户问题。")])
-                summary = resp.content.strip() or summary
-                summary_from_llm = bool(resp.content.strip())
+                    SystemMessage(content=prompt.system),
+                    HumanMessage(content=prompt.human)])
+                from src.llm.output_contracts import AnalysisOutput, parse_json_model
+
+                try:
+                    structured = parse_json_model(resp.content, AnalysisOutput)
+                    summary = structured.summary.strip() or summary
+                except Exception:
+                    summary = resp.content.strip() or summary
+                summary_from_llm = bool(summary.strip())
         except Exception as e:
             logger.warning("LLM 跨源合并失败", error=str(e))
 
-    # 有数据时走分析+图表流水线
+    # 有数据时走固定边的结果展示子图。
     analysis = precise_analysis or {
         "summary": summary,
         "insights": [],
@@ -718,18 +733,34 @@ async def merge_results_node(state: AnalysisState) -> dict:
 
     if all_data:
         try:
-            from src.graph.nodes.analyze_result import analyze_result_node
-            from src.graph.nodes.generate_chart import generate_chart_node
-            merged_state = {"query_result_sample": all_data[:200],
-                            "user_query": query,
-                            "intent": state.get("intent", "query")}
-            if precise_analysis is None:
-                a_result = await analyze_result_node(merged_state)
-                analysis = a_result.get("analysis_result", analysis)
-                if summary_from_llm:
-                    analysis = {**analysis, "summary": summary}
-            c_result = await generate_chart_node({**merged_state, "analysis_result": analysis})
-            chart = c_result.get("chart_config", chart)
+            from src.graph.subgraphs.result_presentation import (
+                build_result_presentation_subgraph,
+            )
+
+            merged_state: AnalysisState = {
+                "query_result_sample": all_data[:200],
+                "user_query": query,
+                "intent": state.get("intent", "query"),
+                "analysis_result": analysis,
+                "multi_source_analysis_precomputed": precise_analysis is not None,
+            }
+            presentation_config = dict(config or {})
+            metadata = dict(presentation_config.get("metadata", {}) or {})
+            metadata["worker"] = "multi_source_result_presentation"
+            presentation_config["metadata"] = metadata
+            presentation_config["tags"] = [
+                *(presentation_config.get("tags", []) or []),
+                "multi_source",
+                "result_presentation",
+            ]
+            presented = await build_result_presentation_subgraph().ainvoke(
+                merged_state,
+                config=presentation_config,
+            )
+            analysis = presented.get("analysis_result", analysis)
+            if summary_from_llm:
+                analysis = {**analysis, "summary": summary}
+            chart = presented.get("chart_config", chart)
         except Exception as e:
             logger.warning("跨源分析/图表生成失败", error=str(e))
 

@@ -11,21 +11,23 @@ LLM 驱动的数据分析智能体。用自然语言提问，自动完成：轮�
 ```
 ├── src/
 │   ├── api/              ① Web 接口层 — 访问策略/领域路由/纯 ASGI 认证/安全头 + SSE 流式
-│   ├── graph/            ② 核心流水线 — LangGraph 16 节点 DAG
+│   ├── graph/            ② 核心流水线 — LangGraph 主图 + 可复用 SQL 子图
 │   │   └── nodes/           状态准备、SQL 主链、直接回答与多源节点
-│   ├── llm/              ③ LLM 调用层 — Provider 注册表 + 适配器 + Prompt
+│   │   └── subgraphs/       多源 worker 复用主图语义的 SQL 执行与结果展示子图
+│   ├── llm/              ③ LLM 调用层 — Provider 注册表 + 适配器 + 版本化 Prompt
 │   │   └── adapters/         模型适配器
 │   ├── datasource/       ④ 数据源管理 — 注册/发现/Schema/凭证加密
 │   │   └── providers/        数据源提供者
 │   ├── connectors/       ⑤ 数据库连接器 — 自注册方言与统一运行时策略
 │   ├── knowledge/        ⑥ 知识库 — 三范围治理 + 标签 + 连接级缓存 + 文档摄取
 │   ├── memory/           ⑦ 记忆系统 — 会话持久化 + 上下文裁剪 + 历史
-│   ├── tools/            ⑧ 分析工具 — 统计、预测与跨资产分析
-│   ├── market/           ⑨ 行情 Provider 与 PostgreSQL 持久化（当前 Tushare/A 股）
-│   ├── actions/          ⑩ 受控外部动作（人工确认、幂等、审计）
-│   ├── security/         ⑪ 安全模块 — API/IP 策略 + SQL 统一执行 + 脱敏 + 限流 + 审计 + 出站策略
-│   ├── db/               ⑫ 状态库基础设施 — 版本化迁移 + URL 工具
-│   ├── mcp_client/       ⑬ MCP 集成 — 客户端管理 + 工具暴露
+│   ├── automation/       ⑧ 主动洞察与定时报告 — PG 调度 + 重授权执行 + 通知分发
+│   ├── tools/            ⑨ 分析工具 — 统计、预测与跨资产分析
+│   ├── market/           ⑩ 行情 Provider 与 PostgreSQL 持久化（当前 Tushare/A 股）
+│   ├── actions/          ⑪ 受控外部动作（人工确认、幂等、审计）
+│   ├── security/         ⑫ 安全模块 — API/IP 策略 + SQL 统一执行 + 脱敏 + 限流 + 审计 + 出站策略
+│   ├── db/               ⑬ 状态库基础设施 — 版本化迁移 + URL 工具
+│   ├── mcp_client/       ⑭ MCP 集成 — 客户端管理 + 工具暴露
 │   ├── app_context.py        应用级依赖容器 + ASGI 请求绑定 + 资源关闭
 │   ├── config.py             配置管理 (pydantic-settings)
 │   ├── bootstrap.py          分阶段启动/关闭编排
@@ -53,14 +55,14 @@ POST /api/v1/chat {"query": "本月 GMV 排名？", "stream": true}
   ├─ API 访问策略        YAML/PG 策略 → 可信代理 IP → deny/allow → 分级访问日志
   ├─ API 安全入口        public/optional/JWT/Admin Key/超级管理员认证 → 请求预算 → 数据源授权候选
   ├─ prepare_turn        保留轻量历史/快照，清理不落 checkpoint 的当前轮状态
-  ├─ classify_intent     关键词匹配 → 7 种意图 + Skill 激活
+  ├─ classify_intent     关键词匹配 → 8 种意图 + 第一阶段 Skill 激活
   ├─ restore_previous_result  仅 meta 且数据源一致时从 HistoryStore 恢复上轮富结果
   ├─ retrieve_schema     SchemaManager 三级回退 → 表结构 + 知识库上下文
-  ├─ generate_sql        LLM 生成 SQL（对话历史注入 + 重试上下文）
+  ├─ generate_sql        LLM 生成 SQL（对话历史注入 + 重试上下文 + Pydantic 契约）
   ├─ layer3_validate     委托统一 SQL 服务做 AST 只读安全校验
   ├─ layer4_explain      统一 SQL 服务按 Registry 权威方言执行 EXPLAIN
   ├─ execute_sql         统一有界执行（权限 / 限流 / 脱敏 / 审计）
-  ├─ analyze_result      统计计算 + LLM 洞察
+  ├─ analyze_result      统计计算 + LLM 洞察 + 第二阶段 Skill 工具执行
   ├─ generate_chart      ECharts 配置生成（桩）
   └─ build_response      响应组装 + 轻量会话历史 + HistoryStore 富结果
 ```
@@ -73,6 +75,7 @@ POST /api/v1/chat {"query": "本月 GMV 排名？", "stream": true}
 |------|------|
 | `routes/__init__.py` | 组合各领域 APIRouter，并保留旧模块导出兼容 |
 | `routes/*.py` | chat、datasource、schema、session、mcp、knowledge、skills、management、admin、access_policy 领域端点 |
+| `routes/automation.py` | 自动化任务 CRUD、立即运行和用户私有站内通知 |
 | `schemas.py` | Pydantic 请求/响应模型 |
 | `streaming.py` | SSE 流式（13 种事件类型，LLM 调用按 stream_id 隔离） |
 | `middleware.py` | 异常 → HTTP 状态码映射 |
@@ -91,7 +94,10 @@ POST /api/v1/chat {"query": "本月 GMV 排名？", "stream": true}
 | `nodes/prepare_turn.py` | 固化上一轮轻量索引，压缩旧历史并清空当前轮 SQL/错误/结果/分析状态 |
 | `nodes/restore_previous_result.py` | 校验数据源集合后从 HistoryStore 恢复上轮 SQL、结果样本和统计 |
 | `nodes/classify_intent.py` | 意图分类 + Skill 激活 |
-| `nodes/retrieve_schema.py` | Schema 检索 + 知识库上下文 |
+| `skill_activation.py` | 意图阶段和 Schema 阶段的两阶段 Skill 激活与预算聚合 |
+| `subgraphs/sql_analysis.py` | 主图与多源 worker 共享的 Schema、分解、SQL、校验、EXPLAIN、执行拓扑装配 |
+| `subgraphs/result_presentation.py` | 多源合并复用的分析、图表固定边与精确分析短路子图 |
+| `nodes/retrieve_schema.py` | Schema 检索 + 知识库上下文 + 按真实表名再次激活 Skill |
 | `nodes/generate_sql.py` | LLM SQL 生成（对话历史注入） |
 | `nodes/layer3_validate.py` | sqlglot AST 只读白名单与危险语句阻断 |
 | `nodes/execute_sql.py` | SQL 执行（空 SQL 跳过保护） |
@@ -101,7 +107,7 @@ POST /api/v1/chat {"query": "本月 GMV 排名？", "stream": true}
 
 ### ③ `src/llm/` — LLM 调用层
 
-`client.py`（兼容工厂 + local/remote/none 任务路由）+ `provider_registry.py`（OpenAI/Anthropic Provider 注册）+ `adapters/` + `prompts.py`。默认只有 `generate_sql` 可调用远程模型，轻量节点优先 `LOCAL_LLM_*`。
+`client.py`（兼容工厂 + local/remote/none 任务路由）+ `provider_registry.py`（OpenAI/Anthropic Provider 注册）+ `adapters/` + `prompts.py` + `prompt_budget.py` + `output_contracts.py`。Prompt 通过稳定 ID/版本注册，System 与动态上下文共享字符预算，节点输出优先由 Pydantic 校验；默认只有 `generate_sql` 可调用远程模型，轻量节点优先 `LOCAL_LLM_*`。
 
 ### ④ `src/datasource/` — 数据源管理
 
@@ -146,7 +152,12 @@ POST /api/v1/chat {"query": "本月 GMV 排名？", "stream": true}
 | `long_term_store.py` | 长期记忆（ChromaDB + PG 双写） |
 | `session_archive.py` | 会话归档 |
 
-### ⑧~⑩ — 工具/安全/MCP
+### ⑧ `src/automation/` — 主动洞察与定时报告
+
+`AutomationStore` 使用 PostgreSQL `SKIP LOCKED` 认领到期任务；`ScheduledAnalysisRunner` 每次运行重新检查
+数据源、行列权限和只读 SQL；`NotificationDispatcher` 的 SMTP/飞书/Slack 只读取服务端配置，站内通知持久化到 PostgreSQL。
+
+### ⑨~⑫、⑭ — 工具/行情/动作/安全/MCP
 
 | 模块 | 职责 |
 |------|------|
@@ -168,12 +179,14 @@ POST /api/v1/chat {"query": "本月 GMV 排名？", "stream": true}
 | `mcp/client_manager.py` | MCP Client 独立连接栈、自动迁移、system/tenant/private 请求级工具过滤 |
 | `mcp/server.py` | MCP Server（暴露 4 个工具） |
 
-### ⑫ `src/db/` — 状态库迁移
+### ⑬ `src/db/` — 状态库迁移
 
 `migrations.py` 在应用启动早期按编号扫描 `migrations/*.sql`，使用 PostgreSQL advisory lock
 避免多实例并发，按文件事务执行，并在 `schema_migrations` 记录版本、文件名与 checksum。
 `007_api_access_policy.sql` 为动态策略和 CIDR 规则启用强制 RLS。API 策略加载属于必需启动步骤，
 任一环境加载失败均阻断启动，防止数据库规则静默失效。
+`009_automation.sql` 为自动化任务、运行记录和站内通知建表并启用租户/用户 RLS，
+`010_automation_force_rls.sql` 强制表所有者也执行这些策略。
 
 ## Skills 系统
 
@@ -185,7 +198,7 @@ POST /api/v1/chat {"query": "本月 GMV 排名？", "stream": true}
 
 ## 前端
 
-`frontend/` — React 18 + TypeScript 5 + Ant Design 5 + ECharts。登录后按角色展示业务菜单；固定 `users.id=1` 超级管理员可进入平台管理页维护租户、用户、安全摘要、API 访问策略、接口 IP 黑白名单以及 system Skills/知识/MCP。
+`frontend/` — React 18 + TypeScript 5 + Ant Design 5 + ECharts。登录后按角色展示业务菜单；`AutomationPage` 提供任务创建、立即运行、删除和站内通知视图；固定 `users.id=1` 超级管理员可进入平台管理页维护租户、用户、安全摘要、API 访问策略、接口 IP 黑白名单以及 system Skills/知识/MCP。
 
 ## 快速上手
 
@@ -207,7 +220,7 @@ POST /api/v1/chat {"query": "本月 GMV 排名？", "stream": true}
 - **多源失败隔离**：每个 worker 独立执行 Schema/SQL/Layer3/EXPLAIN/Execute，不可达来源返回来源级错误
 - **跨源列契约**：按全部结果行识别 dimension/metric 角色，角色序列兼容时按位置统一任意数量列；冲突时保留原字段
 - **最终 SQL 展示**：多源 worker 返回 execute_sql 方言重写/权限注入后的 SQL，响应通过 sql_statements 按来源展示
-- **并行流隔离**：SSE 使用 LangChain run_id 派生 stream_id，前端按调用实例缓冲 thinking/token
+- **并行流隔离**：SSE 使用 LangChain run_id 派生 stream_id，前端按调用实例缓冲 token；原始 reasoning_content 仅做服务端受控诊断
 - **安全阻断**：layer3 使用 sqlglot AST 只读白名单，阻断 DDL/DML、SELECT INTO 和状态变更函数；表/列解析异常失败关闭
 - **高权限连接告警**：DataSourceRegistry 识别 Oracle `SYS/SYSTEM` 和 SQL Server `sa` 时记录 warning 但继续连接；数据库账号权限不改变 layer3 的只读失败关闭策略
 - **向量过滤精确化**：Milvus LIKE 仅缩小候选集，解析 metadata 后再次精确校验，搜索、计数和删除共享同一过滤语义
@@ -223,6 +236,9 @@ POST /api/v1/chat {"query": "本月 GMV 排名？", "stream": true}
 - **会话逐轮恢复**：每轮完整 `final_response` 只写 `query_history.final_result` JSONB；前端逐轮消费，checkpoint 不复制数据与图表
 - **会话恢复回退**：逐轮 JSONB 是富结果权威来源；Checkpointer 只补轻量摘要和消息，旧/缺失状态回退贫化摘要/SQL
 - **单一路径工作流**：执行路由统一走条件边，避免并行分支状态丢失
+- **子图复用**：多数据源 worker 通过子图复用主图节点和条件路由语义，合并展示使用固定分析/图表边；两者均传递父级 RunnableConfig 的 metadata/tags
+- **结果状态统一**：`success/status/source/error_code/error_message` 是所有 SQL、MCP、直接回答和多源路径的共同契约；内部推理与数据库异常不进入 SSE、历史或会话恢复
+- **Prompt 可扩展**：新增能力先注册 PromptDefinition 和输出模型，再由节点声明 PromptSection 的优先级、最低保留量和上限；解析失败只能走显式兼容回退
 - **三级扩展隔离**：Skill/MCP 使用 system/tenant/private 统一作用域；系统写入仅 super_admin，租户写入仅 tenant_admin/super_admin，个人资源仅本人
 - **跨轮结果索引**：`previous_turn_snapshot` 只保存来源、SQL 和可用性标记；明确 meta 追问校验数据源后从 HistoryStore 恢复
 - **统一 SQL 安全执行**：Graph Layer 3/4、执行节点和 DB Tools 均委托 `security/sql_execution.py`，Registry 方言覆盖调用方提示

@@ -1,7 +1,7 @@
 """11.3 SSE 流式输出 — astream_events 逐 Node 推送。
 
 并行 LLM 调用支持：
-  - thinking / token 事件均携带 node 与 stream_id 标识调用实例
+  - token 事件携带 node 与 stream_id 标识调用实例，内部推理仅记录长度
   - llm_content_parts 按 stream_id 分区，互不污染
   - on_chat_model_stream 独立查找父节点，不依赖全局状态
 """
@@ -17,6 +17,7 @@ from decimal import Decimal
 from src.app_context import get_tenant_policy
 from src.config import get_settings
 from src.graph.node_registry import get_progress_map
+from src.graph.outcome import sanitize_public_output
 from src.logging_config import get_logger
 
 logger = get_logger(__name__)
@@ -122,18 +123,19 @@ def _event_stream_id(event: dict) -> str:
 
 
 # 方法作用：执行 LangGraph 并通过 SSE 推送节点进度、模型事件和最终结果。
-# Args: user_query - 用户问题；datasource - 主数据源；session_id - 会话；datasources - 多数据源；tenant_id/user_id/user_role - 认证身份；datasource_access - API 授权快照；request_rate_limit_checked - API 是否已计入配额。
+# Args: user_query - 用户问题；datasource - 主数据源；session_id - 会话；datasources - 多数据源；tenant_id/user_id/user_role - 认证身份；datasource_access - API 授权快照；enabled_skill_ids - 显式 Skill；request_rate_limit_checked - API 是否已计入配额。
 # Returns: SSE 事件异步生成器。
 async def stream_analysis(user_query: str, datasource: str, session_id: str = "",
                           datasources: list[str] | None = None,
                           tenant_id: int | None = None, user_id: int | None = None,
                           user_role: str | None = None,
                           datasource_access: dict[str, dict] | None = None,
+                          enabled_skill_ids: list[str] | None = None,
                           request_rate_limit_checked: bool = False):
     """SSE: 逐 Node 推送进度 + LLM token + 关键结果。
 
-    每个 thinking / token 事件均携带 node 和 stream_id 字段，
-    前端可按调用实例分组渲染并行 LLM 输出。
+    每个 token 事件均携带 node 和 stream_id 字段，前端可按调用实例分组渲染并行 LLM 输出。
+    原始 reasoning_content 仅计数并写入服务端受控诊断，不生成 SSE 事件。
     """
     from src.graph.workflow import app
 
@@ -215,6 +217,7 @@ async def stream_analysis(user_query: str, datasource: str, session_id: str = ""
                        "row_filter_sql": str(primary_access.get("row_filter_sql", "") or ""),
                        "tenant_id": tenant_id, "user_id": user_id,
                        "user_role": user_role,
+                       "enabled_skill_ids": list(enabled_skill_ids or []),
                        "request_rate_limit_checked": request_rate_limit_checked}
         async for event in app.astream_events(input_state, config, version="v2"
         ):
@@ -252,7 +255,10 @@ async def stream_analysis(user_query: str, datasource: str, session_id: str = ""
                     elif name == "layer3_validate":
                         yield _sse("validation", {"valid": output.get("sql_valid", True)})
                     elif name == "build_response" and isinstance(output, dict):
-                        yield _sse("result", output.get("final_response", {}))
+                        yield _sse(
+                            "result",
+                            sanitize_public_output(output.get("final_response", {})),
+                        )
                     elif name == "analyze_result" and isinstance(output, dict):
                         yield _sse("analysis", output.get("analysis_result", {}))
                     # 回退：该节点 LLM 流式 token 没到时，输出累积内容
@@ -303,11 +309,12 @@ async def stream_analysis(user_query: str, datasource: str, session_id: str = ""
                     sc = adapter.parse_stream_chunk(chunk)
                     if sc.reasoning_content:
                         stats["thinking_events"] += 1
-                        yield _sse("thinking", {
-                            "node": node,
-                            "stream_id": stream_id,
-                            "reasoning_content": sc.reasoning_content,
-                        })
+                        logger.debug(
+                            "模型内部推理块已抑制",
+                            node=node,
+                            stream_id=stream_id,
+                            reasoning_chars=len(sc.reasoning_content),
+                        )
                     if sc.content:
                         stats["token_events"] += 1
                         llm_content_parts[stream_id].append(sc.content)
@@ -326,7 +333,7 @@ async def stream_analysis(user_query: str, datasource: str, session_id: str = ""
 
     except Exception as e:
         logger.error("流式错误", error=str(e), exc_info=True)
-        yield _sse("error", {"message": str(e)})
+        yield _sse("error", {"message": "流式处理失败，请稍后重试"})
         logger.info("流式异常终止", stats=stats)
         yield _sse("done", {"status": "error"})
         return

@@ -155,9 +155,28 @@ class TestPlatformAdminRoutes:
         """租户、用户和配置摘要端点缺一不可。"""
         logger.debug("test_admin_routes_are_registered 入口")
         from src.api.routes import router
+        from src.api.routes.admin import router as admin_router
 
-        routes = {(method, route.path) for route in router.routes for method in route.methods}
+        included_routers = [
+            route.original_router
+            for route in router.routes
+            if hasattr(route, "original_router")
+        ]
+        admin_included = any(candidate is admin_router for candidate in included_routers)
+        routes = {
+            (method, route.path)
+            for route in admin_router.routes
+            for method in (getattr(route, "methods", None) or set())
+        }
+        logger.info(
+            "平台管理路由注册探针",
+            extra={
+                "included": admin_included,
+                "route_count": len(routes),
+            },
+        )
 
+        assert admin_included is True
         assert ("GET", "/admin/tenants") in routes
         assert ("POST", "/admin/tenants") in routes
         assert ("GET", "/admin/users") in routes

@@ -4,6 +4,11 @@ from __future__ import annotations
 
 from fastapi import APIRouter, HTTPException, Query
 
+from src.graph.outcome import (
+    public_error_message,
+    sanitize_public_output,
+    status_from_response,
+)
 from src.logging_config import get_logger
 
 logger = get_logger(__name__)
@@ -167,8 +172,8 @@ async def delete_session(session_id: str):
 def _merge_rich_result(primary: dict | None, fallback: dict | None) -> dict:
     """以持久化响应为主，仅用回退响应补齐空的富数据字段。"""
     try:
-        primary_value = primary if isinstance(primary, dict) else {}
-        fallback_value = fallback if isinstance(fallback, dict) else {}
+        primary_value = sanitize_public_output(primary) if isinstance(primary, dict) else {}
+        fallback_value = sanitize_public_output(fallback) if isinstance(fallback, dict) else {}
         logger.debug(
             "合并历史富结果入口",
             primary_keys=sorted(primary_value.keys()),
@@ -178,7 +183,6 @@ def _merge_rich_result(primary: dict | None, fallback: dict | None) -> dict:
         merged.update(primary_value)
         rich_fields = (
             "sql", "sql_statements", "data", "row_count", "analysis", "chart",
-            "sql_reasoning_content",
         )
         for field in rich_fields:
             value = primary_value.get(field)
@@ -278,6 +282,9 @@ async def _load_latest_state(session_id: str) -> dict | None:
         # 多源查询的 generated_sql 可以为空，必须优先读取最终响应判断富数据。
         if isinstance(checkpoint_response, dict) and checkpoint_response:
             data_sample = checkpoint_response.get("data", cv.get("query_result_sample", [])) or []
+            success = bool(checkpoint_response.get("success", True))
+            response_status = status_from_response(checkpoint_response)
+            error_code = str(checkpoint_response.get("error_code", "") or "")
             result = {
                 "sql": checkpoint_response.get("sql", cv.get("generated_sql", "")) or "",
                 "sql_statements": checkpoint_response.get("sql_statements", []) or [],
@@ -290,11 +297,15 @@ async def _load_latest_state(session_id: str) -> dict | None:
                 "truncated": bool(
                     checkpoint_response.get("truncated", cv.get("query_result_truncated", False))
                 ),
-                "success": bool(checkpoint_response.get("success", True)),
-                "error_message": checkpoint_response.get("error_message", "") or "",
-                "sql_reasoning_content": checkpoint_response.get(
-                    "sql_reasoning_content", cv.get("sql_reasoning_content", "")
-                ) or "",
+                "success": success,
+                "status": response_status,
+                "source": checkpoint_response.get("source", ""),
+                "error_code": error_code,
+                "error_message": (
+                    public_error_message(error_code, fallback="查询失败")
+                    if response_status in {"failed", "partial"}
+                    else ""
+                ),
             }
             logger.info(
                 "最新状态从最终响应恢复", session_id=session_id[:20],
@@ -302,7 +313,7 @@ async def _load_latest_state(session_id: str) -> dict | None:
                 data_rows=len(result["data"]),
                 has_analysis=bool(result["analysis"]),
             )
-            return result
+            return sanitize_public_output(result)
 
         # Checkpointer 不可用或没有最终响应时，回退到持久化逐轮查询历史。
         if not cv.get("generated_sql") and not cv.get("execution_error"):
@@ -317,7 +328,7 @@ async def _load_latest_state(session_id: str) -> dict | None:
                         session_id=session_id[:20],
                         data_rows=len(persisted_response.get("data", []) or []),
                     )
-                    return persisted_response
+                    return sanitize_public_output(persisted_response)
                 logger.info(
                     "最新状态从查询历史恢复", session_id=session_id[:20],
                     sql=bool(latest.get("sql")),
@@ -330,10 +341,14 @@ async def _load_latest_state(session_id: str) -> dict | None:
                     "truncated": False,
                     "success": bool(latest.get("success", True)),
                     "error_message": "" if latest.get("success", True) else "查询失败",
-                    "sql_reasoning_content": "",
                 }
         # 只提取前端需要的富数据字段
         data_sample = cv.get("query_result_sample", []) or []
+        success = not bool(
+            cv.get("execution_error", "")
+            or cv.get("validation_errors", [])
+            or cv.get("explain_errors", [])
+        )
         return {
             "sql": cv.get("generated_sql", "") or "",
             "sql_statements": [],
@@ -342,9 +357,10 @@ async def _load_latest_state(session_id: str) -> dict | None:
             "data": data_sample if isinstance(data_sample, list) else [],
             "row_count": int(cv.get("query_result_full_count", 0) or 0),
             "truncated": bool(cv.get("query_result_truncated", False)),
-            "success": not cv.get("execution_error", ""),
-            "error_message": cv.get("execution_error", "") or "",
-            "sql_reasoning_content": cv.get("sql_reasoning_content", "") or "",
+            "success": success,
+            "status": "success" if success else "failed",
+            "error_code": "" if success else "SQL_EXECUTION_FAILED",
+            "error_message": "" if success else public_error_message("SQL_EXECUTION_FAILED"),
         }
     except Exception as exc:
         logger.error(
@@ -376,7 +392,7 @@ def _checkpoint_turns(channel_values: dict) -> list[dict]:
             }
             if not value.get("user_query"):
                 continue
-            final_result = value.get("final_result", {}) or {}
+            final_result = sanitize_public_output(value.get("final_result", {}) or {})
             analysis = final_result.get("analysis", {}) if isinstance(final_result, dict) else {}
             turns.append({
                 "turn_id": value.get("turn_id", index + 1),
@@ -435,7 +451,11 @@ def _checkpoint_turns(channel_values: dict) -> list[dict]:
         turns.append({
             "turn_id": 1,
             "user_query": channel_values.get("user_query", "") or "",
-            "assistant_summary": summary or channel_values.get("execution_error", "") or "会话未完成",
+            "assistant_summary": summary or (
+                public_error_message("SQL_EXECUTION_FAILED")
+                if channel_values.get("execution_error", "")
+                else "会话未完成"
+            ),
             "sql": channel_values.get("generated_sql", "") or "",
             "timestamp": "",
             "final_result": {},
@@ -480,7 +500,7 @@ async def _enrich_turns_from_history(
         ),
         "sql": item.get("sql", "") or "",
         "timestamp": item.get("time", "") or "",
-        "final_result": item.get("final_result", {}) or {},
+        "final_result": sanitize_public_output(item.get("final_result", {}) or {}),
     } for index, item in enumerate(history)]
     if not turns:
         turns = persisted_turns

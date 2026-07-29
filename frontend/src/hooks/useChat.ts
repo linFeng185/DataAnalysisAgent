@@ -106,7 +106,13 @@ export function useChat() {
     }
   }, [turns, sessionId]);
 
-  const send = useCallback((query: string, datasource: string, _datasources?: string[], _modelId?: string) => {
+  const send = useCallback((
+    query: string,
+    datasource: string,
+    _datasources?: string[],
+    _modelId?: string,
+    enabledSkillIds?: string[],
+  ) => {
     aborterRef.current?.abort();
     setRetryInfo(null);
     setLoading(true);
@@ -263,6 +269,7 @@ export function useChat() {
       },
       dss,
       mid,
+      enabledSkillIds,
     );
   }, [sessionId]);
 

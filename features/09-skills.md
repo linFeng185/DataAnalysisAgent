@@ -15,7 +15,7 @@
 | 9.1.7 | get_active_tools() | 同上 | 动态加载激活 Skill 的 tools.py 模块，获取 BaseTool 列表 | 开发完成 |
 | 9.1.8 | build_skill_prompt() | 同上 | 组装激活 Skill 的 system_prompt_override 追加到 System Prompt | 开发完成 |
 | 9.1.9 | _load_skill_module() | 同上 | 动态 import Skill 的 tools.py 模块 | 开发完成 |
-| 9.1.10 | Skill Manifest v2 与请求授权 | `src/skill_manager.py` | 解析 capabilities/accepts/permissions/resources，并在执行前校验资产类型、网络域名和工具调用预算 | 单测完成 | P1 |
+| 9.1.10 | Skill Manifest v2 与请求授权 | `src/skill_manager.py`、`src/graph/skill_activation.py` | 两阶段激活 Skill，解析 capabilities/accepts/permissions/resources，并在加载与执行前校验资产、网络和请求级工具预算 | 单测完成 | P1 |
 | 9.1.11 | Skill 三级作用域隔离 `[P0]` | `src/skill_manager.py` | system/tenant/private 目录发现、复合标识和 tenant_id/user_id 请求级过滤 | 单测完成 |
 
 ### 9.2 示例 Skill — 数据质量检查
@@ -44,7 +44,7 @@
 |---|------|------|------|------|
 | 9.4.1 | 本地 Skill 扫描 | `src/skill_manager.py` | 多目录扫描 + 缓存注入 + 手动刷新 | 开发完成 |
 | 9.4.2 | Git 子模块支持 | `.gitmodules` | 社区 Skill 用 git submodule 引入 | 待开发 |
-| 9.4.3 | Skill Registry 接口 (远期) | `src/skill_manager.py` | 中心化 Skill 市场 | 待开发 |
+| 9.4.3 | Skill Registry 接口 | `src/skill_registry.py`、`src/skill_manager.py` | approved 目录、HTTPS 主机白名单、SHA-256、ZIP 安全检查和三级作用域安装 | 单测完成 |
 
 ### 9.5 Skills 管理与 API（新增）
 
@@ -59,11 +59,10 @@
 
 ### 模块收尾
 
-模块功能点共 30 项，已完成 28 项，待开发 2 项。
+模块功能点共 30 项，已完成 29 项，待开发 1 项。
 
 | 功能点 | 不开发原因 | 可开发条件 | 预计开发时机 |
 |--------|------------|------------|--------------|
 | 9.4.2 Git 子模块支持 | 当前优先完成本地受管目录的安全隔离，Git 来源还缺少签名、版本锁定和更新审计 | 建立受信任仓库白名单、commit 锁定和安装审计 | Phase 4，Skill 分发增强 |
-| 9.4.3 Skill Registry 接口 | 中心化市场涉及发布审核、依赖解析和供应链安全，当前无 Registry 服务 | 完成 Skill 包签名、版本协议和审核工作流 | Phase 4，扩展市场阶段 |
 
 ---

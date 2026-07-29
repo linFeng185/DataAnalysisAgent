@@ -124,6 +124,10 @@ async def retrieve_schema_node(state: AnalysisState) -> dict:
         if str(rule.get("content", "") if isinstance(rule, dict) else rule).strip()
     )
     few_shot_examples = list(getattr(schema, "sql_templates", []) or []) if schema else []
+    memory_text = str(state.get("long_term_memories_text", "") or "").strip()
+    merged_context = "\n\n---\n\n".join(
+        section for section in (memory_text, knowledge_text.strip()) if section
+    )
     result = {
         "dialect": dialect,
         "resolved_schema": schema,
@@ -151,15 +155,20 @@ async def retrieve_schema_node(state: AnalysisState) -> dict:
         "few_shot_examples": few_shot_examples[:5],
         "business_rules_text": business_rules_text,
         "enum_dictionary": enum_dictionary,
-        "long_term_memories_text": knowledge_text,
+        "long_term_memories_text": merged_context,
         "conversation_history": history,
     }
+    from src.graph.skill_activation import activate_skills
+
+    result.update(activate_skills({**state, **result}, [table.name for table in tables]))
     logger.info(
         "retrieve_schema 状态写回完成",
         datasource=datasource_name,
         table_count=len(result["relevant_tables"]),
         enum_columns=len(enum_dictionary),
         knowledge_chars=len(knowledge_text),
+        memory_chars=len(memory_text),
+        merged_context_chars=len(merged_context),
         business_rule_count=len(raw_business_rules),
         few_shot_count=len(few_shot_examples[:5]),
     )

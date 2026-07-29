@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from functools import partial
+from typing import Any
 
 import asyncpg
 
@@ -112,17 +113,8 @@ async def pg_connection(
     )
     try:
         pool = await get_pg_pool()
-        async with pool.acquire() as connection:
-            async with connection.transaction():
-                await connection.execute(
-                    "SELECT set_config('app.current_tenant_id', $1, true), "
-                    "set_config('app.current_user_id', $2, true), "
-                    "set_config('app.current_role', $3, true)",
-                    str(tenant_id),
-                    str(user_id),
-                    role,
-                )
-                yield connection
+        async with pg_pool_connection(pool, tenant_id, user_id, role) as connection:
+            yield connection
         logger.info(
             "pg_connection 完成",
             tenant_id=tenant_id,
@@ -136,3 +128,42 @@ async def pg_connection(
             exc_info=True,
         )
         raise
+
+
+# 方法作用：在指定 Pool 的事务连接上设置 RLS 请求身份并自动清理。
+# Args: pool - asyncpg Pool 或测试替身；tenant_id/user_id/role - 请求身份。
+# Returns: 设置身份后的数据库连接。
+@asynccontextmanager
+async def pg_pool_connection(
+    pool: Any,
+    tenant_id: int,
+    user_id: int,
+    role: str,
+) -> AsyncIterator[Any]:
+    acquire = getattr(pool, "acquire", None)
+    if not callable(acquire):
+        yield pool
+        return
+    logger.debug(
+        "指定 PG Pool 身份连接入口",
+        tenant_id=tenant_id,
+        user_id=user_id,
+        role=role,
+    )
+    async with acquire() as connection:
+        async with connection.transaction():
+            await connection.execute(
+                "SELECT set_config('app.current_tenant_id', $1, true), "
+                "set_config('app.current_user_id', $2, true), "
+                "set_config('app.current_role', $3, true)",
+                str(tenant_id),
+                str(user_id),
+                role,
+            )
+            yield connection
+    logger.info(
+        "指定 PG Pool 身份连接完成",
+        tenant_id=tenant_id,
+        user_id=user_id,
+        role=role,
+    )

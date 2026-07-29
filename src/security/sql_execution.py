@@ -23,6 +23,7 @@ _STATE_MUTATING_FUNCTIONS = frozenset({
     "pg_advisory_lock_shared",
     "pg_read_file",
     "pg_reload_conf",
+    "pg_sleep",
     "pg_try_advisory_lock",
     "pg_try_advisory_lock_shared",
     "set_config",
@@ -126,6 +127,11 @@ def _query_side_effect(tree: Any, query_type: type[Any]) -> str:
                 function_name = str(
                     function.name if isinstance(function, exp.Anonymous) else function.sql_name()
                 ).strip().lower()
+                logger.debug(
+                    "SQL 副作用函数探针",
+                    function_type=type(function).__name__,
+                    function_name=function_name,
+                )
                 if function_name in _STATE_MUTATING_FUNCTIONS or function_name.startswith("xp_"):
                     result = f"状态变更函数 {function_name}"
                     break

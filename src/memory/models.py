@@ -6,7 +6,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from enum import Enum
 from typing import Any
 
@@ -38,11 +38,30 @@ class LongTermMemory:
     access_count: int = 0
     confidence: float = 1.0
     ttl_days: int | None = None
+    visibility: str = "private"
+    tenant_id: int = 1
+    owner_user_id: int = 0
 
+    # 方法作用：记录一次有效召回并刷新最近访问时间。
+    # Args: self - 当前长期记忆。
+    # Returns: 无返回值。
     def touch(self) -> None:
         self.access_count += 1
-        self.last_accessed_at = datetime.now()
+        self.last_accessed_at = datetime.now(timezone.utc)
 
+    # 方法作用：判断记忆在指定时间是否已经超过 TTL。
+    # Args: self - 当前长期记忆；now - 比较时间，缺省为当前 UTC 时间。
+    # Returns: 已过期返回 True，永久记忆返回 False。
+    def is_expired(self, now: datetime | None = None) -> bool:
+        if self.ttl_days is None:
+            return False
+        current = now or datetime.now(timezone.utc)
+        created = _as_utc(self.created_at)
+        return created + timedelta(days=self.ttl_days) <= _as_utc(current)
+
+    # 方法作用：序列化长期记忆为 PostgreSQL 结构化字段。
+    # Args: self - 当前长期记忆。
+    # Returns: 包含身份、生命周期和业务载荷的字典。
     def to_dict(self) -> dict[str, Any]:
         return {
             "id": self.id,
@@ -55,8 +74,14 @@ class LongTermMemory:
             "access_count": self.access_count,
             "confidence": self.confidence,
             "ttl_days": self.ttl_days,
+            "visibility": self.visibility,
+            "tenant_id": self.tenant_id,
+            "owner_user_id": self.owner_user_id,
         }
 
+    # 方法作用：从持久化字典恢复长期记忆并兼容旧 scope 数据。
+    # Args: cls - LongTermMemory 类；data - 持久化字段。
+    # Returns: 恢复后的长期记忆。
     @classmethod
     def from_dict(cls, data: dict) -> LongTermMemory:
         return cls(
@@ -70,6 +95,9 @@ class LongTermMemory:
             access_count=data.get("access_count", 0),
             confidence=data.get("confidence", 1.0),
             ttl_days=data.get("ttl_days"),
+            visibility=data.get("visibility", "private"),
+            tenant_id=int(data.get("tenant_id", 1) or 0),
+            owner_user_id=int(data.get("owner_user_id", 0) or 0),
         )
 
 
@@ -110,5 +138,14 @@ def _parse_dt(val: Any) -> datetime:
     if isinstance(val, datetime):
         return val
     if isinstance(val, str):
-        return datetime.fromisoformat(val)
-    return datetime.now()
+        return _as_utc(datetime.fromisoformat(val.replace("Z", "+00:00")))
+    return datetime.now(timezone.utc)
+
+
+# 方法作用：把有无时区的 datetime 统一为 UTC，避免 TTL 比较类型冲突。
+# Args: value - 待规范化时间。
+# Returns: 带 UTC 时区的 datetime。
+def _as_utc(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)

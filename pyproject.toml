@@ -36,6 +36,7 @@ dependencies = [
     "aiohttp>=3.9",
     "typing-extensions>=4.12",
     "jinja2>=3.1",
+    "prometheus-client>=0.21.0",
 ]
 
 [project.optional-dependencies]
@@ -86,6 +87,7 @@ include = ["src*"]
 asyncio_mode = "auto"
 testpaths = ["tests"]
 markers = [
+    "integration: 使用真实模块边界但不访问远程服务的集成测试",
     "local_llm: 调用快速本地模型的集成、链路或冒烟测试",
     "live_llm: 仅在 RUN_LIVE_LLM_TESTS=1 时调用远程配置模型的测试",
 ]

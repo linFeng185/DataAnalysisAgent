@@ -12,6 +12,84 @@ from src.logging_config import get_logger
 
 logger = get_logger(__name__)
 
+_METADATA_PERMISSION_CODES = {
+    "42501",  # PostgreSQL insufficient_privilege
+    "1044", "1045",  # MySQL database/credential access denied
+    "01031", "00942",  # Oracle insufficient privileges / hidden relation
+    "229",  # SQL Server SELECT permission denied
+    "497",  # ClickHouse ACCESS_DENIED
+}
+_METADATA_PERMISSION_MARKERS = (
+    "permission denied",
+    "insufficient privilege",
+    "insufficient privileges",
+    "access denied",
+    "not authorized",
+    "not authorised",
+    "does not have permission",
+    "无权限",
+    "权限不足",
+)
+
+
+class MetadataPermissionError(PermissionError):
+    """数据库拒绝读取 Schema 元数据时使用的脱敏统一异常。"""
+
+    # 方法作用：保存告警所需的低敏数据源、方言和操作信息。
+    # Args: self - 异常实例；datasource - 数据源名称；dialect - 方言；operation - 元数据操作。
+    # Returns: 无返回值。
+    def __init__(self, *, datasource: str, dialect: str, operation: str) -> None:
+        super().__init__(f"数据源 '{datasource}' 缺少 Schema 元数据读取权限")
+        self.datasource = datasource
+        self.dialect = dialect
+        self.operation = operation
+
+
+# 方法作用：按方言错误码和稳定消息片段识别元数据权限异常。
+# Args: exc - 数据库驱动或 SQLAlchemy 抛出的异常。
+# Returns: 属于权限拒绝时返回 True。
+def is_metadata_permission_error(exc: BaseException) -> bool:
+    current: BaseException | None = exc
+    visited: set[int] = set()
+    while current is not None and id(current) not in visited:
+        visited.add(id(current))
+        code = str(
+            getattr(current, "sqlstate", "")
+            or getattr(current, "pgcode", "")
+            or getattr(current, "code", "")
+            or ""
+        ).strip().upper()
+        message = str(current).lower()
+        if code in _METADATA_PERMISSION_CODES:
+            return True
+        if any(marker in message for marker in _METADATA_PERMISSION_MARKERS):
+            return True
+        current = current.__cause__ or current.__context__
+    return False
+
+
+# 方法作用：将底层权限异常转换为不携带 SQL 和连接细节的统一异常。
+# Args: ds - 数据源配置；operation - 元数据操作；exc - 底层异常。
+# Returns: MetadataPermissionError 实例。
+def _permission_error(
+    ds: DataSourceConfig,
+    operation: str,
+    exc: BaseException,
+) -> MetadataPermissionError:
+    logger.error(
+        "Schema 元数据权限不足",
+        datasource=ds.name,
+        dialect=ds.dialect,
+        operation=operation,
+        error_type=type(exc).__name__,
+        exc_info=True,
+    )
+    return MetadataPermissionError(
+        datasource=ds.name,
+        dialect=ds.dialect,
+        operation=operation,
+    )
+
 
 def _parse_nullable(value) -> bool:
     """归一化 nullable 值: MySQL 返回 "YES"/"NO" 字符串, PG 返回 bool。"""
@@ -164,9 +242,14 @@ async def introspect_columns(
         return []
     if ds.dialect == "sqlite":
         sql = sql.format(table=_quote_sqlite_identifier(table_name))
-    result = await executor(ds, sql, {
-        "table": table_name, "table_name": table_name, "database": ds.database,
-    })
+    try:
+        result = await executor(ds, sql, {
+            "table": table_name, "table_name": table_name, "database": ds.database,
+        })
+    except Exception as exc:
+        if is_metadata_permission_error(exc):
+            raise _permission_error(ds, "columns", exc) from exc
+        raise
     columns = []
     for row in result:
         sqlite = ds.dialect == "sqlite"
@@ -192,9 +275,14 @@ async def introspect_foreign_keys(
         return []
     if ds.dialect == "sqlite":
         sql = sql.format(table=_quote_sqlite_identifier(table_name))
-    result = await executor(ds, sql, {
-        "table": table_name, "table_name": table_name, "database": ds.database,
-    })
+    try:
+        result = await executor(ds, sql, {
+            "table": table_name, "table_name": table_name, "database": ds.database,
+        })
+    except Exception as exc:
+        if is_metadata_permission_error(exc):
+            raise _permission_error(ds, "foreign_keys", exc) from exc
+        raise
     return [
         TableRelation(
             target_table=row.get("target_table", "") or row.get("table", ""),
@@ -225,6 +313,8 @@ async def estimate_row_count(
             count = result[0].get("count", 0) or result[0].get("table_rows", 0) or 0
             return int(count)
     except Exception as exc:
+        if is_metadata_permission_error(exc):
+            raise _permission_error(ds, "row_count", exc) from exc
         logger.warning(
             "行数估算失败，回退为零",
             table=table_name,
@@ -257,6 +347,8 @@ async def introspect_database(
     for name in table_names:
         try:
             tables.append(await introspect_table(ds, name, executor))
+        except MetadataPermissionError:
+            raise
         except Exception as e:
             logger.warning("表内省失败", table=name, error=str(e))
     return SchemaSnapshot(tables=tables)
@@ -284,5 +376,10 @@ async def _list_tables(ds: DataSourceConfig, executor) -> list[str]:
         logger.error("列出数据表失败", dialect=ds.dialect, reason="未知方言")
         raise ValueError(f"不支持的数据源方言: {ds.dialect}")
     sql = sql_map[ds.dialect]
-    result = await executor(ds, sql, {"database": ds.database})
+    try:
+        result = await executor(ds, sql, {"database": ds.database})
+    except Exception as exc:
+        if is_metadata_permission_error(exc):
+            raise _permission_error(ds, "tables", exc) from exc
+        raise
     return [r["name"] for r in result]

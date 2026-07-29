@@ -345,9 +345,9 @@ class TestSessionRouteIsolation:
 
         assert len(turns) == 1
         assert turns[0]["user_query"] == "查询 Oracle 客户消费"
-        assert turns[0]["assistant_summary"] == "Schema 加载失败"
+        assert turns[0]["assistant_summary"] == "查询执行失败，请检查数据源、权限或查询条件"
         assert turns[0]["sql"] == ""
-        assert turns[0]["final_result"]["analysis"]["summary"] == "Schema 加载失败"
+        assert turns[0]["final_result"]["analysis"]["summary"] == "查询执行失败，请检查数据源、权限或查询条件"
         history.list_session.assert_awaited_once_with(
             "legacy-session", before=None, limit=1000,
         )

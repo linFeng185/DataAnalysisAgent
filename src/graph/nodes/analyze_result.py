@@ -11,7 +11,7 @@ from decimal import Decimal
 from src.graph.state import AnalysisState
 from src.llm.client import get_task_llm as _get_task_llm
 from src.llm.client import is_task_llm_available as _is_task_llm_available
-from src.llm.prompts import DATA_ANALYSIS_SYSTEM
+from src.llm.prompt_budget import PromptSection, build_budgeted_prompt
 from src.logging_config import get_logger
 from src.tools import processors as _processors  # noqa: F401
 from src.tools.analyzer import (
@@ -125,9 +125,10 @@ async def analyze_result_node(state: AnalysisState) -> dict:
                 if not fallback_allowed(FailureDomain.LLM):
                     raise
                 logger.error("LLM 润色失败", error=str(exc), exc_info=True)
+        result, skill_calls = await _execute_post_analysis_skill_tools(result, rows, state)
         logger.info("节点完成", node="analyze_result", processor=result.get("processor_name"),
                     elapsed_ms=round((time.monotonic() - _start) * 1000))
-        return {"analysis_result": result}
+        return {"analysis_result": result, "skill_tool_calls": skill_calls}
 
     # 回退：旧统计路径（无匹配处理器时）
     numeric_cols = stats.get("numeric_columns", [])
@@ -177,14 +178,17 @@ async def analyze_result_node(state: AnalysisState) -> dict:
             result_full_count=state.get("query_result_full_count", len(rows)),
             result_truncated=state.get("query_result_truncated", False),
             business_context=business_context,
+            chart_type=chart_type,
+            intent=intent,
         )
     else:
         result = _rule_analyze(rows, stats, trend_info, outlier_info, conc_info, chart_type, intent)
 
     result["statistics"] = stats
     result = _attach_skill_outputs(result, rows, state.get("activated_skills", []) or [])
+    result, skill_calls = await _execute_post_analysis_skill_tools(result, rows, state)
     logger.info("节点完成", node="analyze_result", elapsed_ms=round((time.monotonic() - _start) * 1000))
-    return {"analysis_result": result}
+    return {"analysis_result": result, "skill_tool_calls": skill_calls}
 
 
 async def _llm_polish(summary: str, insights: list[str], data_sample: str) -> dict | None:
@@ -192,20 +196,38 @@ async def _llm_polish(summary: str, insights: list[str], data_sample: str) -> di
     try:
         from langchain_core.messages import HumanMessage, SystemMessage
         llm = _get_task_llm("polish_result", temperature=0.3, reasoning=False)
-        prompt = f"""## 分析摘要
-{summary}
+        prompt = build_budgeted_prompt(
+            "analysis.polish",
+            [
+                PromptSection(
+                    "summary",
+                    f"## 分析摘要\n{summary}",
+                    priority=100,
+                    min_chars=500,
+                    max_chars=1400,
+                ),
+                PromptSection(
+                    "insights",
+                    "## 关键洞察\n" + "\n".join(f"- {item}" for item in insights[:5]),
+                    priority=90,
+                    min_chars=300,
+                    max_chars=900,
+                ),
+                PromptSection(
+                    "data_sample",
+                    f"## 数据样本\n{data_sample}",
+                    priority=50,
+                    max_chars=1000,
+                ),
+            ],
+        )
+        resp = await llm.ainvoke([
+            SystemMessage(content=prompt.system),
+            HumanMessage(content=prompt.human),
+        ])
+        from src.llm.output_contracts import PolishOutput, parse_json_model
 
-## 关键洞察
-{chr(10).join(f'- {i}' for i in insights[:5])}
-
-## 数据样本
-{data_sample}
-
-请对以上摘要进行自然语言润色，使其更易于理解。保持专业准确但不啰嗦。返回 JSON 格式: {{"summary": "润色后的中文摘要"}}"""
-        resp = await llm.ainvoke([SystemMessage(content="你是数据分析师，擅长用通俗易懂的语言解释数据。"),
-                                  HumanMessage(content=prompt)])
-        content = resp.content.strip().removeprefix("```json").removesuffix("```").strip()
-        return json.loads(content) if content.startswith("{") else None
+        return parse_json_model(resp.content, PolishOutput).model_dump()
     except Exception as exc:
         logger.error("LLM 润色异常", error=str(exc), exc_info=True)
         return None
@@ -296,6 +318,109 @@ def _attach_skill_outputs(
     return enriched
 
 
+# 方法作用：按显式适配器和请求预算执行分析后 Skill 工具。
+# Args: result - 基础分析结果；rows - 查询样本；state - Skill 工具与预算状态。
+# Returns: 附加真实工具产物的分析结果和累计调用次数。
+async def _execute_post_analysis_skill_tools(
+    result: dict,
+    rows: list[dict],
+    state: AnalysisState,
+) -> tuple[dict, int]:
+    """按显式参数适配器执行分析后 Skill 工具，并严格遵守请求级预算。"""
+    tools = state.get("skill_tools", []) or []
+    used = int(state.get("skill_tool_calls", 0) or 0)
+    budget = int(state.get("skill_tool_budget", 0) or 0)
+    limit = max(0, budget)
+    if not tools:
+        logger.info("分析后 Skill 工具跳过", reason="无已授权工具")
+        return result, used
+
+    enriched = dict(result)
+    tool_outputs = dict(enriched.get("skill_outputs", {}) or {})
+    columns = sorted({str(column) for row in rows for column in row})
+    numeric_columns = _find_numeric(rows)
+
+    # 方法作用：在共享预算内执行单个已授权 Skill 工具。
+    # Args: tool - 目标工具；payload - 工具结构化输入。
+    # Returns: 工具输出；超预算返回 None，执行异常返回脱敏错误。
+    async def invoke(tool, payload: dict) -> object | None:
+        nonlocal used
+        if used >= limit:
+            logger.warning("分析后 Skill 工具预算耗尽", tool=tool.name, used=used, limit=limit)
+            return None
+        used += 1
+        logger.info("分析后 Skill 工具调用", tool=tool.name, call_count=used, limit=limit)
+        try:
+            return await tool.ainvoke(payload)
+        except Exception as exc:
+            logger.error(
+                "分析后 Skill 工具失败",
+                tool=tool.name,
+                error=str(exc),
+                exc_info=True,
+            )
+            return {"error": "工具执行失败"}
+
+    for tool in tools:
+        name = str(getattr(tool, "name", "") or "")
+        if not name:
+            continue
+        outputs: list[object] = []
+        if name == "render_report":
+            query = str(state.get("user_query", "") or "")
+            template = "monthly_report" if "月报" in query else "weekly_report"
+            metrics = {
+                key: value
+                for key, value in (rows[0] if rows else {}).items()
+                if not isinstance(value, bool) and isinstance(value, (int, float, Decimal))
+            }
+            rendered = await invoke(tool, {
+                "template": template,
+                "data": {
+                    "title": query or "数据分析报告",
+                    "summary": enriched.get("summary", ""),
+                    "insights": enriched.get("insights", []),
+                    "metrics": metrics,
+                },
+            })
+            if isinstance(rendered, str):
+                enriched["rendered_report"] = rendered
+            outputs.append(rendered)
+        elif name == "check_null_rate":
+            for column in columns:
+                output = await invoke(tool, {"rows": rows, "column": column})
+                if output is not None:
+                    outputs.append(output)
+                if used >= limit:
+                    break
+        elif name == "check_duplicates" and columns:
+            outputs.append(await invoke(tool, {"rows": rows, "column": columns[0]}))
+        elif name == "detect_outliers":
+            for column in numeric_columns:
+                output = await invoke(tool, {"rows": rows, "column": column})
+                if output is not None:
+                    outputs.append(output)
+                if used >= limit:
+                    break
+        else:
+            logger.info("分析后 Skill 工具跳过", tool=name, reason="未注册参数适配器")
+            continue
+        cleaned_outputs = [item for item in outputs if item is not None]
+        if cleaned_outputs:
+            tool_outputs[name] = cleaned_outputs
+
+    if tool_outputs:
+        enriched["skill_outputs"] = tool_outputs
+    logger.info(
+        "分析后 Skill 工具完成",
+        tool_count=len(tools),
+        output_count=len(tool_outputs),
+        call_count=used,
+        limit=limit,
+    )
+    return enriched, used
+
+
 async def _llm_analyze(
     rows,
     sql,
@@ -309,6 +434,8 @@ async def _llm_analyze(
     result_full_count: int | None = None,
     result_truncated: bool = False,
     business_context: str = "",
+    chart_type: str = "table",
+    intent: str = "query",
 ) -> dict:
     """基于问题、结果完整性、统计和业务证据生成分析报告。
 
@@ -324,6 +451,8 @@ async def _llm_analyze(
         result_full_count: 查询返回的总行数。
         result_truncated: 查询结果是否被安全上限截断。
         business_context: 业务规则和知识库证据。
+        chart_type: 规则引擎根据真实列类型推荐的图表类型。
+        intent: 当前用户问题的真实意图。
 
     Returns:
         兼容基础字段并包含质量、限制、置信度和行动建议的分析结果。
@@ -363,57 +492,90 @@ async def _llm_analyze(
     )
     business_block = business_context or "(无额外业务口径，以 SQL 与统计结果为准)"
     question = user_query or "(未提供原问题，仅解释当前结果)"
-    user_msg = f"""## 用户原问题
-{question}
-
-## 执行的 SQL
-```sql
-{sql}
-```
-
-## 数据完整性
-{completeness}
-
-## 查询结果 ({input_label})
-{sample}
-
-## 统计摘要
-{stat_text}
-
-## 确定性分析器发现
-{trend} | {outlier} | {conc}
-
-## 业务规则与知识上下文
-{business_block}
-
-{history_block}
-请给出分析报告。"""
+    prompt = build_budgeted_prompt(
+        "analysis.result",
+        [
+            PromptSection(
+                "query",
+                f"## 用户原问题\n{question}\n请给出分析报告。",
+                priority=100,
+                min_chars=400,
+                max_chars=1800,
+            ),
+            PromptSection(
+                "completeness",
+                f"## 数据完整性\n{completeness}",
+                priority=99,
+                min_chars=150,
+                max_chars=500,
+            ),
+            PromptSection(
+                "sql",
+                f"## 执行的 SQL\n```sql\n{sql}\n```",
+                priority=95,
+                min_chars=500,
+                max_chars=2200,
+            ),
+            PromptSection(
+                "result_sample",
+                f"## 查询结果 ({input_label})\n{sample}",
+                priority=90,
+                min_chars=2000,
+                max_chars=4500,
+            ),
+            PromptSection(
+                "statistics",
+                f"## 统计摘要\n{stat_text}",
+                priority=85,
+                min_chars=700,
+                max_chars=2200,
+            ),
+            PromptSection(
+                "deterministic_findings",
+                f"## 确定性分析器发现\n{trend} | {outlier} | {conc}",
+                priority=80,
+                min_chars=200,
+                max_chars=800,
+            ),
+            PromptSection(
+                "business_context",
+                f"## 业务规则与知识上下文\n{business_block}",
+                priority=60,
+                min_chars=300,
+                max_chars=1800,
+            ),
+            PromptSection(
+                "history",
+                history_block,
+                priority=30,
+                max_chars=1200,
+            ),
+        ],
+    )
 
     try:
         from langchain_core.messages import HumanMessage, SystemMessage
         from src.llm.adapters.registry import get_adapter
         from src.config import get_settings
         llm = get_llm(temperature=0.3)
-        resp = await llm.ainvoke([SystemMessage(content=DATA_ANALYSIS_SYSTEM), HumanMessage(content=user_msg)])
+        resp = await llm.ainvoke([
+            SystemMessage(content=prompt.system),
+            HumanMessage(content=prompt.human),
+        ])
         adapter = get_adapter(get_settings().llm_model)
         parsed = adapter.parse_response(resp)
         parsed_content = str(getattr(parsed, "content", "") or "").strip()
         if not parsed_content:
             logger.warning("适配器未返回正文，兼容原始响应", model=get_settings().llm_model)
             parsed_content = str(getattr(resp, "content", "") or "").strip()
-        data = json.loads(parsed_content.removeprefix("```json").removesuffix("```").strip())
-        result = {
-            "summary": data.get("summary", ""),
-            "insights": data.get("insights", []),
-            "recommended_chart_type": data.get("recommended_chart_type", "table"),
-            "follow_up_questions": data.get("follow_up_questions", []),
-            "data_quality": data.get("data_quality", []),
-            "limitations": data.get("limitations", []),
-            "confidence": data.get("confidence", "low"),
-            "recommended_actions": data.get("recommended_actions", []),
-        }
+        from src.llm.output_contracts import AnalysisOutput, parse_json_model
+
+        result = parse_json_model(parsed_content, AnalysisOutput).model_dump()
         if parsed.reasoning_content:
-            result["analysis_reasoning_content"] = parsed.reasoning_content
+            logger.debug(
+                "分析模型内部推理已抑制",
+                reasoning_chars=len(parsed.reasoning_content),
+            )
         logger.info(
             "LLM 数据分析完成",
             confidence=result["confidence"],
@@ -423,7 +585,7 @@ async def _llm_analyze(
         return result
     except Exception as e:
         logger.error("LLM 分析失败", error=str(e), exc_info=True)
-        return _rule_analyze(rows, stats, trend, outlier, conc, "table", "query")
+        return _rule_analyze(rows, stats, trend, outlier, conc, chart_type, intent)
 
 
 def _rule_analyze(rows, stats, trend, outlier, conc, chart_type, intent) -> dict:
@@ -538,6 +700,23 @@ def _build_processor_params(
     elif processor_name == "ab_test":
         params["group_col"] = _match_column(category_columns, ("group", "variant", "version", "组")) \
             or (category_columns[0] if category_columns else "")
+    elif processor_name == "contribution":
+        previous_col = _match_column(
+            numeric_columns,
+            ("previous", "prev", "prior", "last_period", "上期", "同期"),
+        )
+        current_candidates = [column for column in numeric_columns if column != previous_col]
+        current_col = _match_column(
+            current_candidates,
+            ("current", "actual", "present", "本期", "当期"),
+        ) or (current_candidates[0] if current_candidates else "")
+        if not previous_col:
+            previous_col = numeric_columns[1] if len(numeric_columns) > 1 else ""
+        params.update({
+            "dimension_col": category_columns[0] if category_columns else "",
+            "current_value_col": current_col,
+            "previous_value_col": previous_col,
+        })
 
     logger.info("构造处理器参数完成", processor=processor_name, params=params)
     return params
@@ -555,7 +734,11 @@ def _group_by(rows, cat, val):
     for r in rows:
         k = str(r.get(cat, "?"))
         v = r.get(val, 0) or 0
-        agg[k] = agg.get(k, 0) + (float(v) if isinstance(v, (int, float)) else 0)
+        agg[k] = agg.get(k, 0.0) + (
+            float(v)
+            if not isinstance(v, bool) and isinstance(v, (int, float, Decimal))
+            else 0.0
+        )
     return sorted(agg.items(), key=lambda x: x[1], reverse=True)
 
 

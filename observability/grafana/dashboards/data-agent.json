@@ -1,0 +1,50 @@
+{
+  "annotations": {"list": []},
+  "editable": true,
+  "panels": [
+    {
+      "id": 1,
+      "title": "服务健康",
+      "type": "stat",
+      "targets": [{"expr": "up{job=\"data-analysis-agent\"}", "refId": "A"}],
+      "gridPos": {"h": 6, "w": 6, "x": 0, "y": 0}
+    },
+    {
+      "id": 2,
+      "title": "请求吞吐",
+      "type": "timeseries",
+      "targets": [{"expr": "sum(rate(data_agent_http_requests_total[5m])) by (route)", "refId": "A"}],
+      "gridPos": {"h": 8, "w": 9, "x": 6, "y": 0}
+    },
+    {
+      "id": 3,
+      "title": "HTTP 错误率",
+      "type": "timeseries",
+      "targets": [{"expr": "sum(rate(data_agent_http_requests_total{status=~\"5..\"}[5m])) / clamp_min(sum(rate(data_agent_http_requests_total[5m])), 0.001)", "refId": "A"}],
+      "gridPos": {"h": 8, "w": 9, "x": 15, "y": 0}
+    },
+    {
+      "id": 4,
+      "title": "请求 P95 延迟",
+      "type": "timeseries",
+      "targets": [{"expr": "histogram_quantile(0.95, sum(rate(data_agent_http_request_duration_seconds_bucket[5m])) by (le, route))", "refId": "A"}],
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 8}
+    },
+    {
+      "id": 5,
+      "title": "LLM Token 消耗",
+      "type": "timeseries",
+      "targets": [{"expr": "sum(rate(data_agent_llm_tokens_total[5m])) by (task, model, token_type)", "refId": "A"}],
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 8}
+    }
+  ],
+  "refresh": "30s",
+  "schemaVersion": 39,
+  "tags": ["data-analysis-agent"],
+  "templating": {"list": []},
+  "time": {"from": "now-6h", "to": "now"},
+  "timezone": "browser",
+  "title": "Data Analysis Agent",
+  "uid": "data-analysis-agent",
+  "version": 1
+}

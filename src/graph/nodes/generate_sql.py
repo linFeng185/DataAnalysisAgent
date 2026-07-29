@@ -31,7 +31,8 @@ from langchain_core.runnables import RunnableConfig
 from src.graph.state import AnalysisState
 from src.llm.client import get_task_llm as _get_task_llm
 from src.llm.client import is_task_llm_available as _is_task_llm_available
-from src.llm.prompts import SQL_GENERATION_SYSTEM, get_dialect_cheatsheet
+from src.llm.prompt_budget import PromptSection, build_budgeted_prompt
+from src.llm.prompts import get_dialect_cheatsheet
 from src.logging_config import get_logger
 from src.security.sql_execution import normalize_sql_dialect
 
@@ -303,7 +304,7 @@ async def _llm_generate(
     调用 LLM 流式生成 SQL 的核心逻辑，返回 (sql, reasoning_content, explanation)。
 
     使用 astream + config 实现真流式：
-    - DeepSeek 的 reasoning_content 逐 chunk 推送 → 前端实时看到推理过程
+    - DeepSeek 的 reasoning_content 仅用于服务端诊断计数，不进入响应或历史
     - content token 逐 chunk 推送 → 前端实时打字机效果
 
     支持的响应格式（按优先级）：
@@ -322,11 +323,6 @@ async def _llm_generate(
     )
     # 在线程池构造同步 ChatModel，避免多源并发时阻塞事件循环。
     llm = await asyncio.to_thread(get_llm, 0)
-
-    system = SQL_GENERATION_SYSTEM.format(
-        dialect=dialect,
-        skill_instructions=skill_prompt,
-    )
 
     # 7.5.3 注入对话上下文（热/温/冷三层裁剪）
     context_text = ""
@@ -353,30 +349,75 @@ async def _llm_generate(
         f"UTC: {_utc}。{dialect} 当前时间函数: {_time_function}；"
         "用户指定具体日期时使用明确边界，不混用其他方言函数。"
     )
-    _nl = "\n"
-    _history_block = f"## 对话历史{_nl}{context_text}" if context_text else ""
-    user_msg = f"""## 数据库表结构
-{schema_text}
-
-## 方言参考
-{dialect_hint}
-{error_ctx}
-
-## 业务与知识上下文
-{grounding_context}
-
-## 当前时间
-{_now_info}
-
-## 用户问题
-{query}
-{_history_block}
-请生成 SQL:"""
+    prompt = build_budgeted_prompt(
+        "sql.generate",
+        [
+            PromptSection(
+                "skill",
+                skill_prompt,
+                priority=75,
+                max_chars=1500,
+                target="system",
+            ),
+            PromptSection(
+                "query",
+                f"## 用户问题\n{query}\n请生成 SQL:",
+                priority=100,
+                min_chars=600,
+                max_chars=2500,
+            ),
+            PromptSection(
+                "retry_error",
+                error_ctx,
+                priority=98,
+                min_chars=300,
+                max_chars=1800,
+            ),
+            PromptSection(
+                "schema",
+                f"## 数据库表结构\n{schema_text}",
+                priority=95,
+                min_chars=2500,
+                max_chars=6000,
+            ),
+            PromptSection(
+                "dialect",
+                f"## 方言参考\n{dialect_hint}",
+                priority=90,
+                min_chars=300,
+                max_chars=1200,
+            ),
+            PromptSection(
+                "current_time",
+                f"## 当前时间\n{_now_info}",
+                priority=85,
+                min_chars=150,
+                max_chars=500,
+            ),
+            PromptSection(
+                "grounding",
+                f"## 业务与知识上下文\n{grounding_context}",
+                priority=60,
+                min_chars=300,
+                max_chars=2500,
+            ),
+            PromptSection(
+                "history",
+                f"## 对话历史\n{context_text}" if context_text else "",
+                priority=30,
+                max_chars=1500,
+            ),
+        ],
+        system_values={"dialect": dialect, "skill_instructions": ""},
+    )
 
     try:
         from langchain_core.messages import HumanMessage, SystemMessage
 
-        messages = [SystemMessage(content=system), HumanMessage(content=user_msg)]
+        messages = [
+            SystemMessage(content=prompt.system),
+            HumanMessage(content=prompt.human),
+        ]
 
         # ── 流式消费：逐 chunk 累积，LangGraph 自动捕获事件推送到前端 ──
         content_parts: list[str] = []
@@ -399,8 +440,11 @@ async def _llm_generate(
         raw = "".join(content_parts)
         reasoning_text = "".join(reasoning_parts)
         if reasoning_parts:
-            logger.info("LLM 推理链", reasoning_chunks=len(reasoning_parts),
-                        reasoning=reasoning_text[:500])
+            logger.info(
+                "LLM 推理链已收集",
+                reasoning_chunks=len(reasoning_parts),
+                reasoning_chars=len(reasoning_text),
+            )
         logger.info("LLM 原始响应", raw=raw[:500], content_chunks=len(content_parts))
 
         # ── 响应内容为空时的回退 ──
@@ -419,9 +463,11 @@ async def _llm_generate(
             text = text.split("```")[1].split("```")[0]
 
         try:
-            data = json.loads(text)
-            explanation = data.get("explanation", "")
-            sql = data.get("sql", text).strip()
+            from src.llm.output_contracts import SQLGenerationOutput, parse_json_model
+
+            data = parse_json_model(text, SQLGenerationOutput)
+            explanation = data.explanation
+            sql = data.sql.strip()
             logger.info(
                 "LLM SQL 生成完成",
                 dialect=dialect,
@@ -429,7 +475,7 @@ async def _llm_generate(
                 explanation_chars=len(explanation),
             )
             return sql, reasoning_text, explanation
-        except json.JSONDecodeError as exc:
+        except (json.JSONDecodeError, ValueError) as exc:
             logger.debug(
                 "LLM SQL JSON 解析回退",
                 error=str(exc),

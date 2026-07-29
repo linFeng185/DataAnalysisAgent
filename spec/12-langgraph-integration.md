@@ -126,11 +126,15 @@ API 每轮必须重新注入当前身份与 `datasource_access/allowed_columns/r
 `conversation_history`，并把每轮完整 `final_response` 写入 `query_history.final_result` JSONB。
 
 `query_history.final_result` 保存该轮 `sql/sql_statements/data/row_count/truncated/analysis/chart/`
-`sql_reasoning_content/success/error_message`。历史 API 以持久化逐轮响应为权威数据，checkpoint 用于补充
+`success/status/source/error_code/error_message`。原始模型推理不得进入响应、历史或会话恢复。历史 API 以持久化逐轮响应为权威数据，checkpoint 用于补充
 轻量摘要和消息；禁止使用顶层 `generated_sql` 是否为空来判断富结果是否有效，因为多源查询的顶层
 `generated_sql` 合法地为空。历史数据分页首次返回最新一页，再按 `turn_id` 向前加载。
 
 ### 11.5 多数据源结果与流式展示契约
+
+单源主图和多源 worker 子图必须调用同一个 SQL 流程装配函数注册
+`retrieve_schema/decompose_query/generate_sql/layer3_validate/layer4_explain/execute_sql` 及其条件边。
+两者可配置不同终点，但禁止分别维护重试、安全校验、EXPLAIN 和执行拓扑。
 
 1. 每个多数据源 worker 必须保存 `execute_sql` 完成方言重写、权限注入后的最终 SQL，
    不得继续向最终响应返回 LLM 原始 SQL。
@@ -144,8 +148,9 @@ API 每轮必须重新注入当前身份与 `datasource_access/allowed_columns/r
    - 列宽或角色序列不一致时禁止强制语义对齐，保留原始字段并记录告警。
 4. 前端表格必须使用所有结果行字段的有序并集生成列，作为不兼容结果的展示兜底；
    前端字段并集不承担指标语义合并职责。
-5. `thinking`、`token`、`llm_start`、`llm_end` 事件必须携带稳定 `stream_id` 和 `node`。
-   前端按 `stream_id` 独立缓冲并行 LLM 内容，禁止把多个数据源或多个 LLM 阶段直接拼接为一个字符串。
+5. `token`、`llm_start`、`llm_end` 事件必须携带稳定 `stream_id` 和 `node`。
+   前端按 `stream_id` 独立缓冲并行 LLM 内容，禁止把多个数据源或多个 LLM 阶段直接拼接为一个字符串；
+   原始 `reasoning_content` 只允许在服务端做长度计数和受控诊断，不得生成 `thinking` SSE 事件。
 6. `chart.type=table` 表示数据表本身就是展示结果，前端不得再渲染“图表配置未生成”的空图表面板。
 
 ### 11.6 LangSmith 可观测性

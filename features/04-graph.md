@@ -1,6 +1,6 @@
 # 4. LangGraph 编排引擎
 
-## 4. LangGraph 编排引擎 (graph/) `[P0:28 P1:16 P2:3 P3:1]`
+## 4. LangGraph 编排引擎 (graph/) `[P0:28 P1:17 P2:3 P3:1]`
 
 ### 4.1 状态定义与工作流组装
 
@@ -21,6 +21,7 @@
 | 4.1.13 | 时间提示中断 `[P1]` | 同上 + `build_response.py` | needs_time_range 跳过执行→前端时间标签 | 开发完成 |
 | 4.1.14 | 轮次状态初始化 `[P0]` | `src/graph/nodes/prepare_turn.py` | 保留历史，清空 checkpoint 中上一轮 SQL/错误/结果/分析/图表/多源状态 | 单测完成 |
 | 4.1.15 | 跨轮结果快照恢复 `[P0]` | `prepare_turn.py` + `restore_previous_result.py` | 固化上一轮结构化结果；仅 meta 且数据源一致时恢复，普通查询继续清空瞬态状态 | 单测完成 |
+| 4.1.16 | SQL 拓扑单一装配 `[P1]` | `src/graph/subgraphs/sql_analysis.py`、`workflow.py` | 主图和多源子图调用同一节点/边装配函数，仅配置不同终点，消除重试拓扑漂移 | 单测完成 |
 
 ### 4.2 classify_intent Node
 
@@ -84,7 +85,7 @@
 | 4.7.1 | execute_sql_node() | `src/graph/nodes/execute_sql.py` | 对接全局 Registry 并执行真实数据源查询 | 单测完成 | P0 |
 | 4.7.2 | 错误信息简洁化 | `src/graph/nodes/execute_sql.py:82-91` | 从 DB 原始错误提取错误码和消息 | 开发完成 | P1 |
 | 4.7.3 | 列名预检验证 (Layer 2) | `src/graph/nodes/execute_sql.py:_validate_column_references()` | 按实际方言解析列引用，对照 schema；MSSQL 使用 tsql，解析失败阻断并触发 retry | 单测完成 | P0 |
-| 4.7.4 | float→Decimal 精度 `[P1]` | 同上 `_row_to_dict()` | 查询结果 float 自动转 Decimal，从源头消除 IEEE 754 | 开发完成 |
+| 4.7.4 | float→Decimal 精度 `[P1]` | `src/connectors/base.py` | 所有业务查询在连接器边界把有限 float 转为 Decimal，非有限数值转为空值 | 单测完成 |
 | 4.7.5 | sync/async 引擎兼容 `[P1]` | 同上 | 检测 AsyncEngine→async with，否则在线程池中执行 sync Engine（Oracle/MSSQL支持） | 单测完成 |
 
 ### 4.8 analyze_result Node
@@ -95,7 +96,7 @@
 | 4.8.2 | DATA_ANALYSIS_PROMPT | `src/llm/prompts.py` | 数据分析 Prompt | 单测完成 | P0 |
 | 4.8.3 | 描述性统计 | `src/tools/analyzer.py` | 均值/中位数/标准差/分位数/空值率 | 单测完成 | P0 |
 | 4.8.4 | 趋势分析 | 同上 | 环比/方向/移动平均 | 单测完成 | P0 |
-| 4.8.5 | 归因分析 | 同上 | Phase 2 LLM 归因 (数据统计已就绪) | 待开发[^7] | P1 |
+| 4.8.5 | 归因分析 | 同上 | 按维度 current/previous 确定性计算净变化贡献率与影响份额，LLM 仅负责解释 | 单测完成 | P1 |
 | 4.8.6 | 异常检测 | 同上 | Z-Score + IQR 两种方法 | 单测完成 | P0 |
 | 4.8.7 | 占比分析 | 同上 | 集中度/分类聚合 | 单测完成 | P0 |
 | 4.8.9 | 输出: analysis_result | 同上 | summary+insights+chart+followups | 单测完成 | P0 |
@@ -145,14 +146,13 @@
 | 4.13.3 | 确定性无 LLM 回退 | `src/graph/nodes/generate_sql.py` | 数量查询生成 COUNT(*)，无法确定语义时返回明确错误 | 单测完成 |
 | 4.13.4 | 方言与分析契约修复 | `src/datasource/introspection.py`、`src/graph/nodes/analyze_result.py` | SQLite 内省、LLM 样本长度和 statistics 输出契约回归 | 单测完成 |
 | 4.13.5 | 编排与状态契约修复 | `src/graph/workflow.py`、`prepare_turn.py`、`generate_sql.py` | 修复 MCP 死边、metadata 无 Schema、幻觉错误覆盖；表引用解析异常失败关闭 | 单测完成 |
-| 4.13.6 | 跨源列契约与最终 SQL | `src/graph/nodes/multi_source.py`、`build_response.py` | 按维度/指标角色序列对齐任意数量列；冲突时保留原字段；返回每个来源重写后的最终 SQL | 单测完成 |
+| 4.13.6 | 跨源列契约与最终 SQL | `src/graph/nodes/multi_source.py`、`src/graph/subgraphs/`、`build_response.py` | 按维度/指标角色序列对齐任意数量列；多源 worker 通过子图复用主图节点和路由语义；返回每个来源重写后的最终 SQL | 单测完成 |
 
 ### 模块收尾
 
-模块功能点共 80 项，已完成 79 项，待开发 1 项。
+模块功能点共 81 项，已完成 81 项，待开发 0 项。
 
 | 功能点 | 不开发原因 | 可开发条件 | 预计开发时机 |
 |--------|------------|------------|--------------|
-| 4.8.5 归因分析 | 规则统计无法可靠生成因果解释，当前隔离验收环境也没有真实 LLM 凭证和归因质量评测集 | 配置可用 LLM，并建立可重复的归因基准数据与人工验收标准 | Phase 2 增强阶段，归因评测集就绪后 |
 
 ---

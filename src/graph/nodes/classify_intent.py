@@ -80,32 +80,14 @@ async def classify_intent_node(state: AnalysisState) -> dict:
             intent=intent,
         )
 
-    activated_skills = []
-    skill_prompt = ""
-    skill_tools = []
-    try:
-        from src.skill_manager import get_skill_manager
-        mgr = get_skill_manager()
-        tables = [t.get("name", "") for t in state.get("relevant_tables", [])]
-        activated_skills = mgr.match_skills(
-            state["user_query"],
-            intent,
-            tables,
-            tenant_id=state.get("tenant_id"),
-            user_id=state.get("user_id"),
-        )
-        if activated_skills:
-            skill_prompt = mgr.build_skill_prompt(activated_skills)
-            skill_tools = mgr.get_active_tools(activated_skills)
-    except Exception as e:
-        logger.error("Skill 匹配失败，当前轮不激活 Skill", error=str(e), exc_info=True)
+    from src.graph.skill_activation import activate_skills
+
+    skill_result = activate_skills({**state, "intent": intent})
 
     logger.info("节点完成", node="classify_intent", elapsed_ms=round((time.monotonic() - _start) * 1000))
     return {
         "intent": intent,
-        "activated_skills": [s.name for s in activated_skills],
-        "skill_prompt_override": skill_prompt,
-        "skill_tools": skill_tools,
+        **skill_result,
         **datasource_update,
     }
 
@@ -137,6 +119,8 @@ async def _select_authorized_datasource(
     try:
         from langchain_core.messages import HumanMessage, SystemMessage
         from src.llm.client import get_task_llm, is_task_llm_available
+        from src.llm.output_contracts import DatasourceSelectionOutput, parse_json_model
+        from src.llm.prompt_budget import PromptSection, build_budgeted_prompt
 
         if is_task_llm_available("generate_sql"):
             catalog = "\n".join(
@@ -144,14 +128,36 @@ async def _select_authorized_datasource(
                 for name in candidates
             )
             llm = get_task_llm("generate_sql", temperature=0, reasoning=False)
+            prompt = build_budgeted_prompt(
+                "datasource.select",
+                [
+                    PromptSection(
+                        "query",
+                        f"## 用户问题\n{query}",
+                        priority=100,
+                        min_chars=100,
+                        max_chars=500,
+                    ),
+                    PromptSection(
+                        "authorized_catalog",
+                        f"## 授权候选\n{catalog}",
+                        priority=90,
+                        min_chars=300,
+                        max_chars=900,
+                    ),
+                ],
+            )
             response = await llm.ainvoke([
-                SystemMessage(content=(
-                    "你是数据源路由器。只能从候选名称中选择一个最适合回答问题的数据源，"
-                    "只输出数据源名称，不输出解释。"
-                )),
-                HumanMessage(content=f"问题：{query}\n授权候选：\n{catalog}"),
+                SystemMessage(content=prompt.system),
+                HumanMessage(content=prompt.human),
             ])
-            selected = str(response.content or "").strip().strip("`\"'")
+            try:
+                selected = parse_json_model(
+                    response.content,
+                    DatasourceSelectionOutput,
+                ).datasource
+            except Exception:
+                selected = str(response.content or "").strip().strip("`\"'")
             if selected in datasource_access:
                 logger.info("授权候选数据源模型命中", datasource=selected)
                 return selected
@@ -193,10 +199,29 @@ async def _llm_classify(query: str) -> str | None:
             return None
         llm = get_task_llm("classify_intent", temperature=0, reasoning=False)
         from langchain_core.messages import SystemMessage, HumanMessage
+        from src.llm.output_contracts import IntentOutput, parse_json_model
+        from src.llm.prompt_budget import PromptSection, build_budgeted_prompt
+        prompt = build_budgeted_prompt(
+            "intent.classify",
+            [
+                PromptSection(
+                    "query",
+                    query,
+                    priority=100,
+                    min_chars=100,
+                    max_chars=650,
+                ),
+            ],
+        )
         resp = await llm.ainvoke([
-            SystemMessage(content="意图分类器。只输出: query/aggregation/trend/attribution/metadata/chat/file_analysis"),
-            HumanMessage(content=query)])
-        text = (resp.content or "").strip().lower()
+            SystemMessage(content=prompt.system),
+            HumanMessage(content=prompt.human)])
+        try:
+            intent = parse_json_model(resp.content, IntentOutput).intent
+            logger.info("LLM 意图分类完成", intent=intent)
+            return intent
+        except Exception:
+            text = (resp.content or "").strip().lower()
         valid = {"query", "aggregation", "trend", "attribution", "metadata", "chat", "file_analysis"}
         for w in text.split():
             if w in valid:

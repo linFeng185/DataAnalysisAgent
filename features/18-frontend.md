@@ -14,11 +14,11 @@
 | # | 功能 | 文件 | 描述 | 状态 | 优先级 |
 |---|------|------|------|------|--------|
 | 18.2.1 | Chat 对话界面 | `frontend/src/pages/ChatPage.tsx` | 消息输入 + 数据源选择 + 发送/取消/清空 + 会话 ID 显示 | 开发完成 | P2 |
-| 18.2.2 | 流式进度展示 | `frontend/src/hooks/useChat.ts` | SSE 逐 Node 进度 Tags（8 个节点状态）+ thinking/token 实时推送 | 开发完成 | P2 |
+| 18.2.2 | 流式进度展示 | `frontend/src/hooks/useChat.ts` | SSE 逐 Node 进度 Tags（8 个节点状态）+ 按 stream_id 隔离的 token 实时推送 | 开发完成 | P2 |
 | 18.2.3 | SQL 代码高亮 | `ChatPage.tsx` TurnCard | highlight.js github-dark 主题 + 复制按钮 | 开发完成 | P2 |
 | 18.2.4 | 数据表格展示 | `ChatPage.tsx` TurnCard | Ant Design Table 动态列 + 分页（20条/页，最多100行） | 开发完成 | P2 |
 | 18.2.5 | ECharts 图表渲染 | `ChatPage.tsx` TurnCard | echarts-for-react 渲染 chart.option，空数据时显示 fallback | 开发完成 | P2 |
-| 18.2.6 | 推理过程展示 | `ChatPage.tsx` TurnCard | 流式期间实时显示 LLM reasoning_content | 开发完成 | P2 |
+| 18.2.6 | 推理过程兼容展示 | `ChatPage.tsx` TurnCard | 仅兼容历史 reasoning 字段；新请求不再接收或展示模型原始推理链 | 开发完成 | P2 |
 | 18.2.7 | 推荐追问 | `ChatPage.tsx` | 完成后显示 follow_up_questions Tags，点击自动发送 | 开发完成 | P2 |
 | 18.2.8 | 欢迎引导页 | `ChatPage.tsx` | 无对话时居中显示示例问题卡片 + 渐变 Logo | 开发完成 | P2 |
 | 18.2.9 | 数据源动态加载 | `ChatPage.tsx` | 从 GET /datasources 动态获取选项 | 开发完成 | P2 |
@@ -33,8 +33,8 @@
 | 18.3.1 | 数据源列表 | `frontend/src/pages/DatasourcePage.tsx` | Table 展示名称/方言/主机/端口/数据库，支持分页 | 开发完成 | P2 |
 | 18.3.2 | 新增数据源 | 同上 | Modal 表单（名称/方言/主机/端口/数据库/用户名/密码/描述） | 开发完成 | P2 |
 | 18.3.3 | 删除数据源 | 同上 | Popconfirm 确认删除 | 开发完成 | P2 |
-| 18.3.4 | 编辑数据源 | 同上 | 更新已有数据源配置 | 待开发 | P2 |
-| 18.3.5 | 测试连接 | 同上 | 新增前测试数据源连通性 | 待开发 | P2 |
+| 18.3.4 | 编辑数据源 | 同上 | 更新已有数据源配置，空密码沿用原凭证，探测和持久化成功后替换旧配置 | 单测完成 | P2 |
+| 18.3.5 | 测试连接 | 同上 | 新增或编辑前使用短生命周期连接探测，不注册、不落库并及时释放资源 | 单测完成 | P2 |
 
 ### 18.4 表结构浏览页 (SchemaPage)
 
@@ -43,8 +43,8 @@
 | 18.4.1 | 表列表展示 | `frontend/src/pages/SchemaPage.tsx` | Table 含表名/描述/字段数，可搜索 | 开发完成 | P2 |
 | 18.4.2 | 展开行查看字段 | 同上 | 展开行显示列名/类型/注释/可空/主键 | 开发完成 | P2 |
 | 18.4.3 | Schema 刷新 | 同上 | POST /schema/refresh 重新扫描数据库 | 开发完成 | P2 |
-| 18.4.4 | 字段详情抽屉 | 同上 | 点击表名打开 Drawer 显示完整列信息 + 表关系 | 待开发 | P2 |
-| 18.4.5 | 列注释编辑 | 同上 | 对接 PUT /schema/tables/{name}/columns/{col}/comment | 待开发 | P2 |
+| 18.4.4 | 字段详情抽屉 | 同上 | 点击表名打开 Drawer 显示完整列信息 + 表关系 | 开发完成 | P2 |
+| 18.4.5 | 列注释编辑 | 同上 | 对接 PUT /schema/tables/{name}/columns/{col}/comment，显式携带当前 datasource | 单测完成 | P2 |
 
 ### 18.5 查询历史页 (HistoryPage)
 
@@ -71,7 +71,7 @@
 | 18.7.4 | 公共组件库 | `frontend/src/components/` | SqlPanel / DataTable / ChartPanel / ProgressBar / ReasoningPanel / ResultCard | 开发完成 | P2 |
 | 18.7.5 | ErrorBoundary | `frontend/src/components/ErrorBoundary.tsx` | React Error Boundary 包裹所有页面路由 | 开发完成 | P2 |
 | 18.7.6 | 连接状态指示器 | `App.tsx` Header | 启动时 GET /health, Header 显示 LLM 可用性 + 数据源计数 | 开发完成 | P2 |
-| 18.7.7 | 响应式布局 | 全局 | 移动端适配（可折叠侧栏 + 自适应内容区） | 待开发 | P3 |
+| 18.7.7 | 响应式布局 | 全局 | 767px 以下使用抽屉导航，Header/对话/图表/表格和 Modal 自适应 | 单测完成 | P3 |
 | 18.7.8 | SSE 读取失败处理与依赖安全 | `frontend/src/api/client.ts`、`package.json` | reader 异常调用 onError 且不触发 onDone；ECharts 6.1.x，npm audit 无漏洞 | 单测完成 | P1 |
 
 ### 18.8 高级特性
@@ -79,7 +79,7 @@
 | # | 功能 | 描述 | 状态 | 优先级 |
 |---|------|------|------|--------|
 | 18.8.1 | 数据脱敏提示 | 前端显示敏感数据已脱敏的标识 | 待开发 | P3 |
-| 18.8.2 | 技能选择面板 | 对话前选择要启用的 Skill（如数据质量检查、自定义报告） | 待开发 | P3 |
+| 18.8.2 | 技能选择面板 | 对话前按复合 resource_id 选择已启用 Skill，后端重新校验身份与状态 | 单测完成 | P3 |
 
 ### 18.9 Skills 管理页 (SkillsPage)
 
@@ -116,18 +116,12 @@
 
 ### 模块收尾
 
-模块功能点共 56 项，已完成 47 项，待开发 9 项。
+模块功能点共 56 项，已完成 53 项，待开发 3 项。
 
 | 功能点 | 不开发原因 | 可开发条件 | 预计开发时机 |
 |--------|------------|------------|--------------|
-| 18.3.4 编辑数据源 | 当前数据源 Provider 的更新事务与凭证轮换接口尚未统一 | 后端提供带版本校验的 PUT /datasources/{name} | Phase 3，数据源生命周期增强 |
-| 18.3.5 测试连接 | 注册前的临时凭证探测 API 尚未提供 | 后端提供不落库的 POST /datasources/test | Phase 3，数据源生命周期增强 |
-| 18.4.4 字段详情抽屉 | 当前 Schema API 返回数据已具备，但本轮聚焦知识治理 | 完成字段关系响应契约和移动端宽度设计 | Phase 3，Schema 浏览体验批次 |
-| 18.4.5 列注释编辑 | 需明确租户管理员、数据源所有者的编辑权限 | 后端列注释 API 接入 RBAC 并完成审计 | Phase 3，Schema 治理批次 |
 | 18.6.1 指标列表 | 指标仍以知识条目存在，缺少独立指标生命周期 API | 建立 MetricDefinition 模型、审核状态和分页 API | Phase 4，指标治理模块 |
 | 18.6.2 指标编辑 | 依赖指标版本、审核和冲突处理能力 | 18.6.1 及指标草稿/发布 API 完成 | Phase 4，指标治理模块 |
-| 18.7.7 响应式布局 | 当前桌面工作台可用，移动端全页面回归尚未建立 | 建立 375/768/1440 视口 Playwright 回归 | Phase 3，前端质量批次 |
 | 18.8.1 数据脱敏提示 | 后端响应未返回统一 masking metadata | 脱敏器在响应中提供字段级脱敏标识 | Phase 3，安全可视化批次 |
-| 18.8.2 技能选择面板 | 当前 Skill 由意图自动匹配，缺少会话级显式授权参数 | ChatRequest 增加 enabled_skill_ids 并校验权限 | Phase 4，Skill 交互增强 |
 
 ---

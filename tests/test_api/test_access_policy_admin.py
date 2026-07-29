@@ -38,9 +38,30 @@ class TestAccessPolicyAdmin:
         """策略和 IP 规则的列表、创建、更新、删除端点缺一不可。"""
         logger.debug("test_access_policy_admin_routes_are_registered 入口")
         from src.api.routes import router
+        from src.api.routes.access_policy import router as access_policy_router
 
-        routes = {(method, route.path) for route in router.routes for method in route.methods}
+        included_routers = [
+            route.original_router
+            for route in router.routes
+            if hasattr(route, "original_router")
+        ]
+        access_policy_included = any(
+            candidate is access_policy_router for candidate in included_routers
+        )
+        routes = {
+            (method, route.path)
+            for route in access_policy_router.routes
+            for method in (getattr(route, "methods", None) or set())
+        }
+        logger.info(
+            "访问策略路由注册探针",
+            extra={
+                "included": access_policy_included,
+                "route_count": len(routes),
+            },
+        )
 
+        assert access_policy_included is True
         assert ("GET", "/admin/access-policies") in routes
         assert ("POST", "/admin/access-policies") in routes
         assert ("PATCH", "/admin/access-policies/{policy_id}") in routes

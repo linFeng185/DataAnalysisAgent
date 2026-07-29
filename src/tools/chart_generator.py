@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+from decimal import Decimal
 from typing import Any
 
 from langchain_core.tools import BaseTool
@@ -12,6 +13,30 @@ from langchain_core.tools import BaseTool
 from src.logging_config import get_logger
 
 logger = get_logger(__name__)
+
+_SUPPORTED_CHART_TYPES = frozenset({"auto", "line", "bar", "pie", "scatter", "heatmap", "table"})
+_CHART_TYPE_HINTS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("heatmap", ("热力图", "heatmap", "heat map")),
+    ("scatter", ("散点图", "scatter")),
+    ("line", ("折线图", "趋势图", "line")),
+    ("bar", ("柱状图", "条形图", "bar")),
+    ("pie", ("饼图", "环形图", "pie", "donut")),
+    ("table", ("表格", "table")),
+    ("auto", ("自动推荐", "自动选择", "auto")),
+)
+
+
+# 方法作用：把自然语言图表调整指令解析为受支持的白名单类型。
+# Args: instruction - 用户输入的图表类型或自然语言调整指令。
+# Returns: auto/line/bar/pie/scatter/heatmap/table 之一。
+def resolve_chart_type_instruction(instruction: str) -> str:
+    normalized = str(instruction or "").strip().lower()
+    if normalized in _SUPPORTED_CHART_TYPES:
+        return normalized
+    for chart_type, hints in _CHART_TYPE_HINTS:
+        if any(hint in normalized for hint in hints):
+            return chart_type
+    raise ValueError("无法识别图表类型，请选择受支持的图表")
 
 
 class ChartGeneratorTool(BaseTool):
@@ -38,6 +63,9 @@ class ChartGeneratorTool(BaseTool):
                 return {"error": "rows 参数需为 JSON 数组"}
         if not rows:
             return {"error": "rows 为空"}
+
+        if chart_type not in _SUPPORTED_CHART_TYPES:
+            return {"error": f"不支持的图表类型: {chart_type}"}
 
         logger.info("图表生成工具调用", row_count=len(rows), chart_type=chart_type)
         try:
@@ -116,6 +144,44 @@ def _build_option(rows: list[dict], chart_type: str) -> dict:
             "data": [[float(r.get(numeric[0], 0) or 0), float(r.get(numeric[1], 0) or 0)]
                       for r in rows],
         }]
+    elif chart_type == "heatmap":
+        if len(cols) < 3 or not numeric:
+            raise ValueError("热力图需要两个维度列和一个数值列")
+        value_col = numeric[-1]
+        dimensions = [column for column in cols if column != value_col]
+        if len(dimensions) < 2:
+            raise ValueError("热力图需要两个维度列")
+        x_col, y_col = dimensions[0], dimensions[1]
+        x_labels = list(dict.fromkeys(str(row.get(x_col, "")) for row in rows))
+        y_labels = list(dict.fromkeys(str(row.get(y_col, "")) for row in rows))
+        x_index = {label: index for index, label in enumerate(x_labels)}
+        y_index = {label: index for index, label in enumerate(y_labels)}
+        heat_data = [
+            [
+                x_index[str(row.get(x_col, ""))],
+                y_index[str(row.get(y_col, ""))],
+                float(row.get(value_col, 0) or 0),
+            ]
+            for row in rows
+        ]
+        values_for_range = [item[2] for item in heat_data]
+        base["tooltip"] = {"position": "top"}
+        base["xAxis"] = {"type": "category", "data": x_labels, "splitArea": {"show": True}}
+        base["yAxis"] = {"type": "category", "data": y_labels, "splitArea": {"show": True}}
+        base["visualMap"] = {
+            "min": min(values_for_range),
+            "max": max(values_for_range),
+            "calculable": True,
+            "orient": "horizontal",
+            "left": "center",
+            "bottom": 0,
+        }
+        base["series"] = [{
+            "name": value_col,
+            "type": "heatmap",
+            "data": heat_data,
+            "label": {"show": True},
+        }]
     else:
         base["columns"] = [{"field": c, "title": c} for c in cols]
         base["rows"] = rows[:50]
@@ -157,7 +223,7 @@ def _infer_column_types(
 # Returns: int/float 或合法十进制字符串返回 True。
 def _is_numeric_value(value: Any) -> bool:
     logger.debug("图表数值判断入口", value_type=type(value).__name__)
-    result = isinstance(value, (int, float)) and not isinstance(value, bool)
+    result = isinstance(value, (int, float, Decimal)) and not isinstance(value, bool)
     if isinstance(value, str):
         try:
             float(value)

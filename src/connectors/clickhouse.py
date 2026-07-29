@@ -365,7 +365,10 @@ class ClickHouseConnector(ConnectorBase):
                 parameters=bound_params,
                 settings={"max_execution_time": get_settings().max_execution_time},
             )
-            rows = [dict(zip(result.column_names, row)) for row in result.result_rows]
+            rows = [
+                self._row_to_dict(dict(zip(result.column_names, row)))
+                for row in result.result_rows
+            ]
         except Exception as exc:
             logger.error(
                 "ClickHouse 执行失败",

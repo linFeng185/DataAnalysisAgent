@@ -5,11 +5,15 @@ from __future__ import annotations
 import inspect
 import json
 from pathlib import Path
+from collections.abc import Awaitable, Callable
 
 import yaml
 
 from src.datasource.config import DataSourceConfig
-from src.datasource.credential_manager import CredentialManager
+from src.datasource.credential_manager import (
+    CredentialManager,
+    describe_credential_reference as _credential_reference_kind,
+)
 from src.datasource.introspection import introspect_database
 from src.datasource.providers.base import DataSourceProvider
 from src.datasource.schema_snapshot import SchemaSnapshot
@@ -78,21 +82,167 @@ class ExternalDataSourceProvider(DataSourceProvider):
             已持久在当前 Provider 中的数据源配置。
         """
         logger.debug("外部数据源注册入口", datasource=req.name, dialect=req.dialect)
-        cred_mgr = CredentialManager()
-        database = req.database
-        if req.dialect == "sqlite":
-            database = getattr(req, "file_path", "") or req.database or ":memory:"
-        ds = DataSourceConfig(
-            name=req.name, mode="external", dialect=req.dialect,
-            version=req.version,
-            host=req.host, port=req.port or _DIALECT_DEFAULTS.get(req.dialect, 0),
-            database=database, username=req.username,
-            password=cred_mgr.encrypt(req.password),
-            description=req.description, tags=req.tags, extra_params=req.extra_params,
-        )
+        ds = self._build_config(req, encrypt_password=True)
         self._register(ds)
         logger.info("外部数据源注册完成", datasource=ds.name, dialect=ds.dialect)
         return ds
+
+    # 方法作用：从 API 请求统一构建运行时数据源配置并归一化方言扩展字段。
+    # Args: self - Provider 实例；req - 创建或更新请求；encrypt_password - 是否加密密码；name - 可选名称覆盖；password_override - 可选密码覆盖。
+    # Returns: 尚未注册的数据源配置。
+    def _build_config(
+        self,
+        req: object,
+        *,
+        encrypt_password: bool,
+        name: str | None = None,
+        password_override: str | None = None,
+    ) -> DataSourceConfig:
+        dialect = str(getattr(req, "dialect", "")).strip().lower()
+        database = str(getattr(req, "database", "") or "")
+        if dialect == "sqlite":
+            database = str(getattr(req, "file_path", "") or database or ":memory:")
+        raw_password = (
+            password_override
+            if password_override is not None
+            else str(getattr(req, "password", "") or "")
+        )
+        password = CredentialManager().encrypt(raw_password) if encrypt_password else raw_password
+        extra_params = dict(getattr(req, "extra_params", {}) or {})
+        for request_field, config_field in (
+            ("db_schema", "schema"),
+            ("tablespace", "tablespace"),
+            ("service_name", "service_name"),
+            ("instance", "instance"),
+        ):
+            value = str(getattr(req, request_field, "") or "").strip()
+            if value:
+                extra_params[config_field] = value
+        return DataSourceConfig(
+            name=name or str(getattr(req, "name", "connection-test")),
+            mode="external",
+            dialect=dialect,
+            version=str(getattr(req, "version", "") or ""),
+            host=str(getattr(req, "host", "localhost") or "localhost"),
+            port=int(getattr(req, "port", 0) or _DIALECT_DEFAULTS.get(dialect, 0)),
+            database=database,
+            username=str(getattr(req, "username", "") or ""),
+            password=password,
+            description=str(getattr(req, "description", "") or ""),
+            tags=list(getattr(req, "tags", []) or []),
+            extra_params=extra_params,
+        )
+
+    # 方法作用：释放临时或被替换数据源持有的连接器和引擎。
+    # Args: self - Provider 实例；datasource - 待释放的数据源配置。
+    # Returns: 无返回值。
+    async def _close_runtime(self, datasource: DataSourceConfig) -> None:
+        if datasource.connector is not None:
+            await datasource.connector.close()
+        elif datasource.engine is not None:
+            dispose_result = datasource.engine.dispose()
+            if inspect.isawaitable(dispose_result):
+                await dispose_result
+        datasource.connector = None
+        datasource.engine = None
+
+    # 方法作用：使用短生命周期配置测试连接，结束后释放资源且不注册、不持久化。
+    # Args: self - Provider 实例；req - 创建或更新请求；engine_factory - 引擎创建函数；name - 可选名称；password_override - 可选明文密码。
+    # Returns: 连通返回 True，创建或探测失败返回 False。
+    async def probe_request(
+        self,
+        req: object,
+        engine_factory: Callable[[DataSourceConfig], Awaitable[object]],
+        *,
+        name: str | None = None,
+        password_override: str | None = None,
+    ) -> bool:
+        datasource = self._build_config(
+            req,
+            encrypt_password=False,
+            name=name,
+            password_override=password_override,
+        )
+        logger.debug(
+            "临时数据源连接测试入口",
+            datasource=datasource.name,
+            dialect=datasource.dialect,
+        )
+        try:
+            datasource.engine = await engine_factory(datasource)
+            connected = await self.test_connection(datasource)
+            logger.info(
+                "临时数据源连接测试完成",
+                datasource=datasource.name,
+                dialect=datasource.dialect,
+                connected=connected,
+            )
+            return connected
+        except Exception as exc:
+            logger.error(
+                "临时数据源连接测试失败",
+                datasource=datasource.name,
+                dialect=datasource.dialect,
+                error=str(exc)[:500],
+                exc_info=True,
+            )
+            return False
+        finally:
+            await self._close_runtime(datasource)
+
+    # 方法作用：探测并持久化新配置，全部成功后再替换当前 Provider 配置。
+    # Args: self - Provider 实例；name - 数据源名称；req - 更新请求；engine_factory - 引擎创建函数；tenant_id - 租户；owner_user_id - 操作者。
+    # Returns: 更新后的数据源配置。
+    async def update(
+        self,
+        name: str,
+        req: object,
+        *,
+        engine_factory: Callable[[DataSourceConfig], Awaitable[object]],
+        tenant_id: int,
+        owner_user_id: int,
+    ) -> DataSourceConfig:
+        logger.debug(
+            "外部数据源更新入口",
+            datasource=name,
+            tenant_id=tenant_id,
+            owner_user_id=owner_user_id,
+        )
+        current = await self.lookup(name)
+        if current is None:
+            raise KeyError(name)
+        requested_password = getattr(req, "password", None)
+        plain_password = (
+            CredentialManager().decrypt(current.password)
+            if requested_password is None or requested_password == ""
+            else str(requested_password)
+        )
+        connected = await self.probe_request(
+            req,
+            engine_factory,
+            name=name,
+            password_override=plain_password,
+        )
+        if not connected:
+            logger.warning("外部数据源更新被连接测试阻断", datasource=name)
+            raise ConnectionError(f"数据源 '{name}' 连接测试失败")
+        updated = self._build_config(
+            req,
+            encrypt_password=True,
+            name=name,
+            password_override=plain_password,
+        )
+        updated.tenant_id = tenant_id
+        updated.owner_user_id = owner_user_id
+        await self.persist(
+            updated,
+            tenant_id=tenant_id,
+            owner_user_id=owner_user_id,
+        )
+        await self._close_runtime(current)
+        self._register(updated)
+        logger.info("外部数据源更新完成", datasource=name, tenant_id=tenant_id)
+        return updated
 
     # 方法作用：把页面创建的数据源及加密凭证持久化到状态数据库。
     # Args: ds - 已加密密码的数据源配置；tenant_id - 所属租户；owner_user_id - 创建者。
@@ -109,6 +259,11 @@ class ExternalDataSourceProvider(DataSourceProvider):
             datasource=ds.name,
             tenant_id=tenant_id,
             owner_user_id=owner_user_id,
+        )
+        logger.info(
+            "页面数据源持久化凭证边界",
+            datasource=ds.name,
+            credential_format=_credential_reference_kind(ds.password),
         )
         from src.memory.pg_pool import get_pg_pool
 
@@ -162,6 +317,7 @@ class ExternalDataSourceProvider(DataSourceProvider):
                     "database_name, username, encrypted_password, description, extra_params "
                     "FROM datasource_configs ORDER BY id",
                 )
+            logger.info("持久化数据源读取边界", row_count=len(rows))
             for row in rows:
                 ds = DataSourceConfig(
                     name=str(row["name"]),
@@ -179,6 +335,12 @@ class ExternalDataSourceProvider(DataSourceProvider):
                     owner_user_id=int(row["owner_user_id"]),
                 )
                 self._register(ds)
+                logger.info(
+                    "持久化数据源恢复边界",
+                    datasource=ds.name,
+                    credential_format=_credential_reference_kind(ds.password),
+                    registered=True,
+                )
         except Exception:
             logger.error("持久化数据源加载失败", exc_info=True)
             raise
@@ -237,14 +399,7 @@ class ExternalDataSourceProvider(DataSourceProvider):
         logger.debug("外部数据源注销入口", datasource=name)
         if name in self._sources:
             ds = self._sources.pop(name)
-            if ds.connector:
-                await ds.connector.close()
-            elif ds.engine:
-                dispose_result = ds.engine.dispose()
-                if inspect.isawaitable(dispose_result):
-                    await dispose_result
-            ds.engine = None
-            ds.connector = None
+            await self._close_runtime(ds)
             logger.info("数据源已移除", name=name)
         else:
             logger.info("外部数据源注销跳过", datasource=name, reason="不存在")

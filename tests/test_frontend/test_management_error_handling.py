@@ -49,6 +49,20 @@ def test_schema_refresh_checks_http_status() -> None:
     logger.info("test_schema_refresh_checks_http_status 完成")
 
 
+# 方法作用：验证列注释保存请求携带当前选择的数据源。
+# Args: 无。
+# Returns: 无返回值，断言失败时由 pytest 报告。
+def test_schema_comment_update_carries_selected_datasource() -> None:
+    """选择非 demo 数据源时不得把注释静默写入默认数据源。"""
+    logger.debug("test_schema_comment_update_carries_selected_datasource 入口")
+    _assert_source_contains(
+        "pages/SchemaPage.tsx",
+        "comment?datasource=${encodeURIComponent(ds)}",
+        "字段备注保存请求边界",
+    )
+    logger.info("test_schema_comment_update_carries_selected_datasource 完成")
+
+
 # 方法作用：验证 Skill 切换、删除和刷新都检查 response.ok 并反馈错误。
 # Args: 无。
 # Returns: 无返回值，断言失败时由 pytest 报告。

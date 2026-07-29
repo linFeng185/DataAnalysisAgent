@@ -22,6 +22,8 @@ llm_allow_remote_fallback: false
 
 database_url: ""
 run_migrations_on_startup: true
+memory_maintenance_enabled: true
+memory_maintenance_interval_seconds: 86400
 
 vector_store_type: chroma
 vector_store_abstract_enabled: true
@@ -35,6 +37,23 @@ datasource_cache_backend: local
 datasource_cache_dir: ./data/cache/datasource
 datasource_cache_ttl_seconds: 604800
 datasource_cache_redis_prefix: data-agent:datasource-cache
+schema_cache_refresh_enabled: true
+schema_cache_refresh_interval_seconds: 3600
+
+skill_registry_url: ""
+skill_registry_trusted_hosts: ""
+skill_registry_max_package_bytes: 10485760
+
+automation_enabled: true
+automation_poll_interval_seconds: 60
+automation_smtp_host: ""
+automation_smtp_port: 587
+automation_smtp_starttls: true
+automation_smtp_username: ""
+automation_smtp_password: ""
+automation_email_from: ""
+automation_feishu_webhook_url: ""
+automation_slack_webhook_url: ""
 
 multi_tenant: false
 registration_enabled: false
@@ -62,6 +81,13 @@ api_access:
       auth: public
       access_log: none
       description: 健康检查
+    - id: metrics
+      path: /api/v1/metrics
+      path_type: exact
+      methods: [GET]
+      auth: public
+      access_log: none
+      description: Prometheus 指标抓取
     - id: login
       path: /api/v1/auth/login
       path_type: exact
@@ -118,6 +144,27 @@ api_access:
       auth: jwt_or_admin_key
       access_log: audit
       description: 更新字段注释
+    - id: automation_create
+      path: /api/v1/automation/schedules
+      path_type: exact
+      methods: [POST]
+      auth: jwt
+      access_log: audit
+      description: 创建自动化任务
+    - id: automation_delete
+      path: /api/v1/automation/schedules/{schedule_id}
+      path_type: template
+      methods: [DELETE]
+      auth: jwt
+      access_log: audit
+      description: 删除自动化任务
+    - id: automation_run
+      path: /api/v1/automation/schedules/{schedule_id}/run
+      path_type: template
+      methods: [POST]
+      auth: jwt
+      access_log: audit
+      description: 立即运行自动化任务
     - id: model_test
       path: /api/v1/models/test
       path_type: exact
@@ -152,8 +199,13 @@ max_upload_total_bytes: 104857600
 explain_skip_dialects:
   - snowflake
 datasource_host_allowlist: ""
+langsmith_tracing: false
 langsmith_api_key: ""
 langsmith_project: data-analysis-agent
+langsmith_endpoint: https://api.smith.langchain.com
+langsmith_hide_inputs: true
+langsmith_hide_outputs: true
+langsmith_sampling_rate: 1.0
 
 mcp_config_path: config/app.yaml
 mcp_remote_host_allowlist: ""
