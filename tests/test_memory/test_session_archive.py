@@ -7,7 +7,6 @@ from datetime import datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
-
 logger = logging.getLogger(__name__)
 
 

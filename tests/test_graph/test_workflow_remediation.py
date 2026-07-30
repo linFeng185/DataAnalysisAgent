@@ -9,7 +9,6 @@ from unittest.mock import AsyncMock, patch
 import pytest
 from langgraph.checkpoint.memory import MemorySaver
 
-
 logger = logging.getLogger(__name__)
 
 
@@ -194,7 +193,7 @@ class TestWorkflowTopology:
     # Args: self - pytest 测试类实例。
     # Returns: 无返回值，断言失败时由 pytest 报告。
     def test_file_analysis_takes_priority_over_multi_source(self):
-        """选择多个数据源时，文件分析仍必须进入 MCP Agent。"""
+        """选择多个数据源时，文件分析仍必须进入独立文件子图。"""
         logger.debug("test_file_analysis_takes_priority_over_multi_source 入口")
         from src.graph.workflow import route_by_intent
 
@@ -203,7 +202,7 @@ class TestWorkflowTopology:
             "selected_datasources": ["mysql", "postgres"],
         })
 
-        assert target == "mcp_agent"
+        assert target == "file_analysis_subgraph"
         logger.info("test_file_analysis_takes_priority_over_multi_source 完成")
 
     # 方法作用：验证 metadata 先检索 Schema 再直接回答。
@@ -230,10 +229,10 @@ class TestWorkflowTopology:
         assert route_by_intent({"intent": "meta", "datasource": "demo"}) == "restore_previous_result"
         logger.info("test_meta_routes_through_previous_result_restore 完成")
 
-    # 方法作用：验证编译图包含 MCP Agent 的真实执行边和统一响应出口。
+    # 方法作用：验证编译图包含文件分析子图的真实执行边和统一响应出口。
     # Args: self - pytest 测试类实例。
     # Returns: 无返回值，断言失败时由 pytest 报告。
-    async def test_compiled_graph_executes_mcp_agent_before_response(self):
+    async def test_compiled_graph_executes_file_subgraph_before_response(self):
         """仅测试路由函数不足，必须检查 LangGraph 编译后的实际拓扑。"""
         logger.debug("test_compiled_graph_executes_mcp_agent_before_response 入口")
         import src.graph.workflow as workflow_module
@@ -245,8 +244,9 @@ class TestWorkflowTopology:
             graph = await workflow_module.build_workflow()
 
         edges = {(edge.source, edge.target) for edge in graph.get_graph().edges}
-        assert ("classify_intent", "mcp_agent") in edges
-        assert ("mcp_agent", "build_response") in edges
+        assert ("classify_intent", "file_analysis_subgraph") in edges
+        assert ("file_analysis_subgraph", "build_response") in edges
+        assert not any(source == "mcp_agent" or target == "mcp_agent" for source, target in edges)
         assert ("llm_direct_answer", "build_response") in edges
         logger.info("test_compiled_graph_executes_mcp_agent_before_response 完成")
 
@@ -460,12 +460,16 @@ class TestLayer4Explain:
         finally:
             await engine.dispose()
 
-        assert result == {
+        assert {key: result[key] for key in (
+            "explain_errors", "sql_valid", "generated_sql", "sql_explain_checked",
+        )} == {
             "explain_errors": [],
             "sql_valid": True,
             "generated_sql": "SELECT 1",
             "sql_explain_checked": True,
         }
+        assert result["execution_context"]["dialect"] == "sqlite"
+        assert result["execution_context"]["sql_explain_checked"] is True
         logger.info("test_explain_accepts_valid_sql 完成")
 
     # 方法作用：验证 PostgreSQL SQL 在 EXPLAIN 前完成方言重写并写回状态。

@@ -8,7 +8,6 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
-
 logger = logging.getLogger(__name__)
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -284,6 +283,7 @@ class TestStatePersistenceBoundary:
         logger.debug("test_request_fields_use_untracked_channels 入口")
         from langgraph.channels import UntrackedValue
         from langgraph.graph import StateGraph
+
         from src.graph.state import AnalysisState
 
         graph = StateGraph(AnalysisState)

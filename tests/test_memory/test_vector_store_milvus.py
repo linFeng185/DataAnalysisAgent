@@ -2,14 +2,13 @@
 
 from __future__ import annotations
 
-import json
 import importlib.util
+import json
 import logging
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +32,7 @@ class TestMilvusHealthCheck:
             from unittest.mock import MagicMock
 
             from pymilvus import connections, utility
+
             from src.memory.vector_store_milvus import MilvusVectorStore
 
             has_connection = MagicMock(return_value=True)
@@ -64,6 +64,7 @@ class TestMilvusHealthCheck:
             from unittest.mock import MagicMock
 
             from pymilvus import connections, utility
+
             from src.memory.vector_store_milvus import MilvusVectorStore
 
             has_connection = MagicMock(return_value=False)
@@ -94,6 +95,7 @@ class TestMilvusHealthCheck:
             from unittest.mock import MagicMock
 
             from pymilvus import connections, utility
+
             from src.memory.vector_store_milvus import MilvusVectorStore
 
             monkeypatch.setattr(connections, "has_connection", MagicMock(return_value=True))

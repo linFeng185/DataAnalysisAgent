@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import pytest
-
 
 class TestExternalActions:
     """覆盖人工确认、幂等键和默认拒绝。"""

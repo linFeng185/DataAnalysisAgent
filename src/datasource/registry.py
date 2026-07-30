@@ -9,6 +9,8 @@ from src.connectors import clickhouse as _clickhouse  # noqa: F401
 from src.datasource.config import DataSourceConfig
 from src.datasource.credential_manager import (
     CredentialManager,
+)
+from src.datasource.credential_manager import (
     describe_credential_reference as _credential_reference_kind,
 )
 from src.datasource.providers.base import DataSourceProvider
@@ -53,7 +55,7 @@ class DataSourceRegistry:
 
     def __init__(self) -> None:
         self._providers: dict[str, DataSourceProvider] = {}
-        self._cache: dict[str, DataSourceConfig] = {}
+        self._cache: dict[tuple[int, str], DataSourceConfig] = {}
         self._credential = CredentialManager()
 
     def register_provider(self, name: str, provider: DataSourceProvider) -> None:
@@ -83,7 +85,7 @@ class DataSourceRegistry:
         logger.debug("获取数据源 Provider", provider=name, found=provider is not None)
         return provider
 
-    def invalidate(self, name: str) -> bool:
+    def invalidate(self, name: str, *, tenant_id: int | None = None) -> bool:
         """清除数据源解析缓存但不删除 Provider 配置。
 
         Args:
@@ -92,7 +94,14 @@ class DataSourceRegistry:
         Returns:
             存在并清除缓存时返回 True。
         """
-        existed = self._cache.pop(name, None) is not None
+        effective_tenant = self._effective_tenant_id(tenant_id)
+        keys = [
+            key for key in self._cache
+            if self._cache_key_matches(key, name, effective_tenant)
+        ]
+        existed = bool(keys)
+        for key in keys:
+            self._cache.pop(key, None)
         logger.info("数据源缓存失效", datasource=name, existed=existed)
         return existed
 
@@ -113,14 +122,15 @@ class DataSourceRegistry:
         if not config.name.strip():
             logger.error("注册数据源配置失败", reason="数据源名称为空")
             raise ValueError("数据源名称不能为空")
-        if config.name in self._cache and not replace:
+        key = (int(config.tenant_id), config.name)
+        if key in self._cache and not replace:
             logger.warning("注册数据源配置拒绝", datasource=config.name, reason="已存在")
             raise ValueError(f"数据源配置已存在: {config.name}")
-        self._cache[config.name] = config
+        self._cache[key] = config
         logger.info("注册数据源配置完成", datasource=config.name)
         return config
 
-    async def unregister(self, name: str) -> bool:
+    async def unregister(self, name: str, *, tenant_id: int | None = None) -> bool:
         """从 Provider 和 Registry 删除数据源并释放引擎。
 
         Args:
@@ -130,18 +140,29 @@ class DataSourceRegistry:
             数据源存在并删除时返回 True。
         """
         logger.debug("注销数据源入口", datasource=name)
+        isolation_enabled = self._isolation_enabled()
+        effective_tenant = self._effective_tenant_id(tenant_id) if isolation_enabled else None
         provider_found = False
         for provider in self._providers.values():
-            config = await provider.lookup(name)
+            config = await self._provider_lookup(provider, name, effective_tenant)
             if config is None:
                 continue
             provider_found = True
             unregister = getattr(provider, "unregister", None)
             if unregister is not None:
-                await unregister(name)
+                try:
+                    await unregister(name, tenant_id=effective_tenant)
+                except TypeError:
+                    await unregister(name)
             break
 
-        cached = self._cache.pop(name, None)
+        cached_keys = [
+            key for key in self._cache
+            if self._cache_key_matches(key, name, effective_tenant)
+        ]
+        cached = None
+        for key in cached_keys:
+            cached = self._cache.pop(key, None) or cached
         if cached is not None and not provider_found:
             if cached.connector is not None:
                 await cached.connector.close()
@@ -156,7 +177,7 @@ class DataSourceRegistry:
         logger.info("注销数据源完成", datasource=name, removed=provider_found)
         return provider_found
 
-    async def resolve(self, name: str) -> DataSourceConfig:
+    async def resolve(self, name: str, *, tenant_id: int | None = None) -> DataSourceConfig:
         """解析数据源 → 注入 engine → 缓存。
 
         schema 延迟加载：不在 resolve 时 introspect，
@@ -164,12 +185,18 @@ class DataSourceRegistry:
         避免每次服务重启都全量 INFORMATION_SCHEMA 查询。
         """
         logger.debug("解析数据源入口", datasource=name)
-        if name in self._cache:
+        effective_tenant = self._effective_tenant_id(tenant_id)
+        cache_key = (effective_tenant, name)
+        if cache_key in self._cache:
             logger.info("解析数据源命中缓存", datasource=name)
+            return self._cache[cache_key]
+        # 兼容测试和迁移期直接注入的旧字符串缓存键。
+        if name in self._cache:
+            logger.info("命中旧格式数据源缓存键", datasource=name)
             return self._cache[name]
 
         for provider in self._providers.values():
-            config = await provider.lookup(name)
+            config = await self._provider_lookup(provider, name, effective_tenant)
             if config is None:
                 continue
 
@@ -218,7 +245,7 @@ class DataSourceRegistry:
                     config.engine = None
                 continue
 
-            self._cache[name] = config
+            self._cache[cache_key] = config
             logger.info("解析数据源完成", datasource=name, connected=True)
             return config
 
@@ -254,17 +281,23 @@ class DataSourceRegistry:
                 f"数据源 '{ds.name}' 方言驱动不可用: {ds.dialect} — {exc}"
             ) from exc
 
-    async def list_all(self) -> list[dict]:
+    async def list_all(self, *, tenant_id: int | None = None) -> list[dict]:
         """列出 Provider 与缓存中的全部数据源。
 
         Returns:
             去重后的数据源摘要列表。
         """
         logger.debug("列出数据源入口", providers=len(self._providers), cached=len(self._cache))
+        isolation_enabled = self._isolation_enabled()
+        effective_tenant = self._effective_tenant_id(tenant_id) if isolation_enabled else None
         result = []
         seen: set[str] = set()
         for provider in self._providers.values():
-            for ds in await provider.list_all():
+            try:
+                provider_items = await provider.list_all(tenant_id=effective_tenant)
+            except TypeError:
+                provider_items = await provider.list_all()
+            for ds in provider_items:
                 seen.add(ds.name)
                 result.append({
                     "name": ds.name, "dialect": ds.dialect,
@@ -278,10 +311,16 @@ class DataSourceRegistry:
                     "service_name": ds.extra_params.get("service_name", ""),
                     "instance": ds.extra_params.get("instance", ""),
                     "file_path": ds.database if ds.dialect == "sqlite" else "",
-                    "connected": ds.name in self._cache,
+                    "connected": (int(ds.tenant_id), ds.name) in self._cache,
                 })
         # 包含直接注入缓存的 demo 数据源（不通过 Provider 注册）
-        for name, config in self._cache.items():
+        for raw_key, config in self._cache.items():
+            if isinstance(raw_key, tuple):
+                source_tenant, name = raw_key
+            else:
+                source_tenant, name = int(getattr(config, "tenant_id", 1) or 1), str(raw_key)
+            if isolation_enabled and source_tenant != effective_tenant:
+                continue
             if name not in seen:
                 result.append({
                     "name": config.name, "dialect": config.dialect,
@@ -299,6 +338,41 @@ class DataSourceRegistry:
                 })
         logger.info("列出数据源完成", count=len(result))
         return result
+
+    @staticmethod
+    async def _provider_lookup(provider: DataSourceProvider, name: str, tenant_id: int | None):
+        try:
+            return await provider.lookup(name, tenant_id=tenant_id)
+        except TypeError:
+            return await provider.lookup(name)
+
+    @staticmethod
+    def _cache_key_matches(key: object, name: str, tenant_id: int) -> bool:
+        if isinstance(key, tuple) and len(key) == 2:
+            return int(key[0]) == int(tenant_id) and str(key[1]) == name
+        return str(key) == name
+
+    @staticmethod
+    def _isolation_enabled() -> bool:
+        try:
+            from src.app_context import get_tenant_policy
+
+            return bool(get_tenant_policy().datasource_isolation_enabled)
+        except Exception:
+            logger.debug("获取数据源隔离策略失败，使用兼容模式", exc_info=True)
+            return False
+
+    @staticmethod
+    def _effective_tenant_id(tenant_id: int | None) -> int:
+        if tenant_id is not None:
+            return int(tenant_id)
+        try:
+            from src.api.auth import get_current_tenant_id
+
+            return int(get_current_tenant_id())
+        except Exception:
+            logger.debug("获取当前租户失败，使用默认租户", exc_info=True)
+            return 1
 
     async def resolve_or_none(self, name: str) -> DataSourceConfig | None:
         """解析数据源，未找到时返回 None。

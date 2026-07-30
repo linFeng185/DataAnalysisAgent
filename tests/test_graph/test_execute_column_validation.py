@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import logging
 
-
 logger = logging.getLogger(__name__)
 
 
@@ -20,6 +19,7 @@ class TestColumnReferenceValidation:
         try:
             # Arrange
             import sqlglot
+
             from src.graph.nodes.execute_sql import _validate_column_references
 
             captured: dict[str, str] = {}
@@ -55,6 +55,7 @@ class TestColumnReferenceValidation:
         try:
             # Arrange
             import sqlglot
+
             from src.graph.nodes.execute_sql import _validate_column_references
 
             monkeypatch.setattr(

@@ -33,7 +33,11 @@ class TestMarketAnalysis:
     def test_market_metrics_rejects_mixed_symbols_or_nonpositive_price(self):
         """混合证券和非正价格必须拒绝，避免错误联想。"""
         # Arrange
-        from src.tools.market_analysis import MarketAnalysisError, MarketPoint, compute_market_metrics
+        from src.tools.market_analysis import (
+            MarketAnalysisError,
+            MarketPoint,
+            compute_market_metrics,
+        )
 
         # Act / Assert
         with pytest.raises(MarketAnalysisError, match="同一 symbol"):

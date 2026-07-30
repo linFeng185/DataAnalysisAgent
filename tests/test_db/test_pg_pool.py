@@ -7,7 +7,6 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-
 logger = logging.getLogger(__name__)
 
 

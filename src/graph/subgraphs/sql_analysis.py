@@ -10,7 +10,6 @@ from langgraph.graph import END, StateGraph
 from src.graph.state import AnalysisState
 from src.logging_config import get_logger
 
-
 logger = get_logger(__name__)
 SQL_ANALYSIS_NODE_NAMES = (
     "retrieve_schema",

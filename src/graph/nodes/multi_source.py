@@ -16,6 +16,7 @@ from typing import Any
 
 from langchain_core.runnables import RunnableConfig
 
+from src.graph.contracts import MultiSourceResult, SourceQueryRequest, SourceQueryResult
 from src.graph.state import AnalysisState
 from src.logging_config import get_logger
 
@@ -45,9 +46,12 @@ async def multi_source_dispatch_node(
 
     Returns: {"multi_source_results": [{datasource, success, sql, data, ...}, ...]}
     """
+    from src.graph.context import read_contexts
+
+    contexts = read_contexts(state)
     _start = time.monotonic()
-    sources = state.get("selected_datasources", []) or []
-    query = state.get("user_query", "")
+    sources = contexts.routing.selected_datasources
+    query = contexts.request.user_query
 
     if len(sources) <= 1:
         logger.debug("多源调度跳过（单数据源）")
@@ -68,19 +72,46 @@ async def multi_source_dispatch_node(
     coros = [_analyze_one(s, state, config=config, subgraph=subgraph) for s in sources]
     raw = await asyncio.gather(*coros, return_exceptions=True)
 
-    # 收集有效结果
-    collected: list[dict] = []
+    # 收集并校验来源级结果，任何 worker 异常都转换为同一失败契约。
+    collected: list[SourceQueryResult] = []
     for i, r in enumerate(raw):
         if isinstance(r, Exception):
             logger.warning("多源 worker 异常", source=sources[i], error=str(r))
-            collected.append({"datasource": sources[i], "success": False, "error": str(r)})
+            collected.append(SourceQueryResult.failed(sources[i], str(r) or "单源 worker 异常"))
         elif r:
-            collected.append(r)
+            try:
+                source_result = SourceQueryResult.model_validate(r)
+                if source_result.datasource != sources[i]:
+                    raise ValueError("单源结果的数据源与调度计划不一致")
+                collected.append(source_result)
+            except Exception as exc:
+                logger.error(
+                    "多源 worker 结果契约校验失败",
+                    datasource=sources[i],
+                    error=str(exc),
+                    exc_info=True,
+                )
+                collected.append(SourceQueryResult.failed(sources[i], "单源结果契约校验失败"))
+        else:
+            collected.append(SourceQueryResult.failed(sources[i], "单源 SQL 子图未返回结果"))
 
     elapsed = round((time.monotonic() - _start) * 1000)
-    ok = sum(1 for r in collected if r.get("success"))
-    logger.info("多源调度完成", total=len(sources), success=ok, elapsed_ms=elapsed)
-    return {_SOURCES_KEY: collected}
+    batch = MultiSourceResult.from_results(
+        query=query,
+        selected_datasources=list(sources),
+        results=collected,
+    )
+    logger.info(
+        "多源调度完成",
+        total=len(sources),
+        success=batch.success_count,
+        failed=batch.failure_count,
+        elapsed_ms=elapsed,
+    )
+    return {
+        _SOURCES_KEY: batch.to_legacy_results(),
+        "multi_source_result": batch.model_dump(),
+    }
 
 
 # 方法作用：为单个数据源注入权限并运行完整 SQL 子图。
@@ -91,51 +122,54 @@ async def _analyze_one(
     state: AnalysisState,
     config: RunnableConfig | None = None,
     subgraph: Any | None = None,
-) -> dict | None:
+) -> dict:
     """运行单个数据源的统一 SQL 子图。"""
-    logger.debug("单源分析入口", datasource=datasource, query=state.get("user_query", "")[:60])
+    from src.graph.context import read_contexts
+
+    contexts = read_contexts(state)
+    logger.debug(
+        "单源分析入口",
+        datasource=datasource,
+        query=contexts.request.user_query[:60],
+    )
     try:
         from src.datasource.registry import get_registry
+
+        request = SourceQueryRequest.from_state(datasource, state)
+        logger.info(
+            "多源单库请求契约完成",
+            datasource=request.datasource,
+            selected_sources=request.selected_datasources,
+            tenant_id=request.tenant_id,
+            user_id=request.user_id,
+            enabled_skill_count=len(request.enabled_skill_ids),
+        )
 
         resolved = await get_registry().resolve_or_none(datasource)
         if resolved is None:
             logger.warning("单源分析跳过", datasource=datasource, reason="数据源连接失败或不存在")
-            return {"datasource": datasource, "success": False, "error": "数据源连接失败或不存在"}
+            return SourceQueryResult.failed(
+                datasource,
+                "数据源连接失败或不存在",
+            ).to_legacy_dict()
 
-        s1 = dict(state)
-        s1["datasource"] = datasource
-        datasource_access = state.get("datasource_access", {}) or {}
-        if datasource_access:
-            permission = datasource_access.get(datasource)
-            if permission is None:
-                logger.warning("单源分析权限拒绝", datasource=datasource)
-                return {"datasource": datasource, "success": False, "error": "无权访问数据源"}
-            s1["allowed_columns"] = list(permission.get("allowed_columns", []) or [])
-            s1["row_filter_sql"] = str(permission.get("row_filter_sql", "") or "")
+        s1 = request.to_worker_state(
+            resolved_schema=resolved.schema,
+            dialect=resolved.dialect,
+        )
+        if request.permission.allowed_columns or request.permission.row_filter_sql:
             logger.info(
                 "单源分析权限已注入",
                 datasource=datasource,
-                allowed_columns=len(s1["allowed_columns"]),
-                has_row_filter=bool(s1["row_filter_sql"]),
+                allowed_columns=len(request.permission.allowed_columns),
+                has_row_filter=bool(request.permission.row_filter_sql),
             )
-        s1["resolved_schema"] = resolved.schema
-        s1["dialect"] = resolved.dialect
-        global_query = str(state.get("user_query", "") or "")
-        s1["user_query"] = (
-            "这是多数据源并行分析中的单源 SQL 子任务。"
-            f"当前只负责数据源 `{datasource}`，当前 Schema 也只属于该数据源；"
-            "其他已选数据源由独立 worker 查询，最终由合并节点统一比较。"
-            "请只基于当前 Schema 生成回答全局问题所需的本数据源查询；"
-            "多个指标按全局问题中的顺序输出，并使用跨源稳定的英文 snake_case 指标别名；"
-            "不要输出数据源名称列，合并节点会统一注入 `_datasource`；"
-            "不要尝试跨库查询，也不要因为缺少其他数据源的 Schema 而返回空 SQL。"
-            f"\n全局问题：{global_query}"
-        )
         logger.info(
             "多源单库 SQL 子图边界输入",
             datasource=datasource,
-            selected_sources=state.get("selected_datasources", []) or [],
-            global_query=global_query[:200],
+            selected_sources=request.selected_datasources,
+            global_query=request.global_query[:200],
+            worker_state_keys=sorted(s1),
         )
 
         if subgraph is None:
@@ -153,7 +187,10 @@ async def _analyze_one(
         ]
         result = await subgraph.ainvoke(s1, config=worker_config)
         if not isinstance(result, dict):
-            return {"datasource": datasource, "success": False, "error": "SQL 子图未返回结果"}
+            return SourceQueryResult.failed(
+                datasource,
+                "SQL 子图未返回结果",
+            ).to_legacy_dict()
 
         dialect = str(result.get("dialect", resolved.dialect or "mysql"))
         sql = str(result.get("generated_sql", "") or "")
@@ -175,37 +212,45 @@ async def _analyze_one(
                 explain_error_count=len(explain_errors),
                 execution_error_type=result.get("execution_error_type", ""),
             )
-            return {
-                "datasource": datasource,
-                "success": False,
-                "error": error_message,
-                "validation_errors": validation_errors,
-                "explain_errors": explain_errors,
-                "sql": sql,
-                "dialect": dialect,
-            }
+            return SourceQueryResult.failed(
+                datasource,
+                error_message,
+                validation_errors=validation_errors,
+                explain_errors=explain_errors,
+                error_type=str(result.get("execution_error_type", "") or ""),
+                sql=sql,
+                dialect=dialect,
+            ).to_legacy_dict()
 
         data = result.get("query_result_sample", []) or []
         final_sql = str(result.get("generated_sql", "") or sql)
-        output = {
-            "datasource": datasource,
-            "success": True,
-            "sql": final_sql,
-            "data": data[:50],
-            "dialect": dialect,
-            "tables": len(result.get("relevant_tables", []) or []),
-        }
+        output = SourceQueryResult(
+            datasource=datasource,
+            success=True,
+            sql=final_sql,
+            data=data[:50],
+            dialect=dialect,
+            tables=len(result.get("relevant_tables", []) or []),
+            full_count=int(result.get("query_result_full_count", len(data)) or len(data)),
+            truncated=bool(result.get("query_result_truncated", False)),
+        )
         logger.info(
             "单源分析完成",
             datasource=datasource,
             success=True,
-            data_rows=len(output["data"]),
+            data_rows=len(output.data),
             final_sql_chars=len(final_sql),
         )
-        return output
+        return output.to_legacy_dict()
+    except PermissionError as exc:
+        logger.warning("单源分析权限拒绝", datasource=datasource, error=str(exc))
+        return SourceQueryResult.failed(datasource, str(exc)).to_legacy_dict()
     except Exception as exc:
         logger.error("单源分析异常", datasource=datasource, error=str(exc), exc_info=True)
-        return {"datasource": datasource, "success": False, "error": str(exc)}
+        return SourceQueryResult.failed(
+            datasource,
+            str(exc) or "单源分析异常",
+        ).to_legacy_dict()
 
 
 # 识别跨源单行可加指标，并用 Decimal 生成确定性总计。
@@ -645,8 +690,27 @@ async def merge_results_node(
 
     Returns: {"analysis_result": dict, "chart_config": dict}
     """
+    from src.graph.context import read_contexts
+
+    contexts = read_contexts(state)
     results = state.get(_SOURCES_KEY, []) or []
-    query = state.get("user_query", "")
+    structured_batch = state.get("multi_source_result", {}) or {}
+    if structured_batch:
+        try:
+            batch = MultiSourceResult.model_validate(structured_batch)
+            results = batch.to_legacy_results()
+            logger.info(
+                "多源合并结果契约恢复完成",
+                success=batch.success_count,
+                failed=batch.failure_count,
+            )
+        except Exception as exc:
+            logger.error(
+                "多源合并结果契约恢复失败，使用兼容明细",
+                error=str(exc),
+                exc_info=True,
+            )
+    query = contexts.request.user_query
     logger.debug("多源结果合并入口", result_count=len(results), query=query[:60])
     if not results:
         logger.info("多源结果合并跳过", reason="无调度结果")
@@ -684,12 +748,13 @@ async def merge_results_node(
     # 精确可加汇总不调用 LLM，其他跨源问题继续由 LLM 综合语义。
     if ok and precise_analysis is None:
         try:
-            from src.llm.client import get_task_llm, is_task_llm_available
+            from src.llm.client import is_task_llm_available
             if is_task_llm_available("multi_source_merge"):
-                llm = get_task_llm("multi_source_merge", temperature=0, reasoning=False)
-                from langchain_core.messages import SystemMessage, HumanMessage
-                from src.llm.prompt_budget import PromptSection, build_budgeted_prompt
-                prompt = build_budgeted_prompt(
+                from src.llm.invocation import invoke_text
+                from src.llm.output_contracts import AnalysisOutput, parse_json_model
+                from src.llm.prompt_budget import PromptSection
+
+                raw_summary = await invoke_text(
                     "multi_source.merge",
                     [
                         PromptSection(
@@ -708,16 +773,16 @@ async def merge_results_node(
                         ),
                     ],
                 )
-                resp = await llm.ainvoke([
-                    SystemMessage(content=prompt.system),
-                    HumanMessage(content=prompt.human)])
-                from src.llm.output_contracts import AnalysisOutput, parse_json_model
-
                 try:
-                    structured = parse_json_model(resp.content, AnalysisOutput)
+                    structured = parse_json_model(raw_summary, AnalysisOutput)
                     summary = structured.summary.strip() or summary
-                except Exception:
-                    summary = resp.content.strip() or summary
+                except Exception as exc:
+                    logger.warning(
+                        "多源合并结构化输出回退纯文本",
+                        error=str(exc),
+                        exc_info=True,
+                    )
+                    summary = raw_summary.strip() or summary
                 summary_from_llm = bool(summary.strip())
         except Exception as e:
             logger.warning("LLM 跨源合并失败", error=str(e))
@@ -740,7 +805,7 @@ async def merge_results_node(
             merged_state: AnalysisState = {
                 "query_result_sample": all_data[:200],
                 "user_query": query,
-                "intent": state.get("intent", "query"),
+                "intent": contexts.routing.intent or "query",
                 "analysis_result": analysis,
                 "multi_source_analysis_precomputed": precise_analysis is not None,
             }

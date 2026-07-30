@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from unittest.mock import AsyncMock
 
 import pytest
@@ -69,6 +70,21 @@ class _Connection:
 
 
 class TestMigrationRunner:
+
+    def test_project_migrations_have_unique_versions(self):
+        """真实迁移目录中的版本号必须唯一，避免启动扫描直接失败。"""
+        # Arrange
+        migration_dir = Path(__file__).resolve().parents[2] / "migrations"
+        from src.db.migrations import _discover_migrations
+
+        # Act
+        migrations = _discover_migrations(migration_dir)
+
+        # Assert
+        versions = [version for version, _, _ in migrations]
+        assert len(versions) == len(set(versions))
+        assert versions == sorted(versions, key=int)
+
     """覆盖功能 17.2.2 的顺序、版本、回滚和连接生命周期。"""
 
     # 方法作用：验证迁移按编号执行并在同一事务登记版本。
@@ -81,6 +97,7 @@ class TestMigrationRunner:
         (tmp_path / "001_first.sql").write_text("SELECT 1;", encoding="utf-8")
         connection = _Connection()
         import asyncpg
+
         from src.db.migrations import run_migrations
 
         monkeypatch.setattr(asyncpg, "connect", AsyncMock(return_value=connection))
@@ -108,6 +125,7 @@ class TestMigrationRunner:
             "version": "001", "name": "001_first.sql", "checksum": "wrong",
         }])
         import asyncpg
+
         from src.db.migrations import MigrationError, run_migrations
 
         monkeypatch.setattr(asyncpg, "connect", AsyncMock(return_value=connection))
@@ -126,6 +144,7 @@ class TestMigrationRunner:
         (tmp_path / "001_broken.sql").write_text("SELECT RAISE_TEST_ERROR;", encoding="utf-8")
         connection = _Connection()
         import asyncpg
+
         from src.db.migrations import MigrationError, run_migrations
 
         monkeypatch.setattr(asyncpg, "connect", AsyncMock(return_value=connection))

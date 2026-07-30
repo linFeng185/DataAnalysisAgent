@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from types import SimpleNamespace
 
 
 class FakeConnection:
@@ -114,6 +113,7 @@ class TestMarketDataStore:
         """查询结果应转换为 MarketBar，并兼容 JSONB 字符串。"""
         # Arrange
         from datetime import datetime, timezone
+
         from src.market.models import MarketFrequency
         from src.market.storage import MarketDataStore
 

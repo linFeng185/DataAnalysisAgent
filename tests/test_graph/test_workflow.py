@@ -7,7 +7,6 @@ import logging
 
 import pytest
 
-
 logger = logging.getLogger(__name__)
 
 
@@ -84,7 +83,7 @@ class TestConditionalRouting:
 
     def test_intent_file(self):
         from src.graph.workflow import route_by_intent
-        assert route_by_intent({"intent": "file_analysis"}) == "mcp_agent"
+        assert route_by_intent({"intent": "file_analysis"}) == "file_analysis_subgraph"
 
     def test_intent_normal(self):
         from src.graph.workflow import route_by_intent
@@ -244,6 +243,7 @@ class TestMultiSource:
         try:
             # Arrange：隔离真实数据库和 LLM，只记录 worker 调用次数。
             from unittest.mock import AsyncMock
+
             import src.graph.nodes.multi_source as multi_source_module
 
             selected = [f"source_{index}" for index in range(7)]
@@ -280,6 +280,7 @@ class TestMultiSource:
         try:
             # Arrange：用 Mock 隔离单源分析函数。
             from unittest.mock import AsyncMock
+
             import src.graph.nodes.multi_source as multi_source_module
 
             worker = AsyncMock()
@@ -308,6 +309,7 @@ class TestMultiSource:
         try:
             # Arrange：让所有 worker 抛出可识别异常。
             from unittest.mock import AsyncMock
+
             import src.graph.nodes.multi_source as multi_source_module
 
             worker = AsyncMock(side_effect=RuntimeError("连接失败"))
@@ -329,6 +331,36 @@ class TestMultiSource:
             logger.error("test_dispatch_collects_worker_exceptions 异常: %s", exc, exc_info=True)
             raise
 
+    # 方法作用：验证 worker 返回错误来源名时被转换为计划来源的契约失败。
+    # Args: self - pytest 测试类实例；monkeypatch - pytest 补丁工具。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    async def test_dispatch_rejects_mismatched_worker_datasource(self, monkeypatch):
+        """单源结果不得冒充其他来源或导致整批结果覆盖校验崩溃。"""
+        # Arrange
+        from unittest.mock import AsyncMock
+
+        import src.graph.nodes.multi_source as multi_source_module
+
+        worker = AsyncMock(return_value={
+            "datasource": "unexpected",
+            "success": True,
+            "sql": "SELECT 1",
+        })
+        monkeypatch.setattr(multi_source_module, "_analyze_one", worker)
+
+        # Act
+        result = await multi_source_module.multi_source_dispatch_node({
+            "user_query": "比较数据",
+            "selected_datasources": ["mysql", "postgres"],
+        })
+
+        # Assert
+        failures = result["multi_source_results"]
+        assert [item["datasource"] for item in failures] == ["mysql", "postgres"]
+        assert all(item["success"] is False for item in failures)
+        assert all(item["error"] == "单源结果契约校验失败" for item in failures)
+        assert result["multi_source_result"]["failure_count"] == 2
+
     # 验证不可达数据源在 Schema 与 LLM 阶段之前快速返回。
     # Args: self - pytest 测试类实例；monkeypatch - pytest 补丁工具
     # Returns: 无返回值，断言失败时由 pytest 报告。
@@ -338,6 +370,7 @@ class TestMultiSource:
         try:
             # Arrange：模拟 Registry 连接失败，并让 Schema 调用在误执行时立即报错。
             from unittest.mock import AsyncMock, MagicMock
+
             import src.datasource.registry as registry_module
             import src.graph.nodes.multi_source as multi_source_module
             import src.graph.nodes.retrieve_schema as retrieve_schema_module
@@ -455,10 +488,11 @@ class TestMultiSource:
         try:
             # Arrange：模拟统计分析覆盖初始摘要，复现失败来源信息丢失。
             from unittest.mock import AsyncMock
+
             import src.graph.nodes.analyze_result as analyze_module
             import src.graph.nodes.generate_chart as chart_module
-            import src.llm.client as llm_module
             import src.graph.nodes.multi_source as multi_source_module
+            import src.llm.client as llm_module
 
             monkeypatch.setattr(llm_module, "is_task_llm_available", lambda task: False)
             monkeypatch.setattr(
@@ -984,6 +1018,7 @@ class TestE2E:
 
     async def test_workflow_compiles(self, monkeypatch):
         from types import SimpleNamespace
+
         from src.app_context import AppContext, use_app_context_async
         from src.graph.workflow import build_workflow
 
@@ -996,8 +1031,9 @@ class TestE2E:
     async def test_simple_query(self, monkeypatch):
         """完整链路: 无数据源 → 返回错误提示。"""
         from types import SimpleNamespace
-        from src.app_context import AppContext, use_app_context_async
+
         import src.graph.nodes.generate_sql as generate_module
+        from src.app_context import AppContext, use_app_context_async
         from src.graph.workflow import build_workflow
 
         monkeypatch.setattr(generate_module, "is_llm_available", lambda: False)
@@ -1019,8 +1055,9 @@ class TestE2E:
 
     async def test_retry_path(self, monkeypatch):
         from types import SimpleNamespace
-        from src.app_context import AppContext, use_app_context_async
+
         import src.graph.nodes.generate_sql as generate_module
+        from src.app_context import AppContext, use_app_context_async
         from src.graph.workflow import build_workflow
 
         monkeypatch.setattr(generate_module, "is_llm_available", lambda: False)

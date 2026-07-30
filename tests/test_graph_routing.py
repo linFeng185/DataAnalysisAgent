@@ -2,12 +2,11 @@
 
 import pytest
 
-
 # ── route_by_intent ──
 
 def test_route_file_analysis():
     from src.graph.workflow import route_by_intent
-    assert route_by_intent({"intent": "file_analysis"}) == "mcp_agent"
+    assert route_by_intent({"intent": "file_analysis"}) == "file_analysis_subgraph"
 
 def test_route_metadata():
     from src.graph.workflow import route_by_intent

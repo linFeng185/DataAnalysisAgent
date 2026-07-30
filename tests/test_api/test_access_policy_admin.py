@@ -9,7 +9,6 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from pydantic import ValidationError
 
-
 logger = logging.getLogger(__name__)
 
 
@@ -40,19 +39,17 @@ class TestAccessPolicyAdmin:
         from src.api.routes import router
         from src.api.routes.access_policy import router as access_policy_router
 
-        included_routers = [
-            route.original_router
+        mounted_routes = {
+            (method, route.path)
             for route in router.routes
-            if hasattr(route, "original_router")
-        ]
-        access_policy_included = any(
-            candidate is access_policy_router for candidate in included_routers
-        )
+            for method in (getattr(route, "methods", None) or set())
+        }
         routes = {
             (method, route.path)
             for route in access_policy_router.routes
             for method in (getattr(route, "methods", None) or set())
         }
+        access_policy_included = routes.issubset(mounted_routes)
         logger.info(
             "访问策略路由注册探针",
             extra={
@@ -144,9 +141,10 @@ class TestAccessPolicyAdmin:
     async def test_ip_rule_rejects_unknown_policy_key(self, monkeypatch) -> None:
         """拼写错误的策略键不能留下永远不生效的孤立规则。"""
         logger.debug("test_ip_rule_rejects_unknown_policy_key 入口")
+        from fastapi import HTTPException
+
         import src.api.auth as auth
         import src.security.api_access_policy as policy_module
-        from fastapi import HTTPException
         from src.api.routes.access_policy import IpRuleCreateRequest, create_ip_rule
 
         manager = MagicMock()

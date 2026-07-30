@@ -4,13 +4,16 @@ from __future__ import annotations
 
 import time
 
-from src.graph.state import AnalysisState
+from src.graph.artifacts import build_analysis_artifact
+from src.graph.context import read_contexts
 from src.graph.outcome import (
+    build_decision_summary,
     is_successful_response,
     public_error_message,
     sanitize_public_output,
     status_from_response,
 )
+from src.graph.state import AnalysisState
 from src.logging_config import get_logger
 
 logger = get_logger(__name__)
@@ -32,6 +35,7 @@ def _bounded_text(value: object, max_chars: int = 500) -> str:
 # Returns: 包含 datasource、dialect、sql 的 SQL 展示条目。
 def _build_sql_statements(state: AnalysisState) -> list[dict]:
     """多源优先读取 worker 最终 SQL，单源读取 execute_sql 写回 SQL。"""
+    contexts = read_contexts(state)
     logger.debug(
         "最终 SQL 列表构建入口",
         multi_source_count=len(state.get("multi_source_results", []) or []),
@@ -50,8 +54,8 @@ def _build_sql_statements(state: AnalysisState) -> list[dict]:
             sql = str(state.get("generated_sql", "") or "").strip()
             if sql:
                 statements = [{
-                    "datasource": str(state.get("datasource", "")),
-                    "dialect": str(state.get("dialect", "")),
+                    "datasource": contexts.routing.datasource,
+                    "dialect": contexts.execution.dialect,
                     "sql": sql,
                 }]
         logger.info("最终 SQL 列表构建完成", statement_count=len(statements))
@@ -96,6 +100,7 @@ async def build_response_node(state: AnalysisState) -> dict:
         包含最终响应、对话历史和新增消息的状态增量。
     """
     _start = time.monotonic()
+    contexts = read_contexts(state)
     logger.debug(
         "构建响应入口",
         node="build_response",
@@ -126,8 +131,11 @@ async def build_response_node(state: AnalysisState) -> dict:
 
     existing_response = state.get("final_response", {}) or {}
     is_direct_response = (
-        existing_response.get("source") in {"llm_direct", "mcp_agent"}
-        and existing_response.get("user_query", "") == state.get("user_query", "")
+        existing_response.get("source") in {
+            "llm_direct", "mcp_agent", "file_analysis", "market_research",
+            "forecast", "report", "external_action",
+        }
+        and existing_response.get("user_query", "") == contexts.request.user_query
     )
 
     if is_direct_response:
@@ -139,7 +147,7 @@ async def build_response_node(state: AnalysisState) -> dict:
             )
             final_result["error_message"] = public_error_message(
                 str(final_result["error_code"]),
-                fallback="直接回答失败",
+                fallback=str(final_result.get("error_message") or "任务执行失败"),
             )
             final_result["status"] = "failed"
         else:
@@ -150,7 +158,7 @@ async def build_response_node(state: AnalysisState) -> dict:
         logger.info("提示用户指定时间范围", explanation=explanation[:100])
         final_result = {
             "success": True, "status": "needs_input", "source": "prompt", "needs_time_range": True,
-            "user_query": state.get("user_query", ""), "sql": "", "data": [],
+            "user_query": contexts.request.user_query, "sql": "", "data": [],
             "sql_statements": [],
             "analysis": {"summary": explanation, "insights": [], "recommended_chart_type": "table"},
             "chart": {"type": "table", "option": {}},
@@ -162,7 +170,7 @@ async def build_response_node(state: AnalysisState) -> dict:
             "source": "multi_source_query",
             "error_code": "MULTI_SOURCE_FAILED",
             "error_message": public_error_message("MULTI_SOURCE_FAILED"),
-            "user_query": state.get("user_query", ""),
+            "user_query": contexts.request.user_query,
             "sql": "",
             "sql_statements": [],
             "data": [],
@@ -173,14 +181,14 @@ async def build_response_node(state: AnalysisState) -> dict:
         final_result = {
             "success": False, "status": "failed", "source": "sql_query", "error_code": "VALIDATION_FAILED",
             "error_message": public_error_message("VALIDATION_FAILED"),
-            "user_query": state.get("user_query", ""), "sql": "",
+            "user_query": contexts.request.user_query, "sql": "",
             "sql_statements": [], "data": [], "analysis": {}, "chart": {},
         }
     elif state.get("explain_errors"):
         final_result = {
             "success": False, "status": "failed", "source": "sql_query", "error_code": "EXPLAIN_FAILED",
             "error_message": public_error_message("EXPLAIN_FAILED"),
-            "user_query": state.get("user_query", ""), "sql": "",
+            "user_query": contexts.request.user_query, "sql": "",
             "sql_statements": [], "data": [], "analysis": {}, "chart": {},
         }
     else:
@@ -189,7 +197,7 @@ async def build_response_node(state: AnalysisState) -> dict:
         final_result = {
             "success": success, "status": "success" if success else "failed",
             "source": "sql_query", "session_id": "",
-            "user_query": state.get("user_query", ""),
+            "user_query": contexts.request.user_query,
             "sql": sql,
             "sql_statements": sql_statements,
             "data": state.get("query_result_sample", []),
@@ -212,6 +220,10 @@ async def build_response_node(state: AnalysisState) -> dict:
     final_result.setdefault("sql_statements", sql_statements)
     if not final_result.get("sql") and sql_statements:
         final_result["sql"] = sql
+
+    # 受控摘要只使用状态元数据，原始 reasoning_content 永不进入响应或历史。
+    final_result["decision_summary"] = build_decision_summary(state, final_result)
+    final_result["artifact"] = build_analysis_artifact(state, final_result)
 
     # 附加技能与知识库
     final_result["activated_skills"] = state.get("activated_skills", []) or []
@@ -243,7 +255,7 @@ async def build_response_node(state: AnalysisState) -> dict:
         if history:
             logger.info("对话历史从 messages 复原", turns=len(history))
     analysis = final_result.get("analysis", {}) or state.get("analysis_result", {}) or {}
-    query = state.get("user_query", "")
+    query = contexts.request.user_query
     gen_sql = str(final_result.get("sql", "") or "")
     analysis_summary = analysis.get("summary", "")
     new_messages = []
@@ -253,15 +265,15 @@ async def build_response_node(state: AnalysisState) -> dict:
             "generated_sql": gen_sql,
             "execution_success": is_successful_response(final_result),
             "analysis_summary": analysis_summary,
+            "decision_summary": final_result["decision_summary"],
             "chart_type": analysis.get("recommended_chart_type") or state.get("chart_config", {}).get("type", ""),
         }
         history.append(turn_entry)
         logger.info("对话历史已追加", turns=len(history), query=query[:60])
-        from langchain_core.messages import HumanMessage, AIMessage
-        answer_prefix = "查询结论" if final_result.get("source") == "sql_query" else "回答"
+        from langchain_core.messages import AIMessage, HumanMessage
         new_messages = [
             HumanMessage(content=query),
-            AIMessage(content=f"{answer_prefix}: {analysis_summary}" if analysis_summary else answer_prefix),
+            AIMessage(content=final_result["decision_summary"]),
         ]
 
     # 写入查询历史
@@ -270,8 +282,8 @@ async def build_response_node(state: AnalysisState) -> dict:
             from src.memory.history_store import get_history_store
             row_count = len(state.get("query_result_sample", []) or [])
             await get_history_store().add(
-                user_query=query, datasource=state.get("datasource", ""),
-                session_id=state.get("session_id", "") or "",
+                user_query=query, datasource=contexts.routing.datasource,
+                session_id=contexts.request.session_id,
                 generated_sql=gen_sql, success=is_successful_response(final_result),
                 row_count=row_count,
                 final_result=final_result,
@@ -279,14 +291,14 @@ async def build_response_node(state: AnalysisState) -> dict:
         except Exception as exc:
             logger.error(
                 "查询历史写入调度失败",
-                session_id=state.get("session_id", "") or "",
+                session_id=contexts.request.session_id,
                 error=str(exc),
                 exc_info=True,
             )
 
     # 仅学习当前身份下成功执行的 SQL，避免把失败语句和安全短路结果污染模板库。
-    tenant_id = int(state.get("tenant_id", 0) or 0)
-    user_id = int(state.get("user_id", 0) or 0)
+    tenant_id = contexts.request.tenant_id
+    user_id = contexts.request.user_id
     if (
         query.strip()
         and gen_sql.strip()
@@ -302,13 +314,13 @@ async def build_response_node(state: AnalysisState) -> dict:
             identity = RequestIdentity(
                 tenant_id=tenant_id,
                 user_id=user_id,
-                role=str(state.get("user_role", "analyst") or "analyst"),
+                role=contexts.request.user_role or "analyst",
             )
             memory_store = await get_long_term_memory_store()
             await memory_store.save_sql_template(
                 query,
                 gen_sql,
-                str(state.get("dialect", "") or "unknown"),
+                contexts.execution.dialect or "unknown",
                 identity=identity,
                 visibility="private",
             )
@@ -316,7 +328,7 @@ async def build_response_node(state: AnalysisState) -> dict:
                 "成功 SQL 长期记忆写入完成",
                 tenant_id=tenant_id,
                 user_id=user_id,
-                dialect=state.get("dialect", "") or "unknown",
+                dialect=contexts.execution.dialect or "unknown",
             )
         except Exception as exc:
             logger.error(
@@ -339,9 +351,13 @@ async def build_response_node(state: AnalysisState) -> dict:
         success=is_successful_response(final_result),
         source=final_result.get("source", ""),
     )
-    return {
+    response_update = {
         "final_response": final_result,
         "conversation_history": history,
         "messages": new_messages,
         "previous_turn_snapshot": previous_turn_snapshot,
     }
+    from src.graph.context import build_context_groups
+
+    response_update.update(build_context_groups({**state, **response_update}))
+    return response_update

@@ -2,9 +2,8 @@
 
 from __future__ import annotations
 
-from src.llm.adapters.base import ModelAdapter, ParsedResponse, StreamChunk, SupportedFeatures
+from src.llm.adapters.base import ModelAdapter, StreamChunk, SupportedFeatures
 from src.logging_config import get_logger
-
 
 logger = get_logger(__name__)
 

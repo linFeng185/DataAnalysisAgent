@@ -39,6 +39,7 @@ class TestSSEFormat:
 class TestStreamingResponseConfig:
     async def test_stream_endpoint_mounted(self):
         from httpx import ASGITransport, AsyncClient
+
         from src.api.auth import create_access_token
         from src.main import app
         token = create_access_token(9, 4, "analyst")
@@ -51,6 +52,7 @@ class TestStreamingResponseConfig:
 
     async def test_stream_endpoint_post_method(self):
         from httpx import ASGITransport, AsyncClient
+
         from src.api.auth import create_access_token
         from src.main import app
         token = create_access_token(9, 4, "analyst")

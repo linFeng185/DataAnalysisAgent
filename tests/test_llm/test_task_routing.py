@@ -5,7 +5,6 @@ from __future__ import annotations
 import logging
 from types import SimpleNamespace
 
-
 logger = logging.getLogger(__name__)
 
 

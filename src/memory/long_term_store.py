@@ -11,7 +11,6 @@ from src.logging_config import get_logger
 from src.memory.models import LongTermMemory, MemoryType
 from src.security.tenant_policy import RequestIdentity, TenantPolicy
 
-
 logger = get_logger(__name__)
 _RESOURCE_KIND = "long_term_memory"
 _MIN_CONFIDENCE = 0.3
@@ -344,6 +343,17 @@ class LongTermMemoryStore:
                 raise RuntimeError("长期记忆所有后端写入失败") from exc
             else:
                 raise
+        if vector_ok and pg_error is not None and not pg_ok:
+            try:
+                await store.delete_by_ids([entry.id])
+            except Exception as rollback_exc:
+                logger.error(
+                    "PG 写入失败后的向量回滚失败",
+                    entry_id=entry.id,
+                    error=str(rollback_exc),
+                    exc_info=True,
+                )
+            raise RuntimeError("长期记忆 PostgreSQL 写入失败，已回滚向量写入") from pg_error
         logger.info("长期记忆写入完成", entry_id=entry.id, pg=pg_ok, vector=vector_ok)
 
     # 方法作用：把一次召回的访问计数和时间同步回两个后端。
@@ -395,7 +405,7 @@ class LongTermMemoryStore:
                     )
                 ids = _row_ids(rows)
                 if ids:
-                    await (await self._vector()).delete_by_ids(ids)
+                    await self._delete_vector_or_queue(ids)
                 logger.info("过期长期记忆清理完成", count=len(ids))
                 return len(ids)
             except Exception as exc:
@@ -447,7 +457,7 @@ class LongTermMemoryStore:
                     )
                 ids = _row_ids(rows)
                 if ids:
-                    await (await self._vector()).delete_by_ids(ids)
+                    await self._delete_vector_or_queue(ids)
                 logger.info("低置信度长期记忆清理完成", count=len(ids))
                 return len(ids)
             except Exception as exc:
@@ -466,12 +476,13 @@ class LongTermMemoryStore:
         try:
             async with self._pg_identity_connection(system_identity) as connection:
                 rows = await connection.fetch(
-                    "SELECT m.id, m.memory_type, m.scope, m.visibility, m.tenant_id, "
+                    "SELECT p.entry_id, p.operation, m.id, m.memory_type, m.scope, "
+                    "m.visibility, m.tenant_id, "
                     "m.owner_user_id, m.content, m.payload, m.created_at, "
                     "m.last_accessed_at, m.access_count, m.confidence, m.ttl_days "
                     "FROM pending_vector_sync p "
-                    "JOIN long_term_memories m ON m.id = p.entry_id "
-                    "WHERE p.operation = 'upsert' ORDER BY p.created_at LIMIT $1",
+                    "LEFT JOIN long_term_memories m ON m.id = p.entry_id "
+                    "ORDER BY p.created_at LIMIT $1",
                     batch_limit,
                 )
         except Exception as exc:
@@ -482,15 +493,26 @@ class LongTermMemoryStore:
         from src.memory.vector_store import VectorEntry
 
         for row in rows:
-            entry_id = str(row["id"])
+            entry_id = str(row.get("entry_id") or row.get("id"))
+            operation = str(row.get("operation") or "upsert")
             try:
-                memory = LongTermMemory.from_dict(dict(row))
-                await store.delete_by_ids([entry_id])
-                await store.upsert([VectorEntry(
-                    id=entry_id,
-                    content=memory.content,
-                    metadata=_vector_metadata(memory),
-                )])
+                if operation == "delete":
+                    async with self._pg_identity_connection(system_identity) as connection:
+                        await connection.execute(
+                            "DELETE FROM long_term_memories WHERE id = $1",
+                            entry_id,
+                        )
+                    await store.delete_by_ids([entry_id])
+                else:
+                    if row.get("id") is None:
+                        raise RuntimeError("待补偿长期记忆不存在")
+                    memory = LongTermMemory.from_dict(dict(row))
+                    await store.delete_by_ids([entry_id])
+                    await store.upsert([VectorEntry(
+                        id=entry_id,
+                        content=memory.content,
+                        metadata=_vector_metadata(memory),
+                    )])
                 async with self._pg_identity_connection(system_identity) as connection:
                     await connection.execute(
                         "DELETE FROM pending_vector_sync WHERE entry_id = $1",
@@ -553,31 +575,63 @@ class LongTermMemoryStore:
         if not ids:
             return
         if self._pg is not None:
+            pg_deleted = False
             try:
                 async with self._pg_identity_connection(identity) as connection:
                     await connection.execute(
                         "DELETE FROM long_term_memories WHERE id = ANY($1::text[])",
                         ids,
                     )
+                pg_deleted = True
             except Exception as exc:
                 logger.warning("PG 长期记忆删除失败", error=str(exc), exc_info=True)
-        await (await self._vector()).delete_by_ids(ids)
+                for entry_id in ids:
+                    await self._mark_pending_sync(entry_id, operation="delete", error=str(exc))
+            if not pg_deleted:
+                return
+        await self._delete_vector_or_queue(ids)
 
     # 方法作用：记录 PostgreSQL 已成功但 VectorStore 待补偿的条目。
     # Args: self - 当前 Store；entry_id - 条目 ID。
     # Returns: 无返回值。
-    async def _mark_pending_sync(self, entry_id: str) -> None:
+    async def _mark_pending_sync(
+        self,
+        entry_id: str,
+        *,
+        operation: str = "upsert",
+        error: str = "",
+    ) -> None:
         if self._pg is None:
             return
         try:
-            await self._pg.execute(
-                "INSERT INTO pending_vector_sync (entry_id, operation, created_at) "
-                "VALUES ($1, 'upsert', $2) ON CONFLICT (entry_id) DO UPDATE SET created_at = $2",
-                entry_id,
-                datetime.now(timezone.utc),
-            )
+            async with self._pg_identity_connection(RequestIdentity.system()) as connection:
+                await connection.execute(
+                    "INSERT INTO pending_vector_sync "
+                    "(entry_id, operation, retry_count, last_error, created_at, updated_at) "
+                    "VALUES ($1, $2, 0, $3, $4, $4) "
+                    "ON CONFLICT (entry_id) DO UPDATE SET operation=EXCLUDED.operation, "
+                    "last_error=EXCLUDED.last_error, updated_at=EXCLUDED.updated_at",
+                    entry_id,
+                    operation,
+                    error[:500],
+                    datetime.now(timezone.utc),
+                )
         except Exception as exc:
             logger.error("向量补偿任务记录失败", entry_id=entry_id, error=str(exc), exc_info=True)
+
+    async def _delete_vector_or_queue(self, ids: list[str]) -> None:
+        """删除向量条目，失败时为每个 ID 写入幂等删除补偿。"""
+        try:
+            await (await self._vector()).delete_by_ids(ids)
+        except Exception as exc:
+            logger.error(
+                "长期记忆向量删除失败，已进入补偿队列",
+                count=len(ids),
+                error=str(exc),
+                exc_info=True,
+            )
+            for entry_id in ids:
+                await self._mark_pending_sync(entry_id, operation="delete", error=str(exc))
 
     # 方法作用：惰性获取当前应用 VectorStore，测试可直接注入替身。
     # Args: self - 当前 Store。

@@ -18,10 +18,10 @@ class TestCacheRefresherBootstrap:
     async def test_start_registers_cache_refresh_service(self, monkeypatch) -> None:
         """服务必须在启动阶段注册关闭器，不能创建失管后台任务。"""
         # Arrange
-        from src import app_context, bootstrap
         import src.datasource.registry as registry_module
         import src.knowledge.cache_refresher as refresher_module
         import src.knowledge.schema_manager as schema_module
+        from src import app_context, bootstrap
 
         context = SimpleNamespace(set_resource=MagicMock())
         registry = SimpleNamespace()

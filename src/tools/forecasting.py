@@ -68,7 +68,7 @@ def rolling_backtest(values: list[float], horizon: int = 1, min_train: int = 5) 
         }
         for name, predicted in predictions.items():
             errors[name].extend(actual_value - forecast_value
-                                for actual_value, forecast_value in zip(actual, predicted))
+                                for actual_value, forecast_value in zip(actual, predicted, strict=False))
     result = {name: _metrics(error_list, _actual_for_errors(numeric, min_train, horizon))
               for name, error_list in errors.items()}
     logger.info("rolling backtest 完成", models=list(result), windows=len(errors["naive"]) // horizon)
@@ -189,7 +189,7 @@ def _metrics(errors: list[float], actual: list[float]) -> dict[str, float]:
         return {"mae": 0.0, "rmse": 0.0, "smape": 0.0}
     mae = sum(abs(error) for error in errors) / len(errors)
     rmse = math.sqrt(sum(error * error for error in errors) / len(errors))
-    smape = sum(2 * abs(error) / max(abs(real) + abs(real - error), 1e-9) for error, real in zip(errors, actual)) / len(errors) * 100
+    smape = sum(2 * abs(error) / max(abs(real) + abs(real - error), 1e-9) for error, real in zip(errors, actual, strict=False)) / len(errors) * 100
     return {"mae": round(mae, 6), "rmse": round(rmse, 6), "smape": round(smape, 6)}
 
 

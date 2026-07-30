@@ -1,0 +1,22 @@
+{
+  "routing_cases": [
+    {"id": "route-sql", "query": "查询订单总数", "intent": "query", "datasources": ["sales"], "expected_capability": "sql_analysis", "expected_initial_route": "retrieve_schema", "expected_post_analysis": "generate_chart"},
+    {"id": "route-multi", "query": "对比两个库的订单数", "intent": "query", "datasources": ["sales", "archive"], "expected_capability": "sql_analysis", "expected_initial_route": "multi_source_dispatch", "expected_post_analysis": "generate_chart"},
+    {"id": "route-forecast", "query": "预测未来3天销售额", "intent": "trend", "datasources": ["sales"], "expected_capability": "forecast", "expected_initial_route": "retrieve_schema", "expected_post_analysis": "forecast_subgraph"},
+    {"id": "route-report", "query": "生成订单月报", "intent": "query", "datasources": ["sales"], "expected_capability": "report", "expected_initial_route": "retrieve_schema", "expected_post_analysis": "report_subgraph"},
+    {"id": "route-market", "query": "执行竞品研究", "intent": "query", "datasources": [], "expected_capability": "market_research", "expected_initial_route": "market_research_subgraph", "expected_post_analysis": "generate_chart"},
+    {"id": "route-action", "query": "发送通知给负责人", "intent": "query", "datasources": [], "expected_capability": "external_action", "expected_initial_route": "action_subgraph", "expected_post_analysis": "generate_chart"},
+    {"id": "route-file", "query": "分析上传的CSV文件", "intent": "file_analysis", "datasources": [], "expected_capability": "file_analysis", "expected_initial_route": "file_analysis_subgraph", "expected_post_analysis": "generate_chart"}
+  ],
+  "security_cases": [
+    {"id": "security-select", "sql": "SELECT id FROM orders", "dialect": "postgres", "expected_valid": true},
+    {"id": "security-drop", "sql": "DROP TABLE orders", "dialect": "postgres", "expected_valid": false},
+    {"id": "security-update", "sql": "UPDATE orders SET amount = 0", "dialect": "mysql", "expected_valid": false},
+    {"id": "security-multi", "sql": "SELECT 1; DELETE FROM orders", "dialect": "sqlite", "expected_valid": false}
+  ],
+  "artifact_cases": [
+    {"id": "artifact-table", "state": {"user_query": "查订单", "datasource": "sales"}, "response": {"source": "sql_query", "status": "success", "analysis": {"summary": "完成"}, "data": [{"count": 1}], "chart": {"type": "table"}}, "expected_kind": "table"},
+    {"id": "artifact-report", "state": {"user_query": "生成月报", "datasource": "sales"}, "response": {"source": "sql_query", "status": "success", "analysis": {"summary": "完成", "rendered_report": "# 月报"}, "data": [], "chart": {"type": "table"}}, "expected_kind": "report"},
+    {"id": "artifact-forecast", "state": {"user_query": "预测", "datasource": "sales"}, "response": {"source": "sql_query", "status": "success", "analysis": {"summary": "完成", "forecast": {"predictions": [1, 2]}}, "data": [], "chart": {"type": "line"}}, "expected_kind": "forecast"}
+  ]
+}

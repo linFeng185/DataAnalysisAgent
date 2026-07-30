@@ -7,7 +7,6 @@ import time
 from src.graph.state import AnalysisState
 from src.logging_config import get_logger
 
-
 logger = get_logger(__name__)
 
 
@@ -16,10 +15,13 @@ logger = get_logger(__name__)
 # Returns: explain_errors、sql_valid 和重写后的 generated_sql。
 async def layer4_explain_node(state: AnalysisState) -> dict:
     """在真实执行前使用与执行节点相同的方言连接器检查 SQL。"""
+    from src.graph.context import read_contexts
+
+    contexts = read_contexts(state)
     started_at = time.monotonic()
     sql = (state.get("generated_sql", "") or "").strip()
-    dialect = (state.get("dialect", "") or "").lower()
-    datasource = state.get("datasource", "") or ""
+    dialect = contexts.execution.dialect.lower()
+    datasource = contexts.routing.datasource
     logger.info(
         "EXPLAIN 边界输入",
         datasource=datasource,
@@ -30,7 +32,12 @@ async def layer4_explain_node(state: AnalysisState) -> dict:
     if not sql:
         error = {"type": "semantic_error", "message": "EXPLAIN 的 SQL 不能为空"}
         logger.warning("EXPLAIN 拒绝", datasource=datasource, reason="SQL 为空")
-        return {"explain_errors": [error], "sql_valid": False}
+        from src.graph.context import with_execution_context
+
+        return with_execution_context(
+            state,
+            {"explain_errors": [error], "sql_valid": False},
+        )
 
     from src.security.sql_execution import validate_and_explain_sql
 
@@ -46,12 +53,15 @@ async def layer4_explain_node(state: AnalysisState) -> dict:
             dialect=validation.dialect or dialect,
             errors=errors,
         )
-        return {
+        update = {
             "explain_errors": errors,
             "sql_valid": False,
             "generated_sql": validation.sql or sql,
             "sql_explain_checked": False,
         }
+        from src.graph.context import with_execution_context
+
+        return with_execution_context(state, update)
     sql = validation.sql
 
     elapsed_ms = round((time.monotonic() - started_at) * 1000)
@@ -61,9 +71,12 @@ async def layer4_explain_node(state: AnalysisState) -> dict:
         dialect=dialect,
         elapsed_ms=elapsed_ms,
     )
-    return {
+    update = {
         "explain_errors": [],
         "sql_valid": True,
         "generated_sql": sql,
         "sql_explain_checked": True,
     }
+    from src.graph.context import with_execution_context
+
+    return with_execution_context(state, update)

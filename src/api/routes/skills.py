@@ -26,7 +26,9 @@ async def list_skills(skill_scope: str | None = None):
     logger.debug("Skill 列表入口", skill_scope=skill_scope or "")
     try:
         from src.api.auth import (
-            get_current_tenant_id, get_current_user_id, is_platform_super_admin,
+            get_current_tenant_id,
+            get_current_user_id,
+            is_platform_super_admin,
         )
         from src.knowledge.governance import normalize_knowledge_scope
         from src.skill_manager import get_skill_manager
@@ -63,7 +65,7 @@ async def list_skills(skill_scope: str | None = None):
                 "scope": s.scope,
                 "tenant_id": s.tenant_id,
                 "owner_user_id": s.owner_user_id,
-                "resource_id": s.resource_id,
+                "resource_id": getattr(s, "resource_id", s.name),
             })
         result = {"skills": skills, "total": len(skills)}
         logger.info("Skill 列表完成", total=len(skills), tenant_id=tenant_id, user_id=user_id)
@@ -223,6 +225,7 @@ def _cache_uploaded_skills(
     user_id: int,
 ) -> list[dict]:
     from pathlib import Path
+
     from src.skill_manager import get_skill_manager
 
     logger.debug("缓存上传 Skill 入口", imported=len(imported), scope=scope)
@@ -256,6 +259,7 @@ def _write_uploaded_skill(
     scope: str,
 ) -> tuple[dict | None, bool, dict | None]:
     import re
+
     import yaml
 
     logger.debug("写入单个 Skill 入口", filename=uploaded_file.filename or "", scope=scope)
@@ -322,7 +326,9 @@ async def upload_skills(
     后端递归过滤 SKILL.md（大小写不敏感），写入 skills/<name>/SKILL.md。
     """
     from src.api.auth import (
-        get_current_role, get_current_tenant_id, get_current_user_id,
+        get_current_role,
+        get_current_tenant_id,
+        get_current_user_id,
     )
     from src.app_context import get_tenant_policy
     from src.config import get_settings
@@ -425,7 +431,9 @@ async def refresh_skills():
         from src.skill_manager import get_skill_manager
         await get_skill_manager().discover()
         from src.api.auth import (
-            get_current_tenant_id, get_current_user_id, is_platform_super_admin,
+            get_current_tenant_id,
+            get_current_user_id,
+            is_platform_super_admin,
         )
         visible = get_skill_manager().get_visible_skills(
             get_current_tenant_id(), get_current_user_id(),
@@ -437,7 +445,7 @@ async def refresh_skills():
         return result
     except Exception as e:
         logger.error("Skill 刷新失败", error=str(e), exc_info=True)
-        raise HTTPException(500, str(e))
+        raise HTTPException(500, str(e)) from e
 
 
 @router.get("/skills/{skill_name}/content")
@@ -446,10 +454,12 @@ async def refresh_skills():
 # Returns: Skill 名称、作用域和文件内容。
 async def get_skill_content(skill_name: str, skill_scope: str | None = None):
     """获取 SKILL.md 文件的原始内容（直接从缓存 source_path 读取）。"""
-    from src.skill_manager import get_skill_manager
     from src.api.auth import (
-        get_current_tenant_id, get_current_user_id, is_platform_super_admin,
+        get_current_tenant_id,
+        get_current_user_id,
+        is_platform_super_admin,
     )
+    from src.skill_manager import get_skill_manager
     mgr = get_skill_manager()
     skill = mgr.get_skill(
         skill_name, scope=skill_scope,
@@ -478,11 +488,13 @@ async def toggle_skill(
 ):
     """启用或禁用一个 Skill。"""
     try:
-        from src.skill_manager import get_skill_manager
         from src.api.auth import (
-            get_current_role, get_current_tenant_id, get_current_user_id,
+            get_current_role,
+            get_current_tenant_id,
+            get_current_user_id,
         )
         from src.knowledge.governance import can_manage_knowledge_resource
+        from src.skill_manager import get_skill_manager
         mgr = get_skill_manager()
         tenant_id = get_current_tenant_id()
         user_id = get_current_user_id()
@@ -506,7 +518,7 @@ async def toggle_skill(
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(500, str(e))
+        raise HTTPException(500, str(e)) from e
 
 
 @router.delete("/skills/{skill_name}")
@@ -516,6 +528,7 @@ async def toggle_skill(
 async def delete_skill(skill_name: str, skill_scope: str | None = None):
     """删除一个 Skill（移除磁盘目录）。内置 Skill 不可删除。"""
     import shutil as _shutil
+
     from src.api.auth import get_current_role, get_current_tenant_id, get_current_user_id
     from src.knowledge.governance import can_manage_knowledge_resource
     from src.skill_manager import get_skill_manager

@@ -10,6 +10,7 @@ import asyncio
 from pathlib import Path
 from typing import Any
 
+from src.logging_config import get_logger
 from src.memory.vector_store import (
     MetadataFilters,
     VectorEntry,
@@ -17,7 +18,6 @@ from src.memory.vector_store import (
     VectorStore,
     normalize_metadata_filters,
 )
-from src.logging_config import get_logger
 
 logger = get_logger(__name__)
 

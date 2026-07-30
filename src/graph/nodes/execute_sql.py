@@ -26,10 +26,12 @@ async def _record_query_audit(
     error_message: str = "",
 ) -> None:
     from src.api.auth import get_current_tenant_id, get_current_user_id
+    from src.graph.context import read_contexts
     from src.security.data_masker import log_audit
 
-    user_id = state.get("user_id")
-    tenant_id = state.get("tenant_id")
+    contexts = read_contexts(state)
+    user_id = contexts.request.user_id
+    tenant_id = contexts.request.tenant_id
     effective_user_id = get_current_user_id() if user_id is None else int(user_id)
     effective_tenant_id = get_current_tenant_id() if tenant_id is None else int(tenant_id)
     elapsed_ms = round((time.monotonic() - started_at) * 1000)
@@ -59,41 +61,50 @@ async def _record_query_audit(
 
 async def execute_sql_node(state: AnalysisState) -> dict:
     """Phase 2: registry → connector.execute()。Phase 1: 返回空数据 + 提示。"""
+    from src.graph.context import read_contexts
+
+    contexts = read_contexts(state)
     _start = time.monotonic()
     logger.info("节点开始", node="execute_sql")
     sql = (state.get("generated_sql", "") or "").strip()
-    ds_name = state.get("datasource", "")
+    ds_name = contexts.routing.datasource
 
-    dialect = state.get("dialect", "")
+    dialect = contexts.execution.dialect
+
+    from src.graph.context import with_execution_context
+
+    def complete(update: dict) -> dict:
+        """同步当前节点增量和轻量执行上下文。"""
+        return with_execution_context(state, update)
 
     # LLM 返回空 SQL（如问题无法用现有数据回答）时直接跳过执行
     if not sql:
         logger.info("SQL 为空，跳过数据库执行", datasource=ds_name)
-        return {"query_result_sample": [], "query_result_full_count": 0,
-                "query_result_statistics": {"row_count": 0},
-                "query_result_truncated": False,
-                "execution_error": "", "execution_error_type": "",
-                "execution_retry_count": 0}
+        return complete({"query_result_sample": [], "query_result_full_count": 0,
+                         "query_result_statistics": {"row_count": 0},
+                         "query_result_truncated": False,
+                         "execution_error": "", "execution_error_type": "",
+                         "execution_retry_count": 0})
 
     # 12.2.1 非 API 调用保留节点级兜底，API 请求不得重复计数。
-    if not state.get("request_rate_limit_checked", False):
+    if not contexts.request.request_rate_limit_checked:
         from src.security.data_masker import check_rate_limit
-        if not check_rate_limit(state.get("user_id")):
-            logger.warning("SQL 执行节点频率超限", user_id=state.get("user_id"))
+        if not check_rate_limit(contexts.request.user_id):
+            logger.warning("SQL 执行节点频率超限", user_id=contexts.request.user_id)
             await _record_query_audit(
                 state, ds_name, sql, _start, success=False, error_message="rate_limit",
             )
-            return {"execution_error": "请求频率超限",
-                    "execution_error_type": "rate_limit",
-                    "query_result_sample": [], "query_result_full_count": 0,
-                    "query_result_statistics": {"row_count": 0}}
+            return complete({"execution_error": "请求频率超限",
+                             "execution_error_type": "rate_limit",
+                             "query_result_sample": [], "query_result_full_count": 0,
+                             "query_result_statistics": {"row_count": 0}})
     else:
-        logger.info("SQL 执行节点复用入口配额检查", user_id=state.get("user_id"))
+        logger.info("SQL 执行节点复用入口配额检查", user_id=contexts.request.user_id)
 
     # 行列级权限（多租户时生效）
     if get_tenant_policy().datasource_isolation_enabled:
-        allowed = state.get("allowed_columns", []) or []
-        rfilter = state.get("row_filter_sql", "") or ""
+        allowed = contexts.permission.allowed_columns
+        rfilter = contexts.permission.row_filter_sql
         if allowed:
             from src.security.permission_check import check_column_whitelist
             col_err_perm = check_column_whitelist(sql, allowed)
@@ -102,10 +113,10 @@ async def execute_sql_node(state: AnalysisState) -> dict:
                 await _record_query_audit(
                     state, ds_name, sql, _start, success=False, error_message=col_err_perm,
                 )
-                return {"query_result_sample": [], "query_result_full_count": 0,
-                        "query_result_statistics": {"row_count": 0},
-                        "generated_sql": sql, "execution_error": col_err_perm,
-                        "execution_error_type": "security"}
+                return complete({"query_result_sample": [], "query_result_full_count": 0,
+                                 "query_result_statistics": {"row_count": 0},
+                                 "generated_sql": sql, "execution_error": col_err_perm,
+                                 "execution_error_type": "security"})
         if rfilter:
             from src.security.permission_check import inject_row_filter
             sql = inject_row_filter(sql, rfilter)
@@ -121,10 +132,10 @@ async def execute_sql_node(state: AnalysisState) -> dict:
         await _record_query_audit(
             state, ds_name, sql, _start, success=False, error_message=col_err,
         )
-        return {"query_result_sample": [], "query_result_full_count": 0,
-                "query_result_statistics": {"row_count": 0},
-                "generated_sql": sql, "execution_error": col_err,
-                "execution_error_type": "sql_semantic"}
+        return complete({"query_result_sample": [], "query_result_full_count": 0,
+                         "query_result_statistics": {"row_count": 0},
+                         "generated_sql": sql, "execution_error": col_err,
+                         "execution_error_type": "sql_semantic"})
 
     # 统一服务在真实数据源方言下重新校验并有界执行。
     try:
@@ -134,7 +145,7 @@ async def execute_sql_node(state: AnalysisState) -> dict:
             sql,
             ds_name,
             dialect,
-            explain=not bool(state.get("sql_explain_checked", False)),
+            explain=not contexts.execution.sql_explain_checked,
             max_rows=get_settings().max_result_rows,
         )
         sql = execution.sql or sql
@@ -149,7 +160,7 @@ async def execute_sql_node(state: AnalysisState) -> dict:
             )
             masked_rows = mask_sensitive_data(rows)
             logger.info("节点完成", node="execute_sql", elapsed_ms=elapsed)
-            return {
+            return complete({
                 "generated_sql": sql,  # 同步重写后的 SQL 到前端
                 "query_result_sample": masked_rows[:200],
                 "query_result_full_count": len(masked_rows),
@@ -158,7 +169,7 @@ async def execute_sql_node(state: AnalysisState) -> dict:
                 "execution_error": "",
                 "execution_error_type": "",
                 "execution_retry_count": 0,
-            }
+            })
         detail_message = "; ".join(
             str(item.get("message", ""))
             for item in execution.details
@@ -188,13 +199,13 @@ async def execute_sql_node(state: AnalysisState) -> dict:
         success=False,
         error_type=error_type,
     )
-    execution_retry_count = state.get("execution_retry_count", 0)
+    execution_retry_count = contexts.execution.execution_retry_count
     if error_type == "transient":
         execution_retry_count += 1
     await _record_query_audit(
         state, ds_name, sql, _start, success=False, error_message=err_msg,
     )
-    return {
+    return complete({
         "query_result_sample": [],
         "query_result_full_count": 0,
         "query_result_statistics": {"row_count": 0},
@@ -202,7 +213,7 @@ async def execute_sql_node(state: AnalysisState) -> dict:
         "execution_error": err_msg,
         "execution_error_type": error_type,
         "execution_retry_count": execution_retry_count,
-    }
+    })
 
 
 # 方法作用：把数据库错误稳定分类为执行重试、SQL 重生成或直接终止三类。

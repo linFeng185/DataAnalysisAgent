@@ -96,8 +96,7 @@ async def _summarize_turns_llm(turns: list[ConversationTurn]) -> str:
     使用原生 HTTP 调用而非 LangChain LLM 接口，
     确保摘要请求不会被 LangGraph astream_events 捕获并流式输出到前端。
     """
-    from src.config import get_settings
-    from src.llm.client import is_task_llm_available, resolve_llm_task_target
+    from src.llm.client import is_task_llm_available
     if not is_task_llm_available("context_summary"):
         return ""
 
@@ -107,62 +106,26 @@ async def _summarize_turns_llm(turns: list[ConversationTurn]) -> str:
         + (f"\n结论: {_g(t, 'analysis_summary')}" if _g(t, 'analysis_summary') else "")
         for i, t in enumerate(turns)
     )
-    from src.llm.prompt_budget import PromptSection, build_budgeted_prompt
-    prompt = build_budgeted_prompt(
-        "context.summary",
-        [
-            PromptSection(
-                "conversation",
-                f"## 对话\n{turns_text}\n\n请生成摘要。",
-                priority=100,
-                min_chars=1000,
-                max_chars=2800,
-            ),
-        ],
-    )
-
     try:
-        import aiohttp
-        s = get_settings()
-        target = resolve_llm_task_target("context_summary", settings=s)
-        if target == "local":
-            summary_model = s.context_summary_model or s.local_llm_model
-            base_url = s.local_llm_base_url
-            api_key = s.local_llm_api_key or "local"
-            timeout_seconds = s.local_llm_timeout
-        else:
-            summary_model = s.context_summary_model or s.cheap_llm_model or s.llm_model
-            base_url = s.openai_base_url
-            api_key = s.openai_api_key
-            timeout_seconds = min(s.llm_timeout, 15)
-        payload = {
-            "model": summary_model,
-            "messages": [
-                {"role": "system", "content": prompt.system},
-                {"role": "user", "content": prompt.human},
+        from src.llm.invocation import invoke_text
+        from src.llm.prompt_budget import PromptSection
+
+        summary = await invoke_text(
+            "context.summary",
+            [
+                PromptSection(
+                    "conversation",
+                    f"## 对话\n{turns_text}\n\n请生成摘要。",
+                    priority=100,
+                    min_chars=1000,
+                    max_chars=2800,
+                ),
             ],
-            "temperature": 0,
-            "max_tokens": 200,
-            "stream": False,
-        }
-        headers = {
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-        }
-        async with aiohttp.ClientSession() as session:
-            async with session.post(
-                f"{base_url.rstrip('/')}/chat/completions", json=payload, headers=headers,
-                timeout=aiohttp.ClientTimeout(total=timeout_seconds),
-            ) as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    summary = data["choices"][0]["message"]["content"].strip()
-                    if summary:
-                        logger.info("LLM 摘要生成成功", turns=len(turns), chars=len(summary))
-                        return summary
-                else:
-                    logger.debug("LLM 摘要请求失败", status=resp.status)
-        return ""
+            task="context_summary",
+        )
+        if summary:
+            logger.info("LLM 摘要生成成功", turns=len(turns), chars=len(summary))
+        return summary
     except Exception as e:
         logger.error("LLM 摘要生成失败，回退到规则", error=str(e), exc_info=True)
         return ""

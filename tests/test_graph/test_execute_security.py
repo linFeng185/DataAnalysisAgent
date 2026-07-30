@@ -5,7 +5,6 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 
-
 class TestExecuteSQLSecurity:
     """覆盖 4.7 与 12.2/12.3 的执行边界。"""
 
@@ -15,13 +14,13 @@ class TestExecuteSQLSecurity:
         import sqlalchemy as sa
         from sqlalchemy.ext.asyncio import create_async_engine
 
+        import src.api.auth  # noqa: F401
+        import src.config as config_module
+        from src.app_context import AppContext, use_app_context
         from src.datasource.config import DataSourceConfig
         from src.datasource.registry import DataSourceRegistry
         from src.graph.nodes import execute_sql as execute_module
         from src.security import data_masker
-        from src.app_context import AppContext, use_app_context
-        import src.api.auth  # noqa: F401
-        import src.config as config_module
 
         engine = create_async_engine("sqlite+aiosqlite:///:memory:", poolclass=sa.pool.StaticPool)
         async with engine.begin() as connection:
@@ -96,12 +95,12 @@ class TestExecuteSQLSecurity:
 
     async def test_sync_engine_query_runs_without_blocking_path(self, monkeypatch):
         """同步 Engine 也应通过线程池执行并返回结果。"""
+        import src.config as config_module
+        from src.app_context import AppContext, use_app_context
         from src.datasource.config import DataSourceConfig
         from src.datasource.registry import DataSourceRegistry
         from src.graph.nodes import execute_sql as execute_module
         from src.security import data_masker
-        from src.app_context import AppContext, use_app_context
-        import src.config as config_module
 
         class Row:
             _mapping = {"value": 1}

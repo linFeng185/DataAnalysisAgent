@@ -45,17 +45,18 @@ async def summarize_old_turns(ctx, count: int = 20) -> str:
         logger.info("汇总旧会话轮次完成", skipped=True)
         return ""
 
-    from src.llm.client import get_cheap_llm, is_llm_available
+    from src.llm.client import is_llm_available
     if is_llm_available():
         try:
-            from langchain_core.messages import HumanMessage, SystemMessage
             turns_text = "\n".join(
                 f"Q{i+1}: {t.user_query}"
                 + (f"\nSQL: {t.generated_sql[:200]}" if t.generated_sql else "")
                 for i, t in enumerate(old)
             )
-            from src.llm.prompt_budget import PromptSection, build_budgeted_prompt
-            prompt = build_budgeted_prompt(
+            from src.llm.invocation import invoke_text
+            from src.llm.prompt_budget import PromptSection
+
+            summary = await invoke_text(
                 "context.summary",
                 [
                     PromptSection(
@@ -66,13 +67,8 @@ async def summarize_old_turns(ctx, count: int = 20) -> str:
                         max_chars=2800,
                     ),
                 ],
+                task="context_summary",
             )
-            llm = get_cheap_llm()
-            resp = await llm.ainvoke([
-                SystemMessage(content=prompt.system),
-                HumanMessage(content=prompt.human),
-            ])
-            summary = resp.content.strip() if resp.content else ""
             if summary:
                 ctx.conversation_history = ctx.conversation_history[count:]
                 logger.info("LLM 会话摘要完成", removed=count, chars=len(summary))

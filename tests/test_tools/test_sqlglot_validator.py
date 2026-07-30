@@ -18,7 +18,6 @@ from src.tools.sqlglot_validator import (
     validate_with_sqlglot,
 )
 
-
 logger = logging.getLogger(__name__)
 
 

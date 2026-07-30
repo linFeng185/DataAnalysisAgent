@@ -32,16 +32,22 @@ def validate_readonly_sql(sql: str, dialect: str) -> list[dict]:
 
 async def layer3_validate_node(state: AnalysisState) -> dict:
     """安全拦截 + sqlglot 语法校验。"""
+    from src.graph.context import read_contexts
+
+    contexts = read_contexts(state)
     _start = time.monotonic()
     logger.info("节点开始", node="layer3_validate")
     sql = state.get("generated_sql", "").strip()
 
-    errors = validate_readonly_sql(sql, state.get("dialect", "clickhouse"))
+    errors = validate_readonly_sql(sql, contexts.execution.dialect or "clickhouse")
 
     logger.info("节点完成", node="layer3_validate", elapsed_ms=round((time.monotonic() - _start) * 1000))
-    return {
+    update = {
         "sql_valid": len(errors) == 0,
         "validation_errors": errors,
         "validation_warnings": [],
         "transpiled_sql": sql,
     }
+    from src.graph.context import with_execution_context
+
+    return with_execution_context(state, update)

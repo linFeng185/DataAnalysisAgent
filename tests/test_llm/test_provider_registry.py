@@ -5,7 +5,6 @@ from __future__ import annotations
 import logging
 from types import SimpleNamespace
 
-
 logger = logging.getLogger(__name__)
 
 
@@ -81,6 +80,15 @@ class TestProviderRegistry:
         with pytest.raises(ValueError, match="不支持的 Provider"):
             create_provider("missing", "model", "", "")
         logger.info("test_unknown_provider_is_rejected 完成")
+
+    # 方法作用：验证 OpenAI-compatible 协议别名在默认模型查询中同样生效。
+    # Args: self - pytest 测试类实例。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    def test_openai_compatible_alias_uses_openai_registration(self) -> None:
+        """注册、创建和默认模型读取必须共享同一协议规范化规则。"""
+        from src.llm.provider_registry import get_default_model
+
+        assert get_default_model("openai_compatible") == get_default_model("openai")
 
     # 方法作用：验证 Provider Context 缓存使用凭证摘要区分连接实例。
     # Args: self - pytest 测试类实例；monkeypatch - pytest 补丁工具。

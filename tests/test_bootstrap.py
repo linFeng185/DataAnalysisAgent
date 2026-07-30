@@ -8,7 +8,6 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-
 logger = logging.getLogger(__name__)
 
 
@@ -99,9 +98,9 @@ class TestBootstrap:
     async def test_start_memory_maintenance_registers_lifecycle_resource(self, monkeypatch) -> None:
         """维护服务必须由 AppContext 持有，应用关闭时才能可靠停止。"""
         # Arrange
-        from src import app_context, bootstrap
         import src.memory.long_term_store as store_module
         import src.memory.session_archive as archive_module
+        from src import app_context, bootstrap
 
         context = SimpleNamespace(set_resource=MagicMock())
         monkeypatch.setattr(app_context, "get_app_context", lambda: context)
@@ -134,10 +133,10 @@ class TestBootstrap:
     async def test_start_automation_registers_lifecycle_resources(self, monkeypatch) -> None:
         """启用自动化后后台轮询必须随 AppContext 一起关闭。"""
         # Arrange
-        from src import app_context, bootstrap
         import src.automation.runner as runner_module
         import src.automation.service as service_module
         import src.automation.store as store_module
+        from src import app_context, bootstrap
 
         context = SimpleNamespace(set_resource=MagicMock())
         monkeypatch.setattr(app_context, "get_app_context", lambda: context)

@@ -62,16 +62,18 @@ class TestDatasourceLifecycle:
         # Arrange
         monkeypatch.setenv("ENV", "dev")
         provider = ExternalDataSourceProvider()
-        original = await provider.register(DataSourceCreateRequest(
-            name="sales",
-            dialect="postgres",
-            host="old-db",
-            database="sales",
-            username="readonly",
-            password="secret",
-        ))
-        original.tenant_id = 3
-        original.owner_user_id = 7
+        await provider.register(
+            DataSourceCreateRequest(
+                name="sales",
+                dialect="postgres",
+                host="old-db",
+                database="sales",
+                username="readonly",
+                password="secret",
+            ),
+            tenant_id=3,
+            owner_user_id=7,
+        )
         provider.probe_request = AsyncMock(return_value=True)
         provider.persist = AsyncMock()
         request = DataSourceUpdateRequest(
@@ -102,7 +104,7 @@ class TestDatasourceLifecycle:
         assert updated.host == "new-db"
         assert updated.description == "新版只读库"
         assert CredentialManager().decrypt(updated.password) == "secret"
-        assert await provider.lookup("sales") is updated
+        assert await provider.lookup("sales", tenant_id=3) is updated
 
     # 方法作用：验证新配置探测失败时保留旧配置且不执行持久化。
     # Args: self - pytest 测试类实例；monkeypatch - pytest 补丁工具。

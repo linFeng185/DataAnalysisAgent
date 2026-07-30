@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import time
-from typing import Any
 
 from starlette.responses import JSONResponse
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
@@ -15,7 +14,6 @@ from src.security.api_access_policy import (
     get_api_access_policy_manager,
     resolve_client_ip,
 )
-
 
 logger = get_logger(__name__)
 

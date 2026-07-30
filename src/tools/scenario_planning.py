@@ -88,7 +88,7 @@ def generate_scenarios(
     evaluated: list[ScenarioOption] = []
     for combination in itertools.product(*options):
         state = dict(baseline)
-        state.update(dict(zip(names, combination)))
+        state.update(dict(zip(names, combination, strict=False)))
         violations = _constraint_violations(state, rules)
         if violations:
             continue

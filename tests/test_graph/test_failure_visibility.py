@@ -5,7 +5,6 @@ from __future__ import annotations
 import logging
 from unittest.mock import AsyncMock, MagicMock
 
-
 logger = logging.getLogger(__name__)
 
 

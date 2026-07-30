@@ -5,12 +5,11 @@
 
 from __future__ import annotations
 
-import re
-import time
 import hashlib
+import re
 import threading
+import time
 from datetime import datetime
-from typing import Any
 
 from src.config import get_settings
 from src.logging_config import get_logger
@@ -51,8 +50,10 @@ def _mask(val: str) -> str:
     for p, label in _PII_PATTERNS:
         m = p.search(val)
         if m:
-            if label == '手机号': return val[:3] + '****' + val[-4:]
-            if label == '身份证': return val[:4] + '**********' + val[-4:]
+            if label == '手机号':
+                return val[:3] + '****' + val[-4:]
+            if label == '身份证':
+                return val[:4] + '**********' + val[-4:]
             if label == '邮箱':
                 at = val.index('@')
                 return val[0] + '***' + val[at:]

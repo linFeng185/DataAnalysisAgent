@@ -2,9 +2,9 @@
 export type SSEEventType =
   | 'node_start' | 'node_end' | 'progress'
   | 'llm_start' | 'llm_end'
-  | 'thinking' | 'token'
+  | 'token'
   | 'sql' | 'validation'
-  | 'result' | 'analysis'
+  | 'result' | 'analysis' | 'decision_summary'
   | 'error' | 'done';
 
 export interface SSEEvent {
@@ -13,7 +13,6 @@ export interface SSEEvent {
   stream_id?: string;
   message?: string;
   content?: string;
-  reasoning_content?: string;
   sql?: string;
   valid?: boolean;
   errors?: unknown[];
@@ -36,7 +35,6 @@ export interface ChatResponse {
   user_query: string;
   sql: string;
   sql_statements: SQLStatement[];
-  sql_reasoning_content?: string;
   data: Record<string, unknown>[];
   row_count: number;
   truncated: boolean;
@@ -45,10 +43,11 @@ export interface ChatResponse {
     insights: string[];
     recommended_chart_type: string;
     follow_up_questions: string[];
-    analysis_reasoning_content?: string;
     statistics?: Record<string, unknown>;
   };
   chart: { type: string; option?: Record<string, unknown> };
+  decision_summary?: string;
+  artifact?: Record<string, unknown>;
   session_id?: string;
   error_code?: string;
   error_message?: string;
@@ -261,7 +260,8 @@ export interface SessionLatestState {
   truncated: boolean;
   success: boolean;
   error_message: string;
-  sql_reasoning_content?: string;
+  decision_summary?: string;
+  artifact?: Record<string, unknown>;
 }
 
 export interface SessionDetailResponse {

@@ -43,6 +43,8 @@ schema_cache_refresh_interval_seconds: 3600
 skill_registry_url: ""
 skill_registry_trusted_hosts: ""
 skill_registry_max_package_bytes: 10485760
+skill_require_signatures: true
+skill_trusted_public_keys: '{}'
 
 automation_enabled: true
 automation_poll_interval_seconds: 60

@@ -19,8 +19,15 @@ _started_at = time.time()
 
 @router.get("/models")
 async def list_models():
-    from src.llm.model_registry import get_model_registry
+    from src.api.auth import get_current_tenant_id
+    from src.app_context import get_tenant_policy
     from src.config import get_settings
+    from src.llm.model_registry import get_model_registry
+    from src.llm.tenant_config import list_tenant_model_options
+
+    tenant_options = await list_tenant_model_options(tenant_id=get_current_tenant_id())
+    if tenant_options["models"] or get_tenant_policy().multi_tenant:
+        return tenant_options
     items = []
     for m in get_model_registry().list_all():
         items.append({"id": m.model_id, "provider": m.provider, "name": m.display_name,
@@ -40,6 +47,7 @@ async def test_model(req: ModelTestRequest):
         连通状态和请求延迟。
     """
     import time as _t
+
     from src.api.auth import require_super_admin
     from src.llm.client import get_provider
     logger.debug("模型连通性测试入口", model_id=req.model_id)

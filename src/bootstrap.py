@@ -11,7 +11,6 @@ from src.app_context import AppContext, use_app_context_async
 from src.config import Settings
 from src.logging_config import get_logger
 
-
 logger = get_logger(__name__)
 
 
@@ -215,8 +214,8 @@ async def _warmup_llm(settings: Settings) -> None:
 async def _warmup_stores(settings: Settings) -> None:
     del settings
     logger.debug("_warmup_stores 入口")
-    from src.memory.session_store import get_session_store
     from src.memory.history_store import get_history_store
+    from src.memory.session_store import get_session_store
 
     await get_session_store().list(limit=1)
     await get_history_store().list(page=1, page_size=1)

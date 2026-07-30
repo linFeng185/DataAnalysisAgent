@@ -9,10 +9,15 @@ from typing import Any
 from uuid import UUID
 
 from langchain_core.callbacks import BaseCallbackHandler
-from prometheus_client import CONTENT_TYPE_LATEST, CollectorRegistry, Counter, Histogram, generate_latest
+from prometheus_client import (
+    CONTENT_TYPE_LATEST,
+    CollectorRegistry,
+    Counter,
+    Histogram,
+    generate_latest,
+)
 
 from src.logging_config import get_logger
-
 
 logger = get_logger(__name__)
 _metrics_registry: "MetricsRegistry | None" = None

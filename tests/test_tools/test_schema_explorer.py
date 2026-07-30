@@ -6,7 +6,6 @@ import logging
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
-
 logger = logging.getLogger(__name__)
 
 

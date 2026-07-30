@@ -7,7 +7,6 @@ from contextlib import asynccontextmanager
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
-
 logger = logging.getLogger(__name__)
 
 
@@ -316,14 +315,25 @@ class TestMCPAgentFallback:
     async def test_unavailable_model_returns_standard_failure(self, monkeypatch):
         """MCP Agent 降级结果必须带 source、user_query 和失败标志。"""
         logger.debug("test_unavailable_model_returns_standard_failure 入口")
+        # Arrange
+        import src.graph.nodes.mcp_agent as node_module
         import src.llm.client as client_module
-        from src.graph.workflow import mcp_agent_node
+        import src.mcp_client.client_manager as manager_module
 
+        manager = SimpleNamespace(
+            ensure_scoped_servers=AsyncMock(),
+            get_all_tools=MagicMock(return_value=[]),
+        )
+        monkeypatch.setattr(manager_module, "get_mcp_client_manager", lambda: manager)
         monkeypatch.setattr(client_module, "is_task_llm_available", lambda task: False)
 
-        result = await mcp_agent_node({"user_query": "分析上传文件"})
+        # Act
+        result = await node_module.mcp_agent_node({"user_query": "分析上传文件"})
 
+        # Assert
         response = result["final_response"]
+        manager.ensure_scoped_servers.assert_awaited_once_with(0, 0)
+        manager.get_all_tools.assert_called_once_with(tenant_id=0, user_id=0)
         assert response["success"] is False
         assert response["source"] == "mcp_agent"
         assert response["user_query"] == "分析上传文件"

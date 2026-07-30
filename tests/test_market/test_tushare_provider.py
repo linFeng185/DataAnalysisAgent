@@ -104,7 +104,7 @@ class TestTushareProvider:
     async def test_fetch_raises_when_persistence_fails(self):
         """行情接口成功但落库失败时不能返回未持久化数据。"""
         # Arrange
-        from src.market.providers.tushare import TushareMarketDataProvider, MarketProviderError
+        from src.market.providers.tushare import MarketProviderError, TushareMarketDataProvider
 
         http = FakeHttpClient({
             "code": 0,

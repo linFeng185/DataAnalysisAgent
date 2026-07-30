@@ -5,7 +5,6 @@ from __future__ import annotations
 from copy import deepcopy
 from typing import Any, Literal
 
-
 TaskStatus = Literal["success", "failed", "needs_input", "partial"]
 
 
@@ -50,6 +49,53 @@ def status_from_response(response: dict[str, Any]) -> TaskStatus:
 def is_successful_response(response: dict[str, Any]) -> bool:
     """统一判断历史和审计使用的结果成败。"""
     return status_from_response(response) in {"success", "partial"}
+
+
+def build_decision_summary(
+    state: dict[str, Any] | None = None,
+    response: dict[str, Any] | None = None,
+    *,
+    max_chars: int = 320,
+) -> str:
+    """基于受控状态字段生成简短处理摘要，不暴露模型原始推理。"""
+    state = state or {}
+    response = response or {}
+    source = str(response.get("source") or "").strip()
+    status = status_from_response(response)
+    labels = {
+        "sql_query": "数据查询",
+        "multi_source_query": "多数据源查询",
+        "llm_direct": "直接回答",
+        "mcp_agent": "工具分析",
+        "prompt": "参数补充",
+    }
+    parts: list[str] = []
+    if source in labels:
+        parts.append(f"已完成{labels[source]}处理")
+    elif source:
+        parts.append("已完成当前任务处理")
+    if status == "needs_input":
+        parts.append("等待补充必要参数")
+    elif status == "failed":
+        parts.append("处理未完成")
+    elif status == "partial":
+        parts.append("部分数据源完成")
+    row_count = response.get("row_count", state.get("query_result_full_count", 0))
+    if isinstance(row_count, int) and row_count > 0:
+        parts.append(f"返回{row_count}行结果")
+    retry_count = max(
+        int(state.get("retry_count", 0) or 0),
+        int(state.get("execution_retry_count", 0) or 0),
+    )
+    if retry_count > 0:
+        parts.append(f"已自动重试{min(retry_count, 9)}次")
+    skills = state.get("activated_skills") or response.get("activated_skills") or []
+    if skills:
+        parts.append(f"已应用{min(len(skills), 5)}项业务能力")
+    if not parts:
+        parts.append("已完成请求处理")
+    result = "；".join(parts)
+    return result if len(result) <= max_chars else result[: max_chars - 1] + "…"
 
 
 _PRIVATE_OUTPUT_KEYS = frozenset({

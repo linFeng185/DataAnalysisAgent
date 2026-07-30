@@ -7,7 +7,6 @@ from unittest.mock import AsyncMock
 
 from src.graph.nodes.generate_sql import _check_table_hallucination
 
-
 logger = logging.getLogger(__name__)
 
 

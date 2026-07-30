@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 import logging
-from types import SimpleNamespace
 from datetime import datetime, timezone
-from src.knowledge.models import AUTO_TTL_SECONDS, KnowledgeEntry, KnowledgeSource
+from types import SimpleNamespace
 
+from src.knowledge.models import AUTO_TTL_SECONDS, KnowledgeEntry, KnowledgeSource
 
 logger = logging.getLogger(__name__)
 
@@ -25,6 +25,7 @@ class TestLocalEmbeddingModel:
         try:
             # Arrange
             from chromadb.utils import embedding_functions
+
             from src.memory.vector_store_chroma import ChromaVectorStore
 
             for name in (
@@ -182,6 +183,7 @@ class TestSchemaCacheRecovery:
         """缓存只有表级条目时，应重新加载字段结构。"""
         from types import SimpleNamespace
         from unittest.mock import AsyncMock
+
         from src.knowledge.schema_manager import SchemaManager
 
         # 隔离连接级持久化缓存，确保本用例只验证旧向量缓存不完整的恢复路径。
@@ -308,10 +310,21 @@ class TestLoadFromDocs:
 class TestSnapshotToEntries:
     """_snapshot_to_entries 转换测试。"""
 
-    def test_converts_tables_and_columns(self):
-        from src.knowledge.schema_manager import SchemaManager
-        from src.datasource.schema_snapshot import ColumnInfo, SchemaSnapshot, TableSchema
+    # 方法作用：验证单租户兼容模式下表与字段快照转换契约。
+    # Args: self - pytest 测试类实例；monkeypatch - pytest 补丁工具。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    def test_converts_tables_and_columns(self, monkeypatch):
+        from types import SimpleNamespace
 
+        import src.app_context as app_context
+        from src.datasource.schema_snapshot import ColumnInfo, SchemaSnapshot, TableSchema
+        from src.knowledge.schema_manager import SchemaManager
+
+        monkeypatch.setattr(
+            app_context,
+            "get_tenant_policy",
+            lambda: SimpleNamespace(knowledge_isolation_enabled=False),
+        )
         m = SchemaManager()
         snapshot = SchemaSnapshot(tables=[
             TableSchema(name="orders", description="订单表",
@@ -331,9 +344,10 @@ class TestSchemaManagerIntegration:
     """SchemaManager ChromaDB 集成测试 -- mock collection 避免 ChromaDB 初始化。"""
 
     async def test_cache_write_and_read(self, monkeypatch):
-        from src.knowledge.schema_manager import SchemaManager
         from unittest.mock import AsyncMock
+
         import src.memory.vector_store as vector_module
+        from src.knowledge.schema_manager import SchemaManager
 
         m = SchemaManager()
         m._initialized = True
@@ -349,9 +363,10 @@ class TestSchemaManagerIntegration:
         assert saved.metadata["datasource"] == "x"
 
     async def test_query_cache_empty(self, monkeypatch):
-        from src.knowledge.schema_manager import SchemaManager
         from unittest.mock import AsyncMock
+
         import src.memory.vector_store as vector_module
+        from src.knowledge.schema_manager import SchemaManager
 
         m = SchemaManager()
         m._initialized = True
@@ -362,11 +377,12 @@ class TestSchemaManagerIntegration:
         assert cached == []
 
     async def test_query_cache_finds_entries(self, monkeypatch):
+        from datetime import datetime, timezone
+        from unittest.mock import AsyncMock
+
+        import src.memory.vector_store as vector_module
         from src.knowledge.schema_manager import SchemaManager
         from src.memory.vector_store import VectorEntry
-        from unittest.mock import AsyncMock
-        import src.memory.vector_store as vector_module
-        from datetime import datetime, timezone
 
         m = SchemaManager()
         now = datetime.now(timezone.utc).isoformat()

@@ -9,7 +9,6 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-
 logger = logging.getLogger(__name__)
 
 
@@ -359,6 +358,7 @@ class TestSessionRouteIsolation:
         """scoped checkpoint 为空时，应继续查询原始 session_id。"""
         # Arrange
         from langchain_core.messages import AIMessage, HumanMessage
+
         import src.api.auth as auth
         import src.api.routes as routes
         import src.memory.checkpointer as checkpointer_module
@@ -444,6 +444,7 @@ class TestSessionStorePagination:
         """asyncpg 的 timestamptz 参数不得直接接收字符串。"""
         # Arrange
         from datetime import datetime
+
         import src.memory.session_store as session_module
 
         connection = SimpleNamespace(

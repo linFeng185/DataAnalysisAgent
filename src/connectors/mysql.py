@@ -4,11 +4,10 @@ from __future__ import annotations
 
 from sqlalchemy import URL
 
+from src.config import get_settings
 from src.connectors.base import ConnectorBase
 from src.connectors.registry import register_connector
-from src.config import get_settings
 from src.logging_config import get_logger
-
 
 logger = get_logger(__name__)
 

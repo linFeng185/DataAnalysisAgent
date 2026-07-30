@@ -32,8 +32,8 @@ async def list_tables(
         import src.api.routes as routes_package
 
         ds = await routes_package._registry().resolve(datasource)
-    except DataSourceNotFoundError:
-        raise HTTPException(404, f"数据源 '{datasource}' 未找到")
+    except DataSourceNotFoundError as exc:
+        raise HTTPException(404, f"数据源 '{datasource}' 未找到") from exc
     if ds.schema is None:
         logger.info("Schema 路由触发延迟内省", datasource=datasource)
         ds.schema = await routes_package._schema_manager().get_or_fetch_schema(datasource)
@@ -58,8 +58,8 @@ async def get_table(table_name: str, datasource: str = Query(default="demo")):
         import src.api.routes as routes_package
 
         ds = await routes_package._registry().resolve(datasource)
-    except DataSourceNotFoundError:
-        raise HTTPException(404, f"数据源 '{datasource}' 未找到")
+    except DataSourceNotFoundError as exc:
+        raise HTTPException(404, f"数据源 '{datasource}' 未找到") from exc
     if ds.schema is None:
         logger.info("表详情路由触发延迟内省", datasource=datasource)
         ds.schema = await routes_package._schema_manager().get_or_fetch_schema(datasource)
@@ -91,9 +91,9 @@ async def refresh_schema(datasource: str = Query(default="demo")):
         import src.api.routes as routes_package
 
         await routes_package._registry().resolve(datasource)
-    except DataSourceNotFoundError:
+    except DataSourceNotFoundError as exc:
         logger.warning("Schema 刷新数据源不存在", datasource=datasource)
-        raise HTTPException(404, f"数据源 '{datasource}' 未找到")
+        raise HTTPException(404, f"数据源 '{datasource}' 未找到") from exc
     snapshot = await routes_package._schema_manager().refresh(datasource)
     result = {
         "status": "ok",
@@ -129,8 +129,8 @@ async def update_column_comment(
         import src.api.routes as routes_package
 
         await routes_package._registry().resolve(datasource)
-    except DataSourceNotFoundError:
-        raise HTTPException(404, f"数据源 '{datasource}' 未找到")
+    except DataSourceNotFoundError as exc:
+        raise HTTPException(404, f"数据源 '{datasource}' 未找到") from exc
     updated = await routes_package._schema_manager().update_column_comment(
         datasource, table_name, column_name, req.comment,
     )

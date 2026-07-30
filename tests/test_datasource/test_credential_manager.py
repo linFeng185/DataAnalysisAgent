@@ -5,11 +5,10 @@ from __future__ import annotations
 import logging
 from base64 import urlsafe_b64encode
 
+import pytest
 from cryptography.fernet import Fernet
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
-import pytest
-
 
 logger = logging.getLogger(__name__)
 

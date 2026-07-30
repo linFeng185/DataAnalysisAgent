@@ -1,8 +1,12 @@
 """DocLoader 测试."""
 from __future__ import annotations
-import os, tempfile
+
+import os
+import tempfile
+
 from src.knowledge.doc_loader import DocLoader
 from src.knowledge.models import KnowledgeSource
+
 
 class TestParseFrontmatter:
     def test_with_frontmatter(self):

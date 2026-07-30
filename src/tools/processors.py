@@ -36,7 +36,7 @@ class TrendProcessor(DataProcessor):
     # Args: rows - 查询结果；params - 时间列、数值列和窗口配置。
     # Returns: 趋势处理结果。
     def process(self, rows, params):
-        vc, tc = params.get("value_col",""), params.get("time_col","")
+        vc = params.get("value_col","")
         if not vc or len(rows)<3: return ProcessorResult("数据不足",[],"table",rows,"low")
         vals=[self._f(r.get(vc)) for r in rows]; w=min(params.get("window",3),len(vals))
         ma=[round(sum(vals[max(0,i-w+1):i+1])/(i-max(0,i-w+1)+1),2) for i in range(len(vals))]

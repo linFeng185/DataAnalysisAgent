@@ -14,8 +14,8 @@ class TestAnalyzeAdapterContent:
     # Args: self - 测试类实例；monkeypatch - pytest 补丁工具。
     # Returns: 无返回值，断言失败时由 pytest 报告。
     async def test_llm_analyze_uses_parsed_content(self, monkeypatch) -> None:
-        import src.graph.nodes.analyze_result as analyze_module
         import src.config as config_module
+        import src.graph.nodes.analyze_result as analyze_module
         import src.llm.adapters.registry as adapter_module
 
         parsed_payload = {

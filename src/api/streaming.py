@@ -13,6 +13,7 @@ import math
 from collections import defaultdict
 from datetime import date, datetime
 from decimal import Decimal
+from typing import TYPE_CHECKING
 
 from src.app_context import get_tenant_policy
 from src.config import get_settings
@@ -21,6 +22,9 @@ from src.graph.outcome import sanitize_public_output
 from src.logging_config import get_logger
 
 logger = get_logger(__name__)
+
+if TYPE_CHECKING:
+    from src.llm.tenant_config import TenantLLMSelection
 
 
 def _clean_float(f: float) -> Decimal:
@@ -123,7 +127,7 @@ def _event_stream_id(event: dict) -> str:
 
 
 # 方法作用：执行 LangGraph 并通过 SSE 推送节点进度、模型事件和最终结果。
-# Args: user_query - 用户问题；datasource - 主数据源；session_id - 会话；datasources - 多数据源；tenant_id/user_id/user_role - 认证身份；datasource_access - API 授权快照；enabled_skill_ids - 显式 Skill；request_rate_limit_checked - API 是否已计入配额。
+# Args: user_query - 用户问题；datasource - 主数据源；session_id - 会话；datasources - 多数据源；tenant_id/user_id/user_role - 认证身份；datasource_access - API 授权快照；enabled_skill_ids - 显式 Skill；request_rate_limit_checked - API 是否已计入配额；llm_selection - 已授权租户 LLM 选择。
 # Returns: SSE 事件异步生成器。
 async def stream_analysis(user_query: str, datasource: str, session_id: str = "",
                           datasources: list[str] | None = None,
@@ -131,18 +135,22 @@ async def stream_analysis(user_query: str, datasource: str, session_id: str = ""
                           user_role: str | None = None,
                           datasource_access: dict[str, dict] | None = None,
                           enabled_skill_ids: list[str] | None = None,
-                          request_rate_limit_checked: bool = False):
+                          request_rate_limit_checked: bool = False,
+                          llm_selection: TenantLLMSelection | None = None):
     """SSE: 逐 Node 推送进度 + LLM token + 关键结果。
 
     每个 token 事件均携带 node 和 stream_id 字段，前端可按调用实例分组渲染并行 LLM 输出。
     原始 reasoning_content 仅计数并写入服务端受控诊断，不生成 SSE 事件。
     """
-    from src.graph.workflow import app
-
     import uuid
+
+    from src.graph.workflow import app
     effective_id = session_id or str(uuid.uuid4())
     from src.api.auth import (
-        get_current_role, get_current_tenant_id, get_current_user_id, scope_thread_id,
+        get_current_role,
+        get_current_tenant_id,
+        get_current_user_id,
+        scope_thread_id,
     )
     tenant_id = get_current_tenant_id() if tenant_id is None else tenant_id
     user_id = get_current_user_id() if user_id is None else user_id
@@ -208,6 +216,14 @@ async def stream_analysis(user_query: str, datasource: str, session_id: str = ""
     active_llm_streams: set[str] = set()
     stream_nodes: dict[str, str] = {}
 
+    from src.llm.tenant_config import (
+        _bind_tenant_llm_selection,
+        _reset_tenant_llm_selection,
+    )
+
+    selection_token = _bind_tenant_llm_selection(llm_selection)
+    stream_failed = False
+
     try:
         input_state = {"user_query": user_query, "datasource": datasource,
                        "session_id": effective_id,
@@ -255,10 +271,11 @@ async def stream_analysis(user_query: str, datasource: str, session_id: str = ""
                     elif name == "layer3_validate":
                         yield _sse("validation", {"valid": output.get("sql_valid", True)})
                     elif name == "build_response" and isinstance(output, dict):
-                        yield _sse(
-                            "result",
-                            sanitize_public_output(output.get("final_response", {})),
-                        )
+                        public_result = sanitize_public_output(output.get("final_response", {}))
+                        yield _sse("result", public_result)
+                        decision_summary = str(public_result.get("decision_summary", "") or "")
+                        if decision_summary:
+                            yield _sse("decision_summary", {"summary": decision_summary})
                     elif name == "analyze_result" and isinstance(output, dict):
                         yield _sse("analysis", output.get("analysis_result", {}))
                     # 回退：该节点 LLM 流式 token 没到时，输出累积内容
@@ -305,7 +322,9 @@ async def stream_analysis(user_query: str, datasource: str, session_id: str = ""
                     stream_nodes.setdefault(stream_id, node or "unknown")
 
                     from src.llm.adapters.registry import get_adapter
-                    adapter = get_adapter(get_settings().llm_model)
+                    adapter = get_adapter(
+                        llm_selection.model_id if llm_selection else get_settings().llm_model,
+                    )
                     sc = adapter.parse_stream_chunk(chunk)
                     if sc.reasoning_content:
                         stats["thinking_events"] += 1
@@ -336,6 +355,11 @@ async def stream_analysis(user_query: str, datasource: str, session_id: str = ""
         yield _sse("error", {"message": "流式处理失败，请稍后重试"})
         logger.info("流式异常终止", stats=stats)
         yield _sse("done", {"status": "error"})
+        stream_failed = True
+    finally:
+        _reset_tenant_llm_selection(selection_token)
+
+    if stream_failed:
         return
 
     logger.info("流式完成", stats=stats, had_stream_tokens=stats["chat_model_stream"] > 0,

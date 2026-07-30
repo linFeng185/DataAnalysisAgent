@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from src.knowledge.content_safety import render_evidence_context, sanitize_untrusted_text
 from src.knowledge.asset_models import Evidence
+from src.knowledge.content_safety import render_evidence_context, sanitize_untrusted_text
 
 
 class TestContentSafety:

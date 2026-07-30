@@ -9,14 +9,14 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from starlette.middleware.cors import CORSMiddleware
 
+from src.api.middleware import register_exception_handlers
+from src.api.routes import router
 from src.app_context import (
     AppContext,
     AppContextMiddleware,
     create_app_context,
     use_app_context_async,
 )
-from src.api.middleware import register_exception_handlers
-from src.api.routes import router
 from src.bootstrap import bootstrap_all, shutdown_all
 from src.config import get_settings
 from src.logging_config import get_logger, setup_logging
@@ -84,12 +84,13 @@ def create_app() -> FastAPI:
     validate_production_settings(settings)
 
     import json as _json
+
     from starlette.responses import JSONResponse as _JSONResponse
 
     class _PrecisionResponse(_JSONResponse):
         """FastAPI 全局 JSON 响应：float → Decimal → 精确序列化。"""
         def render(self, content) -> bytes:
-            from src.api.streaming import _PrecisionEncoder, _json_serialize
+            from src.api.streaming import _json_serialize, _PrecisionEncoder
             return _json.dumps(content, cls=_PrecisionEncoder, default=_json_serialize,
                                ensure_ascii=False).encode("utf-8")
 
@@ -106,8 +107,8 @@ def create_app() -> FastAPI:
     context = create_app_context(settings)
     app.state.app_context = context
 
-    from src.api.auth import AuthMiddleware, auth_router
     from src.api.access_policy import ApiAccessPolicyMiddleware
+    from src.api.auth import AuthMiddleware, auth_router
     from src.api.security_headers import SecurityHeadersMiddleware
     from src.observability import PrometheusMiddleware, get_metrics_registry
 

@@ -23,6 +23,17 @@ class IntentOutput(StrictOutputModel):
     ]
 
 
+class TaskPlanOutput(StrictOutputModel):
+    """LLM 路由阶段的结构化任务计划。"""
+
+    intent: Literal[
+        "query", "aggregation", "trend", "attribution", "metadata", "chat",
+        "file_analysis", "meta",
+    ] = "query"
+    operation: str = "query"
+    confidence: float = Field(default=0.5, ge=0.0, le=1.0)
+
+
 class DatasourceSelectionOutput(StrictOutputModel):
     """数据源选择输出。"""
 

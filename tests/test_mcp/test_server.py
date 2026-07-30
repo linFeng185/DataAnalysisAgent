@@ -6,7 +6,6 @@ import logging
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
-
 logger = logging.getLogger(__name__)
 
 
@@ -50,6 +49,7 @@ class TestMCPServer:
     def _server(self, monkeypatch) -> FakeFastMCP:
         logger.debug("TestMCPServer._server 入口")
         import mcp.server.fastmcp as fastmcp_module
+
         from src.mcp_client.server import create_mcp_server
 
         monkeypatch.setattr(fastmcp_module, "FastMCP", FakeFastMCP)

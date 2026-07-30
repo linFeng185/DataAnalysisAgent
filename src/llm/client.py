@@ -218,6 +218,34 @@ def get_task_llm(
 ) -> BaseChatModel:
     """创建节点级模型，未授权任何模型时抛出明确异常。"""
     settings = get_settings()
+    from src.llm.tenant_config import get_current_tenant_llm_selection
+
+    tenant_selection = get_current_tenant_llm_selection()
+    if tenant_selection is not None:
+        logger.info(
+            "租户任务 LLM 路由完成",
+            task=task,
+            tenant_id=tenant_selection.tenant_id,
+            connection_id=tenant_selection.connection_id,
+            provider=tenant_selection.provider_code,
+            model_id=tenant_selection.model_id,
+        )
+        provider = get_provider(
+            model_id=tenant_selection.model_id,
+            provider_name=tenant_selection.protocol,
+            base_url=tenant_selection.base_url,
+            api_key=tenant_selection.api_key,
+        )
+        model = provider.get_chat_model(
+            temperature=temperature,
+            max_tokens=max_tokens,
+            stream=True,
+            reasoning=reasoning,
+            timeout=settings.llm_timeout,
+        )
+        from src.observability import attach_llm_metrics
+
+        return attach_llm_metrics(model, task)
     target = resolve_llm_task_target(task, settings=settings)
     logger.debug("创建任务 LLM 入口", task=task, target=target, reasoning=reasoning)
     if target == "local":

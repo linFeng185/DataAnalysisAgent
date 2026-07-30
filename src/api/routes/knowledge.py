@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-import io
 import html
+import io
 import json
 import os
 import time
@@ -91,9 +91,9 @@ async def list_knowledge(
     )
     try:
         from src.api.auth import is_platform_super_admin
-        from src.memory.vector_store import get_vector_store
         from src.knowledge.governance import normalize_knowledge_scope
         from src.knowledge.retrieval import build_accessible_knowledge_filters
+        from src.memory.vector_store import get_vector_store
 
         store = await get_vector_store()
         filter_groups = build_accessible_knowledge_filters(category=category or "")
@@ -322,10 +322,12 @@ async def upload_knowledge_docs(
 
     system 仅超级管理员，tenant 仅租户管理员或超级管理员，private 归当前用户。
     """
-    from src.config import get_settings
     from src.api.auth import (
-        get_current_role, get_current_tenant_id, get_current_user_id,
+        get_current_role,
+        get_current_tenant_id,
+        get_current_user_id,
     )
+    from src.config import get_settings
     from src.knowledge.governance import normalize_knowledge_scope
 
     logger.info(
@@ -453,7 +455,9 @@ async def search_knowledge_tags(
 ):
     """搜索当前用户可见的全局标签和个人标签。"""
     from src.api.auth import (
-        get_current_role, get_current_tenant_id, get_current_user_id,
+        get_current_role,
+        get_current_tenant_id,
+        get_current_user_id,
     )
     from src.knowledge.governance import is_super_admin
     from src.knowledge.tag_store import get_knowledge_tag_store
@@ -567,7 +571,9 @@ async def promote_knowledge_tag(tag_id: int):
 async def update_knowledge_tag_status(tag_id: int, request: KnowledgeTagStatusRequest):
     """启用或停用全局标签或当前用户自己的个人标签。"""
     from src.api.auth import (
-        get_current_role, get_current_tenant_id, get_current_user_id,
+        get_current_role,
+        get_current_tenant_id,
+        get_current_user_id,
     )
     from src.knowledge.tag_store import get_knowledge_tag_store
 
@@ -607,8 +613,8 @@ async def test_knowledge_search(q: str = Query(default=""), datasource: str = Qu
 
     require_super_admin()
     try:
-        from src.memory.vector_store import get_vector_store
         from src.knowledge.retrieval import build_knowledge_filters, search_knowledge
+        from src.memory.vector_store import get_vector_store
         store = await get_vector_store()
         if q:
             evidence = await search_knowledge(store, q, datasource=datasource, top_k=10)
@@ -629,11 +635,13 @@ async def test_knowledge_search(q: str = Query(default=""), datasource: str = Qu
 async def list_knowledge_docs():
     """列出当前身份可见文档并附带服务端删除权限。"""
     from src.api.auth import (
-        get_current_role, get_current_tenant_id, get_current_user_id,
+        get_current_role,
+        get_current_tenant_id,
+        get_current_user_id,
         is_platform_super_admin,
     )
-    from src.knowledge.governance import can_manage_knowledge_resource
     from src.knowledge.file_store import get_file_store
+    from src.knowledge.governance import can_manage_knowledge_resource
 
     logger.debug("知识文档列表 API 入口", role=get_current_role())
     docs = await get_file_store().list_files()
@@ -706,6 +714,7 @@ async def get_doc_content(doc_name: str, knowledge_scope: str = ""):
 async def get_doc_raw(doc_name: str, knowledge_scope: str = ""):
     """返回原始文件（从 PG 读取，回退磁盘，用于 PDF iframe 渲染）。"""
     from fastapi.responses import Response
+
     from src.api.auth import is_platform_super_admin
     from src.knowledge.file_store import get_file_store
     if knowledge_scope == "system" and not is_platform_super_admin():
@@ -795,7 +804,9 @@ async def delete_knowledge_entry(entry_id: str):
             logger.warning("删除知识条目拒绝", entry_id=entry_id, reason="非用户上传")
             raise HTTPException(403, "目录扫描或系统内置知识条目不可通过 API 删除")
         from src.api.auth import (
-            get_current_role, get_current_tenant_id, get_current_user_id,
+            get_current_role,
+            get_current_tenant_id,
+            get_current_user_id,
         )
         from src.knowledge.governance import can_manage_knowledge_resource
 
@@ -840,10 +851,10 @@ async def delete_knowledge_doc(doc_name: str, knowledge_scope: str = ""):
         doc_name=doc_name,
         knowledge_scope=knowledge_scope,
     )
-    from src.memory.vector_store import get_vector_store
     from src.api.auth import get_current_role, get_current_tenant_id, get_current_user_id
     from src.knowledge.governance import can_manage_knowledge_resource, normalize_knowledge_scope
     from src.knowledge.retrieval import build_accessible_knowledge_filters
+    from src.memory.vector_store import get_vector_store
 
     if knowledge_scope:
         try:

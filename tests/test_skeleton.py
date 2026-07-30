@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import pytest
-
 
 class TestConfig:
     """配置管理 (1.1.3, 1.2.1)。"""

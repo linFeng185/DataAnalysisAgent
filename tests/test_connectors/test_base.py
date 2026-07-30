@@ -302,6 +302,7 @@ class TestConnectionURL:
         """Oracle health_check 必须使用 DUAL 探针。"""
         # Arrange
         from unittest.mock import AsyncMock
+
         from src.connectors.oracle import OracleConnector
 
         connector = OracleConnector(_ds("oracle"))
@@ -319,6 +320,7 @@ class TestConnectionURL:
         """Oracle explain 失败时返回语义错误摘要。"""
         # Arrange
         from unittest.mock import AsyncMock
+
         from src.connectors.oracle import OracleConnector
 
         connector = OracleConnector(_ds("oracle"))
@@ -518,6 +520,7 @@ class TestEXPLAIN:
     def test_clickhouse_skipped(self, monkeypatch):
         """explain_skip_dialects 配置生效。"""
         import asyncio
+
         from src.app_context import AppContext, use_app_context
         from src.config import Settings
         from src.connectors.clickhouse import ClickHouseConnector
@@ -535,6 +538,7 @@ class TestClickHousePartition:
 
     def test_no_db_graceful(self):
         import asyncio
+
         from src.connectors.clickhouse import ClickHouseConnector
         r = asyncio.run(ClickHouseConnector(_ds("clickhouse")).get_partition_key("t"))
         assert r == ""

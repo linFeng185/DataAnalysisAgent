@@ -9,7 +9,6 @@ from typing import Any
 
 from src.logging_config import get_logger
 
-
 logger = get_logger(__name__)
 _BACKGROUND_TASKS: set[asyncio.Task[Any]] = set()
 

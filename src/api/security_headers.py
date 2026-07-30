@@ -7,7 +7,6 @@ from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from src.logging_config import get_logger
 
-
 logger = get_logger(__name__)
 _API_CSP = "default-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'"
 

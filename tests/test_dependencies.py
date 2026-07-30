@@ -7,7 +7,6 @@ import re
 import tomllib
 from pathlib import Path
 
-
 logger = logging.getLogger(__name__)
 ROOT = Path(__file__).resolve().parents[1]
 

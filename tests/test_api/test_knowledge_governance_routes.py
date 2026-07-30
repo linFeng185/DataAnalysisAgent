@@ -24,8 +24,8 @@ class TestKnowledgeScopeRoutes:
         logger.debug("test_tenant_admin_cannot_upload_system_knowledge 入口")
         try:
             # Arrange：构造租户管理员身份和文件存储探针。
-            import src.api.routes as routes
             import src.api.auth as auth
+            import src.api.routes as routes
             import src.config as config_module
             import src.knowledge.file_store as file_store_module
 
@@ -61,8 +61,8 @@ class TestKnowledgeScopeRoutes:
         logger.debug("test_tenant_upload_rejects_private_tag 入口")
         try:
             # Arrange：构造租户管理员和一个个人标签。
-            import src.api.routes as routes
             import src.api.auth as auth
+            import src.api.routes as routes
             import src.config as config_module
             import src.knowledge.file_store as file_store_module
             import src.knowledge.tag_store as tag_store_module
@@ -106,8 +106,8 @@ class TestKnowledgeTagRoutes:
         logger.debug("test_create_tag_uses_current_owner 入口")
         try:
             # Arrange：模拟当前身份与标签存储。
-            import src.api.routes as routes
             import src.api.auth as auth
+            import src.api.routes as routes
             import src.knowledge.tag_store as tag_store_module
             from src.api.schemas import KnowledgeTagCreateRequest
 
@@ -142,8 +142,8 @@ class TestKnowledgeTagRoutes:
         logger.debug("test_tenant_admin_cannot_create_global_tag 入口")
         try:
             # Arrange：设置租户管理员角色。
-            import src.api.routes as routes
             import src.api.auth as auth
+            import src.api.routes as routes
             from src.api.schemas import KnowledgeTagCreateRequest
 
             monkeypatch.setattr(auth, "get_current_role", lambda: "tenant_admin")
@@ -174,6 +174,7 @@ class TestKnowledgeGovernanceAsgi:
         try:
             # Arrange：创建启用多租户认证的 ASGI 应用和租户管理员令牌。
             from httpx import ASGITransport, AsyncClient
+
             import src.api.auth as auth
             import src.main as main_module
 
@@ -217,6 +218,7 @@ class TestKnowledgeGovernanceAsgi:
         try:
             # Arrange：模拟标签存储并创建分析师令牌。
             from httpx import ASGITransport, AsyncClient
+
             import src.api.auth as auth
             import src.knowledge.tag_store as tag_store_module
             import src.main as main_module

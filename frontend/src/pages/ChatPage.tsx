@@ -23,6 +23,15 @@ const SUGGESTIONS = [
 
 const DS_STORAGE_KEY = 'selected_datasource';
 
+type ModelOption = { id: string; name: string; connection_id?: number; connection_name?: string; provider?: string };
+
+// 方法作用：生成连接与模型组合的稳定选择值，避免同一模型跨连接重名。
+// Args: option - 当前租户模型选项。
+// Returns: 可用于 Select value 的组合字符串。
+function modelOptionValue(option: ModelOption): string {
+  return `${option.connection_id ?? 0}:${option.id}`;
+}
+
 // 方法作用：从会话存储恢复上次选择的主数据源。
 // Args: 无。
 // Returns: 数据源名称，读取失败返回空字符串。
@@ -43,7 +52,8 @@ export default function ChatPage() {
   const [query, setQuery] = useState('');
   const [ds, setDs] = useState<string[]>(() => { const v = loadDs(); return v ? [v] : []; });
   const [modelId, setModelId] = useState('');
-  const [models, setModels] = useState<{id:string;name:string}[]>([]);
+  const [llmConnectionId, setLlmConnectionId] = useState<number | undefined>();
+  const [models, setModels] = useState<ModelOption[]>([]);
   const [datasources, setDatasources] = useState<DatasourceConfig[]>([]);
   const [skills, setSkills] = useState<SkillInfo[]>([]);
   const [selectedSkillIds, setSelectedSkillIds] = useState<string[]>([]);
@@ -70,8 +80,18 @@ export default function ChatPage() {
         }
       })
       .catch(() => message.warning('无法加载数据源列表'));
-    get<{models:{id:string;name:string}[],default:string}>('/models')
-      .then(data => { setModels(data.models||[]); if (!modelId) setModelId(data.default||''); })
+    get<{models: ModelOption[]; default: string | { connection_id?: number; model_id?: string }}>('/models')
+      .then(data => {
+        const connectedModels = (data.models || []).filter(item => Number(item.connection_id) > 0);
+        setModels(connectedModels);
+        const selectedDefault = typeof data.default === 'string'
+          ? undefined
+          : data.default;
+        if (!modelId && selectedDefault?.connection_id && selectedDefault.model_id) {
+          setLlmConnectionId(selectedDefault.connection_id);
+          setModelId(selectedDefault.model_id);
+        }
+      })
       .catch(() => message.warning('无法加载模型列表'));
     get<{skills:SkillInfo[]}>('/skills')
       .then(data => setSkills((data.skills || []).filter(skill => skill.enabled)))
@@ -102,7 +122,7 @@ export default function ChatPage() {
       message.warning('请选择有效的数据源');
       return;
     }
-    send(query, ds[0], ds.length > 1 ? ds : undefined, modelId || undefined, selectedSkillIds);
+    send(query, ds[0], ds.length > 1 ? ds : undefined, modelId || undefined, llmConnectionId, selectedSkillIds);
     setQuery('');
   };
 
@@ -205,7 +225,7 @@ export default function ChatPage() {
         ) : (
           /* 对话列表 */
           turns.map((t) => <TurnBubble key={t.id} turn={t}
-            onSendMessage={(msg: string) => { send(`${t.userQuery} - ${msg}`, ds[0] || 'demo', ds.length > 1 ? ds : undefined, modelId || undefined, selectedSkillIds); }} />)
+            onSendMessage={(msg: string) => { send(`${t.userQuery} - ${msg}`, ds[0] || 'demo', ds.length > 1 ? ds : undefined, modelId || undefined, llmConnectionId, selectedSkillIds); }} />)
         )}
         <div ref={bottomRef} />
       </div>
@@ -219,7 +239,7 @@ export default function ChatPage() {
           <div style={{ marginBottom: 8, display: 'flex', flexWrap: 'wrap', gap: 4 }}>
             {(lastAnalysis.follow_up_questions as string[])?.slice(0, 4).map((q, i) => (
               <Tag key={i} color="processing" style={{ cursor: 'pointer', fontSize: 12, borderRadius: 6 }}
-                onClick={() => send(q, ds[0] || '', undefined, modelId || undefined, selectedSkillIds)}>{q}</Tag>
+                onClick={() => send(q, ds[0] || '', undefined, modelId || undefined, llmConnectionId, selectedSkillIds)}>{q}</Tag>
             ))}
           </div>
         )}
@@ -271,9 +291,17 @@ export default function ChatPage() {
                 会话: {sessionId.slice(-8)}
               </Typography.Text>
             )}
-            {models.length > 1 && (
-              <Select size="small" value={modelId || undefined} onChange={v => setModelId(v || '')}
-                options={models.map(m => ({ value: m.id, label: m.name }))}
+            {models.length > 0 && (
+              <Select size="small"
+                value={models.find(m => m.id === modelId && m.connection_id === llmConnectionId)
+                  ? modelOptionValue(models.find(m => m.id === modelId && m.connection_id === llmConnectionId)!)
+                  : undefined}
+                onChange={value => {
+                  const selected = models.find(option => modelOptionValue(option) === value);
+                  setLlmConnectionId(selected?.connection_id);
+                  setModelId(selected?.id || '');
+                }}
+                options={models.map(m => ({ value: modelOptionValue(m), label: `${m.connection_name || '连接'} / ${m.name}` }))}
                 style={{ minWidth: 140 }} dropdownMatchSelectWidth={false} />
             )}
             {skills.length > 0 && (
@@ -321,7 +349,9 @@ export default function ChatPage() {
   );
 }
 
-/* 单条消息气泡 */
+// 方法作用：渲染一轮用户问题及其流式分析结果。
+// Args: turn - 当前对话轮次；onSendMessage - 追问回调。
+// Returns: 单条消息气泡 React 节点。
 function TurnBubble({ turn, onSendMessage }: { turn: ChatTurn; onSendMessage?: (msg: string) => void }) {
   const { userQuery, assistant, finalResult, status } = turn;
   const hasResult = status === 'done' && !!finalResult;
@@ -385,7 +415,9 @@ function TurnBubble({ turn, onSendMessage }: { turn: ChatTurn; onSendMessage?: (
 
           <ProgressBar nodes={assistant.progressNodes} />
 
-          {isStreaming && <ReasoningPanel reasoning={assistant.reasoning} />}
+          {(isStreaming || assistant.decisionSummary) && (
+            <ReasoningPanel summary={assistant.decisionSummary} />
+          )}
 
           {isStreaming && assistant.tokens && (
             <div style={{
@@ -397,7 +429,7 @@ function TurnBubble({ turn, onSendMessage }: { turn: ChatTurn; onSendMessage?: (
             </div>
           )}
 
-          {isStreaming && !assistant.reasoning && !assistant.tokens
+          {isStreaming && !assistant.decisionSummary && !assistant.tokens
             && Object.keys(assistant.progressNodes).length === 0 && (
             <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '10px 16px', color: '#999', fontSize: 13 }}>
               <LoadingOutlined style={{ color: '#1677ff' }} /> 正在连接分析服务...
@@ -412,7 +444,7 @@ function TurnBubble({ turn, onSendMessage }: { turn: ChatTurn; onSendMessage?: (
               </Typography.Paragraph>
             </Card>
           ) : hasResult && (
-            <ResultCard sql={assistant.sql} reasoning={assistant.reasoning}
+            <ResultCard sql={assistant.sql}
               tokens={assistant.tokens} finalResult={finalResult}
               validationErrors={assistant.validationErrors}
               onSendMessage={onSendMessage} />

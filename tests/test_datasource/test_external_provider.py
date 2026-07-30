@@ -6,11 +6,13 @@ import asyncio
 import tempfile
 from pathlib import Path
 
+
 class TestYAMLLoading:
     """2.3.6 YAML 加载。"""
 
     def test_load_basic(self):
         import yaml
+
         from src.datasource.providers.external import ExternalDataSourceProvider
 
         with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False, encoding="utf-8") as f:
@@ -38,6 +40,7 @@ class TestYAMLLoading:
 
     def test_empty_yaml(self):
         import yaml
+
         from src.datasource.providers.external import ExternalDataSourceProvider
 
         with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
@@ -52,6 +55,7 @@ class TestYAMLLoading:
 
     def test_from_yaml_classmethod(self):
         import yaml
+
         from src.datasource.providers.external import ExternalDataSourceProvider
 
         with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
@@ -96,7 +100,10 @@ class TestDynamicRegistration:
     """2.3.2-2.3.3 注册/移除。"""
 
     def test_register(self):
-        from src.datasource.providers.external import DataSourceCreateRequest, ExternalDataSourceProvider
+        from src.datasource.providers.external import (
+            DataSourceCreateRequest,
+            ExternalDataSourceProvider,
+        )
 
         req = DataSourceCreateRequest(name="new_db", dialect="mysql", host="10.0.3.1", port=3306, database="analytics", username="reader", password="p@ss", description="新接入")
         provider = ExternalDataSourceProvider()
@@ -105,7 +112,10 @@ class TestDynamicRegistration:
         assert ds.password != "p@ss"
 
     def test_unregister(self):
-        from src.datasource.providers.external import DataSourceCreateRequest, ExternalDataSourceProvider
+        from src.datasource.providers.external import (
+            DataSourceCreateRequest,
+            ExternalDataSourceProvider,
+        )
 
         req = DataSourceCreateRequest(name="tmp", dialect="mysql", host="localhost", database="tmp", username="root", password="x")
         provider = ExternalDataSourceProvider()
@@ -123,7 +133,10 @@ class TestExternalProviderInterface:
     """Provider 基础接口。"""
 
     def test_lookup_found_and_not_found(self):
-        from src.datasource.providers.external import DataSourceCreateRequest, ExternalDataSourceProvider
+        from src.datasource.providers.external import (
+            DataSourceCreateRequest,
+            ExternalDataSourceProvider,
+        )
 
         req = DataSourceCreateRequest(name="lk", dialect="clickhouse", host="localhost", database="db", username="u", password="p")
         provider = ExternalDataSourceProvider()

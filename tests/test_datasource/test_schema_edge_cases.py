@@ -7,7 +7,6 @@ import os
 
 import pytest
 
-
 # ================================================================
 # SchemaSnapshot — 补充空快照、重复合并
 # ================================================================
@@ -24,7 +23,9 @@ class TestSchemaSnapshotEdgeCases:
     def test_merge_duplicate_relations(self):
         """边界条件: 同表多次 merge 关系追加不覆盖。"""
         from src.datasource.schema_snapshot import (
-            SchemaSnapshot, TableRelation, TableSchema,
+            SchemaSnapshot,
+            TableRelation,
+            TableSchema,
         )
         a = SchemaSnapshot(tables=[TableSchema(
             name="t", relations=[TableRelation("u1", "id", "many_to_one")]

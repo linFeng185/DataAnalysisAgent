@@ -2,14 +2,14 @@
 
 from __future__ import annotations
 
-import time
 import json
+import time
 from dataclasses import dataclass, field
 from uuid import uuid4
 
 from src.knowledge.doc_parser import ChunkConfig, chunk_text, extract_text
-from src.memory.vector_store import VectorEntry, get_vector_store
 from src.logging_config import get_logger
+from src.memory.vector_store import VectorEntry, get_vector_store
 
 logger = get_logger(__name__)
 
@@ -117,11 +117,9 @@ class UploadManager:
         Returns:
             新建的上传任务。
         """
-        from src.api.auth import get_current_tenant_id, get_current_user_id
-
+        from src.api.auth import get_current_role, get_current_tenant_id, get_current_user_id
         from src.app_context import get_tenant_policy
         from src.knowledge.governance import normalize_knowledge_scope
-        from src.api.auth import get_current_role
         from src.security.tenant_policy import RequestIdentity
 
         normalized_scope = normalize_knowledge_scope(knowledge_scope).value

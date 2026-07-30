@@ -17,6 +17,9 @@
 | 9.1.9 | _load_skill_module() | 同上 | 动态 import Skill 的 tools.py 模块 | 开发完成 |
 | 9.1.10 | Skill Manifest v2 与请求授权 | `src/skill_manager.py`、`src/graph/skill_activation.py` | 两阶段激活 Skill，解析 capabilities/accepts/permissions/resources，并在加载与执行前校验资产、网络和请求级工具预算 | 单测完成 | P1 |
 | 9.1.11 | Skill 三级作用域隔离 `[P0]` | `src/skill_manager.py` | system/tenant/private 目录发现、复合标识和 tenant_id/user_id 请求级过滤 | 单测完成 |
+| 9.1.12 | Skill 隔离执行与资源治理 `[P0]` | `src/skill_runtime.py`、`src/skill_worker.py` | 非系统 Skill 子进程隔离、超时/CPU/内存/网络/文件/输出大小限制 | 单测完成 |
+| 9.1.13 | Skill 签名与完整性校验 `[P0]` | `src/skill_security.py`、`src/skill_manager.py` | 包摘要、Ed25519 签名、可信签发者和篡改阻断 | 单测完成 |
+| 9.1.14 | Skill 输入输出契约强制 `[P1]` | `src/skill_runtime.py`、工作流 | 工具输入 Pydantic 校验、输出 JSON Schema、脱敏和引用边界 | 单测完成 |
 
 ### 9.2 示例 Skill — 数据质量检查
 
@@ -37,6 +40,7 @@
 | 9.3.2 | 周报模板 | `skills/custom_report/templates/weekly_report.jinja2` | Jinja2 模板 — 周度数据报告 | 开发完成 |
 | 9.3.3 | 月报模板 | 同上 | Jinja2 模板 — 月度数据报告 | 开发完成 |
 | 9.3.4 | 报告渲染工具 | `skills/custom_report/tools.py` | render_report(template_name, data) → 渲染 Markdown | 开发完成 |
+| 9.3.5 | 报告 Skill 工作流闭环 | `src/graph/subgraphs/report.py`、`analyze_result.py` | custom-report 真实执行、结果校验并输出 report Artifact | 单测完成 |
 
 ### 9.4 Skill 分发
 
@@ -59,7 +63,7 @@
 
 ### 模块收尾
 
-模块功能点共 30 项，已完成 29 项，待开发 1 项。
+模块功能点共 34 项，已完成 33 项，待开发 1 项。
 
 | 功能点 | 不开发原因 | 可开发条件 | 预计开发时机 |
 |--------|------------|------------|--------------|

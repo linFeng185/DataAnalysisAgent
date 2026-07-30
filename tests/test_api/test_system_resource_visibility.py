@@ -6,7 +6,6 @@ import logging
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
 
-
 logger = logging.getLogger(__name__)
 
 

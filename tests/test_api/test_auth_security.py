@@ -8,10 +8,10 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from fastapi import HTTPException
+from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import Response
-from starlette.middleware.base import BaseHTTPMiddleware
-
 
 logger = logging.getLogger(__name__)
 
@@ -107,6 +107,7 @@ class TestCookieAuthentication:
         connection.fetchrow = AsyncMock(return_value={
             "id": 7,
             "tenant_id": 3,
+            "tenant_code": "acme",
             "role": "analyst",
             "password_hash": "test-hash",
         })
@@ -130,7 +131,7 @@ class TestCookieAuthentication:
 
         # Act
         body = await auth.login(
-            auth.LoginRequest(username="alice", password="secret123"),
+            auth.LoginRequest(tenant_code="acme", username="alice", password="secret123"),
             response,
         )
 
@@ -142,7 +143,7 @@ class TestCookieAuthentication:
         assert "access_token" not in body
 
     async def test_register_sets_httponly_cookie_without_returning_token(self, monkeypatch):
-        """注册成功后应直接建立 Cookie 会话且不暴露 JWT。"""
+        """公开注册永久关闭时不能建立 Cookie 会话。"""
         # Arrange
         import src.api.auth as auth
 
@@ -171,15 +172,15 @@ class TestCookieAuthentication:
         response = Response()
 
         # Act
-        body = await auth.register(
-            auth.RegisterRequest(username="bob", password="secret123"),
-            response,
-        )
+        with pytest.raises(HTTPException) as caught:
+            await auth.register(
+                auth.RegisterRequest(username="bob", password="secret123"),
+                response,
+            )
 
         # Assert
-        assert "access_token=" in response.headers.get("set-cookie", "")
-        assert "HttpOnly" in response.headers.get("set-cookie", "")
-        assert "access_token" not in body
+        assert caught.value.status_code == 403
+        assert "access_token=" not in response.headers.get("set-cookie", "")
 
     async def test_logout_clears_access_cookie(self):
         """登出应立即清除服务端认证 Cookie。"""
@@ -474,6 +475,8 @@ class TestAuthContextIsolation:
             "registration_enabled": False,
             "user_id": 9,
             "tenant_id": 4,
+            "tenant_code": "default",
+            "username": "",
             "role": "viewer",
         }
 

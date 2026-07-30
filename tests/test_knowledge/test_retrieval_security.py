@@ -80,8 +80,8 @@ class TestKnowledgeFilters:
     async def test_search_returns_citations_and_forwards_filters(self, monkeypatch):
         """向量召回必须携带租户/数据源过滤并生成引用定位。"""
         logger.debug("test_search_returns_citations_and_forwards_filters 入口")
-        from src.memory.vector_store import VectorSearchResult
         import src.knowledge.retrieval as retrieval_module
+        from src.memory.vector_store import VectorSearchResult
 
         monkeypatch.setattr(
             retrieval_module,
@@ -116,8 +116,8 @@ class TestKnowledgeFilters:
     async def test_search_decodes_locator_json(self):
         """VectorStore 返回 locator_json 时应恢复为结构化定位。"""
         logger.debug("test_search_decodes_locator_json 入口")
-        from src.memory.vector_store import VectorSearchResult
         import src.knowledge.retrieval as retrieval_module
+        from src.memory.vector_store import VectorSearchResult
 
         store = SimpleNamespace(search=AsyncMock(return_value=[VectorSearchResult(
             id="doc-json", content="报告段落", metadata={
@@ -138,8 +138,8 @@ class TestUploadVectorStoreBoundary:
     async def test_upload_writes_through_vector_store(self, monkeypatch):
         """_write_to_chromadb 应调用 VectorStore.upsert。"""
         logger.debug("test_upload_writes_through_vector_store 入口")
-        from src.knowledge.doc_parser import DocChunk, ChunkConfig, ChunkStrategy
         import src.knowledge.upload_manager as upload_module
+        from src.knowledge.doc_parser import ChunkConfig, ChunkStrategy, DocChunk
 
         store = SimpleNamespace(upsert=AsyncMock(return_value=1))
         monkeypatch.setattr(upload_module, "get_vector_store", AsyncMock(return_value=store))
@@ -176,8 +176,8 @@ class TestUploadVectorStoreBoundary:
     async def test_upload_serializes_locator_for_chroma_metadata(self, monkeypatch):
         """上传分块的页码和段落定位必须序列化为 Chroma 可接受的标量。"""
         logger.debug("test_upload_serializes_locator_for_chroma_metadata 入口")
-        from src.knowledge.doc_parser import DocChunk, ChunkConfig, ChunkStrategy
         import src.knowledge.upload_manager as upload_module
+        from src.knowledge.doc_parser import ChunkConfig, ChunkStrategy, DocChunk
 
         store = SimpleNamespace(upsert=AsyncMock(return_value=1))
         monkeypatch.setattr(upload_module, "get_vector_store", AsyncMock(return_value=store))

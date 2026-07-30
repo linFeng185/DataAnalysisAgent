@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-import json
 import html
+import json
 import re
 from dataclasses import dataclass, field
 

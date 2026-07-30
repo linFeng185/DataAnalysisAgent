@@ -8,14 +8,46 @@ import {
   SafetyCertificateOutlined, SettingOutlined, TeamOutlined,
 } from '@ant-design/icons';
 import { useNavigate } from 'react-router-dom';
-import { del, get, patch, post } from '../api/client';
+import { del, get, patch, post, put } from '../api/client';
+import { useAuth } from '../hooks/AuthContext';
 
 interface Tenant {
   id: number;
+  code: string;
   name: string;
   is_active: boolean;
   user_count: number;
   created_at: string;
+}
+
+interface LLMProvider {
+  id: number;
+  code: string;
+  display_name: string;
+  protocol: 'openai_compatible' | 'anthropic';
+  default_base_url: string;
+  is_active: boolean;
+}
+
+interface LLMModel {
+  id: number;
+  provider_id: number;
+  model_id: string;
+  display_name: string;
+  capabilities: Record<string, unknown>;
+  is_active: boolean;
+}
+
+interface TenantLLMConnection {
+  id: number;
+  provider_id: number;
+  name: string;
+  base_url: string;
+  provider_code: string;
+  provider_name: string;
+  model_catalog_ids: number[];
+  is_active: boolean;
+  api_key_configured: boolean;
 }
 
 interface ManagedUser {
@@ -99,6 +131,8 @@ const ACCESS_LOG_OPTIONS = [
 export default function AdminPage() {
   console.debug('AdminPage 入口');
   const navigate = useNavigate();
+  const { user } = useAuth();
+  const isTenantAdmin = user?.role === 'tenant_admin';
   const [tenants, setTenants] = useState<Tenant[]>([]);
   const [users, setUsers] = useState<ManagedUser[]>([]);
   const [config, setConfig] = useState<ConfigSummary | null>(null);
@@ -112,39 +146,74 @@ export default function AdminPage() {
   const [editingPolicy, setEditingPolicy] = useState<AccessPolicy | null>(null);
   const [rulePolicy, setRulePolicy] = useState<AccessPolicy | null>(null);
   const [tenantFilter, setTenantFilter] = useState<number | undefined>();
+  const [providers, setProviders] = useState<LLMProvider[]>([]);
+  const [providerModels, setProviderModels] = useState<LLMModel[]>([]);
+  const [connections, setConnections] = useState<TenantLLMConnection[]>([]);
+  const [selectedProviderId, setSelectedProviderId] = useState<number | undefined>();
+  const [selectedDefaultConnectionId, setSelectedDefaultConnectionId] = useState<number | undefined>();
+  const [providerModal, setProviderModal] = useState(false);
+  const [modelModal, setModelModal] = useState(false);
+  const [connectionModal, setConnectionModal] = useState(false);
+  const [editingConnection, setEditingConnection] = useState<TenantLLMConnection | null>(null);
   const [tenantForm] = Form.useForm();
   const [userForm] = Form.useForm();
   const [passwordForm] = Form.useForm();
   const [policyForm] = Form.useForm();
   const [ruleForm] = Form.useForm();
+  const [providerForm] = Form.useForm();
+  const [modelForm] = Form.useForm();
+  const [connectionForm] = Form.useForm();
 
-  // 方法作用：并行加载平台管理所需的租户、用户和脱敏配置摘要。
+  // 方法作用：按当前角色加载租户用户治理或平台管理与 LLM 目录数据。
   // Args: 无。
   // Returns: 加载完成后无返回值。
   const load = async () => {
     console.debug('AdminPage.load 入口', { tenantFilter });
     setLoading(true);
     try {
-      const query = tenantFilter ? `?tenant_id=${tenantFilter}` : '';
-      const [tenantData, userData, configData, accessData] = await Promise.all([
+      const providerData = await get<{ providers: LLMProvider[] }>('/admin/llm/providers');
+      const nextProviders = providerData.providers || [];
+      setProviders(nextProviders);
+      const nextProviderId = selectedProviderId && nextProviders.some(item => item.id === selectedProviderId)
+        ? selectedProviderId
+        : nextProviders[0]?.id;
+      setSelectedProviderId(nextProviderId);
+      if (nextProviderId) {
+        const modelData = await get<{ models: LLMModel[] }>(`/admin/llm/providers/${nextProviderId}/models`);
+        setProviderModels(modelData.models || []);
+      } else {
+        setProviderModels([]);
+      }
+      if (isTenantAdmin) {
+        const [userData, connectionData] = await Promise.all([
+          get<{ users: ManagedUser[] }>('/admin/users?page_size=100'),
+          get<{ connections: TenantLLMConnection[] }>('/admin/llm/connections'),
+        ]);
+        setUsers(userData.users || []);
+        setConnections(connectionData.connections || []);
+        console.info('AdminPage.load 租户工作区完成', {
+          users: userData.users.length,
+          connections: connectionData.connections.length,
+        });
+        return;
+      }
+      const [tenantData, configData, accessData] = await Promise.all([
         get<{ tenants: Tenant[] }>('/admin/tenants?page_size=100'),
-        get<{ users: ManagedUser[] }>(`/admin/users${query}${query ? '&' : '?'}page_size=100`),
         get<ConfigSummary>('/admin/config'),
         get<AccessPolicySnapshot>('/admin/access-policies'),
       ]);
       setTenants(tenantData.tenants || []);
-      setUsers(userData.users || []);
       setConfig(configData);
       setAccessPolicies(accessData.policies || []);
       setAccessIpRules(accessData.ip_rules || []);
-      console.info('AdminPage.load 完成', { tenants: tenantData.tenants.length, users: userData.users.length });
+      console.info('AdminPage.load 平台工作区完成', { tenants: tenantData.tenants.length });
     } catch (error) {
       console.error('AdminPage.load 异常', error);
       message.error('平台数据加载失败');
     } finally { setLoading(false); }
   };
 
-  useEffect(() => { void load(); }, [tenantFilter]);
+  useEffect(() => { void load(); }, [tenantFilter, isTenantAdmin]);
 
   // 方法作用：提交租户及首个租户管理员。
   // Args: 无，读取 tenantForm 当前值。
@@ -176,6 +245,96 @@ export default function AdminPage() {
       await load();
       console.info('AdminPage.createUser 完成');
     } catch (error) { console.error('AdminPage.createUser 异常', error); }
+  };
+
+  // 方法作用：加载选中平台厂商下的模型目录。
+  // Args: providerId - 平台厂商目录 ID。
+  // Returns: 加载完成后无返回值。
+  const loadProviderModels = async (providerId: number) => {
+    try {
+      const data = await get<{ models: LLMModel[] }>(`/admin/llm/providers/${providerId}/models`);
+      setSelectedProviderId(providerId);
+      setProviderModels(data.models || []);
+    } catch (error) {
+      console.error('AdminPage.loadProviderModels 异常', error);
+      message.error('模型目录加载失败');
+    }
+  };
+
+  // 方法作用：创建平台支持的模型厂商目录。
+  // Args: 无，读取 providerForm 当前值。
+  // Returns: 创建完成后无返回值。
+  const createProvider = async () => {
+    try {
+      const values = await providerForm.validateFields();
+      await post('/admin/llm/providers', values);
+      providerForm.resetFields();
+      setProviderModal(false);
+      await load();
+      message.success('模型厂商已创建');
+    } catch (error) { console.error('AdminPage.createProvider 异常', error); }
+  };
+
+  // 方法作用：创建选中厂商下的平台模型目录。
+  // Args: 无，读取 modelForm 当前值和选中厂商。
+  // Returns: 创建完成后无返回值。
+  const createModel = async () => {
+    if (!selectedProviderId) return;
+    try {
+      const values = await modelForm.validateFields();
+      const capabilities = typeof values.capabilities === 'string'
+        ? JSON.parse(values.capabilities || '{}')
+        : (values.capabilities || {});
+      await post(`/admin/llm/providers/${selectedProviderId}/models`, { ...values, capabilities });
+      modelForm.resetFields();
+      setModelModal(false);
+      await loadProviderModels(selectedProviderId);
+      message.success('模型已创建');
+    } catch (error) { console.error('AdminPage.createModel 异常', error); }
+  };
+
+  // 方法作用：创建或更新当前租户的命名 LLM 连接。
+  // Args: 无，读取 connectionForm 当前值和编辑状态。
+  // Returns: 保存完成后无返回值。
+  const saveConnection = async () => {
+    try {
+      const values = await connectionForm.validateFields();
+      if (editingConnection) {
+        await patch(`/admin/llm/connections/${editingConnection.id}`, values);
+      } else {
+        await post('/admin/llm/connections', values);
+      }
+      connectionForm.resetFields();
+      setEditingConnection(null);
+      setConnectionModal(false);
+      await load();
+      message.success('LLM 连接已保存');
+    } catch (error) { console.error('AdminPage.saveConnection 异常', error); }
+  };
+
+  // 方法作用：删除当前租户不再使用的命名 LLM 连接。
+  // Args: connection - 当前租户连接。
+  // Returns: 删除完成后无返回值。
+  const deleteConnection = async (connection: TenantLLMConnection) => {
+    try {
+      await del(`/admin/llm/connections/${connection.id}`);
+      await load();
+      message.success('LLM 连接已删除');
+    } catch (error) { console.error('AdminPage.deleteConnection 异常', error); message.error('LLM 连接删除失败'); }
+  };
+
+  // 方法作用：设置当前租户默认的命名连接和对话模型。
+  // Args: 无，读取 connectionForm 当前默认选择字段。
+  // Returns: 保存完成后无返回值。
+  const setDefaultConnection = async () => {
+    try {
+      const values = await connectionForm.validateFields(['default_connection_id', 'default_model_catalog_id']);
+      await put('/admin/llm/default', {
+        connection_id: values.default_connection_id,
+        model_catalog_id: values.default_model_catalog_id,
+      });
+      message.success('默认 LLM 已更新');
+    } catch (error) { console.error('AdminPage.setDefaultConnection 异常', error); message.error('默认 LLM 更新失败'); }
   };
 
   // 方法作用：切换租户启用状态并刷新工作台。
@@ -355,6 +514,36 @@ export default function AdminPage() {
     } catch (error) { console.error('AdminPage.deleteIpRule 异常', error); message.error('IP 规则删除失败'); }
   };
 
+  // 方法作用：启用或停用平台厂商目录项。
+  // Args: provider - 目标厂商；isActive - 目标状态。
+  // Returns: 更新完成后无返回值。
+  const toggleProvider = async (provider: LLMProvider, isActive: boolean) => {
+    try {
+      await patch(`/admin/llm/providers/${provider.id}`, { is_active: isActive });
+      await load();
+    } catch (error) { console.error('AdminPage.toggleProvider 异常', error); message.error('厂商状态更新失败'); }
+  };
+
+  // 方法作用：启用或停用平台模型目录项。
+  // Args: model - 目标模型；isActive - 目标状态。
+  // Returns: 更新完成后无返回值。
+  const toggleModel = async (model: LLMModel, isActive: boolean) => {
+    try {
+      await patch(`/admin/llm/models/${model.id}`, { is_active: isActive });
+      if (selectedProviderId) await loadProviderModels(selectedProviderId);
+    } catch (error) { console.error('AdminPage.toggleModel 异常', error); message.error('模型状态更新失败'); }
+  };
+
+  // 方法作用：启用或停用当前租户命名连接并刷新列表。
+  // Args: connection - 目标连接；isActive - 目标状态。
+  // Returns: 更新完成后无返回值。
+  const toggleConnection = async (connection: TenantLLMConnection, isActive: boolean) => {
+    try {
+      await patch(`/admin/llm/connections/${connection.id}`, { is_active: isActive });
+      await load();
+    } catch (error) { console.error('AdminPage.toggleConnection 异常', error); message.error('连接状态更新失败'); }
+  };
+
   const tenantNames = useMemo(
     () => new Map(tenants.map(tenant => [tenant.id, tenant.name])),
     [tenants],
@@ -377,13 +566,13 @@ export default function AdminPage() {
   const userWorkspace = (
     <Table<ManagedUser> rowKey="id" dataSource={users} loading={loading} pagination={{ pageSize: 20 }}
       title={() => <Space wrap><Button type="primary" icon={<PlusOutlined />} onClick={() => setUserModal(true)}>创建用户</Button>
-        <Select allowClear placeholder="全部租户" style={{ width: 180 }} value={tenantFilter} onChange={setTenantFilter}
-          options={tenants.map(tenant => ({ value: tenant.id, label: tenant.name }))} />
+        {!isTenantAdmin && <Select allowClear placeholder="全部租户" style={{ width: 180 }} value={tenantFilter} onChange={setTenantFilter}
+          options={tenants.map(tenant => ({ value: tenant.id, label: tenant.name }))} />}
         <Button icon={<ReloadOutlined />} onClick={() => void load()} aria-label="刷新用户" /></Space>}
       columns={[
         { title: 'ID', dataIndex: 'id', width: 72 },
         { title: '用户名', dataIndex: 'username' },
-        { title: '租户', dataIndex: 'tenant_id', render: value => tenantNames.get(value) || value },
+        ...(!isTenantAdmin ? [{ title: '租户', dataIndex: 'tenant_id', render: (value: number) => tenantNames.get(value) || value }] : []),
         { title: '角色', dataIndex: 'role', width: 150, render: (role, user) => user.id === 1
           ? <Tag color="red">super_admin</Tag>
           : <Select value={role} style={{ width: 130 }} options={ROLE_OPTIONS} onChange={value => void updateRole(user, value)} /> },
@@ -455,18 +644,75 @@ export default function AdminPage() {
       ]} />
   </div>;
 
+  const providerWorkspace = <Space direction="vertical" size={16} style={{ width: '100%' }}>
+    <Table<LLMProvider> rowKey="id" dataSource={providers} loading={loading} pagination={{ pageSize: 10 }}
+      title={() => <Space>
+        <Button type="primary" icon={<PlusOutlined />} onClick={() => setProviderModal(true)}>新增厂商</Button>
+        <Button icon={<ReloadOutlined />} onClick={() => void load()} aria-label="刷新厂商" />
+      </Space>}
+      columns={[
+        { title: '编码', dataIndex: 'code' },
+        { title: '名称', dataIndex: 'display_name' },
+        { title: '协议', dataIndex: 'protocol' },
+        { title: '默认地址', dataIndex: 'default_base_url', ellipsis: true },
+        { title: '状态', render: (_: unknown, provider: LLMProvider) => <Switch checked={provider.is_active} onChange={value => void toggleProvider(provider, value)} /> },
+        { title: '模型', render: (_: unknown, provider: LLMProvider) => <Button type="link" onClick={() => void loadProviderModels(provider.id)}>查看</Button> },
+      ]} />
+    <Table<LLMModel> rowKey="id" dataSource={providerModels} pagination={{ pageSize: 10 }}
+      title={() => <Space><Typography.Text>当前厂商模型目录</Typography.Text><Button type="primary" icon={<PlusOutlined />} disabled={!selectedProviderId} onClick={() => setModelModal(true)}>新增模型</Button></Space>}
+      columns={[
+        { title: '模型 ID', dataIndex: 'model_id' },
+        { title: '展示名称', dataIndex: 'display_name' },
+        { title: '能力', dataIndex: 'capabilities', render: value => JSON.stringify(value || {}) },
+        { title: '状态', render: (_: unknown, model: LLMModel) => <Switch checked={model.is_active} onChange={value => void toggleModel(model, value)} /> },
+      ]} />
+  </Space>;
+
+  const tenantLLMWorkspace = <Space direction="vertical" size={16} style={{ width: '100%' }}>
+    <Table<TenantLLMConnection> rowKey="id" dataSource={connections} loading={loading} pagination={{ pageSize: 10 }}
+      title={() => <Space>
+        <Button type="primary" icon={<PlusOutlined />} onClick={() => { setEditingConnection(null); connectionForm.resetFields(); setConnectionModal(true); }}>新增命名连接</Button>
+        <Button icon={<ReloadOutlined />} onClick={() => void load()} aria-label="刷新 LLM 连接" />
+      </Space>}
+      columns={[
+        { title: '连接名', dataIndex: 'name' },
+        { title: '厂商', render: (_: unknown, connection: TenantLLMConnection) => `${connection.provider_name} (${connection.provider_code})` },
+        { title: '请求地址', dataIndex: 'base_url', ellipsis: true },
+        { title: 'API Key', dataIndex: 'api_key_configured', render: value => value ? '已配置' : '未配置' },
+        { title: '模型数', render: (_: unknown, connection: TenantLLMConnection) => connection.model_catalog_ids?.length || 0 },
+        { title: '状态', render: (_: unknown, connection: TenantLLMConnection) => <Switch checked={connection.is_active} onChange={value => void toggleConnection(connection, value)} /> },
+        { title: '操作', render: (_: unknown, connection: TenantLLMConnection) => <Space>
+          <Button icon={<EditOutlined />} onClick={() => { setEditingConnection(connection); void loadProviderModels(connection.provider_id); connectionForm.setFieldsValue({ provider_id: connection.provider_id, name: connection.name, base_url: connection.base_url, model_catalog_ids: connection.model_catalog_ids }); setConnectionModal(true); }}>编辑</Button>
+          <Button danger icon={<DeleteOutlined />} onClick={() => void deleteConnection(connection)} />
+        </Space> },
+      ]} />
+    <Form form={connectionForm} layout="inline" onFinish={() => void setDefaultConnection()}>
+      <Form.Item name="default_connection_id" label="默认连接" rules={[{ required: true }]}>
+        <Select placeholder="选择默认连接" style={{ minWidth: 190 }} onChange={value => { setSelectedDefaultConnectionId(value); const connection = connections.find(item => item.id === value); if (connection) void loadProviderModels(connection.provider_id); }} options={connections.filter(item => item.is_active).map(item => ({ value: item.id, label: item.name }))} />
+      </Form.Item>
+      <Form.Item name="default_model_catalog_id" label="默认模型" rules={[{ required: true }]}>
+        <Select placeholder="选择默认模型" style={{ minWidth: 220 }} options={providerModels.filter(item => item.is_active && (connections.find(connection => connection.id === selectedDefaultConnectionId)?.model_catalog_ids || []).includes(item.id)).map(item => ({ value: item.id, label: item.display_name }))} />
+      </Form.Item>
+      <Button type="primary" htmlType="submit">保存默认</Button>
+    </Form>
+  </Space>;
+
   console.info('AdminPage 完成', { tenantCount: tenants.length, userCount: users.length });
   return <div style={{ padding: 24, maxWidth: 1280, margin: '0 auto' }}>
-    <Typography.Title level={3} style={{ marginTop: 0 }}>平台管理</Typography.Title>
-    <Tabs items={[
+    <Typography.Title level={3} style={{ marginTop: 0 }}>{isTenantAdmin ? '租户管理' : '平台管理'}</Typography.Title>
+    <Tabs items={isTenantAdmin ? [
+      { key: 'users', label: '当前租户用户', children: userWorkspace },
+      { key: 'connections', label: 'LLM 命名连接', children: tenantLLMWorkspace },
+    ] : [
       { key: 'tenants', label: '租户管理', children: tenantWorkspace },
-      { key: 'users', label: '用户管理', children: userWorkspace },
+      { key: 'llm', label: 'LLM 厂商与模型', children: providerWorkspace },
       { key: 'security', label: '安全配置', children: configWorkspace },
       { key: 'access', label: '访问策略', children: accessPolicyWorkspace },
     ]} />
 
     <Modal title="创建租户" open={tenantModal} onOk={() => void createTenant()} onCancel={() => setTenantModal(false)} destroyOnClose>
       <Form form={tenantForm} layout="vertical">
+        <Form.Item name="code" label="租户编码" rules={[{ required: true, pattern: /^[a-z0-9][a-z0-9-]{0,31}$/ }]}><Input /></Form.Item>
         <Form.Item name="name" label="租户名称" rules={[{ required: true, max: 128 }]}><Input /></Form.Item>
         <Form.Item name="admin_username" label="管理员用户名" rules={[{ required: true, max: 64 }]}><Input /></Form.Item>
         <Form.Item name="admin_password" label="管理员密码" rules={[{ required: true, min: 8, max: 72 }]}><Input.Password /></Form.Item>
@@ -475,10 +721,37 @@ export default function AdminPage() {
 
     <Modal title="创建用户" open={userModal} onOk={() => void createUser()} onCancel={() => setUserModal(false)} destroyOnClose>
       <Form form={userForm} layout="vertical" initialValues={{ role: 'analyst' }}>
-        <Form.Item name="tenant_id" label="所属租户" rules={[{ required: true }]}><Select options={tenants.filter(t => t.is_active).map(t => ({ value: t.id, label: t.name }))} /></Form.Item>
+        {!isTenantAdmin && <Form.Item name="tenant_id" label="所属租户" rules={[{ required: true }]}><Select options={tenants.filter(t => t.is_active).map(t => ({ value: t.id, label: t.name }))} /></Form.Item>}
         <Form.Item name="username" label="用户名" rules={[{ required: true, max: 64 }]}><Input /></Form.Item>
         <Form.Item name="password" label="初始密码" rules={[{ required: true, min: 8, max: 72 }]}><Input.Password /></Form.Item>
         <Form.Item name="role" label="角色" rules={[{ required: true }]}><Select options={ROLE_OPTIONS} /></Form.Item>
+      </Form>
+    </Modal>
+
+    <Modal title="新增模型厂商" open={providerModal} onOk={() => void createProvider()} onCancel={() => setProviderModal(false)} destroyOnClose>
+      <Form form={providerForm} layout="vertical">
+        <Form.Item name="code" label="厂商编码" rules={[{ required: true, pattern: /^[A-Za-z0-9][A-Za-z0-9_-]*$/ }]}><Input /></Form.Item>
+        <Form.Item name="display_name" label="展示名称" rules={[{ required: true }]}><Input /></Form.Item>
+        <Form.Item name="protocol" label="协议" rules={[{ required: true }]} initialValue="openai_compatible"><Select options={[{ value: 'openai_compatible', label: 'OpenAI Compatible' }, { value: 'anthropic', label: 'Anthropic' }]} /></Form.Item>
+        <Form.Item name="default_base_url" label="默认请求地址"><Input /></Form.Item>
+      </Form>
+    </Modal>
+
+    <Modal title="新增模型目录" open={modelModal} onOk={() => void createModel()} onCancel={() => setModelModal(false)} destroyOnClose>
+      <Form form={modelForm} layout="vertical">
+        <Form.Item name="model_id" label="模型 ID" rules={[{ required: true }]}><Input /></Form.Item>
+        <Form.Item name="display_name" label="展示名称" rules={[{ required: true }]}><Input /></Form.Item>
+        <Form.Item name="capabilities" label="能力 JSON" initialValue="{}"><Input.TextArea rows={4} /></Form.Item>
+      </Form>
+    </Modal>
+
+    <Modal title={editingConnection ? '编辑命名连接' : '新增命名连接'} open={connectionModal} onOk={() => void saveConnection()} onCancel={() => { setEditingConnection(null); setConnectionModal(false); }} destroyOnClose>
+      <Form form={connectionForm} layout="vertical">
+        <Form.Item name="provider_id" label="模型厂商" rules={[{ required: true }]}><Select disabled={Boolean(editingConnection)} onChange={value => void loadProviderModels(value)} options={providers.filter(item => item.is_active).map(item => ({ value: item.id, label: `${item.display_name} (${item.code})` }))} /></Form.Item>
+        <Form.Item name="name" label="连接名称" rules={[{ required: true, max: 128 }]}><Input /></Form.Item>
+        <Form.Item name="base_url" label="请求地址"><Input placeholder="留空使用厂商默认地址" /></Form.Item>
+        <Form.Item name="api_key" label="API Key" rules={editingConnection ? [] : [{ required: true }]}><Input.Password placeholder={editingConnection ? '留空沿用原凭证' : ''} /></Form.Item>
+        <Form.Item name="model_catalog_ids" label="可用模型" rules={[{ required: true }]}><Select mode="multiple" options={providerModels.filter(item => item.is_active).map(item => ({ value: item.id, label: item.display_name }))} /></Form.Item>
       </Form>
     </Modal>
 

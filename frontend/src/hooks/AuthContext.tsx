@@ -2,25 +2,25 @@ import { createContext, useContext, useState, useCallback, useEffect, type React
 import { useNavigate } from 'react-router-dom';
 import { message } from 'antd';
 
-interface User { user_id: number; tenant_id: number; role: string; username: string; }
+interface User { user_id: number; tenant_id: number; tenant_code: string; role: string; username: string; }
 
 interface AuthState {
   user: User | null;
-  login: (u: string, p: string) => Promise<void>;
-  register: (u: string, p: string) => Promise<void>;
+  login: (tenantCode: string, username: string, password: string) => Promise<void>;
   logout: () => Promise<void>;
   isAuthenticated: boolean;
   authRequired: boolean;
-  registrationEnabled: boolean;
   loading: boolean;
 }
 
 const AuthContext = createContext<AuthState | null>(null);
 
+// 方法作用：提供认证状态、租户身份和登录退出操作给整个前端应用。
+// Args: children - 需要访问认证 Context 的 React 子节点。
+// Returns: 包裹认证状态的 React Provider。
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
   const [authRequired, setAuthRequired] = useState(true);
-  const [registrationEnabled, setRegistrationEnabled] = useState(false);
   const [loading, setLoading] = useState(true);
   const navigate = useNavigate();
 
@@ -31,10 +31,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         const data = await response.json().catch(() => ({}));
         if (!active) return;
         setAuthRequired(Boolean(data.auth_required));
-        setRegistrationEnabled(Boolean(data.registration_enabled));
         setUser(data.authenticated ? {
           user_id: data.user_id,
           tenant_id: data.tenant_id,
+          tenant_code: data.tenant_code || '',
           role: data.role,
           username: data.username || '',
         } : null);
@@ -48,13 +48,16 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     return () => { active = false; };
   }, []);
 
-  const login = useCallback(async (username: string, password: string) => {
-    console.debug('login 入口', { username });
+  // 方法作用：使用租户编码、大小写敏感用户名和密码建立认证会话。
+  // Args: tenantCode - 全局唯一租户编码；username - 区分大小写的用户名；password - 密码。
+  // Returns: 登录成功后无返回值，失败时抛出服务端错误。
+  const login = useCallback(async (tenantCode: string, username: string, password: string) => {
+    console.debug('login 入口', { tenantCode, username });
     const response = await fetch('/api/v1/auth/login', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       credentials: 'include',
-      body: JSON.stringify({ username, password }),
+      body: JSON.stringify({ tenant_code: tenantCode, username, password }),
     });
     if (!response.ok) {
       const error = await response.json().catch(() => ({ detail: '登录失败' }));
@@ -65,37 +68,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setUser({
       user_id: data.user_id,
       tenant_id: data.tenant_id,
+      tenant_code: data.tenant_code || tenantCode,
       role: data.role,
       username,
     });
     console.info('login 完成', { userId: data.user_id });
-    navigate('/');
-  }, [navigate]);
-
-  // 方法作用：通过服务端公开注册开关创建默认租户 analyst 并建立登录态。
-  // Args: username - 用户名；password - 密码。
-  // Returns: 注册成功后无返回值。
-  const register = useCallback(async (username: string, password: string) => {
-    console.debug('register 入口', { username });
-    const response = await fetch('/api/v1/auth/register', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      credentials: 'include',
-      body: JSON.stringify({ username, password }),
-    });
-    if (!response.ok) {
-      const error = await response.json().catch(() => ({ detail: '注册失败' }));
-      console.error('register 异常', { status: response.status });
-      throw new Error(error.detail || '注册失败');
-    }
-    const data = await response.json();
-    setUser({
-      user_id: data.user_id,
-      tenant_id: data.tenant_id,
-      role: data.role,
-      username,
-    });
-    console.info('register 完成', { userId: data.user_id });
     navigate('/');
   }, [navigate]);
 
@@ -118,11 +95,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     <AuthContext.Provider value={{
       user,
       login,
-      register,
       logout,
       isAuthenticated: user !== null,
       authRequired,
-      registrationEnabled,
       loading,
     }}>
       {children}
@@ -130,6 +105,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   );
 }
 
+// 方法作用：读取当前组件树中的认证 Context。
+// Args: 无。
+// Returns: 当前认证状态和认证操作。
 export function useAuth() {
   const context = useContext(AuthContext);
   if (!context) throw new Error('useAuth');

@@ -8,7 +8,6 @@ from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 from starlette.middleware.cors import CORSMiddleware
 
-
 logger = logging.getLogger(__name__)
 
 

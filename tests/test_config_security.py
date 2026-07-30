@@ -9,7 +9,6 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-
 logger = logging.getLogger(__name__)
 
 
@@ -226,8 +225,8 @@ class TestLoggingRetention:
     def test_setup_logging_adds_seven_day_rotating_handler(self, tmp_path, monkeypatch):
         """日志配置应每天轮转并仅保留七份备份。"""
         # Arrange
-        from src.config import Settings
         from src import logging_config
+        from src.config import Settings
 
         log_file = tmp_path / "logs" / "app.log"
         settings = Settings(log_file=str(log_file), log_format="json", log_level="INFO")
@@ -381,6 +380,7 @@ class TestDockerSecrets:
         """仓库内置外挂数据源必须使用环境变量凭证占位符。"""
         # Arrange
         from pathlib import Path
+
         import yaml
 
         config = yaml.safe_load(

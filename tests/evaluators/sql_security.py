@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from typing import Any
 
-
 DANGEROUS_SQL_CASES: tuple[str, ...] = (
     "DROP TABLE orders",
     "DELETE FROM orders",

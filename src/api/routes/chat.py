@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+from typing import TYPE_CHECKING
 
 from fastapi import APIRouter, HTTPException
 
@@ -12,6 +13,9 @@ from src.logging_config import get_logger
 logger = get_logger(__name__)
 router = APIRouter()
 _started_at = time.time()
+
+if TYPE_CHECKING:
+    from src.llm.tenant_config import TenantLLMSelection
 
 
 # 方法作用：规范化聊天请求中用户显式选择的数据源顺序并去重。
@@ -166,6 +170,53 @@ def _validated_skill_ids(req: ChatRequest) -> list[str]:
     return result
 
 
+# 方法作用：解析当前租户的显式或默认 LLM 选择，并执行多租户失败关闭策略。
+# Args: req - 包含可选连接和模型的聊天请求。
+# Returns: 已授权选择；仅单租户无默认连接时返回 None 走 Settings 兼容路径。
+async def _resolve_chat_llm_selection(req: ChatRequest) -> TenantLLMSelection | None:
+    from src.api.auth import get_current_tenant_id
+    from src.app_context import get_tenant_policy
+    from src.llm.tenant_config import resolve_tenant_llm_selection
+
+    tenant_id = get_current_tenant_id()
+    explicit = req.llm_connection_id is not None
+    logger.debug(
+        "解析 Chat LLM 选择入口",
+        tenant_id=tenant_id,
+        explicit=explicit,
+        connection_id=req.llm_connection_id or 0,
+        model_id=req.model_id,
+    )
+    try:
+        selection = await resolve_tenant_llm_selection(
+            tenant_id=tenant_id,
+            connection_id=req.llm_connection_id,
+            model_id=req.model_id,
+        )
+    except (LookupError, ValueError) as exc:
+        if not explicit and not get_tenant_policy().multi_tenant:
+            logger.warning(
+                "解析 Chat LLM 选择回退",
+                tenant_id=tenant_id,
+                reason="单租户未配置命名连接",
+            )
+            return None
+        logger.warning(
+            "解析 Chat LLM 选择拒绝",
+            tenant_id=tenant_id,
+            explicit=explicit,
+            reason=str(exc),
+        )
+        raise HTTPException(409, str(exc)) from exc
+    logger.info(
+        "解析 Chat LLM 选择完成",
+        tenant_id=tenant_id,
+        connection_id=selection.connection_id,
+        model_id=selection.model_id,
+    )
+    return selection
+
+
 # ---- Chat (11.1.1-2) ----
 
 @router.post("/chat")
@@ -177,6 +228,7 @@ async def chat(req: ChatRequest):
     import src.api.routes as routes_package
 
     datasource_access = await routes_package._resolve_chat_access(req)
+    llm_selection = await _resolve_chat_llm_selection(req)
     primary_access = datasource_access.get(req.datasource, {}) if req.datasource else {}
     logger.debug(
         "Chat 请求入口",
@@ -186,8 +238,9 @@ async def chat(req: ChatRequest):
     )
     if req.stream:
         from fastapi.responses import StreamingResponse
-        from src.api.streaming import stream_analysis
+
         from src.api.auth import get_current_role, get_current_tenant_id, get_current_user_id
+        from src.api.streaming import stream_analysis
         logger.info(
             "Chat 流式响应已创建",
             datasource=req.datasource,
@@ -202,6 +255,7 @@ async def chat(req: ChatRequest):
                 datasource_access=datasource_access,
                 enabled_skill_ids=enabled_skill_ids,
                 request_rate_limit_checked=True,
+                llm_selection=llm_selection,
             ),
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
@@ -231,23 +285,30 @@ async def chat(req: ChatRequest):
             error=str(exc),
             exc_info=True,
         )
-    from src.api.auth import scope_thread_id
-    from src.api.auth import get_current_role, get_current_tenant_id, get_current_user_id
+    from src.api.auth import (
+        get_current_role,
+        get_current_tenant_id,
+        get_current_user_id,
+        scope_thread_id,
+    )
     cfg = {"configurable": {"thread_id": scope_thread_id(sid)}}
-    result = await routes_package._app().ainvoke({
-        "user_query": req.query,
-        "datasource": req.datasource,
-        "session_id": sid,
-        "selected_datasources": selected_datasources,
-        "datasource_access": datasource_access,
-        "allowed_columns": list(primary_access.get("allowed_columns", []) or []),
-        "row_filter_sql": str(primary_access.get("row_filter_sql", "") or ""),
-        "tenant_id": get_current_tenant_id(),
-        "user_id": get_current_user_id(),
-        "user_role": get_current_role(),
-        "request_rate_limit_checked": True,
-        "enabled_skill_ids": enabled_skill_ids,
-    }, cfg)
+    from src.llm.tenant_config import use_tenant_llm_selection
+
+    with use_tenant_llm_selection(llm_selection):
+        result = await routes_package._app().ainvoke({
+            "user_query": req.query,
+            "datasource": req.datasource,
+            "session_id": sid,
+            "selected_datasources": selected_datasources,
+            "datasource_access": datasource_access,
+            "allowed_columns": list(primary_access.get("allowed_columns", []) or []),
+            "row_filter_sql": str(primary_access.get("row_filter_sql", "") or ""),
+            "tenant_id": get_current_tenant_id(),
+            "user_id": get_current_user_id(),
+            "user_role": get_current_role(),
+            "request_rate_limit_checked": True,
+            "enabled_skill_ids": enabled_skill_ids,
+        }, cfg)
     from src.graph.outcome import sanitize_public_output
 
     f = sanitize_public_output(result.get("final_response", {}))
@@ -262,6 +323,8 @@ async def chat(req: ChatRequest):
         truncated=bool(f.get("truncated", result.get("query_result_truncated", False))),
         analysis=f.get("analysis", result.get("analysis_result", {})),
         chart=f.get("chart", result.get("chart_config", {})),
+        decision_summary=str(f.get("decision_summary", "") or ""),
+        artifact=f.get("artifact", {}),
         error_code=f.get("error_code", ""),
         error_message=f.get("error_message", ""),
     )
@@ -278,11 +341,13 @@ async def chat_stream(req: ChatRequest):
         selected_count=len(req.datasources or [req.datasource]),
     )
     from fastapi.responses import StreamingResponse
-    from src.api.streaming import stream_analysis
-    from src.api.auth import get_current_role, get_current_tenant_id, get_current_user_id
+
     import src.api.routes as routes_package
+    from src.api.auth import get_current_role, get_current_tenant_id, get_current_user_id
+    from src.api.streaming import stream_analysis
 
     datasource_access = await routes_package._resolve_chat_access(req)
+    llm_selection = await _resolve_chat_llm_selection(req)
     logger.info("兼容流式 Chat 响应已创建", datasource=req.datasource)
     return StreamingResponse(
         stream_analysis(
@@ -296,6 +361,7 @@ async def chat_stream(req: ChatRequest):
             datasource_access=datasource_access,
             enabled_skill_ids=enabled_skill_ids,
             request_rate_limit_checked=True,
+            llm_selection=llm_selection,
         ),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},

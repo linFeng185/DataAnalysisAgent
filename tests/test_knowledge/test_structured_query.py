@@ -7,7 +7,6 @@ import threading
 
 import pytest
 
-
 logger = logging.getLogger(__name__)
 
 

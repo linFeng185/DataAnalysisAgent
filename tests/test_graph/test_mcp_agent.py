@@ -6,7 +6,6 @@ import logging
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
-
 logger = logging.getLogger(__name__)
 
 
@@ -82,6 +81,7 @@ class TestMCPAgentNode:
         """预算包装不能让原工具参数从 Agent 可见 Schema 中消失。"""
         # Arrange
         from langchain_core.tools import BaseTool
+
         from src.graph.nodes.mcp_agent import _budget_tool
 
         class EchoTool(BaseTool):

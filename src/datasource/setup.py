@@ -36,8 +36,8 @@ SCHEMA = {
 async def ensure_demo_datasource() -> DataSourceConfig:
     """启动时自动创建 SQLite 内存演示库。"""
     logger.debug("初始化演示数据源入口")
-    from sqlalchemy.ext.asyncio import create_async_engine
     import sqlalchemy as sa
+    from sqlalchemy.ext.asyncio import create_async_engine
 
     engine = create_async_engine("sqlite+aiosqlite:///:memory:", poolclass=sa.pool.StaticPool)
 

@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import time
+
 from src.graph.state import AnalysisState
 from src.logging_config import get_logger
+
 logger = get_logger(__name__)
 
 
@@ -13,8 +15,11 @@ async def decompose_query_node(state: AnalysisState) -> dict:
 
     Returns: {"needs_decompose": bool, "decompose_steps": [{"step":N,"question":"...","depends_on":[],"output_columns":[]}]}
     """
+    from src.graph.context import read_contexts
+
+    contexts = read_contexts(state)
     _start = time.monotonic()
-    query = state.get("user_query", "")
+    query = contexts.request.user_query
     ch = state.get("conversation_history", []) or []
 
     # 快径1：有历史上下文 → 大概率是追问，不需要分解
@@ -31,14 +36,15 @@ async def decompose_query_node(state: AnalysisState) -> dict:
 
     # 只有明确含多步关键词的问题才走 LLM 分解
     try:
-        from src.llm.client import get_task_llm, is_task_llm_available
+        from src.llm.client import is_task_llm_available
         if not is_task_llm_available("decompose_query"):
             return {"needs_decompose": False, "decompose_steps": []}
-        llm = get_task_llm("decompose_query", temperature=0, reasoning=False)
         schema_hint = _format_schema_hint(state.get("relevant_tables", []) or [])
-        from langchain_core.messages import SystemMessage, HumanMessage
-        from src.llm.prompt_budget import PromptSection, build_budgeted_prompt
-        prompt = build_budgeted_prompt(
+        from src.llm.invocation import invoke_structured
+        from src.llm.output_contracts import DecomposeOutput
+        from src.llm.prompt_budget import PromptSection
+
+        parsed = await invoke_structured(
             "query.decompose",
             [
                 PromptSection(
@@ -56,12 +62,13 @@ async def decompose_query_node(state: AnalysisState) -> dict:
                     max_chars=1400,
                 ),
             ],
+            output_model=DecomposeOutput,
         )
-        resp = await llm.ainvoke([
-            SystemMessage(content=prompt.system),
-            HumanMessage(content=prompt.human)])
-        text = (resp.content or "").strip()
-        result = _parse(text)
+        steps = [step.model_dump() for step in parsed.steps]
+        result = {
+            "needs_decompose": parsed.needs_decompose and len(steps) > 1,
+            "decompose_steps": steps,
+        }
         elapsed = round((time.monotonic() - _start) * 1000)
         label = f"{len(result['decompose_steps'])}步" if result["needs_decompose"] else "无需"
         logger.info("查询分解完成", label=label, elapsed_ms=elapsed)

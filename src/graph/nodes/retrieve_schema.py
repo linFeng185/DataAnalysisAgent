@@ -11,9 +11,12 @@ logger = get_logger(__name__)
 
 
 async def retrieve_schema_node(state: AnalysisState) -> dict:
+    from src.graph.context import read_contexts
+
+    contexts = read_contexts(state)
     _start = time.monotonic()
     logger.info("节点开始", node="retrieve_schema")
-    datasource_name = state.get("datasource", "")
+    datasource_name = contexts.routing.datasource
     schema = state.get("resolved_schema")
 
     if schema is None:
@@ -22,7 +25,7 @@ async def retrieve_schema_node(state: AnalysisState) -> dict:
             manager = get_schema_manager()
             schema = await manager.get_or_fetch_schema(
                 datasource_name,
-                user_query=state.get("user_query", ""),
+                user_query=contexts.request.user_query,
             )
             tables_count = len(schema.tables) if schema else 0
             logger.info("Schema 检索成功", tables=tables_count)
@@ -42,8 +45,9 @@ async def retrieve_schema_node(state: AnalysisState) -> dict:
                         logger.info("Schema 从 Registry 缓存获取", tables=len(schema.tables))
                     else:
                         # 缓存无数据 → 直接内省
-                        from src.datasource.introspection import introspect_database
                         import sqlalchemy as sa
+
+                        from src.datasource.introspection import introspect_database
 
                         async def _exec(ds_cfg, sql, params):
                             async with ds_cfg.engine.connect() as c:
@@ -76,7 +80,7 @@ async def retrieve_schema_node(state: AnalysisState) -> dict:
             exc_info=True,
         )
     if not dialect:
-        dialect = state.get("dialect", "") or "clickhouse"
+        dialect = contexts.execution.dialect or "clickhouse"
 
     tables = schema.tables if schema else []
     logger.info("Schema 检索完成", table_count=len(tables),
@@ -107,12 +111,15 @@ async def retrieve_schema_node(state: AnalysisState) -> dict:
     #   - 非 chat 意图 → 加载（表结构/业务规则/函数手册来自知识库）
     #   - retry > 0 → 加载（SQL 执行失败，参考知识库修正）
     #   - chat 意图且非 retry → 跳过（无需 SQL，省延迟）
-    intent = state.get("intent", "")
-    retry_count = state.get("retry_count", 0)
+    intent = contexts.routing.intent
+    retry_count = contexts.execution.retry_count
     skip_intents = {"chat"}
 
     should_load = intent not in skip_intents or retry_count > 0
-    knowledge_text = await _load_knowledge_context(datasource_name, state.get("user_query", "")) if should_load else ""
+    knowledge_text = await _load_knowledge_context(
+        datasource_name,
+        contexts.request.user_query,
+    ) if should_load else ""
     if not should_load:
         logger.debug("知识库跳过（chat 意图无需 SQL）", datasource=datasource_name)
 
@@ -161,6 +168,11 @@ async def retrieve_schema_node(state: AnalysisState) -> dict:
     from src.graph.skill_activation import activate_skills
 
     result.update(activate_skills({**state, **result}, [table.name for table in tables]))
+    from src.graph.context import build_execution_context, build_routing_context
+
+    merged_state = {**state, **result}
+    result["routing_context"] = build_routing_context(merged_state).model_dump()
+    result["execution_context"] = build_execution_context(merged_state).model_dump()
     logger.info(
         "retrieve_schema 状态写回完成",
         datasource=datasource_name,
@@ -185,8 +197,8 @@ async def _load_enum_dictionary(datasource: str, tables: list) -> dict[str, list
     """
     logger.debug("枚举值字典加载入口", datasource=datasource, table_count=len(tables))
     try:
-        from src.memory.vector_store import get_vector_store
         from src.knowledge.retrieval import build_knowledge_filters
+        from src.memory.vector_store import get_vector_store
         store = await get_vector_store()
         enum_dict: dict[str, list[str]] = {}
         for category in ("column", "enum_value"):
@@ -223,9 +235,9 @@ async def _load_knowledge_context(datasource: str, query: str) -> str:
     - 只返回最相关的 Top-3，避免上下文爆炸
     """
     try:
-        from src.memory.vector_store import get_vector_store
-        from src.knowledge.retrieval import search_knowledge
         from src.knowledge.content_safety import render_evidence_context
+        from src.knowledge.retrieval import search_knowledge
+        from src.memory.vector_store import get_vector_store
         store = await get_vector_store()
         total = await store.count()
         if total == 0:

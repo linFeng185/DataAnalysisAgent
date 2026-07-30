@@ -114,6 +114,18 @@ history = await app.aget_state(config)
 结果样本、多源结果、分析、图表和 `final_response` 使用 `UntrackedValue`，不写入 checkpoint。
 API 每轮必须重新注入当前身份与 `datasource_access/allowed_columns/row_filter_sql`，禁止恢复旧权限。
 
+`AnalysisState` 在兼容扁平字段之外提供四个请求级轻量分组：
+
+- `request_context`：查询、会话 ID 和可信身份；
+- `permission_context`：数据源权限快照、列白名单、行过滤和显式 Skill 授权；
+- `routing_context`：意图、任务计划、数据源选择及 Skill 激活阶段；
+- `execution_context`：方言、真实表名、校验/重试/行数摘要。
+
+四组上下文全部使用 `UntrackedValue`，不得保存 SQL 文本、Schema 对象、结果行、分析、图表或模型推理。
+迁移期间节点优先写入分组并保留旧扁平字段；适配器读取时优先使用明确存在的扁平字段，合法的 `0`、`False`
+和空集合也必须覆盖旧分组值，禁止按真值回退造成跨轮污染。`prepare_turn` 每轮根据当前 API 输入和清空后的
+执行字段重新构造四组上下文。
+
 `prepare_turn` 仍负责清空当前轮瞬态状态，并在升级后首次请求中删除旧 checkpoint 内
 `conversation_history[].final_result`。`previous_turn_snapshot` 只保存来源问题、意图、数据源集合、最终 SQL 和
 `result_available` 标记，不保存结果、统计、分析、图表或多源数据。
@@ -136,6 +148,11 @@ API 每轮必须重新注入当前身份与 `datasource_access/allowed_columns/r
 `retrieve_schema/decompose_query/generate_sql/layer3_validate/layer4_explain/execute_sql` 及其条件边。
 两者可配置不同终点，但禁止分别维护重试、安全校验、EXPLAIN 和执行拓扑。
 
+调度边界使用三个 Pydantic 契约：`SourceQueryRequest` 只从父状态提取身份、权限、路由、历史和偏好白名单，
+禁止使用 `dict(state)` 复制上一轮 SQL、错误、结果或图表；`SourceQueryResult` 统一成功、SQL、数据、阶段错误和
+截断信息；`MultiSourceResult` 校验全部已选来源均有且仅有一个结果，并根据明细计算成功/失败数量。
+兼容期继续写入 `multi_source_results`，同时把完整契约写入 `multi_source_result`。
+
 1. 每个多数据源 worker 必须保存 `execute_sql` 完成方言重写、权限注入后的最终 SQL，
    不得继续向最终响应返回 LLM 原始 SQL。
 2. 最终响应使用 `sql_statements` 返回多条 SQL，元素包含 `datasource`、`dialect`、`sql`；
@@ -153,7 +170,27 @@ API 每轮必须重新注入当前身份与 `datasource_access/allowed_columns/r
    原始 `reasoning_content` 只允许在服务端做长度计数和受控诊断，不得生成 `thinking` SSE 事件。
 6. `chart.type=table` 表示数据表本身就是展示结果，前端不得再渲染“图表配置未生成”的空图表面板。
 
-### 11.6 LangSmith 可观测性
+Skill 激活分为两个明确阶段：`classify_intent` 根据关键词、意图和可见表触发声明形成候选集，记录
+`skill_candidate_ids`；`retrieve_schema` 获取真实表名后重新匹配，记录最终 `activated_skill_ids` 和
+`skill_activation_stage=schema`。仅声明表触发器的 Skill 在 Schema 到达前只能进入候选集，不能提前激活。
+显式选择的 Skill 在两个阶段都按复合资源 ID、租户和用户重新校验，不得混入自动匹配项。
+
+### 11.6 通用能力子图
+
+`TaskPlan.capability` 是能力路由的唯一稳定字段。文件分析、市场研究和外部动作在意图分类后直接进入
+`file_analysis_subgraph`、`market_research_subgraph`、`action_subgraph`；预测与报告必须先复用完整 SQL
+分析链，在 `analyze_result` 后进入 `forecast_subgraph` 或 `report_subgraph`。五类子图全部回到
+`build_response`，禁止自行写历史或建立第二套响应出口。
+
+预测子图只接受包含时间列、数值列且按时间有序的真实查询结果，输出必须包含回测、预测区间、模型卡和
+限制说明。报告子图必须真实执行 `custom-report` 工具，经过 Skill Runtime 输入输出契约后生成 report
+Artifact。外部动作子图默认返回人工确认状态，只有结构化请求同时具备动作名、幂等键和确认标志时才可
+交给 `ExternalActionRegistry`。
+
+所有子图输出继续由 `AnalysisArtifact` 归一化为 table/chart/report/forecast/recommendation，必须携带证据、
+限制、置信度和复现信息。文件与市场研究只能使用当前请求授权的 MCP/Skill 工具，工具不可用时保留真实失败。
+
+### 11.7 LangSmith 可观测性
 
 ```python
 # .env 配置
@@ -162,8 +199,8 @@ API 每轮必须重新注入当前身份与 `datasource_access/allowed_columns/r
 # LANGCHAIN_PROJECT=data-analysis-agent
 
 # 每个 Node 的执行自动上报到 LangSmith:
-# - Node 级延迟、输入/输出
-# - LLM 调用 token 消耗、Prompt 快照
+# - Node 级延迟，输入/输出默认隐藏
+# - LLM 调用 token 消耗、Prompt ID/版本
 # - Tool 调用链完整追溯
 # - 失败 Node 的错误堆栈
 
@@ -172,5 +209,10 @@ API 每轮必须重新注入当前身份与 `datasource_access/allowed_columns/r
 # - 定位耗时最长的 Node 做优化
 # - 查看完整调用链排查生产问题
 ```
+
+业务 LLM 调用统一通过 `src/llm/invocation.py`，调用 metadata 至少包含 `prompt_id`、`prompt_version` 和
+`llm_task`，能力节点按需附加 capability/datasource。PromptRegistry 保存多版本、当前激活版本和回滚历史；
+生产回归通过 `tests/evaluators/run_eval.py` 的显式 `RUN_LANGSMITH_EVALS=1` 开关调用 LangSmith Dataset，
+日常测试只运行固定离线评测集。
 
 ---

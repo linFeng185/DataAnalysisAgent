@@ -31,6 +31,7 @@ class TestDocumentAssetAdapter:
         """Word 应保留段落样式和表格行定位，而不是只输出纯文本。"""
         # Arrange
         from docx import Document
+
         from src.knowledge.document_assets import DocumentAssetAdapter
 
         doc = Document()
@@ -56,8 +57,8 @@ class TestDocumentAssetAdapter:
     def test_chunk_document_propagates_citation_locator(self):
         """分块后必须保留原文 locator，供 Evidence/Citation 回溯。"""
         # Arrange
-        from src.knowledge.document_assets import DocumentAssetAdapter, chunk_document
         from src.knowledge.doc_parser import ChunkConfig, ChunkStrategy
+        from src.knowledge.document_assets import DocumentAssetAdapter, chunk_document
 
         asset = DocumentAssetAdapter().parse("note.txt", "第一段内容\n\n第二段内容".encode("utf-8"))
 

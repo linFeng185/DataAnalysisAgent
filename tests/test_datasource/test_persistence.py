@@ -6,7 +6,6 @@ import logging
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
-
 logger = logging.getLogger(__name__)
 
 
@@ -80,7 +79,7 @@ class TestDatasourcePersistence:
         provider = ExternalDataSourceProvider()
 
         count = await provider.load_persisted()
-        datasource = await provider.lookup("managed")
+        datasource = await provider.lookup("managed", tenant_id=2)
 
         assert count == 1
         assert datasource is not None

@@ -104,9 +104,10 @@ async def _create_checkpointer_resource(settings: Any) -> _CheckpointerResource:
     try:
         url = settings.database_url
         if url and "postgres" in url:
+            from urllib.parse import urlparse, urlunparse
+
             import asyncpg
             from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
-            from urllib.parse import urlparse, urlunparse
             pg_url = to_asyncpg_url(url)
             # 自动创建目标数据库（如不存在）
             parsed = urlparse(pg_url)
@@ -158,6 +159,17 @@ async def _create_checkpointer_resource(settings: Any) -> _CheckpointerResource:
                 await postgres_context.__aexit__(None, None, None)
             except Exception:
                 logger.error("失败的 PostgreSQL Checkpointer 上下文关闭异常", exc_info=True)
+        if str(getattr(settings, "env", "dev")) == "prod":
+            logger.error(
+                "生产环境 Checkpointer 初始化失败，拒绝降级内存实现",
+                error_type=type(exc).__name__,
+                exc_info=True,
+            )
+            raise RuntimeError("生产环境必须使用可持久化 PostgreSQL Checkpointer") from exc
+
+    if str(getattr(settings, "env", "dev")) == "prod":
+        logger.error("生产环境未配置 PostgreSQL Checkpointer")
+        raise RuntimeError("生产环境必须配置 DATABASE_URL 以启用持久化 Checkpointer")
 
     from langgraph.checkpoint.memory import MemorySaver
     checkpointer = MemorySaver()

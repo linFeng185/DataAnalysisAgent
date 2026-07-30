@@ -2,11 +2,10 @@
 
 from __future__ import annotations
 
-from src.graph.state import AnalysisState
 from src.graph.outcome import public_error_message
-from src.llm.prompt_budget import PromptSection, build_budgeted_prompt
+from src.graph.state import AnalysisState
+from src.llm.prompt_budget import PromptSection
 from src.logging_config import get_logger
-
 
 logger = get_logger(__name__)
 
@@ -56,9 +55,12 @@ def _budget_tool(tool, counter: dict[str, int], limit: int):
 # Returns: 与 execute_sql/build_response 兼容的标准状态增量。
 async def mcp_agent_node(state: AnalysisState) -> dict:
     """8.3.1 文件分析等场景的动态工具调用 Node。"""
-    tenant_id = int(state.get("tenant_id", 0) or 0)
-    user_id = int(state.get("user_id", 0) or 0)
-    logger.debug(
+    from src.graph.context import read_contexts
+
+    contexts = read_contexts(state)
+    tenant_id = contexts.request.tenant_id
+    user_id = contexts.request.user_id
+    logger.info(
         "MCP Agent 入口",
         tenant_id=tenant_id,
         user_id=user_id,
@@ -82,12 +84,10 @@ async def mcp_agent_node(state: AnalysisState) -> dict:
         )
 
         skill_prompt = state.get("skill_prompt_override", "") or ""
-        prompt = build_budgeted_prompt(
-            "mcp.agent",
-            [
+        prompt_sections = [
                 PromptSection(
                     "query",
-                    f"## 用户任务\n{state.get('user_query', '')}",
+                    f"## 用户任务\n{contexts.request.user_query}",
                     priority=100,
                     min_chars=400,
                     max_chars=1800,
@@ -100,10 +100,8 @@ async def mcp_agent_node(state: AnalysisState) -> dict:
                     max_chars=2500,
                     target="system",
                 ),
-            ],
-        )
+            ]
 
-        from langchain_core.messages import HumanMessage, SystemMessage
         from src.llm.client import get_task_llm, is_task_llm_available
 
         if not is_task_llm_available("mcp_agent"):
@@ -120,10 +118,21 @@ async def mcp_agent_node(state: AnalysisState) -> dict:
             )
 
         llm = get_task_llm("mcp_agent", temperature=0, reasoning=False)
-        messages = [
-            SystemMessage(content=prompt.system),
-            HumanMessage(content=prompt.human),
-        ]
+        from src.llm.invocation import prepare_invocation
+
+        prepared = prepare_invocation(
+            "mcp.agent",
+            prompt_sections,
+            task="mcp_agent",
+            metadata={
+                "node": "mcp_agent",
+                "tenant_id": tenant_id,
+                "user_id": user_id,
+            },
+            model=llm,
+        )
+        llm = prepared.model
+        messages = prepared.messages
         if all_tools:
             from langgraph.prebuilt import create_react_agent
 
@@ -135,7 +144,10 @@ async def mcp_agent_node(state: AnalysisState) -> dict:
             agent = create_react_agent(llm, guarded_tools)
             result = await agent.ainvoke(
                 {"messages": messages},
-                config={"recursion_limit": max(4, tool_limit * 2 + 2)},
+                config={
+                    **prepared.config,
+                    "recursion_limit": max(4, tool_limit * 2 + 2),
+                },
             )
             final = result["messages"][-1] if result.get("messages") else None
             agent_text = (
@@ -199,17 +211,20 @@ def _mcp_standard_output(
     tool_calls: int = 0,
 ) -> dict:
     """标准化 MCP Agent 输出，保持 SQL 路径之外的响应结构一致。"""
-    logger.debug(
+    logger.info(
         "MCP Agent 输出标准化入口",
         success=success,
         output_chars=len(agent_text),
     )
+    from src.graph.context import read_contexts
+
+    contexts = read_contexts(state)
     result = {
         "final_response": {
             "success": success,
             "status": "success" if success else "failed",
             "source": "mcp_agent",
-            "user_query": state.get("user_query", ""),
+            "user_query": contexts.request.user_query,
             "sql": "",
             "data": [],
             "analysis": {

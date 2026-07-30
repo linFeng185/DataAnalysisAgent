@@ -28,8 +28,15 @@ def _first_numeric_value(rows: list[dict], column: str):
 
 
 async def generate_chart_node(state: AnalysisState) -> dict:
+    from src.graph.context import read_contexts
+
+    contexts = read_contexts(state)
     _start = time.monotonic()
-    logger.info("节点开始", node="generate_chart")
+    logger.info(
+        "节点开始",
+        node="generate_chart",
+        intent=contexts.routing.intent,
+    )
 
     data = state.get("query_result_sample", []) or []
     analysis = state.get("analysis_result", {}) or {}

@@ -8,7 +8,6 @@ from typing import Any
 
 from src.logging_config import get_logger
 
-
 logger = get_logger(__name__)
 
 
@@ -72,6 +71,11 @@ def _load_default_nodes() -> None:
         from src.graph.nodes.prepare_turn import prepare_turn_node
         from src.graph.nodes.restore_previous_result import restore_previous_result_node
         from src.graph.nodes.retrieve_schema import retrieve_schema_node
+        from src.graph.subgraphs.action import build_action_subgraph
+        from src.graph.subgraphs.file_analysis import build_file_analysis_subgraph
+        from src.graph.subgraphs.forecast import build_forecast_subgraph
+        from src.graph.subgraphs.market_research import build_market_research_subgraph
+        from src.graph.subgraphs.report import build_report_subgraph
 
         definitions = [
             ("prepare_turn", prepare_turn_node, ""),
@@ -90,6 +94,11 @@ def _load_default_nodes() -> None:
             ("llm_direct_answer", llm_direct_answer_node, "正在整理回答..."),
             ("multi_source_dispatch", multi_source_dispatch_node, "正在查询多个数据源..."),
             ("merge_results", merge_results_node, "正在合并多源结果..."),
+            ("file_analysis_subgraph", build_file_analysis_subgraph(), "正在分析文件..."),
+            ("market_research_subgraph", build_market_research_subgraph(), "正在整理市场研究证据..."),
+            ("forecast_subgraph", build_forecast_subgraph(), "正在执行预测与回测..."),
+            ("report_subgraph", build_report_subgraph(), "正在生成分析报告..."),
+            ("action_subgraph", build_action_subgraph(), "正在校验外部动作..."),
         ]
         for name, handler, progress_message in definitions:
             register_node(name, handler, progress_message)

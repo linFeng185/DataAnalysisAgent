@@ -10,6 +10,7 @@ from base64 import urlsafe_b64decode, urlsafe_b64encode
 from cryptography.fernet import Fernet
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
+
 from src.logging_config import get_logger
 
 logger = get_logger(__name__)

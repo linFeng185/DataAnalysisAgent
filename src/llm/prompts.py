@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator, MutableMapping
 from dataclasses import dataclass
 from typing import Any
 
@@ -9,16 +10,18 @@ from src.llm.output_contracts import (
     AnalysisOutput,
     DatasourceSelectionOutput,
     DecomposeOutput,
-    IntentOutput,
     PolishOutput,
     SQLGenerationOutput,
+    TaskPlanOutput,
     TextAnswerOutput,
 )
 
 # ---- 4.2 意图识别 ----
 
-INTENT_CLASSIFY_SYSTEM = """你是意图分类器。只输出 JSON：{{"intent": "类型"}}。
+INTENT_CLASSIFY_SYSTEM = """你是意图分类器。只输出 JSON：{{"intent": "类型", "operation": "操作", "confidence": 0.0}}。
 类型只能是 query、aggregation、trend、attribution、metadata、chat、file_analysis、meta。
+operation 使用 query、aggregation、trend、attribution、schema_explanation、conversation、file_analysis 或 follow_up_analysis。
+confidence 是 0 到 1 之间的数字。
 """
 
 # ---- 4.4 SQL 生成 ----
@@ -161,7 +164,103 @@ class PromptDefinition:
             raise ValueError(f"提示词 {self.prompt_id} 缺少变量: {exc.args[0]}") from exc
 
 
-PROMPT_REGISTRY: dict[str, PromptDefinition] = {
+class PromptRegistry(MutableMapping[str, PromptDefinition]):
+    """保存 Prompt 多版本、激活版本和可回滚历史。"""
+
+    def __init__(self, definitions: list[PromptDefinition] | None = None) -> None:
+        self._versions: dict[str, dict[str, PromptDefinition]] = {}
+        self._active: dict[str, str] = {}
+        self._activation_history: dict[str, list[str]] = {}
+        for definition in definitions or []:
+            self.register(definition)
+
+    def __getitem__(self, prompt_id: str) -> PromptDefinition:
+        return self.get_definition(prompt_id)
+
+    def __setitem__(self, prompt_id: str, definition: PromptDefinition) -> None:
+        if prompt_id != definition.prompt_id:
+            raise ValueError("Prompt 键与定义 ID 不一致")
+        self.register(definition, replace=True)
+
+    def __delitem__(self, prompt_id: str) -> None:
+        if prompt_id not in self._versions:
+            raise KeyError(prompt_id)
+        self._versions.pop(prompt_id, None)
+        self._active.pop(prompt_id, None)
+        self._activation_history.pop(prompt_id, None)
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(self._versions)
+
+    def __len__(self) -> int:
+        return len(self._versions)
+
+    def register(
+        self,
+        definition: PromptDefinition,
+        *,
+        replace: bool = False,
+        activate: bool = True,
+    ) -> None:
+        """注册一个版本，同版本默认拒绝覆盖，新版本可直接激活。"""
+        versions = self._versions.setdefault(definition.prompt_id, {})
+        if definition.version in versions and not replace:
+            raise ValueError(
+                f"提示词已注册: {definition.prompt_id}@{definition.version}"
+            )
+        versions[definition.version] = definition
+        if activate:
+            self.activate(definition.prompt_id, definition.version)
+
+    def activate(self, prompt_id: str, version: str) -> PromptDefinition:
+        """激活指定版本并记录可回滚的上一版本。"""
+        try:
+            definition = self._versions[prompt_id][version]
+        except KeyError as exc:
+            raise KeyError(f"未注册的提示词版本: {prompt_id}@{version}") from exc
+        previous = self._active.get(prompt_id)
+        if previous and previous != version:
+            self._activation_history.setdefault(prompt_id, []).append(previous)
+        self._active[prompt_id] = version
+        return definition
+
+    def rollback(self, prompt_id: str) -> PromptDefinition:
+        """回滚到最近一次不同的激活版本。"""
+        history = self._activation_history.get(prompt_id, [])
+        if not history:
+            raise ValueError(f"提示词没有可回滚版本: {prompt_id}")
+        version = history.pop()
+        self._active[prompt_id] = version
+        return self._versions[prompt_id][version]
+
+    def get_definition(
+        self,
+        prompt_id: str,
+        version: str | None = None,
+    ) -> PromptDefinition:
+        """读取指定版本或当前激活版本。"""
+        try:
+            selected_version = version or self._active[prompt_id]
+            return self._versions[prompt_id][selected_version]
+        except KeyError as exc:
+            suffix = f"@{version}" if version else ""
+            raise KeyError(f"未注册的提示词: {prompt_id}{suffix}") from exc
+
+    def list_versions(self, prompt_id: str) -> tuple[str, ...]:
+        """按注册顺序返回指定 Prompt 的全部版本。"""
+        if prompt_id not in self._versions:
+            raise KeyError(f"未注册的提示词: {prompt_id}")
+        return tuple(self._versions[prompt_id])
+
+    def active_version(self, prompt_id: str) -> str:
+        """返回当前激活版本号。"""
+        try:
+            return self._active[prompt_id]
+        except KeyError as exc:
+            raise KeyError(f"未注册的提示词: {prompt_id}") from exc
+
+
+_INITIAL_PROMPTS: dict[str, PromptDefinition] = {
     "datasource.select": PromptDefinition(
         prompt_id="datasource.select",
         version="1.0.0",
@@ -178,7 +277,7 @@ PROMPT_REGISTRY: dict[str, PromptDefinition] = {
         version="1.0.0",
         task="classify_intent",
         template=INTENT_CLASSIFY_SYSTEM,
-        output_model=IntentOutput,
+        output_model=TaskPlanOutput,
         context_budget=800,
     ),
     "query.decompose": PromptDefinition(
@@ -278,26 +377,46 @@ PROMPT_REGISTRY: dict[str, PromptDefinition] = {
     ),
 }
 
+PROMPT_REGISTRY = PromptRegistry(list(_INITIAL_PROMPTS.values()))
+
 
 # 方法作用：向集中注册表增加或显式替换 Prompt 定义。
 # Args: definition - 待注册定义；replace - 是否允许覆盖同 ID 定义。
 # Returns: 无返回值；冲突时抛出 ValueError。
-def register_prompt(definition: PromptDefinition, *, replace: bool = False) -> None:
+def register_prompt(
+    definition: PromptDefinition,
+    *,
+    replace: bool = False,
+    activate: bool = True,
+) -> None:
     """注册扩展 Prompt；默认拒绝静默覆盖已有版本。"""
-    if not replace and definition.prompt_id in PROMPT_REGISTRY:
-        raise ValueError(f"提示词已注册: {definition.prompt_id}")
-    PROMPT_REGISTRY[definition.prompt_id] = definition
+    PROMPT_REGISTRY.register(definition, replace=replace, activate=activate)
 
 
 # 方法作用：按稳定 ID 获取已注册 Prompt 定义。
 # Args: prompt_id - Prompt 稳定标识符。
 # Returns: 对应 PromptDefinition；未知 ID 抛出 KeyError。
-def get_prompt_definition(prompt_id: str) -> PromptDefinition:
+def get_prompt_definition(
+    prompt_id: str,
+    version: str | None = None,
+) -> PromptDefinition:
     """按稳定 ID 获取提示词定义。"""
-    try:
-        return PROMPT_REGISTRY[prompt_id]
-    except KeyError as exc:
-        raise KeyError(f"未注册的提示词: {prompt_id}") from exc
+    return PROMPT_REGISTRY.get_definition(prompt_id, version)
+
+
+def activate_prompt_version(prompt_id: str, version: str) -> PromptDefinition:
+    """显式激活已注册 Prompt 版本。"""
+    return PROMPT_REGISTRY.activate(prompt_id, version)
+
+
+def rollback_prompt(prompt_id: str) -> PromptDefinition:
+    """回滚到最近一次激活版本。"""
+    return PROMPT_REGISTRY.rollback(prompt_id)
+
+
+def list_prompt_versions(prompt_id: str) -> tuple[str, ...]:
+    """列出 Prompt 的全部已注册版本。"""
+    return PROMPT_REGISTRY.list_versions(prompt_id)
 
 
 # 方法作用：统一渲染节点使用的 System Prompt。

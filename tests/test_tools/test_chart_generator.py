@@ -7,7 +7,6 @@ from decimal import Decimal
 
 import pytest
 
-
 logger = logging.getLogger(__name__)
 
 

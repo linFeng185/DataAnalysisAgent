@@ -183,6 +183,7 @@ def _merge_rich_result(primary: dict | None, fallback: dict | None) -> dict:
         merged.update(primary_value)
         rich_fields = (
             "sql", "sql_statements", "data", "row_count", "analysis", "chart",
+            "decision_summary", "artifact",
         )
         for field in rich_fields:
             value = primary_value.get(field)
@@ -290,6 +291,8 @@ async def _load_latest_state(session_id: str) -> dict | None:
                 "sql_statements": checkpoint_response.get("sql_statements", []) or [],
                 "analysis": checkpoint_response.get("analysis", cv.get("analysis_result", {})) or {},
                 "chart": checkpoint_response.get("chart", cv.get("chart_config", {})) or {},
+                "decision_summary": str(checkpoint_response.get("decision_summary", "") or ""),
+                "artifact": checkpoint_response.get("artifact", {}) or {},
                 "data": data_sample if isinstance(data_sample, list) else [],
                 "row_count": int(
                     checkpoint_response.get("row_count", cv.get("query_result_full_count", 0)) or 0

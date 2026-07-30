@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import calendar
 import json
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -28,7 +29,12 @@ def calculate_next_run(frequency: str, base: datetime | None = None) -> datetime
     origin = base or datetime.now(timezone.utc)
     if origin.tzinfo is None:
         origin = origin.replace(tzinfo=timezone.utc)
-    return origin + timedelta(seconds=_FREQUENCY_SECONDS[frequency])
+    if frequency != "monthly":
+        return origin + timedelta(seconds=_FREQUENCY_SECONDS[frequency])
+    next_year = origin.year + (1 if origin.month == 12 else 0)
+    next_month = 1 if origin.month == 12 else origin.month + 1
+    day = min(origin.day, calendar.monthrange(next_year, next_month)[1])
+    return origin.replace(year=next_year, month=next_month, day=day)
 
 
 class AutomationStore:
@@ -150,7 +156,11 @@ class AutomationStore:
                 " CASE s.frequency WHEN 'hourly' THEN NOW()+INTERVAL '1 hour'"
                 " WHEN 'daily' THEN NOW()+INTERVAL '1 day'"
                 " WHEN 'weekly' THEN NOW()+INTERVAL '7 days'"
-                " ELSE NOW()+INTERVAL '30 days' END"
+                " ELSE date_trunc('month', s.next_run_at + INTERVAL '1 month') "
+                " + (LEAST(EXTRACT(DAY FROM s.next_run_at)::int, "
+                "EXTRACT(DAY FROM (date_trunc('month', s.next_run_at + "
+                "INTERVAL '2 months') - INTERVAL '1 day'))::int) - 1) * INTERVAL '1 day' "
+                " + s.next_run_at::time END"
                 " FROM due, users u WHERE s.id=due.id AND u.id=s.user_id"
                 " RETURNING s.*, u.role AS user_role",
                 bounded_limit,

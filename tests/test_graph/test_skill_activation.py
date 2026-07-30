@@ -60,3 +60,50 @@ class TestSkillActivation:
         assert calls == [(["orders"], "query")]
         assert result["activated_skills"] == ["table-skill"]
         assert result["skill_tool_budget"] == 3
+        assert result["skill_activation_stage"] == "schema"
+        assert result["skill_candidate_ids"] == ["table-skill"]
+
+    # 方法作用：验证意图阶段只记录表触发候选，Schema 阶段才完成最终激活。
+    # Args: self - pytest 测试类实例；monkeypatch - pytest 补丁工具。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    def test_table_only_skill_activates_after_schema_resolution(self, monkeypatch) -> None:
+        """只声明表触发器的 Skill 不得在真实表名到达前提前激活。"""
+        # Arrange
+        import src.skill_manager as manager_module
+        from src.graph.skill_activation import activate_skills
+        from src.skill_manager import Skill, SkillManager
+
+        manager = SkillManager()
+        table_skill = Skill(
+            name="order-audit",
+            version="1.0.0",
+            description="订单审计",
+            triggers={"tables": ["orders"]},
+            depends_on={},
+            tools=[],
+            system_prompt_override="检查订单",
+            resource_id="system:order-audit",
+        )
+        manager.add_skill(table_skill)
+        monkeypatch.setattr(manager_module, "get_skill_manager", lambda: manager)
+        state = {
+            "user_query": "分析业务数据",
+            "intent": "query",
+            "relevant_tables": [{"name": "orders"}],
+        }
+
+        # Act
+        intent_result = activate_skills(state, stage="intent")
+        schema_result = activate_skills(
+            {**state, **intent_result},
+            ["orders"],
+            stage="schema",
+        )
+
+        # Assert
+        assert intent_result["activated_skills"] == []
+        assert intent_result["skill_candidate_ids"] == ["system:order-audit"]
+        assert intent_result["skill_activation_stage"] == "intent"
+        assert schema_result["activated_skills"] == ["order-audit"]
+        assert schema_result["activated_skill_ids"] == ["system:order-audit"]
+        assert schema_result["skill_activation_stage"] == "schema"

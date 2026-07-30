@@ -405,9 +405,13 @@ class SchemaManager:
                 "visibility": "tenant",
             })
             if entry.category == "table":
-                entry_id = f"table:{datasource_name}.{entry.table_name}"
+                entry_id = self._scoped_entry_id(
+                    "table", datasource_name, entry.table_name,
+                )
             elif entry.category == "column":
-                entry_id = f"column:{datasource_name}.{entry.table_name}.{entry.column_name}"
+                entry_id = self._scoped_entry_id(
+                    "column", datasource_name, entry.table_name, entry.column_name,
+                )
             else:
                 continue
             result.append(replace(entry, id=entry_id, metadata=metadata))
@@ -567,7 +571,9 @@ class SchemaManager:
         try:
             from src.memory.vector_store import VectorEntry, get_vector_store
             store = await get_vector_store()
-            entry_id = f"column:{datasource_name}.{table_name}.{column_name}"
+            entry_id = self._scoped_entry_id(
+                "column", datasource_name, table_name, column_name,
+            )
             entry = await store.get_by_id(entry_id)
             if entry is None:
                 logger.warning("字段备注更新目标不存在", entry_id=entry_id)
@@ -587,6 +593,9 @@ class SchemaManager:
         """检查 entry id 是否属于指定的数据源。"""
         try:
             _, qualified = entry_id.split(":", 1)
+            tenant_prefix, separator, remainder = qualified.partition(":")
+            if separator and tenant_prefix.isdigit():
+                qualified = remainder
             return qualified.startswith(datasource_name + ".")
         except (ValueError, AttributeError):
             return False
@@ -767,6 +776,13 @@ class SchemaManager:
         now = datetime.now(timezone.utc)
         tenant_id = self._current_tenant_id()
         owner_user_id = self._current_user_id()
+        logger.info(
+            "Schema 条目身份解析边界",
+            datasource=datasource_name,
+            tenant_id=tenant_id,
+            owner_user_id=owner_user_id,
+            table_count=len(snapshot.tables) if snapshot else 0,
+        )
 
         for table in (snapshot.tables if snapshot else []):
             columns_desc = ", ".join(
@@ -775,7 +791,9 @@ class SchemaManager:
 
             # 表级：用于「找跟订单相关的表」
             entries.append(KnowledgeEntry(
-                id=f"table:{datasource_name}.{table.name}",
+                id=self._scoped_entry_id(
+                    "table", datasource_name, table.name, tenant_id=tenant_id,
+                ),
                 content=self._format_table_summary(
                     table.name, table.description or "", columns_desc
                 ),
@@ -804,7 +822,10 @@ class SchemaManager:
             # 字段级：每个字段独立一条，用于精确定位「amount 单位」
             for col in (table.columns or []):
                 entries.append(KnowledgeEntry(
-                    id=f"column:{datasource_name}.{table.name}.{col.name}",
+                    id=self._scoped_entry_id(
+                        "column", datasource_name, table.name, col.name,
+                        tenant_id=tenant_id,
+                    ),
                     content=self._format_column_detail(
                         table.name, col.name, col.type, col.comment or ""
                     ),
@@ -851,6 +872,34 @@ class SchemaManager:
         from src.api.auth import get_current_user_id
 
         return get_current_user_id()
+
+    # 方法作用：构建可选租户前缀的稳定 Schema 条目标识。
+    # Args: self - SchemaManager 实例；category - 条目类别；datasource_name - 数据源名；table_name - 表名；column_name - 可选字段名；tenant_id - 已解析租户 ID。
+    # Returns: 单租户兼容或多租户隔离的条目 ID。
+    def _scoped_entry_id(
+        self,
+        category: str,
+        datasource_name: str,
+        table_name: str,
+        column_name: str = "",
+        *,
+        tenant_id: int | None = None,
+    ) -> str:
+        """构建租户隔离的 Schema 条目 ID，单租户模式保持旧格式兼容。"""
+        from src.app_context import get_tenant_policy
+
+        effective_tenant_id = (
+            self._current_tenant_id() if tenant_id is None else int(tenant_id)
+        )
+        tenant_prefix = (
+            f"{effective_tenant_id}:"
+            if get_tenant_policy().knowledge_isolation_enabled
+            else ""
+        )
+        suffix = f"{datasource_name}.{table_name}"
+        if column_name:
+            suffix += f".{column_name}"
+        return f"{category}:{tenant_prefix}{suffix}"
 
     # ── 私有：缓存写入 ──────────────────────────────────
 
@@ -1053,7 +1102,7 @@ class SchemaManager:
                 logger.warning("语义搜索无结果，回退到全部表")
                 return {t.name.lower() for t in tables}
 
-            prefix = f"table:{datasource_name}."
+            prefix = self._scoped_entry_id("table", datasource_name, "")
             matched: list[tuple[str, float]] = []
             for r in results:
                 if r.id.startswith(prefix):

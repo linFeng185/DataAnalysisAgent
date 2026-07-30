@@ -2,15 +2,14 @@
 
 from __future__ import annotations
 
-import asyncio
 import ast
+import asyncio
 import logging
 from pathlib import Path
 from types import SimpleNamespace
 
 from fastapi import Depends, FastAPI
 from httpx import ASGITransport, AsyncClient
-
 
 logger = logging.getLogger(__name__)
 ROOT = Path(__file__).resolve().parents[1]

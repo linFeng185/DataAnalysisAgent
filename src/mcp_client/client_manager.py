@@ -134,7 +134,7 @@ class MCPClientManager:
             for n, c in servers.items()
         ]
         results = await asyncio.gather(*tasks, return_exceptions=True)
-        for name, result in zip(servers.keys(), results):
+        for name, result in zip(servers.keys(), results, strict=False):
             if isinstance(result, Exception):
                 logger.error(f"MCP Server '{name}' 连接失败", error=str(result))
             else:
@@ -565,6 +565,7 @@ class MCPClientManager:
         logger.debug("从数据库重载 MCP 入口", tenant_id=tenant_id, user_id=user_id)
         try:
             import json as _j
+
             from src.memory.pg_pool import pg_connection
 
             async with pg_connection(

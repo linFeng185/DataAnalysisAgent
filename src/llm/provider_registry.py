@@ -8,8 +8,8 @@ from typing import Any
 from src.llm.provider import LLMProvider
 from src.logging_config import get_logger
 
-
 logger = get_logger(__name__)
+_PROTOCOL_ALIASES = {"openai_compatible": "openai"}
 
 
 @dataclass(frozen=True)
@@ -38,7 +38,7 @@ def register_provider(
     default_model: str = "",
 ):
     """注册 Provider，重复名称由最新显式注册覆盖。"""
-    normalized = name.strip().lower()
+    normalized = _PROTOCOL_ALIASES.get(name.strip().lower(), name.strip().lower())
     logger.debug("注册 Provider 装饰器入口", provider=normalized)
 
     # 方法作用：把 Provider 类写入模块级注册表。
@@ -103,7 +103,7 @@ def create_provider(
 ) -> LLMProvider:
     """从注册表创建 Provider，不对具体厂商做条件分支。"""
     _load_default_providers()
-    normalized = name.strip().lower()
+    normalized = _PROTOCOL_ALIASES.get(name.strip().lower(), name.strip().lower())
     logger.debug("创建 Provider 入口", provider=normalized, model_id=model_id)
     registration = _registry.get(normalized)
     if registration is None:
@@ -124,7 +124,7 @@ def create_provider_from_settings(
 ) -> LLMProvider:
     """配置字段由注册元数据驱动，client.py 不再硬编码厂商。"""
     _load_default_providers()
-    normalized = name.strip().lower()
+    normalized = _PROTOCOL_ALIASES.get(name.strip().lower(), name.strip().lower())
     logger.debug("按配置创建 Provider 入口", provider=normalized, model_id=model_id)
     registration = _registry.get(normalized)
     if registration is None:
@@ -146,7 +146,7 @@ def create_provider_from_settings(
 def provider_has_credentials(name: str, settings: Any) -> bool:
     """只检查配置，不触发网络请求或创建模型客户端。"""
     _load_default_providers()
-    normalized = name.strip().lower()
+    normalized = _PROTOCOL_ALIASES.get(name.strip().lower(), name.strip().lower())
     logger.debug("Provider 凭证检查入口", provider=normalized)
     registration = _registry.get(normalized)
     available = bool(
@@ -163,7 +163,7 @@ def provider_has_credentials(name: str, settings: Any) -> bool:
 def get_default_model(name: str) -> str:
     """为显式切换 Provider 但未指定模型的调用提供默认值。"""
     _load_default_providers()
-    normalized = name.strip().lower()
+    normalized = _PROTOCOL_ALIASES.get(name.strip().lower(), name.strip().lower())
     logger.debug("获取 Provider 默认模型入口", provider=normalized)
     registration = _registry.get(normalized)
     if registration is None:
@@ -182,7 +182,7 @@ def get_default_model(name: str) -> str:
 # Returns: 存在并移除时返回 True。
 def unregister_provider(name: str) -> bool:
     """显式移除 Provider，不影响其他注册项。"""
-    normalized = name.strip().lower()
+    normalized = _PROTOCOL_ALIASES.get(name.strip().lower(), name.strip().lower())
     logger.debug("注销 Provider 入口", provider=normalized)
     removed = _registry.pop(normalized, None) is not None
     logger.info("注销 Provider 完成", provider=normalized, removed=removed)

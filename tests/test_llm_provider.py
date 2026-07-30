@@ -3,9 +3,9 @@
 import logging
 
 import pytest
+
 from src.llm.adapters.base import SupportedFeatures
 from src.llm.provider import LLMProvider, LLMResponse, LLMStreamChunk
-
 
 logger = logging.getLogger(__name__)
 

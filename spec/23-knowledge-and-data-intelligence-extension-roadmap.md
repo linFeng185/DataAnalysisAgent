@@ -1,6 +1,6 @@
 # 知识库优化与通用数据智能扩展路线图
 
-> 状态：Phase A 已实现，Phase B 的结构化资产适配器和 Phase C 的文档证据定位、Phase D 的行情/预测底座已实现；各阶段剩余能力仍待开发。
+> 状态：Phase A 已实现，Phase B/C/D 的资产、证据和预测底座已实现；Phase E 已补齐 Skill 隔离、签名、契约和通用能力子图，各阶段其余能力按清单继续演进。
 >
 > 范围：知识库质量提升；从数据库分析扩展到 Excel、CSV、Word、PDF、文章、
 > 股市/时序数据、跨源联想、预测和方案生成；以 Skill 作为能力扩展单元。
@@ -13,7 +13,7 @@ Phase B 已先落地 `StructuredAssetAdapter`：统一读取 CSV/Excel/Parquet�
 时间列、候选主键和预览；Excel/Parquet 引擎通过可选依赖启用。Phase C 已落地 `DocumentAssetAdapter` 的
 结构保真解析和 `locator` 输出，上传链路会把 PDF/Word 的页码/段落/表格定位写入 `locator_json`；Phase D 已落地
 `rolling_backtest`、naive/线性基线、预测区间、模型卡和 `MarketDataProvider` 基础指标；本批次新增 `TushareMarketDataProvider`、PostgreSQL `MarketDataStore`、可注册 `ForecastEngine` 和受控外部动作契约。Phase E 已落地受约束
-情景组合、跨资产 `JoinContract`、Skill Manifest v2 请求授权、知识库混合召回/轻量 reranker 和不可信内容隔离基础已落地；联网研究、漂移监控、隔离 worker、签名和攻击集评测仍待开发。
+情景组合、跨资产 `JoinContract`、Skill Manifest v2 请求授权、知识库混合召回/轻量 reranker、不可信内容隔离、隔离 worker、Ed25519 签名和固定攻击回归集已落地；外部联网 Provider、模型漂移监控和依赖锁仍待开发。
 
 当前项目不是从零开始：已经有统一 `VectorStore` 接口、知识文件上传、Schema/业务规则、
 LangGraph、确定性统计处理器、MCP Client/Server 和 SkillManager。主要问题是这些能力还没有
@@ -414,15 +414,13 @@ PostgreSQL `market_bars` 表、批量 `executemany`、唯一键 `(symbol, timest
 
 ## 6. Skill 平台升级
 
-### 6.1 当前 SkillManager 的限制
+### 6.1 当前 SkillManager 的剩余限制
 
 - 触发是关键词/意图/表名 OR 匹配，容易同时激活不兼容 Skill。
-- `tools.py` 在主进程动态 import，可执行任意代码。
 - 依赖检查只检查 Python import，未锁版本、哈希和系统依赖。
-- `output_schema_extension` 已建模但未在工作流强制校验。
-- Skill 工具与全部 MCP 工具一起交给通用 Agent，缺少逐请求 allowlist。
-- 缺少超时、内存、CPU、网络、文件路径和调用次数限制。
-- 缺少签名、来源信任、兼容版本、回滚和领域评测集。
+- 内置仓库 Skill 仍可在主进程执行，因此内置目录的代码审查和发布权限仍属于信任根。
+- Linux 使用 `resource` 强制 CPU/地址空间限制；Windows 依赖超时、进程隔离、审计钩子和输出上限，后续可接 Job Object 强化硬内存限制。
+- 工具输出已执行 JSON Schema、大小、脱敏和 citation 校验；领域语义评分仍需各 Skill 自带评测集。
 
 ### 6.2 Skill Manifest v2
 
@@ -454,9 +452,10 @@ evaluation:
   minimum_score: 0.9
 ```
 
-运行策略：内置可信 Skill 可进程内运行；用户上传 Skill 默认在隔离 worker/container 中运行，禁止任意
+当前运行策略：内置可信 Skill 可进程内运行；用户上传和额外目录 Skill 在隔离 worker 中运行，禁止任意
 网络和宿主文件访问。工具参数先经 Pydantic 校验，再经权限策略授权；输出经 JSON Schema、大小、
-数据泄漏和 citation 校验后才能写回 state。
+数据泄漏和 citation 校验后才能写回 state。受管 Skill 默认必须提供独立 `SIGNATURE.json`，包摘要排除签名
+信封本身并由可信 Ed25519 公钥验证，文件篡改在 Manifest 加载边界阻断。
 
 ### 6.3 推荐 Skill 目录
 

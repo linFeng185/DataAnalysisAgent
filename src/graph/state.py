@@ -50,11 +50,35 @@ class AnalysisState(TypedDict, total=False):
     """意图分类结果（query/trend/aggregation/attribution/metadata/file_analysis/chat）。
     —— classify_intent 写，route_by_intent / analyze_result 读"""
 
+    task_plan: Annotated[dict[str, Any], UntrackedValue]
+    """当前请求的能力、操作和缺失参数计划。"""
+
+    request_context: Annotated[dict[str, Any], UntrackedValue]
+    """当前轮查询、会话和可信身份的轻量分组。"""
+
+    permission_context: Annotated[dict[str, Any], UntrackedValue]
+    """当前轮已校验的数据源与 Skill 权限分组。"""
+
+    routing_context: Annotated[dict[str, Any], UntrackedValue]
+    """当前轮意图、任务计划、数据源选择和 Skill 生命周期分组。"""
+
+    execution_context: Annotated[dict[str, Any], UntrackedValue]
+    """当前轮 SQL 阶段状态摘要，不包含 SQL、结果或 Schema 对象。"""
+
     # ── 扩展层（技能/工具 注入，Phase 2）──────────
     enabled_skill_ids: Annotated[list[str], UntrackedValue]
     """用户在当前请求显式授权的 Skill 复合资源 ID；空列表保留自动匹配。"""
 
     activated_skills: Annotated[list[str], UntrackedValue]
+    activated_skill_ids: Annotated[list[str], UntrackedValue]
+    """最终激活 Skill 的复合资源 ID。"""
+
+    skill_candidate_ids: Annotated[list[str], UntrackedValue]
+    """意图阶段筛出的候选 Skill 复合资源 ID。"""
+
+    skill_activation_stage: Annotated[str, UntrackedValue]
+    """Skill 生命周期阶段：intent、schema 或对应失败阶段。"""
+
     skill_prompt_override: Annotated[str, UntrackedValue]
     skill_tools: Annotated[list[Any], UntrackedValue]
     skill_tool_budget: Annotated[int, UntrackedValue]
@@ -68,6 +92,8 @@ class AnalysisState(TypedDict, total=False):
 
     selected_datasources: Annotated[list[str], UntrackedValue]
     multi_source_results: Annotated[list[dict], UntrackedValue]
+    multi_source_result: Annotated[dict[str, Any], UntrackedValue]
+    """通过 MultiSourceResult 校验的完整多源调度结果。"""
     multi_source_analysis_precomputed: Annotated[bool, UntrackedValue]
     """多源合并节点是否已生成精确分析，结果展示子图据此跳过重复统计。"""
     datasource_access: Annotated[dict[str, dict[str, Any]], UntrackedValue]
@@ -181,6 +207,9 @@ class AnalysisState(TypedDict, total=False):
     # ── MCP 集成层（Phase 2）───────────────────────
     mcp_agent_output: Annotated[str, UntrackedValue]
     """MCP 子图输出（文件分析场景）。—— 仅 file_analysis 路径使用"""
+
+    action_request: Annotated[dict[str, Any], UntrackedValue]
+    """外部动作子图使用的已校验动作请求；自然语言请求默认只生成确认提示。"""
 
     # ── 输出层 ─────────────────────────────────────
     final_response: Annotated[dict, UntrackedValue]

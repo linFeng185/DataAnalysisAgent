@@ -5,7 +5,6 @@ from __future__ import annotations
 import logging
 from datetime import date
 
-
 logger = logging.getLogger(__name__)
 
 

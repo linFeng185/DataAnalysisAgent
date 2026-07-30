@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import importlib.util
 import io
-import os
 import shutil
 import sys
 import tempfile
@@ -50,6 +49,9 @@ class Skill:
     tenant_id: int = 0
     owner_user_id: int = 0
     resource_id: str = ""
+    package_digest: str = ""
+    signature_verified: bool = False
+    signer_key_id: str = ""
 
 
 # ── 9.1.2 SkillManager ──────────────────────────────
@@ -69,6 +71,8 @@ class SkillManager:
         builtin_dir: str = "skills",
         extra_dirs: str = "",
         managed_dir: str = "data/skills",
+        trusted_public_keys: str | dict[str, str] = "",
+        require_signatures: bool = False,
     ):
         logger.debug(
             "初始化 SkillManager 入口",
@@ -79,6 +83,10 @@ class SkillManager:
         self.builtin_dir = Path(builtin_dir)
         self.extra_dirs = [Path(d.strip()) for d in extra_dirs.split(";") if d.strip()]
         self.managed_dir = Path(managed_dir)
+        from src.skill_security import parse_trusted_public_keys
+
+        self.trusted_public_keys = parse_trusted_public_keys(trusted_public_keys)
+        self.require_signatures = bool(require_signatures)
         self.all_dirs: list[Path] = []
         self.skills: dict[str, Skill] = {}
         logger.info("初始化 SkillManager 完成", system_dirs=1 + len(self.extra_dirs))
@@ -147,6 +155,7 @@ class SkillManager:
                 tenant_id=tenant_id,
                 owner_user_id=owner_user_id,
             )
+            self._verify_skill_integrity(skill)
             if skill.resource_id in fresh:
                 logger.warning("Skill 复合标识重复，保留先发现项", resource_id=skill.resource_id)
                 return
@@ -382,6 +391,55 @@ class SkillManager:
 
     # ── 9.1.6 匹配 ──────────────────────────────────
 
+    # 方法作用：按作用域优先级筛选当前身份可见且同名唯一的 Skill。
+    # Args: tenant_id - 当前租户；user_id - 当前用户。
+    # Returns: private > tenant > system 去重后的 Skill 列表。
+    def _select_visible_skills(self, tenant_id: int, user_id: int) -> list[Skill]:
+        """返回当前身份实际可激活的同名唯一 Skill。"""
+        visible = self.get_visible_skills(tenant_id, user_id)
+        priority = {"private": 3, "tenant": 2, "system": 1}
+        selected: dict[str, Skill] = {}
+        for skill in visible:
+            current = selected.get(skill.name)
+            if current is None or priority.get(skill.scope, 0) > priority.get(current.scope, 0):
+                selected[skill.name] = skill
+        return list(selected.values())
+
+    # 方法作用：在 Schema 未解析时筛出可能由关键词、意图或表名触发的 Skill。
+    # Args: user_query - 用户问题；intent - 当前意图；tenant_id - 租户；user_id - 用户。
+    # Returns: 后续 Schema 阶段需要精确复核的候选 Skill。
+    def get_skill_candidates(
+        self,
+        user_query: str,
+        intent: str,
+        *,
+        tenant_id: int | None = None,
+        user_id: int | None = None,
+    ) -> list[Skill]:
+        """生成路由前候选集，但不把表名触发项提前视为已激活。"""
+        query_lower = user_query.lower()
+        resolved_tenant, resolved_user = self._resolve_identity(tenant_id, user_id)
+        candidates: list[Skill] = []
+        for skill in self._select_visible_skills(resolved_tenant, resolved_user):
+            if not skill.enabled:
+                continue
+            triggers = skill.triggers or {}
+            keyword_match = any(
+                str(keyword).lower() in query_lower
+                for keyword in triggers.get("keywords", [])
+            )
+            intent_match = intent in triggers.get("intents", [])
+            has_table_trigger = bool(triggers.get("tables", []))
+            if keyword_match or intent_match or has_table_trigger:
+                candidates.append(skill)
+        logger.info(
+            "Skill 候选集生成完成",
+            intent=intent,
+            candidate_count=len(candidates),
+            names=[skill.name for skill in candidates],
+        )
+        return candidates
+
     # 方法作用：在当前身份可见 Skill 中按关键词、意图和表名匹配激活项。
     # Args: user_query - 用户问题；intent - 当前意图；tables - 相关表；tenant_id - 租户；user_id - 用户。
     # Returns: 同名按 private > tenant > system 去重后的激活 Skill。
@@ -400,14 +458,7 @@ class SkillManager:
         query_lower = user_query.lower()
         activated: list[Skill] = []
         resolved_tenant, resolved_user = self._resolve_identity(tenant_id, user_id)
-        visible = self.get_visible_skills(resolved_tenant, resolved_user)
-        priority = {"private": 3, "tenant": 2, "system": 1}
-        selected: dict[str, Skill] = {}
-        for skill in visible:
-            current = selected.get(skill.name)
-            if current is None or priority.get(skill.scope, 0) > priority.get(current.scope, 0):
-                selected[skill.name] = skill
-        for skill in selected.values():
+        for skill in self._select_visible_skills(resolved_tenant, resolved_user):
             if not skill.enabled:
                 continue
             triggers = skill.triggers or {}
@@ -477,22 +528,36 @@ class SkillManager:
     # Args: activated_skills - 已通过请求级可见性过滤的 Skill。
     # Returns: 通过 Manifest 授权和依赖加载的工具列表。
     def get_active_tools(self, activated_skills: list[Skill]) -> list:
-        """获取激活 Skills 的所有 BaseTool。"""
+        """获取统一经过运行时隔离、契约和资源治理的工具。"""
         logger.debug("获取 Skill 工具入口", skill_count=len(activated_skills))
         tools: list = []
         for skill in activated_skills:
             if not validate_skill_request(skill, asset_kind="", tool_calls=0):
                 logger.warning("Skill 未通过 Manifest v2 预授权，跳过工具加载", skill=skill.name)
                 continue
-            try:
-                mod = self._load_skill_module(skill)
-                if mod and hasattr(mod, "get_tool"):
-                    for td in (skill.tools or []):
-                        t = mod.get_tool(td["name"])
-                        if t:
-                            tools.append(t)
-            except Exception as e:
-                logger.warning("Skill 工具加载失败", skill=skill.name, error=str(e))
+            if self.require_signatures and not self._is_builtin_skill(skill) and not skill.signature_verified:
+                logger.warning("未验签 Skill 禁止加载工具", skill=skill.name)
+                continue
+            from src.skill_runtime import SkillRuntimeTool
+
+            for tool_definition in skill.tools or []:
+                tool_name = str(tool_definition.get("name", "") or "").strip()
+                if not tool_name:
+                    logger.warning("Skill 工具声明缺少名称", skill=skill.name)
+                    continue
+                logger.info(
+                    "Skill 工具装配边界输入",
+                    skill=skill.name,
+                    tool=tool_name,
+                    input_schema=str(tool_definition.get("input_schema", "") or ""),
+                    output_schema=str(tool_definition.get("output_schema", "") or ""),
+                )
+                tools.append(SkillRuntimeTool(
+                    skill=skill,
+                    tool_name=tool_name,
+                    description=str(tool_definition.get("description", "") or "已授权 Skill 工具"),
+                    trusted_builtin=self._is_builtin_skill(skill),
+                ))
         logger.debug("获取 Skill 工具完成", tool_count=len(tools))
         return tools
 
@@ -556,6 +621,7 @@ class SkillManager:
                 tenant_id=tenant_id,
                 owner_user_id=owner_user_id,
             )
+            self._verify_skill_integrity(result)
         except Exception as exc:
             logger.error(
                 "公开加载 Skill 清单失败",
@@ -566,6 +632,33 @@ class SkillManager:
             raise
         logger.debug("公开加载 Skill 清单完成", skill=result.name, scope=result.scope)
         return result
+
+    def _verify_skill_integrity(self, skill: Skill) -> None:
+        """对加载边界上的 Skill 执行摘要和签名校验。"""
+        from src.skill_security import verify_skill_package
+
+        trusted_builtin = self._is_builtin_skill(skill)
+        verification = verify_skill_package(
+            skill.source_path,
+            self.trusted_public_keys,
+            require_signature=self.require_signatures and not trusted_builtin,
+        )
+        skill.package_digest = verification.package_digest
+        skill.signature_verified = verification.signature_verified
+        skill.signer_key_id = verification.signer_key_id
+        logger.info(
+            "Skill 完整性校验完成",
+            skill=skill.name,
+            builtin=trusted_builtin,
+            signature_verified=skill.signature_verified,
+            digest=skill.package_digest[:12],
+        )
+
+    def _is_builtin_skill(self, skill: Skill) -> bool:
+        """判断 Skill 是否位于代码仓库内置可信目录。"""
+        source = Path(skill.source_path).resolve()
+        builtin = self.builtin_dir.resolve()
+        return source == builtin or builtin in source.parents
 
     # 方法作用：解析 SKILL.md 并注入由目录确定的可信作用域身份。
     # Args: skill_md_path - 清单路径；scope - 可信作用域；tenant_id - 租户；owner_user_id - 所有者。
@@ -698,9 +791,18 @@ def get_skill_manager(
     from src.app_context import get_app_context
 
     logger.debug("获取 SkillManager 入口")
-    result = get_app_context().get_or_create(
+    context = get_app_context()
+    settings = context.settings
+    result = context.get_or_create(
         "skill_manager",
-        partial(SkillManager, builtin_dir, extra_dirs, managed_dir),
+        partial(
+            SkillManager,
+            builtin_dir,
+            extra_dirs,
+            managed_dir,
+            getattr(settings, "skill_trusted_public_keys", ""),
+            getattr(settings, "skill_require_signatures", True),
+        ),
     )
     logger.debug("获取 SkillManager 完成")
     return result

@@ -72,10 +72,14 @@ class AppContext:
 ## LLM 单一调用链
 
 - 节点任务统一通过 `get_task_llm(task_name)` 进入任务路由，再由 `get_provider()` 解析并复用当前 Context 的 Provider。
+- 多租户请求先按 `tenant_id + connection_id + model_id` 解析租户命名连接；未显式选择时使用
+  当前租户默认连接和默认模型。解析结果通过请求级 ContextVar 进入统一调用链，禁止把凭证写入 Graph State。
 - `get_llm()`、`get_openai_llm()` 和 `get_anthropic_llm()` 是兼容工厂，只能委托 `get_provider()`，不得直接创建厂商 ChatModel。
 - 管理端模型连通性测试允许直接获取指定 Provider，但 Provider 创建、凭证、超时和 Adapter 注入仍走同一工厂。
 - OpenAI-compatible 本地模型使用显式 `base_url/api_key/timeout` 覆盖创建 Provider，不得绕过 Provider 直接调用 Adapter。
 - Provider Context 缓存键必须包含连接地址和 API Key 的不可逆摘要；同模型、同地址但不同凭证不得复用认证客户端。
+- 平台厂商目录只声明 `openai_compatible/anthropic` 协议和模型能力；API Key 归租户命名连接所有，
+  多租户模式禁止回退到平台 Settings 凭证。完整契约见 `spec/28-tenant-identity-and-llm-governance.md`。
 
 ## SQL 安全执行边界
 

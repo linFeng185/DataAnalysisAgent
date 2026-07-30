@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import ipaddress
-import re
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any, Pattern
@@ -14,7 +13,6 @@ from starlette.types import Scope
 
 from src.config import ApiAccessConfig, ApiAccessRouteConfig
 from src.logging_config import get_logger
-
 
 logger = get_logger(__name__)
 IpAddress = ipaddress.IPv4Address | ipaddress.IPv6Address

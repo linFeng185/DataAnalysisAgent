@@ -3,12 +3,12 @@
 支持 MySQL 8.0, PostgreSQL 16, Oracle 21c, SQL Server 2019
 输出独立文件，直接执行即可插入数据
 """
-import random
 import datetime
+import random
+
 from faker import Faker
 
 from src.logging_config import get_logger
-
 
 logger = get_logger(__name__)
 

@@ -2,17 +2,16 @@
 
 from __future__ import annotations
 
+import ipaddress
 import logging
 import os
-import ipaddress
 from pathlib import Path
 from typing import Any, Literal, cast
 from urllib.parse import unquote, urlsplit
 
 from dotenv import load_dotenv
 from pydantic import BaseModel, Field, field_validator, model_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
-from pydantic_settings import YamlConfigSettingsSource
+from pydantic_settings import BaseSettings, SettingsConfigDict, YamlConfigSettingsSource
 
 # 项目根目录 (src/config.py → src/ → 项目根)
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -343,6 +342,10 @@ class Settings(BaseSettings):
     """额外的 Skills 搜索目录，多个路径以分号分隔。上传时优先写入第一个额外目录。"""
     managed_skills_dir: str = "data/skills"
     """租户级和个人级 Skill 的受管根目录。"""
+    skill_require_signatures: bool = True
+    """受管和额外目录 Skill 是否必须提供可信 Ed25519 签名。"""
+    skill_trusted_public_keys: str = ""
+    """可信 Skill 签发者公钥 JSON 映射，值为 PEM 或 Base64 原始公钥。"""
 
     # ---- 业务文档 ----
     metrics_docs_dir: str = "docs/metrics"

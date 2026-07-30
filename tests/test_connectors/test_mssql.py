@@ -9,7 +9,6 @@ import pytest
 
 from src.datasource.config import DataSourceConfig
 
-
 logger = logging.getLogger(__name__)
 
 

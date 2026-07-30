@@ -6,6 +6,7 @@ import asyncio
 from contextlib import contextmanager
 from types import SimpleNamespace
 
+
 # 方法作用：构造 LLM 测试需要的完整最小 Settings。
 # Args: overrides - 需要覆盖的配置字段。
 # Returns: 可注入 AppContext 的配置对象。

@@ -1,11 +1,14 @@
 """BusinessRuleStore test."""
 from __future__ import annotations
+
 import asyncio
 import os
 import tempfile
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
+
 from src.knowledge.models import KnowledgeSource
+
 
 class TestBusinessRuleStore:
     def test_initialize_indexes_docs(self):

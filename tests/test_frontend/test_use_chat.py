@@ -4,9 +4,8 @@ from __future__ import annotations
 
 import json
 import logging
-from pathlib import Path
 import subprocess
-
+from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +44,7 @@ process.stdout.write(JSON.stringify({
   argument_count: args.length,
   datasources: args[6] || '',
   model_id: args[7] || '',
+  connection_id: args[8] || '',
 }));
 """
 
@@ -58,11 +58,12 @@ process.stdout.write(JSON.stringify({
         )
         call = json.loads(completed.stdout)
 
-        # Assert：最后两个参数必须分别传入多数据源列表和模型标识。
+        # Assert：末尾参数必须分别传入多数据源、模型、连接和 Skill。
         assert call == {
-            "argument_count": 8,
+            "argument_count": 10,
             "datasources": "dss",
             "model_id": "mid",
+            "connection_id": "cid",
         }
         logger.info("test_use_chat_forwards_multi_datasource_and_model_arguments 完成", extra=call)
     except Exception as exc:
@@ -172,3 +173,15 @@ def test_stream_chat_reports_malformed_sse_events() -> None:
     except Exception as exc:
         logger.error("test_stream_chat_reports_malformed_sse_events 异常: %s", exc, exc_info=True)
         raise
+
+
+def test_use_chat_does_not_store_model_reasoning() -> None:
+    """前端只能展示受控摘要，不得从历史或 SSE 保存模型原始推理。"""
+    # Arrange
+    source = Path("frontend/src/hooks/useChat.ts").read_text(encoding="utf-8")
+
+    # Act
+    forbidden = ("sql_reasoning_content", "reasoning_content", "assistant.reasoning")
+
+    # Assert
+    assert all(token not in source for token in forbidden)

@@ -10,7 +10,6 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 
 from src.logging_config import get_logger
 
-
 logger = get_logger(__name__)
 router = APIRouter(prefix="/admin", tags=["api-access-policy"])
 ProtectedAuthMode = Literal["jwt", "jwt_or_admin_key", "super_admin"]

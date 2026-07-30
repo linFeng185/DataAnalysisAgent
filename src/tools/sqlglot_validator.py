@@ -8,8 +8,8 @@ from __future__ import annotations
 
 from typing import Any
 
-from sqlglot import exp
 from langchain_core.tools import BaseTool
+from sqlglot import exp
 
 from src.logging_config import get_logger
 from src.security.sql_execution import extract_sql_function_names, validate_sql

@@ -3,10 +3,9 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from datetime import datetime
 
-from src.market.models import MarketBar, MarketFrequency
 from src.logging_config import get_logger
+from src.market.models import MarketBar, MarketFrequency
 
 logger = get_logger(__name__)
 

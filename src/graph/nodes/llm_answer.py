@@ -28,9 +28,12 @@ async def llm_direct_answer_node(state: AnalysisState) -> dict:
 
     Returns: {"final_response": dict, "analysis_result": dict, "chart_config": dict}
     """
+    from src.graph.context import read_contexts
+
+    contexts = read_contexts(state)
     _start = time.monotonic()
-    intent = state.get("intent", "chat")
-    query = state.get("user_query", "")
+    intent = contexts.routing.intent or "chat"
+    query = contexts.request.user_query
     knowledge_text = state.get("long_term_memories_text", "") or ""
     schema_text = _format_schema_context(state.get("relevant_tables", []) or [])
     logger.info("节点开始", node="llm_direct_answer", intent=intent, query=query[:60])
@@ -61,12 +64,13 @@ async def llm_direct_answer_node(state: AnalysisState) -> dict:
 
     # LLM 调用
     try:
-        from src.llm.client import get_task_llm, is_task_llm_available
+        from src.llm.client import is_task_llm_available
         if is_task_llm_available("direct_answer"):
-            llm = get_task_llm("direct_answer", temperature=0, reasoning=False)
-            from langchain_core.messages import SystemMessage, HumanMessage
-            from src.llm.prompt_budget import PromptSection, build_budgeted_prompt
-            prompt = build_budgeted_prompt(
+            from src.llm.invocation import invoke_structured
+            from src.llm.output_contracts import TextAnswerOutput
+            from src.llm.prompt_budget import PromptSection
+
+            answer_result = await invoke_structured(
                 "direct.answer",
                 [
                     PromptSection(
@@ -104,17 +108,10 @@ async def llm_direct_answer_node(state: AnalysisState) -> dict:
                         max_chars=800,
                     ),
                 ],
+                output_model=TextAnswerOutput,
+                task="direct_answer",
             )
-            resp = await llm.ainvoke([
-                SystemMessage(content=prompt.system),
-                HumanMessage(content=prompt.human),
-            ])
-            try:
-                from src.llm.output_contracts import TextAnswerOutput, parse_json_model
-
-                answer = parse_json_model(resp.content, TextAnswerOutput).answer
-            except Exception:
-                answer = resp.content.strip() if resp.content else ""
+            answer = answer_result.answer
         else:
             answer = _fallback_answer(intent, query, knowledge_text, schema_text)
     except Exception as e:

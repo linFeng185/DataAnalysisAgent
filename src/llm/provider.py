@@ -122,7 +122,7 @@ class LLMProvider(ABC):
 
         Returns: SystemMessage / HumanMessage / AIMessage
         """
-        from langchain_core.messages import SystemMessage, HumanMessage, AIMessage
+        from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
         r, c = m.get("role", "user"), m.get("content", "")
         if r == "system":
             return SystemMessage(content=c)

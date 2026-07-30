@@ -36,8 +36,8 @@ from __future__ import annotations
 
 from langgraph.graph import END, StateGraph
 
+from src.graph.context import read_contexts
 from src.graph.node_registry import get_node_definitions
-from src.graph.nodes.mcp_agent import mcp_agent_node
 from src.graph.state import AnalysisState
 from src.logging_config import get_logger
 
@@ -57,12 +57,13 @@ def after_generate_sql(state: AnalysisState) -> str:
       - needs_time_range → 跳过后续，直接 build_response 提示用户选择时间范围
       - 正常 SQL → 继续 layer3_validate
     """
+    contexts = read_contexts(state)
     errors = state.get("validation_errors", []) or []
     if any(error.get("type") == "hallucination" for error in errors):
         from src.config import get_settings
         target = (
             "generate_sql"
-            if state.get("retry_count", 0) < get_settings().max_retry_count
+            if contexts.execution.retry_count < get_settings().max_retry_count
             else "build_response"
         )
         logger.info("SQL 生成后路由", target=target, reason="表名幻觉")
@@ -84,6 +85,7 @@ def after_layer3(state: AnalysisState) -> str:
       - syntax_error（语法错误）→ 回到 generate_sql 重试
       - 校验通过 → 继续 layer4_explain
     """
+    contexts = read_contexts(state)
     for e in state.get("validation_errors", []):
         if e.get("type") == "security_block":
             return "build_response"  # 安全拦截是终局的，不重试
@@ -91,7 +93,7 @@ def after_layer3(state: AnalysisState) -> str:
         from src.config import get_settings
         return (
             "generate_sql"
-            if state.get("retry_count", 0) < get_settings().max_retry_count
+            if contexts.execution.retry_count < get_settings().max_retry_count
             else "build_response"
         )
     return "layer4_explain"
@@ -106,9 +108,10 @@ def after_layer4(state: AnalysisState) -> str:
       - 有错误但次数耗尽 → build_response 终止
       - 无错误 → 进入实际执行
     """
+    contexts = read_contexts(state)
     if state.get("explain_errors"):
         from src.config import get_settings
-        return "generate_sql" if state.get("retry_count", 0) < get_settings().max_retry_count else "build_response"
+        return "generate_sql" if contexts.execution.retry_count < get_settings().max_retry_count else "build_response"
     return "execute_sql"
 
 
@@ -121,16 +124,17 @@ def should_retry(state: AnalysisState) -> str:
       2. 配置类错误（"未配置"、"未找到"）→ build_response（不重试）
       3. 瞬态错误（超时、连接等）→ generate_sql 重试（最多 3 次）
     """
+    contexts = read_contexts(state)
     err = state.get("execution_error", "")
-    retry = state.get("retry_count", 0)
+    retry = contexts.execution.retry_count
     if not err:
         return "analyze_result"
-    error_type = state.get("execution_error_type", "")
+    error_type = contexts.execution.execution_error_type
     from src.config import get_settings
     if error_type == "transient":
         return (
             "execute_sql"
-            if state.get("execution_retry_count", 0) < get_settings().max_retry_count
+            if contexts.execution.execution_retry_count < get_settings().max_retry_count
             else "build_response"
         )
     if error_type in {"configuration", "security", "rate_limit"}:
@@ -145,18 +149,29 @@ def should_retry(state: AnalysisState) -> str:
 
 def route_by_intent(state: AnalysisState) -> str:
     """意图路由：多源→并行, file_analysis→MCP, metadata/chat→LLM, 其他→SQL。"""
-    sources = state.get("selected_datasources", []) or []
-    intent = state.get("intent", "")
+    contexts = read_contexts(state)
+    sources = contexts.routing.selected_datasources
+    intent = contexts.routing.intent
+    task_plan = contexts.routing.task_plan
+    capability = str(task_plan.get("capability", "") or "")
     logger.info(
         "意图路由输入",
-        intent=state.get("intent", ""),
+        intent=intent,
+        capability=capability,
+        operation=task_plan.get("operation", ""),
         selected_sources=sources,
-        datasource=state.get("datasource", ""),
+        datasource=contexts.routing.datasource,
     )
-    if intent == "file_analysis":
-        logger.info("意图路由输出", target="mcp_agent", reason="文件分析")
-        return "mcp_agent"
-    if intent == "chat":
+    if capability == "file_analysis" or intent == "file_analysis":
+        logger.info("意图路由输出", target="file_analysis_subgraph", reason="文件分析")
+        return "file_analysis_subgraph"
+    if capability == "market_research":
+        logger.info("意图路由输出", target="market_research_subgraph", reason="市场研究")
+        return "market_research_subgraph"
+    if capability == "external_action":
+        logger.info("意图路由输出", target="action_subgraph", reason="外部动作")
+        return "action_subgraph"
+    if intent == "chat" and capability in {"", "direct_answer"}:
         logger.info("意图路由输出", target="llm_direct_answer", reason="chat")
         return "llm_direct_answer"
     if intent == "metadata":
@@ -177,10 +192,11 @@ def route_by_intent(state: AnalysisState) -> str:
 # Returns: metadata 返回 llm_direct_answer，其他查询返回 decompose_query。
 def after_retrieve_schema(state: AnalysisState) -> str:
     """确保 metadata 问题先获得真实 Schema，再交给直接回答节点。"""
-    target = "llm_direct_answer" if state.get("intent") == "metadata" else "decompose_query"
+    contexts = read_contexts(state)
+    target = "llm_direct_answer" if contexts.routing.intent == "metadata" else "decompose_query"
     logger.info(
         "Schema 检索后路由",
-        intent=state.get("intent", ""),
+        intent=contexts.routing.intent,
         target=target,
         table_count=len(state.get("relevant_tables", []) or []),
     )
@@ -201,6 +217,17 @@ def after_restore_previous_result(state: AnalysisState) -> str:
     return target
 
 
+def after_analyze_result(state: AnalysisState) -> str:
+    """按任务能力进入预测、报告或默认图表展示子图。"""
+    capability = str(read_contexts(state).routing.task_plan.get("capability", "") or "")
+    target = {
+        "forecast": "forecast_subgraph",
+        "report": "report_subgraph",
+    }.get(capability, "generate_chart")
+    logger.info("分析完成后能力路由", capability=capability, target=target)
+    return target
+
+
 # ================================================================
 # StateGraph 组装 — 注册所有节点 + 连线 + 编译
 # ================================================================
@@ -216,7 +243,10 @@ async def build_workflow() -> StateGraph:
 
     # Step 2: 注册非 SQL 节点；SQL 节点与条件边由共享装配函数统一注册。
     for definition in get_node_definitions():
-        if definition.name not in sql_flow.SQL_ANALYSIS_NODE_NAMES:
+        if (
+            definition.name not in sql_flow.SQL_ANALYSIS_NODE_NAMES
+            and definition.name != "mcp_agent"
+        ):
             workflow.add_node(definition.name, definition.handler)
     sql_flow.add_sql_analysis_flow(
         workflow,
@@ -239,7 +269,10 @@ async def build_workflow() -> StateGraph:
     # 意图路由：按意图分叉 → 主路径或 MCP 文件分析路径
     workflow.add_conditional_edges(
         "classify_intent", route_by_intent,
-        {"retrieve_schema": "retrieve_schema", "mcp_agent": "mcp_agent",
+        {"retrieve_schema": "retrieve_schema",
+         "file_analysis_subgraph": "file_analysis_subgraph",
+         "market_research_subgraph": "market_research_subgraph",
+         "action_subgraph": "action_subgraph",
          "llm_direct_answer": "llm_direct_answer",
          "multi_source_dispatch": "multi_source_dispatch",
          "restore_previous_result": "restore_previous_result"}
@@ -253,10 +286,22 @@ async def build_workflow() -> StateGraph:
     workflow.add_edge("multi_source_dispatch", "merge_results")
     workflow.add_edge("merge_results", "build_response")
 
-    workflow.add_edge("analyze_result", "generate_chart")
+    workflow.add_conditional_edges(
+        "analyze_result",
+        after_analyze_result,
+        {
+            "generate_chart": "generate_chart",
+            "forecast_subgraph": "forecast_subgraph",
+            "report_subgraph": "report_subgraph",
+        },
+    )
     workflow.add_edge("generate_chart", "build_response")
+    workflow.add_edge("forecast_subgraph", "build_response")
+    workflow.add_edge("report_subgraph", "build_response")
+    workflow.add_edge("file_analysis_subgraph", "build_response")
+    workflow.add_edge("market_research_subgraph", "build_response")
+    workflow.add_edge("action_subgraph", "build_response")
     workflow.add_edge("build_response", END)
-    workflow.add_edge("mcp_agent", "build_response")      # MCP Agent 路径终点
 
     # Step 5: 编译 — 注入 Checkpointer 实现多轮对话状态持久化
     from src.memory.checkpointer import get_checkpointer

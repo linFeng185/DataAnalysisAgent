@@ -81,13 +81,12 @@ class CacheRefresher:
         if not expired:
             logger.info("过期 Schema 缓存刷新完成", expired=0, deleted=0)
             return 0
-        ids = [entry.id for entry in expired]
-        deleted = await store.delete_by_ids(ids)
         datasources = sorted({
             self._entry_datasource(entry.id, entry.metadata)
             for entry in expired
             if self._entry_datasource(entry.id, entry.metadata)
         })
+        deleted = 0
         for datasource in datasources:
             token = await self._acquire_lock(datasource)
             if token is None:
@@ -95,6 +94,28 @@ class CacheRefresher:
                 continue
             try:
                 await self._schema_manager.refresh(datasource)
+                # SchemaManager 成功后再检查旧 ID；若刷新已写入同 ID 的新快照，不删除新条目。
+                refreshed_entries = await store.get_by_filter(
+                    {"source": "auto_introspect", "datasource": datasource},
+                    limit=10_000,
+                )
+                refreshed_by_id = {entry.id: entry for entry in refreshed_entries}
+                stale_ids = [
+                    entry.id
+                    for entry in expired
+                    if self._entry_datasource(entry.id, entry.metadata) == datasource
+                    and (
+                        entry.id not in refreshed_by_id
+                        or self._is_expired(refreshed_by_id[entry.id].metadata)
+                    )
+                ]
+                if stale_ids:
+                    deleted += int(await store.delete_by_ids(stale_ids))
+                logger.info(
+                    "过期 Schema 刷新后清理完成",
+                    datasource=datasource,
+                    stale_count=len(stale_ids),
+                )
             except Exception as exc:
                 logger.error(
                     "过期 Schema 主动刷新失败",
@@ -327,7 +348,7 @@ class CacheRefreshService:
                 )
                 continue
             except TimeoutError:
-                pass
+                logger.debug("Schema 缓存刷新等待周期结束")
             try:
                 await self.run_once()
             except Exception as exc:

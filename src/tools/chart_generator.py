@@ -133,7 +133,7 @@ def _build_option(rows: list[dict], chart_type: str) -> dict:
             "name": value_col, "type": "pie",
             "data": [
                 {"name": label, "value": value}
-                for label, value in zip(labels, values)
+                for label, value in zip(labels, values, strict=False)
             ],
         }]
     elif chart_type == "scatter" and len(numeric) >= 2:

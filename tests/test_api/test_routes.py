@@ -4,10 +4,10 @@ from __future__ import annotations
 
 import logging
 from collections.abc import AsyncIterator
+from importlib import import_module
 
 import pytest
 from httpx import ASGITransport, AsyncClient
-
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +41,12 @@ async def client(monkeypatch) -> AsyncIterator[AsyncClient]:
         AsyncMock(return_value=datasource_access),
         raising=False,
     )
+    chat_routes = import_module("src.api.routes.chat")
+    monkeypatch.setattr(
+        chat_routes,
+        "_resolve_chat_llm_selection",
+        AsyncMock(return_value=None),
+    )
     monkeypatch.setattr(ExternalDataSourceProvider, "persist", AsyncMock())
     token = create_access_token(1, 1, "super_admin")
     test_client = AsyncClient(
@@ -69,6 +75,26 @@ class TestSchemas:
         from src.api.schemas import ChatRequest
         with pytest.raises(Exception):
             ChatRequest()
+
+    # 方法作用：验证对话级 LLM 连接和模型必须成对提交。
+    # Args: self - pytest 测试类实例。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    def test_chat_request_requires_llm_connection_and_model_pair(self) -> None:
+        """只提交连接或模型会形成歧义，必须在协议层拒绝。"""
+        from src.api.schemas import ChatRequest
+
+        with pytest.raises(Exception):
+            ChatRequest(query="q", llm_connection_id=11)
+        with pytest.raises(Exception):
+            ChatRequest(query="q", model_id="gpt-4o")
+
+        request = ChatRequest(
+            query="q",
+            llm_connection_id=11,
+            model_id="gpt-4o",
+        )
+        assert request.llm_connection_id == 11
+        assert request.model_id == "gpt-4o"
 
     # 方法作用：验证聊天请求模型限制超长输入和过多数据源。
     # Args: self - pytest 测试类实例。
@@ -171,6 +197,7 @@ class TestEndpoints:
     async def test_chat(self, client, monkeypatch):
         from types import SimpleNamespace
         from unittest.mock import AsyncMock
+
         import src.api.routes as routes
 
         workflow = SimpleNamespace(ainvoke=AsyncMock(return_value={
@@ -339,6 +366,7 @@ class TestEndpoints:
         """复用已有会话时，workflow 必须收到同一个 session_id 以持久化轮次。"""
         from types import SimpleNamespace
         from unittest.mock import AsyncMock
+
         import src.api.routes as routes
 
         workflow = SimpleNamespace(ainvoke=AsyncMock(return_value={
@@ -501,8 +529,9 @@ class TestEndpoints:
         """外部数据源延迟加载时，Schema 路由应调用 SchemaManager 获取表结构。"""
         from types import SimpleNamespace
         from unittest.mock import AsyncMock
-        from src.datasource.schema_snapshot import SchemaSnapshot, TableSchema
+
         import src.api.routes as routes
+        from src.datasource.schema_snapshot import SchemaSnapshot, TableSchema
 
         datasource = SimpleNamespace(schema=None)
         snapshot = SchemaSnapshot(tables=[TableSchema(name="orders")])
@@ -525,6 +554,7 @@ class TestEndpoints:
         # Arrange
         from types import SimpleNamespace
         from unittest.mock import AsyncMock
+
         import src.api.routes as routes
         import src.memory.session_store as session_module
 
@@ -552,6 +582,7 @@ class TestEndpoints:
         # Arrange
         from types import SimpleNamespace
         from unittest.mock import AsyncMock
+
         import src.api.routes as routes
         import src.memory.session_store as session_module
 

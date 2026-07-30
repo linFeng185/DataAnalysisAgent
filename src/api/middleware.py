@@ -6,8 +6,12 @@ from fastapi import Request
 from fastapi.responses import JSONResponse
 
 from src.exceptions import (
-    DataAnalysisAgentError, DataSourceNotFoundError, ExecutionError,
-    RateLimitError, SQLSecurityError, SQLValidationError,
+    DataAnalysisAgentError,
+    DataSourceNotFoundError,
+    ExecutionError,
+    RateLimitError,
+    SQLSecurityError,
+    SQLValidationError,
 )
 from src.logging_config import get_logger
 

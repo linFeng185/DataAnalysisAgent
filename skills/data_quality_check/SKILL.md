@@ -1,6 +1,7 @@
 ---
 name: data-quality-check
 version: 1.0.0
+api_version: data-agent/v2
 description: 对查询结果执行数据质量检查 (空值率、重复值、异常值)
 author: data-team
 tags: [quality, validation, production]
@@ -18,10 +19,30 @@ depends_on:
 tools:
   - name: check_null_rate
     description: 检查指定列的空值率
+    input_schema: schemas/quality_input.json
+    output_schema: schemas/quality_output.json
   - name: check_duplicates
     description: 检查指定列的重复值
+    input_schema: schemas/quality_input.json
+    output_schema: schemas/quality_output.json
   - name: detect_outliers
     description: 用 Z-Score 方法检测异常值
+    input_schema: schemas/quality_input.json
+    output_schema: schemas/quality_output.json
+
+capabilities: [data.quality]
+accepts: [database, table_file]
+permissions:
+  network: []
+  files: none
+  datasources: read_only
+resources:
+  timeout_seconds: 30
+  cpu_seconds: 10
+  memory_mb: 256
+  max_tool_calls: 50
+  max_input_bytes: 2097152
+  max_output_bytes: 524288
 ---
 
 当用户询问数据质量相关问题时，你应当:

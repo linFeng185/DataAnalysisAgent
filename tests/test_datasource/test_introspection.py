@@ -19,6 +19,7 @@ from src.datasource.introspection import (
     introspect_foreign_keys,
     introspect_table,
 )
+
 # ---- helpers ----
 
 def _ds(dialect: str) -> DataSourceConfig:

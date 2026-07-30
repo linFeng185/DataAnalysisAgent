@@ -4,8 +4,8 @@
 
 from __future__ import annotations
 
-from src.knowledge.models import KnowledgeEntry
 from src.knowledge.doc_loader import DocLoader
+from src.knowledge.models import KnowledgeEntry
 from src.logging_config import get_logger
 from src.memory.vector_store import VectorStore
 

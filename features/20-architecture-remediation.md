@@ -28,12 +28,20 @@
 | 20.22 | 异常处理决策矩阵 | `src/failure_policy.py`、安全与降级边界 | 单测完成 | P0 |
 | 20.23 | VectorStore 所有权收口 | `src/memory/`、`src/knowledge/` | 单测完成 | P0 |
 | 20.24 | AnalysisState 持久化分层 | `src/graph/`、会话历史 | 单测完成 | P0 |
+| 20.25 | 任务计划与统一分析产物 | `src/graph/contracts.py`、`src/graph/artifacts.py`、`src/llm/invocation.py` | 单测完成 | P1 |
+| 20.26 | 多数据源请求与结果契约 | `src/graph/contracts.py`、`src/graph/nodes/multi_source.py` | 单测完成 | P1 |
+| 20.27 | Skill 两阶段精确激活 | `src/graph/skill_activation.py`、`src/graph/nodes/` | 单测完成 | P1 |
+| 20.28 | AnalysisState 上下文分组 | `src/graph/context.py`、`src/graph/state.py`、`src/graph/nodes/` | 单测完成 | P1 |
+| 20.29 | 图节点上下文读取收口 | `src/graph/context.py`、`src/graph/nodes/`、`src/graph/workflow.py` | 单测完成 | P1 |
 
 ### 模块收尾
 
-模块功能点共 24 项，已完成 24 项，待开发 0 项；第二轮底层架构收口已完成。
+模块功能点共 29 项，已完成 29 项，待开发 0 项；第五轮扩展与生产化收口已完成上下文读取收口。
 
 20.5 已通过 `git filter-repo` 清除所有本地 refs 中的 `src/test_data.sql` / `test_data.sql`，本地数据文件继续由 `.gitignore` 排除。远端历史发布属于仓库维护操作，必须在通知协作者后单独 force-push。
 
-第一轮 20.1-20.16 与第二轮 20.17-20.24 均已完成。额外审计同步修复了跨后端 VectorStore 不等值过滤、
+第一轮 20.1-20.16、第二轮 20.17-20.24 与第三轮 20.25 均已完成。额外审计同步修复了跨后端 VectorStore 不等值过滤、
 pgvector 空过滤全表删除风险、启动预热私有接口泄漏、MCP/Skill/结构化资产跨模块私有访问，以及知识上传授权顺序。
+第四轮 20.26-20.28 与第五轮 20.29 已完成。
+
+当前模块无待开发项。

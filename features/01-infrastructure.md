@@ -13,6 +13,7 @@
 | 1.1.5 | requirements.txt | `requirements.txt` | 生产环境 pip 依赖固定版本 | 单测完成 | P0 |
 | 1.1.6 | 日志配置 | `src/logging_config.py` | structlog 结构化日志，支持 JSON/Console 双格式，区分开发/生产 | 单测完成 | P0 |
 | 1.1.7 | 异常体系 | `src/exceptions.py` | DataSourceNotFoundError、SQLValidationError、ExecutionError、RateLimitError 等自定义异常 | 单测完成 | P0 |
+| 1.1.8 | Ruff 静态检查 | `pyproject.toml`、`.github/workflows/test.yml` | Python 3.12 规则、导入与高风险错误检查，本地和 CI 使用同一配置 | 单测完成 | P1 |
 
 ### 1.2 配置体系
 
@@ -34,5 +35,9 @@
 | 1.3.5 | RateLimitError | `src/exceptions.py` | 请求频率超限异常 | 单测完成 | P0 |
 | 1.3.6 | KnowledgeNotFoundError | `src/exceptions.py` | 知识库未找到相关知识异常 | 单测完成 | P0 |
 | 1.3.7 | 全局异常处理中间件 | `src/api/middleware.py` | 7 种异常 → HTTP 响应映射 | 单测完成 | P0 |
+
+### 模块收尾
+
+模块功能点共 19 项，已完成 19 项，待开发 0 项。当前模块无待开发项。
 
 ---

@@ -11,7 +11,7 @@ from decimal import Decimal
 from src.graph.state import AnalysisState
 from src.llm.client import get_task_llm as _get_task_llm
 from src.llm.client import is_task_llm_available as _is_task_llm_available
-from src.llm.prompt_budget import PromptSection, build_budgeted_prompt
+from src.llm.prompt_budget import PromptSection
 from src.logging_config import get_logger
 from src.tools import processors as _processors  # noqa: F401
 from src.tools.analyzer import (
@@ -63,10 +63,13 @@ def get_llm(temperature: float = 0.3):
 
 async def analyze_result_node(state: AnalysisState) -> dict:
     """描述统计 + 趋势 + 异常 + 占比 → LLM 解读 (有 API Key) 或规则摘要。"""
+    from src.graph.context import read_contexts
+
+    contexts = read_contexts(state)
     _start = time.monotonic()
     logger.info("节点开始", node="analyze_result")
     rows: list[dict] = state.get("query_result_sample", [])
-    intent = state.get("intent", "query")
+    intent = contexts.routing.intent or "query"
     sql = state.get("generated_sql", "")
     logger.info(
         "分析节点边界输入",
@@ -86,7 +89,7 @@ async def analyze_result_node(state: AnalysisState) -> dict:
     processor_result = None
     try:
         from src.tools.data_processor import get_processor
-        proc = get_processor(intent, query=state.get("user_query", ""))
+        proc = get_processor(intent, query=contexts.request.user_query)
         if proc:
             nc = _find_numeric(rows)
             params = _build_processor_params(rows, proc.name, nc)
@@ -174,9 +177,9 @@ async def analyze_result_node(state: AnalysisState) -> dict:
             outlier_info,
             conc_info,
             history,
-            user_query=state.get("user_query", ""),
-            result_full_count=state.get("query_result_full_count", len(rows)),
-            result_truncated=state.get("query_result_truncated", False),
+            user_query=contexts.request.user_query,
+            result_full_count=contexts.execution.row_count or len(rows),
+            result_truncated=contexts.execution.truncated,
             business_context=business_context,
             chart_type=chart_type,
             intent=intent,
@@ -194,9 +197,11 @@ async def analyze_result_node(state: AnalysisState) -> dict:
 async def _llm_polish(summary: str, insights: list[str], data_sample: str) -> dict | None:
     """LLM 对处理器输出做自然语言润色，不参与数值计算。"""
     try:
-        from langchain_core.messages import HumanMessage, SystemMessage
         llm = _get_task_llm("polish_result", temperature=0.3, reasoning=False)
-        prompt = build_budgeted_prompt(
+        from src.llm.invocation import invoke_structured
+        from src.llm.output_contracts import PolishOutput
+
+        parsed = await invoke_structured(
             "analysis.polish",
             [
                 PromptSection(
@@ -220,14 +225,10 @@ async def _llm_polish(summary: str, insights: list[str], data_sample: str) -> di
                     max_chars=1000,
                 ),
             ],
+            output_model=PolishOutput,
+            model=llm,
         )
-        resp = await llm.ainvoke([
-            SystemMessage(content=prompt.system),
-            HumanMessage(content=prompt.human),
-        ])
-        from src.llm.output_contracts import PolishOutput, parse_json_model
-
-        return parse_json_model(resp.content, PolishOutput).model_dump()
+        return parsed.model_dump()
     except Exception as exc:
         logger.error("LLM 润色异常", error=str(exc), exc_info=True)
         return None
@@ -367,7 +368,9 @@ async def _execute_post_analysis_skill_tools(
             continue
         outputs: list[object] = []
         if name == "render_report":
-            query = str(state.get("user_query", "") or "")
+            from src.graph.context import read_contexts
+
+            query = read_contexts(state).request.user_query
             template = "monthly_report" if "月报" in query else "weekly_report"
             metrics = {
                 key: value
@@ -492,9 +495,7 @@ async def _llm_analyze(
     )
     business_block = business_context or "(无额外业务口径，以 SQL 与统计结果为准)"
     question = user_query or "(未提供原问题，仅解释当前结果)"
-    prompt = build_budgeted_prompt(
-        "analysis.result",
-        [
+    prompt_sections = [
             PromptSection(
                 "query",
                 f"## 用户原问题\n{question}\n请给出分析报告。",
@@ -550,18 +551,22 @@ async def _llm_analyze(
                 priority=30,
                 max_chars=1200,
             ),
-        ],
-    )
+        ]
 
     try:
-        from langchain_core.messages import HumanMessage, SystemMessage
-        from src.llm.adapters.registry import get_adapter
         from src.config import get_settings
+        from src.llm.adapters.registry import get_adapter
+        from src.llm.invocation import prepare_invocation
         llm = get_llm(temperature=0.3)
-        resp = await llm.ainvoke([
-            SystemMessage(content=prompt.system),
-            HumanMessage(content=prompt.human),
-        ])
+        prepared = prepare_invocation(
+            "analysis.result",
+            prompt_sections,
+            task="analyze_result",
+            temperature=0.3,
+            metadata={"node": "analyze_result", "intent": intent},
+            model=llm,
+        )
+        resp = await prepared.model.ainvoke(prepared.messages)
         adapter = get_adapter(get_settings().llm_model)
         parsed = adapter.parse_response(resp)
         parsed_content = str(getattr(parsed, "content", "") or "").strip()

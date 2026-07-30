@@ -10,7 +10,6 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from fastapi import HTTPException
 
-
 logger = logging.getLogger(__name__)
 
 
@@ -90,8 +89,41 @@ class TestPlatformIdentity:
         result = await auth.current_user()
 
         assert result["auth_required"] is True
-        assert result["registration_enabled"] is True
+        assert result["registration_enabled"] is False
         logger.info("test_auth_probe_exposes_registration_switch 完成")
+
+    # 方法作用：验证平台配置摘要不会把遗留配置误报为公开注册已启用。
+    # Args: self - pytest 测试类实例；monkeypatch - 权限与配置补丁。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    async def test_config_summary_reports_public_registration_disabled(self, monkeypatch) -> None:
+        """注册端点固定阻断后，后台摘要也必须固定显示关闭。"""
+        # Arrange
+        import src.api.auth as auth
+        import src.api.routes.admin as admin
+
+        settings = SimpleNamespace(
+            env="dev",
+            multi_tenant=True,
+            registration_enabled=True,
+            database_url="postgresql://configured",
+            jwt_secret="configured",
+            credential_encryption_key="configured",
+            vector_store_type="pgvector",
+            datasource_cache_backend="local",
+            login_max_per_hour=20,
+            login_lockout_threshold=5,
+            login_lockout_minutes=15,
+            max_queries_per_hour=100,
+            mcp_servers=[],
+        )
+        monkeypatch.setattr(auth, "require_super_admin", lambda: None)
+        monkeypatch.setattr("src.config.get_settings", lambda: settings)
+
+        # Act
+        result = await admin.get_config_summary()
+
+        # Assert
+        assert result["registration_enabled"] is False
 
     # 方法作用：验证达到失败阈值后数据库写入账号锁定时间。
     # Args: self - pytest 测试类实例；monkeypatch - 密码和数据库补丁。
@@ -106,6 +138,7 @@ class TestPlatformIdentity:
         connection.fetchrow = AsyncMock(side_effect=[
             {
                 "id": 7, "tenant_id": 2, "role": "analyst", "password_hash": "hash",
+                "tenant_code": "acme",
                 "is_active": True, "failed_login_attempts": 0, "locked_until": None,
             },
             {"failed_login_attempts": 1, "locked_until": locked_until},
@@ -131,7 +164,7 @@ class TestPlatformIdentity:
 
         with pytest.raises(HTTPException) as exc_info:
             await auth.login(
-                auth.LoginRequest(username="alice", password="wrong-pass"),
+                auth.LoginRequest(tenant_code="acme", username="alice", password="wrong-pass"),
                 response=SimpleNamespace(),
             )
 
@@ -157,17 +190,17 @@ class TestPlatformAdminRoutes:
         from src.api.routes import router
         from src.api.routes.admin import router as admin_router
 
-        included_routers = [
-            route.original_router
+        mounted_routes = {
+            (method, route.path)
             for route in router.routes
-            if hasattr(route, "original_router")
-        ]
-        admin_included = any(candidate is admin_router for candidate in included_routers)
+            for method in (getattr(route, "methods", None) or set())
+        }
         routes = {
             (method, route.path)
             for route in admin_router.routes
             for method in (getattr(route, "methods", None) or set())
         }
+        admin_included = routes.issubset(mounted_routes)
         logger.info(
             "平台管理路由注册探针",
             extra={
@@ -227,7 +260,7 @@ class TestPlatformAdminRoutes:
         monkeypatch.setattr(pg_pool, "get_pg_pool", AsyncMock(return_value=pool))
 
         result = await create_tenant(TenantCreateRequest(
-            name="Acme", admin_username="acme-admin", admin_password="StrongPass123!",
+            code="acme", name="Acme", admin_username="acme-admin", admin_password="StrongPass123!",
         ))
 
         assert result["tenant"]["id"] == 2

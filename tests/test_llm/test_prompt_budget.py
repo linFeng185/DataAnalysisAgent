@@ -161,11 +161,44 @@ class TestPromptBudget:
         ]
 
         # Act
-        missing = [
-            str(path)
-            for path in boundaries
-            if "build_budgeted_prompt(" not in path.read_text(encoding="utf-8")
-        ]
+        from src.logging_config import get_logger
+
+        logger = get_logger(__name__)
+        boundary_markers = {}
+        for path in boundaries:
+            source = path.read_text(encoding="utf-8")
+            boundary_markers[str(path)] = [
+                marker for marker in (
+                    "build_budgeted_prompt(",
+                    "invoke_structured(",
+                    "prepare_invocation(",
+                    "invoke_text(",
+                )
+                if marker in source
+            ]
+        logger.info("统一 Prompt 边界扫描完成", boundaries=boundary_markers)
+        missing = [path for path, markers in boundary_markers.items() if not markers]
 
         # Assert
         assert missing == []
+
+    def test_business_nodes_do_not_inline_system_messages(self) -> None:
+        """业务节点不得绕过 PromptRegistry 直接构造 SystemMessage。"""
+        # Arrange
+        from pathlib import Path
+
+        boundaries = [
+            *Path("src/graph/nodes").glob("*.py"),
+            Path("src/memory/context_builder.py"),
+            Path("src/memory/session_archive.py"),
+        ]
+        violations: list[str] = []
+
+        # Act
+        for path in boundaries:
+            source = path.read_text(encoding="utf-8")
+            if "SystemMessage(" in source or "from langchain_core.messages import SystemMessage" in source:
+                violations.append(str(path))
+
+        # Assert
+        assert violations == []

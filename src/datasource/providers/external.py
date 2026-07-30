@@ -4,14 +4,16 @@ from __future__ import annotations
 
 import inspect
 import json
-from pathlib import Path
 from collections.abc import Awaitable, Callable
+from pathlib import Path
 
 import yaml
 
 from src.datasource.config import DataSourceConfig
 from src.datasource.credential_manager import (
     CredentialManager,
+)
+from src.datasource.credential_manager import (
     describe_credential_reference as _credential_reference_kind,
 )
 from src.datasource.introspection import introspect_database
@@ -30,7 +32,7 @@ class ExternalDataSourceProvider(DataSourceProvider):
     """
 
     def __init__(self) -> None:
-        self._sources: dict[str, DataSourceConfig] = {}
+        self._sources: dict[tuple[int, str], DataSourceConfig] = {}
 
     @classmethod
     def from_yaml(cls, yaml_path: str = "config/datasources.yaml") -> "ExternalDataSourceProvider":
@@ -72,7 +74,13 @@ class ExternalDataSourceProvider(DataSourceProvider):
         logger.info("YAML 配置加载完成", count=len(sources))
         return sources
 
-    async def register(self, req: "DataSourceCreateRequest") -> DataSourceConfig:  # noqa: F821
+    async def register(
+        self,
+        req: "DataSourceCreateRequest",  # noqa: F821
+        *,
+        tenant_id: int = 1,
+        owner_user_id: int = 0,
+    ) -> DataSourceConfig:
         """注册新数据源并加密凭证。
 
         Args:
@@ -83,6 +91,8 @@ class ExternalDataSourceProvider(DataSourceProvider):
         """
         logger.debug("外部数据源注册入口", datasource=req.name, dialect=req.dialect)
         ds = self._build_config(req, encrypt_password=True)
+        ds.tenant_id = int(tenant_id)
+        ds.owner_user_id = int(owner_user_id)
         self._register(ds)
         logger.info("外部数据源注册完成", datasource=ds.name, dialect=ds.dialect)
         return ds
@@ -208,7 +218,7 @@ class ExternalDataSourceProvider(DataSourceProvider):
             tenant_id=tenant_id,
             owner_user_id=owner_user_id,
         )
-        current = await self.lookup(name)
+        current = await self.lookup(name, tenant_id=tenant_id)
         if current is None:
             raise KeyError(name)
         requested_password = getattr(req, "password", None)
@@ -240,6 +250,17 @@ class ExternalDataSourceProvider(DataSourceProvider):
             owner_user_id=owner_user_id,
         )
         await self._close_runtime(current)
+        replacement_key = (int(tenant_id), name)
+        same_name_tenant_ids = sorted(
+            key[0] for key in self._sources if key[1] == name
+        )
+        logger.info(
+            "外部数据源内存替换边界",
+            datasource=name,
+            target_tenant_id=tenant_id,
+            same_name_tenant_ids=same_name_tenant_ids,
+        )
+        self._sources.pop(replacement_key, None)
         self._register(updated)
         logger.info("外部数据源更新完成", datasource=name, tenant_id=tenant_id)
         return updated
@@ -278,8 +299,8 @@ class ExternalDataSourceProvider(DataSourceProvider):
                         "(name, tenant_id, owner_user_id, dialect, version, host, port, "
                         "database_name, username, encrypted_password, description, extra_params) "
                         "VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12::jsonb) "
-                        "ON CONFLICT (name) DO UPDATE SET tenant_id=EXCLUDED.tenant_id, "
-                        "owner_user_id=EXCLUDED.owner_user_id, dialect=EXCLUDED.dialect, "
+                        "ON CONFLICT (tenant_id, name) DO UPDATE SET owner_user_id=EXCLUDED.owner_user_id, "
+                        "dialect=EXCLUDED.dialect, "
                         "version=EXCLUDED.version, host=EXCLUDED.host, port=EXCLUDED.port, "
                         "database_name=EXCLUDED.database_name, username=EXCLUDED.username, "
                         "encrypted_password=EXCLUDED.encrypted_password, "
@@ -371,8 +392,8 @@ class ExternalDataSourceProvider(DataSourceProvider):
                 async with connection.transaction():
                     row = await connection.fetchrow(
                         "DELETE FROM datasource_configs WHERE name=$1 "
-                        "AND ($2::bool OR tenant_id=$3) RETURNING tenant_id",
-                        name, platform_admin, tenant_id,
+                        "AND tenant_id=$2 RETURNING tenant_id",
+                        name, tenant_id,
                     )
                     if row is not None:
                         await connection.execute(
@@ -387,7 +408,7 @@ class ExternalDataSourceProvider(DataSourceProvider):
         logger.info("持久化数据源删除完成", datasource=name, removed=removed)
         return removed
 
-    async def unregister(self, name: str) -> None:
+    async def unregister(self, name: str, *, tenant_id: int | None = None) -> None:
         """移除数据源并兼容关闭同步/异步连接池。
 
         Args:
@@ -397,11 +418,16 @@ class ExternalDataSourceProvider(DataSourceProvider):
             无返回值。
         """
         logger.debug("外部数据源注销入口", datasource=name)
-        if name in self._sources:
-            ds = self._sources.pop(name)
+        effective_tenant = self._effective_tenant_id(tenant_id)
+        keys = [
+            key for key in self._sources
+            if key[1] == name and key[0] == effective_tenant
+        ]
+        for key in keys:
+            ds = self._sources.pop(key)
             await self._close_runtime(ds)
-            logger.info("数据源已移除", name=name)
-        else:
+            logger.info("数据源已移除", name=name, tenant_id=ds.tenant_id)
+        if not keys:
             logger.info("外部数据源注销跳过", datasource=name, reason="不存在")
 
     async def _prefetch_schema(self, ds: DataSourceConfig) -> None:
@@ -422,13 +448,48 @@ class ExternalDataSourceProvider(DataSourceProvider):
         return await introspect_database(ds, _executor)
 
     def _register(self, ds: DataSourceConfig) -> None:
-        self._sources[ds.name] = ds
+        self._sources[(int(ds.tenant_id), ds.name)] = ds
 
-    async def lookup(self, name: str) -> DataSourceConfig | None:
-        return self._sources.get(name)
+    async def lookup(self, name: str, *, tenant_id: int | None = None) -> DataSourceConfig | None:
+        effective_tenant = self._effective_tenant_id(tenant_id)
+        result = self._sources.get((effective_tenant, name))
+        if result is not None or self._isolation_enabled():
+            return result
+        # 单租户兼容模式允许恢复历史数据中遗留的非默认 tenant_id 配置。
+        matches = [value for (source_tenant, source_name), value in self._sources.items() if source_name == name]
+        return matches[0] if len(matches) == 1 else None
 
-    async def list_all(self) -> list[DataSourceConfig]:
-        return list(self._sources.values())
+    async def list_all(self, *, tenant_id: int | None = None) -> list[DataSourceConfig]:
+        if not self._isolation_enabled():
+            tenant_id = None
+        elif tenant_id is None:
+            tenant_id = self._effective_tenant_id(None)
+        return [
+            value for (source_tenant, _), value in self._sources.items()
+            if tenant_id is None or source_tenant == int(tenant_id)
+        ]
+
+    @staticmethod
+    def _effective_tenant_id(tenant_id: int | None) -> int:
+        if tenant_id is not None:
+            return int(tenant_id)
+        try:
+            from src.api.auth import get_current_tenant_id
+
+            return int(get_current_tenant_id())
+        except Exception:
+            logger.debug("获取当前租户失败，使用默认租户", exc_info=True)
+            return 1
+
+    @staticmethod
+    def _isolation_enabled() -> bool:
+        try:
+            from src.app_context import get_tenant_policy
+
+            return bool(get_tenant_policy().datasource_isolation_enabled)
+        except Exception:
+            logger.debug("获取数据源隔离策略失败，使用兼容模式", exc_info=True)
+            return False
 
     async def test_connection(self, ds: DataSourceConfig) -> bool:
         """2.3.4 测试数据源连通性。

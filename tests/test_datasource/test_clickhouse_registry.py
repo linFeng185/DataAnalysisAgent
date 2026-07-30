@@ -4,9 +4,8 @@ from __future__ import annotations
 
 import logging
 
-import sqlalchemy as sa
 import pytest
-
+import sqlalchemy as sa
 
 logger = logging.getLogger(__name__)
 
@@ -20,6 +19,7 @@ class TestClickHouseRegistryAdapter:
         # Arrange
         import socket
         from unittest.mock import MagicMock
+
         from src.datasource.config import DataSourceConfig
         from src.datasource.registry import DataSourceRegistry
 
@@ -106,9 +106,11 @@ class TestClickHouseRegistryAdapter:
         # Arrange
         import socket
         from unittest.mock import MagicMock
+
+        import clickhouse_connect
+
         from src.datasource.config import DataSourceConfig
         from src.datasource.registry import DataSourceRegistry
-        import clickhouse_connect
 
         class QueryResult:
             column_names = ["name"]

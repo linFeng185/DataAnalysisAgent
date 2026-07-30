@@ -8,7 +8,6 @@ import pytest
 
 from src.memory.vector_store import VectorEntry, VectorSearchResult, VectorStore
 
-
 logger = logging.getLogger(__name__)
 
 

@@ -7,7 +7,6 @@ from typing import Literal
 
 from src.logging_config import get_logger
 
-
 logger = get_logger(__name__)
 _TRUNCATION_MARKER = "\n...[已截断]"
 PromptTarget = Literal["system", "human"]

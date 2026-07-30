@@ -32,7 +32,10 @@ def _authorize_extension_scope(scope: str) -> tuple[str, int, int, str]:
     """Skill 和 MCP 共用与知识库一致的三级写权限。"""
     logger.debug("扩展资源作用域授权入口", scope=scope)
     from src.api.auth import (
-        get_current_identity, get_current_role, get_current_tenant_id, get_current_user_id,
+        get_current_identity,
+        get_current_role,
+        get_current_tenant_id,
+        get_current_user_id,
     )
     from src.app_context import get_tenant_policy
     from src.knowledge.governance import normalize_knowledge_scope

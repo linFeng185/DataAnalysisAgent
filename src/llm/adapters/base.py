@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 
 
@@ -33,7 +32,7 @@ class StreamChunk:
     content: str = ""
 
 
-class ModelAdapter(ABC):
+class ModelAdapter:
     """模型适配器基类。
 
     每个子类负责：

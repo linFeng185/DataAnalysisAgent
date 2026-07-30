@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import time
 
+from src.graph.contracts import build_task_plan
 from src.graph.state import AnalysisState
+from src.llm.output_contracts import TaskPlanOutput
 from src.logging_config import get_logger
 
 logger = get_logger(__name__)
@@ -12,11 +14,14 @@ logger = get_logger(__name__)
 
 async def classify_intent_node(state: AnalysisState) -> dict:
     """Phase 1 规则匹配; Phase 2 切换 LLM。"""
+    from src.graph.context import read_contexts
+
+    contexts = read_contexts(state)
     _start = time.monotonic()
     logger.info("节点开始", node="classify_intent")
     ch = state.get("conversation_history", []) or []
     logger.info("对话历史检查", has_history=len(ch) > 0, turns=len(ch))
-    q = state["user_query"].lower()
+    q = contexts.request.user_query.lower()
 
     metadata_phrases = (
         "表结构", "有哪些表", "schema", "有哪些列", "有哪些字段",
@@ -26,6 +31,7 @@ async def classify_intent_node(state: AnalysisState) -> dict:
     function_help = "怎么用" in q and any(
         marker in q for marker in ("date_", "count(", "sum(", "avg(", "函数", "语法")
     )
+    llm_plan = None
     if any(w in q for w in metadata_phrases) or function_help:
         intent = "metadata"
     elif any(w in q for w in ("上传", "文件", "csv", "excel")):
@@ -54,17 +60,24 @@ async def classify_intent_node(state: AnalysisState) -> dict:
     elif ch:
         intent = "query"
     else:
-        intent = await _llm_classify(q) or "chat"
+        llm_plan = await _llm_classify(q)
+        intent = llm_plan.intent if llm_plan is not None else "chat"
+
+    preliminary_plan = build_task_plan(intent, query=contexts.request.user_query)
+    if preliminary_plan.capability == "forecast" and intent == "chat":
+        intent = "trend"
+    elif preliminary_plan.capability == "report" and intent == "chat":
+        intent = "query"
 
     datasource_update: dict = {}
-    datasource_access = state.get("datasource_access", {}) or {}
+    datasource_access = contexts.permission.datasource_access
     if (
-        intent not in {"chat", "file_analysis", "meta"}
-        and not str(state.get("datasource", "") or "").strip()
+        preliminary_plan.capability in {"sql_analysis", "forecast", "report"}
+        and not contexts.routing.datasource.strip()
         and datasource_access
     ):
         selected_datasource = await _select_authorized_datasource(
-            state["user_query"], datasource_access,
+            contexts.request.user_query, datasource_access,
         )
         permission = datasource_access[selected_datasource]
         datasource_update = {
@@ -83,13 +96,36 @@ async def classify_intent_node(state: AnalysisState) -> dict:
     from src.graph.skill_activation import activate_skills
 
     skill_result = activate_skills({**state, "intent": intent})
+    selected_sources = datasource_update.get(
+        "selected_datasources",
+        contexts.routing.selected_datasources,
+    )
+    task_plan = build_task_plan(
+        intent,
+        query=contexts.request.user_query,
+        datasources=selected_sources,
+    )
+    if llm_plan is not None:
+        task_plan.operation = (llm_plan.operation or task_plan.operation).strip()[:64] or task_plan.operation
+        task_plan.confidence = llm_plan.confidence
 
-    logger.info("节点完成", node="classify_intent", elapsed_ms=round((time.monotonic() - _start) * 1000))
-    return {
+    update = {
         "intent": intent,
+        "task_plan": task_plan.model_dump(),
         **skill_result,
         **datasource_update,
     }
+    from src.graph.context import build_routing_context
+
+    update["routing_context"] = build_routing_context({**state, **update}).model_dump()
+    logger.info(
+        "节点完成",
+        node="classify_intent",
+        elapsed_ms=round((time.monotonic() - _start) * 1000),
+        skill_stage=update["routing_context"]["skill_activation_stage"],
+        skill_candidates=len(update["routing_context"]["skill_candidate_ids"]),
+    )
+    return update
 
 
 # 方法作用：使用 SQL 任务模型从服务端授权候选中选择最相关的数据源。
@@ -117,18 +153,17 @@ async def _select_authorized_datasource(
         logger.info("授权候选数据源单项命中", datasource=candidates[0])
         return candidates[0]
     try:
-        from langchain_core.messages import HumanMessage, SystemMessage
-        from src.llm.client import get_task_llm, is_task_llm_available
-        from src.llm.output_contracts import DatasourceSelectionOutput, parse_json_model
-        from src.llm.prompt_budget import PromptSection, build_budgeted_prompt
+        from src.llm.client import is_task_llm_available
+        from src.llm.invocation import invoke_structured
+        from src.llm.output_contracts import DatasourceSelectionOutput
+        from src.llm.prompt_budget import PromptSection
 
         if is_task_llm_available("generate_sql"):
             catalog = "\n".join(
                 f"- {name}: {str(datasource_access[name].get('description', '') or '')}"
                 for name in candidates
             )
-            llm = get_task_llm("generate_sql", temperature=0, reasoning=False)
-            prompt = build_budgeted_prompt(
+            structured = await invoke_structured(
                 "datasource.select",
                 [
                     PromptSection(
@@ -146,18 +181,10 @@ async def _select_authorized_datasource(
                         max_chars=900,
                     ),
                 ],
+                output_model=DatasourceSelectionOutput,
+                task="generate_sql",
             )
-            response = await llm.ainvoke([
-                SystemMessage(content=prompt.system),
-                HumanMessage(content=prompt.human),
-            ])
-            try:
-                selected = parse_json_model(
-                    response.content,
-                    DatasourceSelectionOutput,
-                ).datasource
-            except Exception:
-                selected = str(response.content or "").strip().strip("`\"'")
+            selected = structured.datasource
             if selected in datasource_access:
                 logger.info("授权候选数据源模型命中", datasource=selected)
                 return selected
@@ -189,46 +216,25 @@ async def _select_authorized_datasource(
 # 方法作用：在规则未命中时使用任务模型识别意图，并在模型故障时安全降级。
 # Args: query - 用户原始问题。
 # Returns: 合法意图名称；模型不可用、输出无效或调用失败时返回 None。
-async def _llm_classify(query: str) -> str | None:
+async def _llm_classify(query: str) -> TaskPlanOutput | None:
     """LLM 意图分类——规则未命中时回退。"""
     logger.debug("LLM 意图分类入口", query=query[:80])
     try:
-        from src.llm.client import get_task_llm, is_task_llm_available
+        from src.llm.client import is_task_llm_available
         if not is_task_llm_available("classify_intent"):
             logger.info("LLM 意图分类回退", reason="任务模型不可用")
             return None
-        llm = get_task_llm("classify_intent", temperature=0, reasoning=False)
-        from langchain_core.messages import SystemMessage, HumanMessage
-        from src.llm.output_contracts import IntentOutput, parse_json_model
-        from src.llm.prompt_budget import PromptSection, build_budgeted_prompt
-        prompt = build_budgeted_prompt(
+        from src.llm.invocation import invoke_structured
+        from src.llm.prompt_budget import PromptSection
+
+        result = await invoke_structured(
             "intent.classify",
-            [
-                PromptSection(
-                    "query",
-                    query,
-                    priority=100,
-                    min_chars=100,
-                    max_chars=650,
-                ),
-            ],
+            [PromptSection("query", query, priority=100, min_chars=100, max_chars=650)],
+            output_model=TaskPlanOutput,
+            task="classify_intent",
         )
-        resp = await llm.ainvoke([
-            SystemMessage(content=prompt.system),
-            HumanMessage(content=prompt.human)])
-        try:
-            intent = parse_json_model(resp.content, IntentOutput).intent
-            logger.info("LLM 意图分类完成", intent=intent)
-            return intent
-        except Exception:
-            text = (resp.content or "").strip().lower()
-        valid = {"query", "aggregation", "trend", "attribution", "metadata", "chat", "file_analysis"}
-        for w in text.split():
-            if w in valid:
-                logger.info("LLM 意图分类完成", intent=w)
-                return w
-        logger.warning("LLM 意图分类回退", reason="模型输出不在合法集合", output=text[:80])
-        return None
+        logger.info("LLM 意图分类完成", intent=result.intent, operation=result.operation)
+        return result
     except Exception as exc:
         from src.failure_policy import FailureDomain, fallback_allowed
 

@@ -89,8 +89,9 @@ def _check_02_config_loading() -> bool:
         all_ok &= check("MCP配置加载", False, str(e))
 
     try:
-        import yaml
         from pathlib import Path
+
+        import yaml
 
         datasource_path = Path("config/datasources.example.yaml")
         ds_config = (
@@ -123,7 +124,7 @@ def _check_03_ddl_generation() -> bool:
     print("\n3. DDL生成检查")
     all_ok = True
 
-    from tests.import_test_data import get_tables, build_ddl
+    from tests.import_test_data import build_ddl, get_tables
 
     schemas = get_tables(1000)
     dialects = ["clickhouse", "mysql", "postgres", "oracle", "mssql"]
@@ -147,8 +148,8 @@ def _check_04_small_data_generation() -> bool:
     print("\n4. 小规模数据生成检查")
     all_ok = True
 
-    from tests.import_test_data import get_tables
     from tests.import_test_data import generate_table_file as gen_table
+    from tests.import_test_data import get_tables
 
     schemas = get_tables(100)
     output_dir = Path("data/generated")
@@ -234,8 +235,8 @@ def _check_07_workflow_structure() -> bool:
     print("\n7. 工作流结构检查")
     all_ok = True
 
-    from src.graph.workflow import route_by_intent, after_layer3
     from src.graph.state import AnalysisState
+    from src.graph.workflow import after_layer3, route_by_intent
 
     # 构造最小state
     state: AnalysisState = {

@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from typing import Any, Literal
+from typing import Any, Literal, Self
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 class ChatRequest(BaseModel):
@@ -13,8 +13,20 @@ class ChatRequest(BaseModel):
     datasource: str = Field(default="", max_length=64)
     datasources: list[str] = Field(default_factory=list, max_length=20)
     model_id: str = Field(default="", max_length=128)
+    llm_connection_id: int | None = Field(default=None, ge=1)
     enabled_skill_ids: list[str] = Field(default_factory=list, max_length=20)
     stream: bool = False
+
+    # 方法作用：校验对话级连接和模型是否成对出现，避免选择语义不完整。
+    # Args: self - 已解析的聊天请求。
+    # Returns: 校验通过的当前请求；字段不成对时抛出 ValueError。
+    @model_validator(mode="after")
+    def validate_llm_selection(self) -> Self:
+        has_connection = self.llm_connection_id is not None
+        has_model = bool(self.model_id.strip())
+        if has_connection != has_model:
+            raise ValueError("llm_connection_id 与 model_id 必须同时提交")
+        return self
 
 
 class ChartAdjustRequest(BaseModel):
@@ -61,6 +73,8 @@ class ChatResponse(BaseModel):
     truncated: bool = False
     analysis: dict = Field(default_factory=dict)
     chart: dict = Field(default_factory=dict)
+    decision_summary: str = ""
+    artifact: dict = Field(default_factory=dict)
     error_code: str = ""
     error_message: str = ""
 

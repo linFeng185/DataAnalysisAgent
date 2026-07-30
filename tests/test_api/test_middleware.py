@@ -8,7 +8,6 @@ from unittest.mock import MagicMock
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 
-
 logger = logging.getLogger(__name__)
 
 

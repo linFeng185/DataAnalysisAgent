@@ -163,7 +163,7 @@ class HistoryStore:
             return
         try:
             async with self._pg_conn() as conn:
-                from src.api.streaming import _PrecisionEncoder, _json_serialize
+                from src.api.streaming import _json_serialize, _PrecisionEncoder
 
                 await conn.execute(
                     "INSERT INTO query_history "

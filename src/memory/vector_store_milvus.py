@@ -42,7 +42,14 @@ class MilvusVectorStore(VectorStore):
 
         Returns: MilvusVectorStore 实例
         """
-        from pymilvus import connections, Collection, FieldSchema, CollectionSchema, DataType, utility
+        from pymilvus import (
+            Collection,
+            CollectionSchema,
+            DataType,
+            FieldSchema,
+            connections,
+            utility,
+        )
 
         connections.connect("default", uri=uri, timeout=10)
         logger.info("Milvus 已连接", uri=uri)

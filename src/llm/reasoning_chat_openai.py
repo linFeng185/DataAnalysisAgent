@@ -11,8 +11,6 @@ langchain-openai 1.x 的 _convert_delta_to_message_chunk 只提取已知字段
 
 from __future__ import annotations
 
-from typing import Any
-
 from langchain_core.messages import AIMessageChunk
 from langchain_core.outputs import ChatGenerationChunk
 from langchain_openai import ChatOpenAI

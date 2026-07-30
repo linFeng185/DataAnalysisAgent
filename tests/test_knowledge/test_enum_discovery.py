@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 import logging
+
 from sqlalchemy.dialects import postgresql
 
 from src.knowledge.enum_discovery import is_low_cardinality_candidate
-
 
 logger = logging.getLogger(__name__)
 
@@ -34,10 +34,10 @@ class TestEnumDiscoveryIntegration:
     def test_constants(self):
         """确认安全阈值常量符合 SPEC 约束。"""
         from src.knowledge.enum_discovery import (
-            MAX_ROWS_FOR_SAMPLING,
+            LOW_CARDINALITY_THRESHOLD,
             MAX_DISTINCT_VALUES,
             MAX_EXECUTION_SECONDS,
-            LOW_CARDINALITY_THRESHOLD,
+            MAX_ROWS_FOR_SAMPLING,
         )
         assert MAX_ROWS_FOR_SAMPLING == 10_000_000
         assert MAX_DISTINCT_VALUES == 50

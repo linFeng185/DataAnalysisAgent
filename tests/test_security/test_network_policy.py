@@ -10,7 +10,6 @@ import pytest
 
 from src.datasource.config import DataSourceConfig
 
-
 logger = logging.getLogger(__name__)
 
 
@@ -28,9 +27,10 @@ class TestOutboundHostPolicy:
         logger.debug("test_clickhouse_private_address_is_rejected_before_connect 入口")
         try:
             # Arrange
-            from src.connectors.clickhouse import ClickHouseConnector
-            import src.connectors.clickhouse as clickhouse_module
             import clickhouse_connect
+
+            import src.connectors.clickhouse as clickhouse_module
+            from src.connectors.clickhouse import ClickHouseConnector
 
             connector = ClickHouseConnector(DataSourceConfig(
                 name="blocked",
@@ -79,9 +79,10 @@ class TestOutboundHostPolicy:
         logger.debug("test_clickhouse_allowlisted_private_host_is_permitted 入口")
         try:
             # Arrange
-            from src.connectors.clickhouse import ClickHouseConnector
-            import src.connectors.clickhouse as clickhouse_module
             import clickhouse_connect
+
+            import src.connectors.clickhouse as clickhouse_module
+            from src.connectors.clickhouse import ClickHouseConnector
 
             connector = ClickHouseConnector(DataSourceConfig(
                 name="trusted",

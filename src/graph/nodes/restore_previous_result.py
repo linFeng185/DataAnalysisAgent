@@ -4,9 +4,9 @@ from __future__ import annotations
 
 from copy import deepcopy
 
+from src.graph.context import read_contexts
 from src.graph.state import AnalysisState
 from src.logging_config import get_logger
-
 
 logger = get_logger(__name__)
 
@@ -16,15 +16,16 @@ logger = get_logger(__name__)
 # Returns: 可供 analyze_result 使用的当前轮结果字段，或明确的不可恢复说明。
 async def restore_previous_result_node(state: AnalysisState) -> dict:
     """只为明确的 meta 追问恢复同一数据源、同一会话中的上一轮结果。"""
+    contexts = read_contexts(state)
     logger.debug(
         "上一轮结果恢复入口",
-        session_id=(state.get("session_id", "") or "")[:20],
-        datasource=state.get("datasource", ""),
+        session_id=contexts.request.session_id[:20],
+        datasource=contexts.routing.datasource,
     )
     snapshot = state.get("previous_turn_snapshot", {}) or {}
-    current_sources = set(state.get("selected_datasources", []) or [])
-    if not current_sources and state.get("datasource"):
-        current_sources = {state.get("datasource", "")}
+    current_sources = set(contexts.routing.selected_datasources)
+    if not current_sources and contexts.routing.datasource:
+        current_sources = {contexts.routing.datasource}
     snapshot_sources = set(snapshot.get("selected_datasources", []) or [])
     if not snapshot_sources and snapshot.get("datasource"):
         snapshot_sources = {snapshot.get("datasource", "")}
@@ -49,7 +50,7 @@ async def restore_previous_result_node(state: AnalysisState) -> dict:
         return _unavailable_result("数据源已切换，不能复用上一数据源的查询结果，请重新发起查询。")
 
     rich_result: dict = {}
-    session_id = state.get("session_id", "") or ""
+    session_id = contexts.request.session_id
     if session_id:
         try:
             from src.memory.history_store import get_history_store

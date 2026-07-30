@@ -4,7 +4,8 @@ from __future__ import annotations
 
 from fastapi import APIRouter
 
-from src.api.schemas import ColumnCommentRequest, DataSourceCreateRequest, DataSourceUpdateRequest
+from src.api.routes._helpers import _app, _authorize_extension_scope, _registry
+from src.api.routes.access_policy import router as access_policy_router
 from src.api.routes.admin import router as admin_router
 from src.api.routes.automation import (
     create_automation_schedule,
@@ -12,16 +13,18 @@ from src.api.routes.automation import (
     list_automation_notifications,
     list_automation_schedules,
     run_automation_schedule,
+)
+from src.api.routes.automation import (
     router as automation_router,
 )
-from src.api.routes.access_policy import router as access_policy_router
-from src.api.routes._helpers import _app, _authorize_extension_scope, _registry
 from src.api.routes.chat import (
     _enforce_chat_request_quota,
     _requested_chat_datasources,
     _resolve_chat_access,
     chat,
     chat_stream,
+)
+from src.api.routes.chat import (
     router as chat_router,
 )
 from src.api.routes.datasource import (
@@ -30,6 +33,8 @@ from src.api.routes.datasource import (
     register_datasource,
     test_datasource_connection,
     update_datasource,
+)
+from src.api.routes.datasource import (
     router as datasource_router,
 )
 from src.api.routes.knowledge import (
@@ -44,21 +49,26 @@ from src.api.routes.knowledge import (
     list_knowledge,
     list_knowledge_docs,
     promote_knowledge_tag,
-    router as knowledge_router,
     search_knowledge_tags,
     test_knowledge_search,
     update_knowledge_tag_status,
     upload_knowledge_docs,
     upload_status,
 )
+from src.api.routes.knowledge import (
+    router as knowledge_router,
+)
+from src.api.routes.llm_admin import router as llm_admin_router
 from src.api.routes.management import (
     forecast_asset,
     health,
     list_models,
     profile_structured_asset,
     query_structured_asset,
-    router as management_router,
     test_model,
+)
+from src.api.routes.management import (
+    router as management_router,
 )
 from src.api.routes.mcp import (
     _connect_scoped_mcp_db,
@@ -67,16 +77,20 @@ from src.api.routes.mcp import (
     create_mcp_server,
     delete_mcp_server,
     list_mcp_servers,
-    router as mcp_router,
     test_mcp_server,
+)
+from src.api.routes.mcp import (
+    router as mcp_router,
 )
 from src.api.routes.schema import (
     _schema_manager,
     get_table,
     list_tables,
     refresh_schema,
-    router as schema_router,
     update_column_comment,
+)
+from src.api.routes.schema import (
+    router as schema_router,
 )
 from src.api.routes.session import (
     _load_checkpoint_tuple,
@@ -88,21 +102,26 @@ from src.api.routes.session import (
     list_history,
     list_session_turns,
     list_sessions,
+)
+from src.api.routes.session import (
     router as session_router,
 )
 from src.api.routes.skills import (
     delete_skill,
     get_skill_content,
-    list_skills,
-    list_skill_registry,
     install_registry_skill,
+    list_skill_registry,
+    list_skills,
     refresh_skills,
-    router as skills_router,
     toggle_skill,
     upload_skills,
 )
-from src.api.routes.visualization import adjust_chart, router as visualization_router
-
+from src.api.routes.skills import (
+    router as skills_router,
+)
+from src.api.routes.visualization import adjust_chart
+from src.api.routes.visualization import router as visualization_router
+from src.api.schemas import ColumnCommentRequest, DataSourceCreateRequest, DataSourceUpdateRequest
 
 router = APIRouter()
 for domain_router in (
@@ -118,6 +137,7 @@ for domain_router in (
     skills_router,
     visualization_router,
     knowledge_router,
+    llm_admin_router,
 ):
     router.include_router(domain_router)
 

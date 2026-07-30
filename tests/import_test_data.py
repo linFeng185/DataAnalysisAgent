@@ -24,7 +24,6 @@ import sys
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any
 
 from dotenv import load_dotenv
 
@@ -520,9 +519,9 @@ def build_ddl(table_name: str, columns: list, db: str) -> str:
     if db == "mssql":
         return (f"IF OBJECT_ID('{table_name}', 'U') IS NULL "
                 f"CREATE TABLE {q1}{table_name}{q2} (\n  "
-                + ",\n  ".join(col_defs) + f"\n);\n")
+                + ",\n  ".join(col_defs) + "\n);\n")
     if db == "oracle":
-        return f"CREATE TABLE {q1}{table_name}{q2} (\n  " + ",\n  ".join(col_defs) + f"\n)"
+        return f"CREATE TABLE {q1}{table_name}{q2} (\n  " + ",\n  ".join(col_defs) + "\n)"
     return f"CREATE TABLE IF NOT EXISTS {prefix}{q1}{table_name}{q2} (\n  " + ",\n  ".join(col_defs) + f"\n){extra};\n"
 
 

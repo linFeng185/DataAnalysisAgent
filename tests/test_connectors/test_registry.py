@@ -9,7 +9,6 @@ import pytest
 
 from src.datasource.config import DataSourceConfig
 
-
 logger = logging.getLogger(__name__)
 
 
@@ -70,7 +69,8 @@ class TestConnectorRegistry:
         expected_engine = object()
         connector = AsyncMock()
         connector.create_engine.return_value = expected_engine
-        create = lambda config: connector
+        def create(config):
+            return connector
         monkeypatch.setattr(connector_registry, "create_connector", create)
 
         result = await DataSourceRegistry()._create_engine(self._datasource("postgres"))

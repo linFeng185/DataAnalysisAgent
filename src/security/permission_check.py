@@ -220,6 +220,7 @@ def inject_row_filter(sql: str, row_filter: str) -> str:
     try:
         import sqlglot
         from sqlglot import exp
+
         from src.exceptions import SQLSecurityError
 
         tree = sqlglot.parse_one(sql)

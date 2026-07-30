@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -86,7 +86,11 @@ class TestAutomationDelivery:
         base = datetime(2026, 7, 29, tzinfo=timezone.utc)
 
         # Act / Assert
-        assert (calculate_next_run(frequency, base) - base).total_seconds() == seconds
+        result = calculate_next_run(frequency, base)
+        if frequency == "monthly":
+            assert result.year == 2026 and result.month == 8 and result.day == 29
+        else:
+            assert (result - base).total_seconds() == seconds
 
 
 @pytest.mark.asyncio
@@ -99,8 +103,8 @@ class TestAutomationStore:
     async def test_list_due_uses_valid_update_from_clause(self, monkeypatch) -> None:
         """目标表别名只能在 WHERE 中与 FROM 表关联。"""
         # Arrange
-        from src.automation.store import AutomationStore
         import src.memory.pg_pool as pg_pool_module
+        from src.automation.store import AutomationStore
 
         connection = SimpleNamespace(fetch=AsyncMock(return_value=[]))
 
@@ -133,8 +137,8 @@ class TestAutomationStore:
     async def test_create_persists_identity_and_schedule(self, monkeypatch) -> None:
         """API 传入的 tenant/user 不能被请求体覆盖。"""
         # Arrange
-        from src.automation.store import AutomationStore
         import src.memory.pg_pool as pg_pool_module
+        from src.automation.store import AutomationStore
 
         now = datetime.now(timezone.utc)
         row = {
@@ -191,8 +195,8 @@ class TestAutomationStore:
     async def test_list_notifications_is_user_scoped(self, monkeypatch) -> None:
         """租户管理员也不能读取同租户其他用户的个人通知。"""
         # Arrange
-        from src.automation.store import AutomationStore
         import src.memory.pg_pool as pg_pool_module
+        from src.automation.store import AutomationStore
 
         connection = SimpleNamespace(fetch=AsyncMock(return_value=[]))
 
@@ -222,8 +226,8 @@ class TestAutomationStore:
     async def test_identity_crud_queries_are_rls_scoped(self, monkeypatch) -> None:
         """三个管理方法都不能使用系统身份绕过租户边界。"""
         # Arrange
-        from src.automation.store import AutomationStore
         import src.memory.pg_pool as pg_pool_module
+        from src.automation.store import AutomationStore
 
         connection = SimpleNamespace(
             fetch=AsyncMock(return_value=[]),
@@ -263,9 +267,9 @@ class TestAutomationStore:
     async def test_run_payload_methods_persist_success_and_failure(self, monkeypatch) -> None:
         """运行记录方法应覆盖基线读取、通知事务和失败摘要。"""
         # Arrange
+        import src.memory.pg_pool as pg_pool_module
         from src.automation.models import ScheduleDefinition
         from src.automation.store import AutomationStore
-        import src.memory.pg_pool as pg_pool_module
 
         @asynccontextmanager
         # 方法作用：模拟 record_success 使用的数据库事务。

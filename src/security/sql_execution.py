@@ -10,7 +10,6 @@ from pydantic import BaseModel, Field
 from src.failure_policy import FailureDomain, must_fail_closed
 from src.logging_config import get_logger
 
-
 logger = get_logger(__name__)
 
 _STATE_MUTATING_FUNCTIONS = frozenset({

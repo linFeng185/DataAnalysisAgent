@@ -9,7 +9,7 @@ from typing import Any, Sequence
 from pydantic import BaseModel, Field, field_validator
 
 from src.logging_config import get_logger
-from src.tools.forecasting import ForecastResult, ForecastingError, forecast_series
+from src.tools.forecasting import ForecastingError, ForecastResult, forecast_series
 
 logger = get_logger(__name__)
 
@@ -125,7 +125,7 @@ class ForecastEngine:
         for end in range(min_train, len(values) - horizon + 1):
             state = model.fit(values[:end])
             predicted = self._normalize_predictions(model.predict(state, horizon), horizon)
-            errors.extend(actual - forecast for actual, forecast in zip(values[end:end + horizon], predicted))
+            errors.extend(actual - forecast for actual, forecast in zip(values[end:end + horizon], predicted, strict=False))
         if not errors:
             raise ForecastingError("样本不足，无法执行预测模型回测")
         mae = sum(abs(error) for error in errors) / len(errors)
@@ -144,7 +144,7 @@ class ForecastEngine:
         for end in range(min_train, len(values) - horizon + 1):
             state = model.fit(values[:end])
             predicted = self._normalize_predictions(model.predict(state, horizon), horizon)
-            errors.extend(actual - forecast for actual, forecast in zip(values[end:end + horizon], predicted))
+            errors.extend(actual - forecast for actual, forecast in zip(values[end:end + horizon], predicted, strict=False))
         if len(errors) < 2:
             return 0.0
         mean = sum(errors) / len(errors)

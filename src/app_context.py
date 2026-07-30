@@ -16,7 +16,6 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 from src.logging_config import get_logger
 from src.security.tenant_policy import TenantPolicy
 
-
 logger = get_logger(__name__)
 
 T = TypeVar("T")

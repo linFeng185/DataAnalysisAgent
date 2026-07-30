@@ -11,7 +11,6 @@ import pytest
 from fastapi import HTTPException
 from pydantic import ValidationError
 
-
 logger = logging.getLogger(__name__)
 
 

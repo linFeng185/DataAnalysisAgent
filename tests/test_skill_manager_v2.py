@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+
 def _write_skill(root: Path, name: str, keyword: str) -> None:
     """写入最小 Skill 清单供作用域发现测试使用。"""
     skill_dir = root / name

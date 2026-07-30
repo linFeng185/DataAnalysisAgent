@@ -6,7 +6,6 @@ from src.connectors.base import ConnectorBase
 from src.datasource.config import DataSourceConfig
 from src.logging_config import get_logger
 
-
 logger = get_logger(__name__)
 _registry: dict[str, type[ConnectorBase]] = {}
 _defaults_loaded = False

@@ -7,7 +7,9 @@ import time
 from fastapi import APIRouter, HTTPException, Query
 
 from src.api.schemas import (
-    DataSourceCreateRequest, DataSourceInfo, DataSourceUpdateRequest,
+    DataSourceCreateRequest,
+    DataSourceInfo,
+    DataSourceUpdateRequest,
 )
 from src.logging_config import get_logger
 
@@ -45,11 +47,13 @@ async def register_datasource(req: DataSourceCreateRequest):
     Returns:
         已注册数据源摘要。
     """
-    from src.datasource.providers.external import ExternalDataSourceProvider
-    from src.api.auth import (
-        get_current_tenant_id, get_current_user_id, require_tenant_admin,
-    )
     import src.api.routes as routes_package
+    from src.api.auth import (
+        get_current_tenant_id,
+        get_current_user_id,
+        require_tenant_admin,
+    )
+    from src.datasource.providers.external import ExternalDataSourceProvider
 
     require_tenant_admin()
     registry = routes_package._registry()
@@ -57,18 +61,20 @@ async def register_datasource(req: DataSourceCreateRequest):
     if provider is None:
         provider = ExternalDataSourceProvider()
         registry.register_provider("external", provider)
-    ds = await provider.register(req)
+    tenant_id = get_current_tenant_id()
+    owner_user_id = get_current_user_id()
+    ds = await provider.register(req, tenant_id=tenant_id, owner_user_id=owner_user_id)
     try:
         await provider.persist(
             ds,
-            tenant_id=get_current_tenant_id(),
-            owner_user_id=get_current_user_id(),
+            tenant_id=tenant_id,
+            owner_user_id=owner_user_id,
         )
     except Exception as exc:
-        await provider.unregister(ds.name)
+        await provider.unregister(ds.name, tenant_id=tenant_id)
         logger.error("数据源注册持久化失败", datasource=ds.name, exc_info=True)
         raise HTTPException(500, "数据源配置保存失败") from exc
-    registry.invalidate(ds.name)
+    registry.invalidate(ds.name, tenant_id=tenant_id)
     logger.info("数据源注册路由完成", datasource=ds.name)
     return _datasource_info(ds)
 
@@ -78,9 +84,9 @@ async def register_datasource(req: DataSourceCreateRequest):
 # Args: req - 待测试的数据源配置。
 # Returns: 连通性结果和面向用户的简短消息。
 async def test_datasource_connection(req: DataSourceCreateRequest):
+    import src.api.routes as routes_package
     from src.api.auth import require_tenant_admin
     from src.datasource.providers.external import ExternalDataSourceProvider
-    import src.api.routes as routes_package
 
     require_tenant_admin()
     registry = routes_package._registry()
@@ -104,21 +110,21 @@ async def test_datasource_connection(req: DataSourceCreateRequest):
 # Args: name - 数据源名称；req - 新的数据源配置。
 # Returns: 更新后的安全摘要。
 async def update_datasource(name: str, req: DataSourceUpdateRequest):
+    import src.api.routes as routes_package
     from src.api.auth import (
         get_current_tenant_id,
         get_current_user_id,
         is_platform_super_admin,
         require_tenant_admin,
     )
-    import src.api.routes as routes_package
 
     require_tenant_admin()
     registry = routes_package._registry()
     provider = registry.get_provider("external")
     if provider is None:
         raise HTTPException(404, f"数据源 '{name}' 未找到")
-    current = await provider.lookup(name)
     tenant_id = get_current_tenant_id()
+    current = await provider.lookup(name, tenant_id=tenant_id)
     if current is None or (
         int(getattr(current, "tenant_id", 0)) != tenant_id
         and not is_platform_super_admin()
@@ -154,23 +160,28 @@ async def delete_datasource(name: str):
         删除状态。
     """
     logger.debug("数据源删除路由入口", datasource=name)
-    from src.api.auth import (
-        get_current_tenant_id, is_platform_super_admin, require_tenant_admin,
-    )
     import src.api.routes as routes_package
+    from src.api.auth import (
+        get_current_tenant_id,
+        require_tenant_admin,
+    )
 
     require_tenant_admin()
     provider = routes_package._registry().get_provider("external")
+    removed_persisted = True
+    tenant_id = get_current_tenant_id()
     if provider is not None and hasattr(provider, "delete_persisted"):
-        await provider.delete_persisted(
+        removed_persisted = await provider.delete_persisted(
             name,
-            tenant_id=get_current_tenant_id(),
-            platform_admin=is_platform_super_admin(),
+            tenant_id=tenant_id,
+            platform_admin=False,
         )
-    if not await routes_package._registry().unregister(name):
+    if not removed_persisted:
+        raise HTTPException(404, f"数据源 '{name}' 未找到")
+    if not await routes_package._registry().unregister(name, tenant_id=tenant_id):
         logger.warning("数据源删除目标不存在", datasource=name)
         raise HTTPException(404, f"数据源 '{name}' 未找到")
-    logger.info("数据源删除路由完成", datasource=name)
+    logger.info("数据源删除路由完成", datasource=name, tenant_id=tenant_id)
     return {"status": "ok", "message": f"数据源 '{name}' 已删除"}
 
 
@@ -179,11 +190,10 @@ async def delete_datasource(name: str):
 # Args: page - 页码；page_size - 每页数量。
 # Returns: 不包含行列权限细节的数据源分页结果。
 async def list_datasources(page: int = Query(default=1, ge=1), page_size: int = Query(default=20, ge=1, le=100)):
+    import src.api.routes as routes_package
     from src.api.auth import get_current_role, get_current_tenant_id, get_current_user_id
     from src.app_context import get_tenant_policy
     from src.security.permission_check import resolve_datasource_access
-
-    import src.api.routes as routes_package
 
     items = await routes_package._registry().list_all()
     logger.debug(

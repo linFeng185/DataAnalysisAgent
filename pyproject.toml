@@ -36,6 +36,7 @@ dependencies = [
     "aiohttp>=3.9",
     "typing-extensions>=4.12",
     "jinja2>=3.1",
+    "jsonschema>=4.23",
     "prometheus-client>=0.21.0",
 ]
 
@@ -45,6 +46,7 @@ dev = [
     "pytest-asyncio>=0.25.0",
     "coverage[toml]>=7.6",
     "langsmith>=0.3.0",
+    "ruff>=0.12.0",
 ]
 structured = [
     "openpyxl>=3.1",
@@ -90,6 +92,7 @@ markers = [
     "integration: 使用真实模块边界但不访问远程服务的集成测试",
     "local_llm: 调用快速本地模型的集成、链路或冒烟测试",
     "live_llm: 仅在 RUN_LIVE_LLM_TESTS=1 时调用远程配置模型的测试",
+    "live_datasource: 仅在 RUN_LIVE_DATASOURCE_TESTS=1 时访问显式配置的外部数据源",
 ]
 filterwarnings = [
     "ignore:'asyncio\\.iscoroutinefunction' is deprecated and slated for removal in Python 3\\.16; use inspect\\.iscoroutinefunction\\(\\) instead:DeprecationWarning:chromadb\\.telemetry\\.opentelemetry.*",
@@ -106,3 +109,19 @@ fail_under = 67
 precision = 2
 show_missing = true
 skip_empty = true
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+extend-exclude = ["data", "chroma_data", "frontend", "logs"]
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I", "B", "ASYNC"]
+ignore = ["B008", "ASYNC230", "ASYNC240"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**/*.py" = ["B017"]
+"src/api/routes/__init__.py" = ["F401"]
+"src/llm/adapters/registry.py" = ["E402"]
+"src/tools/processors.py" = ["E701", "E702"]
+"tests/import_test_data.py" = ["E701", "E702"]

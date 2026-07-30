@@ -31,7 +31,7 @@ from langchain_core.runnables import RunnableConfig
 from src.graph.state import AnalysisState
 from src.llm.client import get_task_llm as _get_task_llm
 from src.llm.client import is_task_llm_available as _is_task_llm_available
-from src.llm.prompt_budget import PromptSection, build_budgeted_prompt
+from src.llm.prompt_budget import PromptSection
 from src.llm.prompts import get_dialect_cheatsheet
 from src.logging_config import get_logger
 from src.security.sql_execution import normalize_sql_dialect
@@ -70,12 +70,15 @@ async def generate_sql_node(state: AnalysisState, config: RunnableConfig) -> dic
 
     返回: {"generated_sql": str, "retry_count": int}
     """
+    from src.graph.context import read_contexts
+
+    contexts = read_contexts(state)
     _start = time.monotonic()
     logger.info("节点开始", node="generate_sql")
     tables = state.get("relevant_tables", [])
-    dialect = state.get("dialect", "clickhouse")
-    query = state.get("user_query", "")
-    retry = state.get("retry_count", 0)
+    dialect = contexts.execution.dialect or "clickhouse"
+    query = contexts.request.user_query
+    retry = contexts.execution.retry_count
 
     # 表结构 → Markdown 格式（用于 Prompt）
     schema_text = format_schema_for_prompt(tables, dialect)
@@ -220,15 +223,18 @@ async def generate_sql_node(state: AnalysisState, config: RunnableConfig) -> dic
 # Returns: 按证据类型分段的文本；无证据时返回明确占位。
 def build_sql_grounding_context(state: AnalysisState) -> str:
     """组装意图、业务规则、知识命中、枚举字典和已验证 SQL 示例。"""
+    from src.graph.context import read_contexts
+
+    contexts = read_contexts(state)
     logger.debug(
         "组装 SQL 证据上下文入口",
-        intent=state.get("intent", ""),
+        intent=contexts.routing.intent,
         rule_chars=len(state.get("business_rules_text", "") or ""),
         knowledge_chars=len(state.get("long_term_memories_text", "") or ""),
     )
     try:
         sections: list[str] = []
-        intent = str(state.get("intent", "") or "")
+        intent = contexts.routing.intent
         if intent:
             sections.append(f"### 查询意图\n{intent}")
         if state.get("needs_decompose"):
@@ -349,9 +355,7 @@ async def _llm_generate(
         f"UTC: {_utc}。{dialect} 当前时间函数: {_time_function}；"
         "用户指定具体日期时使用明确边界，不混用其他方言函数。"
     )
-    prompt = build_budgeted_prompt(
-        "sql.generate",
-        [
+    prompt_sections = [
             PromptSection(
                 "skill",
                 skill_prompt,
@@ -407,22 +411,28 @@ async def _llm_generate(
                 priority=30,
                 max_chars=1500,
             ),
-        ],
-        system_values={"dialect": dialect, "skill_instructions": ""},
-    )
+        ]
 
     try:
-        from langchain_core.messages import HumanMessage, SystemMessage
+        from src.llm.invocation import prepare_invocation
 
-        messages = [
-            SystemMessage(content=prompt.system),
-            HumanMessage(content=prompt.human),
-        ]
+        prepared = prepare_invocation(
+            "sql.generate",
+            prompt_sections,
+            task="generate_sql",
+            system_values={"dialect": dialect, "skill_instructions": ""},
+            config=dict(config or {}),
+            metadata={"node": "generate_sql", "dialect": dialect},
+            model=llm,
+        )
 
         # ── 流式消费：逐 chunk 累积，LangGraph 自动捕获事件推送到前端 ──
         content_parts: list[str] = []
         reasoning_parts: list[str] = []
-        async for chunk in llm.astream(messages, config=config):
+        async for chunk in prepared.model.astream(
+            prepared.messages,
+            config=prepared.config,
+        ):
             # 提取 content（兼容 AIMessageChunk.content 和 ChatGenerationChunk.text）
             chunk_content = ""
             if hasattr(chunk, "content") and chunk.content:
@@ -535,7 +545,9 @@ def _template_generate(tables: list[dict], retry: int, state: AnalysisState) -> 
     Returns:
         可证明正确的 SQL；无法确定语义时返回空字符串。
     """
-    query = (state.get("user_query", "") or "").strip()
+    from src.graph.context import read_contexts
+
+    query = read_contexts(state).request.user_query.strip()
     logger.debug("SQL 模板回退入口", query=query[:80], retry=retry, table_count=len(tables))
     if retry > 0 or not tables:
         logger.info("SQL 模板回退停止", reason="重试不可修复或无候选表")

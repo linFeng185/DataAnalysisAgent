@@ -11,13 +11,13 @@
 from __future__ import annotations
 
 import asyncio
-import bcrypt
 import os
 import threading
 import time
 from contextvars import ContextVar, Token
 from datetime import datetime, timedelta, timezone
 
+import bcrypt
 import jwt
 from fastapi import APIRouter, HTTPException, Request, Response
 from pydantic import BaseModel, Field
@@ -32,8 +32,8 @@ from src.security.tenant_policy import (
     ANONYMOUS_ROLE,
     ANONYMOUS_USER_ID,
     DEFAULT_TENANT_ID,
-    RequestIdentity,
     SUPER_ADMIN_USER_ID,
+    RequestIdentity,
 )
 
 logger = get_logger(__name__)
@@ -49,14 +49,17 @@ _current_tenant_id: ContextVar[int] = ContextVar(
     default=DEFAULT_TENANT_ID,
 )
 _current_role: ContextVar[str] = ContextVar("current_role", default=ANONYMOUS_ROLE)
+_current_tenant_code: ContextVar[str] = ContextVar("current_tenant_code", default="default")
+_current_username: ContextVar[str] = ContextVar("current_username", default="")
 ACCESS_TOKEN_COOKIE = "access_token"
 _DUMMY_PASSWORD_HASH = (
     "$2b$12$yZTzGXG0vRKu0H18pTJmo.9LXjZUANU747KXcPehet4YrkgPnQKlG"
 )
 _registration_limits: dict[str, list[float]] = {}
 _registration_rate_lock = threading.Lock()
-_login_limits: dict[tuple[str, str], list[float]] = {}
+_login_limits: dict[tuple[str, str, str], list[float]] = {}
 _login_rate_lock = threading.Lock()
+AuthIdentity = tuple[int, int, str, str, str]
 
 
 def get_current_user_id() -> int:
@@ -95,6 +98,24 @@ def get_current_role() -> str:
     logger.debug("获取当前角色入口")
     result = _current_role.get()
     logger.debug("获取当前角色完成", role=result)
+    return result
+
+
+# 方法作用：获取当前请求令牌携带的租户编码。
+# Args: 无。
+# Returns: 当前租户编码，兼容旧令牌时返回 default。
+def get_current_tenant_code() -> str:
+    result = _current_tenant_code.get()
+    logger.debug("获取当前租户编码完成", tenant_code=result)
+    return result
+
+
+# 方法作用：获取当前请求令牌携带的大小写敏感用户名。
+# Args: 无。
+# Returns: 当前用户名，兼容旧令牌时返回空字符串。
+def get_current_username() -> str:
+    result = _current_username.get()
+    logger.debug("获取当前用户名完成", username=result)
     return result
 
 
@@ -167,6 +188,18 @@ def require_tenant_admin() -> None:
         logger.warning("校验租户管理员权限拒绝", role=role)
         raise HTTPException(403, "需要租户管理员权限")
     logger.debug("校验租户管理员权限完成", role=role)
+
+
+# 方法作用：限制租户用户管理能力只能由 tenant_admin 使用。
+# Args: 无。
+# Returns: 授权成功时无返回值，否则抛出 HTTP 403。
+def require_tenant_user_admin() -> None:
+    role = get_current_role()
+    logger.debug("校验租户用户管理员入口", role=role, tenant_id=get_current_tenant_id())
+    if role != "tenant_admin":
+        logger.warning("校验租户用户管理员拒绝", role=role)
+        raise HTTPException(403, "需要当前租户管理员权限")
+    logger.debug("校验租户用户管理员完成", role=role)
 
 
 # 方法作用：使用 bcrypt 生成密码哈希并拒绝超出算法安全边界的输入。
@@ -252,7 +285,13 @@ def _secret() -> str:
     return key
 
 
-def create_access_token(user_id: int, tenant_id: int, role: str) -> str:
+def create_access_token(
+    user_id: int,
+    tenant_id: int,
+    role: str,
+    tenant_code: str = "default",
+    username: str = "",
+) -> str:
     """创建 JWT access token。
 
     Args:
@@ -266,6 +305,7 @@ def create_access_token(user_id: int, tenant_id: int, role: str) -> str:
     s = get_settings()
     token = jwt.encode({
         "user_id": user_id, "tenant_id": tenant_id, "role": role,
+        "tenant_code": tenant_code, "username": username,
         "exp": datetime.now(timezone.utc) + timedelta(hours=s.jwt_access_token_expire_hours),
     }, _secret(), algorithm="HS256")
     logger.debug("创建访问令牌完成", user_id=user_id, tenant_id=tenant_id)
@@ -316,7 +356,13 @@ def _unauthorized(detail: str) -> JSONResponse:
 
 class LoginRequest(BaseModel):
     """登录请求。"""
-    username: str = Field(..., min_length=1)
+    tenant_code: str = Field(
+        ...,
+        min_length=1,
+        max_length=32,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9-]{0,31}$",
+    )
+    username: str = Field(..., min_length=1, max_length=64)
     password: str = Field(..., min_length=1, max_length=72)
 
 
@@ -351,15 +397,27 @@ def _check_registration_rate_limit(client_key: str, limit: int) -> bool:
     return True
 
 
-# 方法作用：按客户端地址和规范化用户名限制登录尝试，减缓撞库与密码猜测。
-# Args: client_key - 客户端地址；username - 登录用户名；limit - 一小时最大尝试数。
+# 方法作用：按客户端地址、租户编码和大小写敏感用户名限制登录尝试。
+# Args: client_key - 客户端地址；tenant_code - 租户编码；username - 登录用户名；limit - 一小时最大尝试数。
 # Returns: 未超过限制返回 True，否则返回 False。
-def _check_login_rate_limit(client_key: str, username: str, limit: int) -> bool:
-    normalized_username = username.strip().casefold()
-    key = (client_key, normalized_username)
+def _check_login_rate_limit(
+    client_key: str,
+    tenant_code: str,
+    username: str,
+    limit: int,
+) -> bool:
+    normalized_tenant_code = tenant_code.strip().lower()
+    normalized_username = username.strip()
+    key = (client_key, normalized_tenant_code, normalized_username)
     now = time.monotonic()
     window = now - 3600
-    logger.debug("登录限流检查入口", client_key=client_key, username=normalized_username, limit=limit)
+    logger.debug(
+        "登录限流检查入口",
+        client_key=client_key,
+        tenant_code=normalized_tenant_code,
+        username=normalized_username,
+        limit=limit,
+    )
     with _login_rate_lock:
         for stale_key in [
             candidate for candidate, timestamps in _login_limits.items()
@@ -412,31 +470,41 @@ async def login(req: LoginRequest, response: Response, request: Request = None):
     settings = get_settings()
     if not _check_login_rate_limit(
         client_key,
+        req.tenant_code,
         req.username,
         max(1, int(getattr(settings, "login_max_per_hour", 20))),
     ):
         raise HTTPException(429, "登录尝试过于频繁，请稍后重试")
-    logger.debug("登录入口", username=req.username, client_key=client_key)
+    tenant_code = req.tenant_code.strip().lower()
+    username = req.username.strip()
+    logger.debug(
+        "登录入口",
+        tenant_code=tenant_code,
+        username=username,
+        client_key=client_key,
+    )
     try:
         pool = await get_pg_pool()
         async with pool.acquire() as conn:
             row = await conn.fetchrow(
-                "SELECT u.id, u.tenant_id, u.role, u.password_hash, u.is_active, "
+                "SELECT u.id, u.tenant_id, t.code AS tenant_code, u.role, "
+                "u.password_hash, u.is_active, "
                 "u.failed_login_attempts, u.locked_until, t.is_active AS tenant_active "
                 "FROM users u JOIN tenants t ON t.id=u.tenant_id "
-                "WHERE LOWER(u.username)=LOWER($1)",
-                req.username,
+                "WHERE LOWER(t.code)=LOWER($1) AND u.username=$2",
+                tenant_code,
+                username,
             )
             if not row:
                 await asyncio.to_thread(_verify_password, req.password, _DUMMY_PASSWORD_HASH)
-                logger.warning("登录失败", username=req.username, reason="凭证无效")
-                raise HTTPException(401, "用户名或密码错误")
+                logger.warning("登录失败", tenant_code=tenant_code, username=username, reason="凭证无效")
+                raise HTTPException(401, "租户编码、用户名或密码错误")
             if not bool(row.get("is_active", True)):
                 logger.warning("登录失败", username=req.username, reason="账号停用")
-                raise HTTPException(401, "用户名或密码错误")
+                raise HTTPException(401, "租户编码、用户名或密码错误")
             if not bool(row.get("tenant_active", True)):
                 logger.warning("登录失败", username=req.username, reason="租户停用")
-                raise HTTPException(401, "用户名或密码错误")
+                raise HTTPException(401, "租户编码、用户名或密码错误")
             now = datetime.now(timezone.utc)
             locked_until = row.get("locked_until")
             if locked_until is not None and locked_until > now:
@@ -468,16 +536,28 @@ async def login(req: LoginRequest, response: Response, request: Request = None):
                     attempts=attempts,
                     locked=next_locked_until is not None,
                 )
-                raise HTTPException(401, "用户名或密码错误")
+                raise HTTPException(401, "租户编码、用户名或密码错误")
             await conn.execute(
                 "UPDATE users SET failed_login_attempts=0, locked_until=NULL, "
                 "last_login_at=NOW() WHERE id=$1",
                 row["id"],
             )
-        token = create_access_token(row["id"], row["tenant_id"], row["role"])
+        token = create_access_token(
+            row["id"],
+            row["tenant_id"],
+            row["role"],
+            str(row["tenant_code"]),
+            username,
+        )
         _set_access_cookie(response, token)
         logger.info("登录成功", username=req.username, user_id=row["id"])
-        return {"user_id": row["id"], "tenant_id": row["tenant_id"], "role": row["role"]}
+        return {
+            "user_id": row["id"],
+            "tenant_id": row["tenant_id"],
+            "tenant_code": str(row["tenant_code"]),
+            "username": username,
+            "role": row["role"],
+        }
     except HTTPException:
         raise
     except Exception as exc:
@@ -495,55 +575,8 @@ async def register(req: RegisterRequest, response: Response, request: Request = 
     Returns:
         不含明文令牌的用户身份信息；令牌写入 HttpOnly Cookie。
     """
-    client_key = "unknown"
-    if request is not None and request.client is not None:
-        client_key = request.client.host
-    settings = get_settings()
-    if not bool(getattr(settings, "registration_enabled", False)):
-        logger.warning("公开注册拒绝", reason="功能已关闭")
-        raise HTTPException(403, "公开注册未开启")
-    if not _check_registration_rate_limit(
-        client_key,
-        max(1, int(getattr(settings, "registration_max_per_hour", 10))),
-    ):
-        raise HTTPException(429, "注册请求过于频繁，请稍后重试")
-    logger.debug("注册入口", username=req.username, client_key=client_key)
-    try:
-        pool = await get_pg_pool()
-        async with pool.acquire() as conn:
-            # 方法作用：在事务边界内创建租户和用户。
-            # Args: 无，使用外层注册请求和数据库连接。
-            # Returns: (user_id, tenant_id) 二元组。
-            async def _create_user() -> tuple[int, int]:
-                """在一个事务中创建租户和用户，保证失败时不残留半成品。"""
-                logger.debug(
-                    "注册数据库写入入口",
-                    username=req.username,
-                )
-                tid = DEFAULT_TENANT_ID
-                pwd = await asyncio.to_thread(_hash_password, req.password)
-                uid = await conn.fetchval(
-                    "INSERT INTO users (username, password_hash, role, tenant_id) "
-                    "VALUES ($1, $2, 'analyst', $3) RETURNING id", req.username, pwd, tid)
-                logger.debug("注册数据库写入完成", user_id=uid, tenant_id=tid)
-                return uid, tid
-
-            transaction_factory = getattr(conn, "transaction", None)
-            if callable(transaction_factory):
-                async with transaction_factory():
-                    uid, tid = await _create_user()
-            else:
-                logger.warning("注册连接不支持事务，使用兼容回退", username=req.username)
-                uid, tid = await _create_user()
-        token = create_access_token(uid, tid, "analyst")
-        _set_access_cookie(response, token)
-        logger.info("注册成功", username=req.username, user_id=uid, tenant_id=tid)
-        return {"user_id": uid, "tenant_id": tid, "role": "analyst"}
-    except Exception as exc:
-        logger.error("注册异常", error=str(exc), exc_info=True)
-        if type(exc).__name__ == "UniqueViolationError":
-            raise HTTPException(409, "用户名已存在") from exc
-        raise HTTPException(500, "注册服务暂不可用") from exc
+    logger.warning("公开注册拒绝", reason="平台策略永久关闭", username=req.username)
+    raise HTTPException(403, "公开注册未开启")
 
 
 @auth_router.post("/logout")
@@ -578,13 +611,14 @@ async def current_user() -> dict:
     """
     logger.debug("当前身份查询入口")
     user_id = get_current_user_id()
-    settings = get_settings()
     result = {
         "authenticated": user_id > 0,
         "auth_required": get_tenant_policy().requires_authentication(),
-        "registration_enabled": bool(getattr(settings, "registration_enabled", False)),
+        "registration_enabled": False,
         "user_id": user_id,
         "tenant_id": get_current_tenant_id(),
+        "tenant_code": get_current_tenant_code(),
+        "username": get_current_username(),
         "role": get_current_role(),
     }
     logger.info("当前身份查询完成", authenticated=result["authenticated"], user_id=user_id)
@@ -706,7 +740,7 @@ class AuthMiddleware:
     def _authenticate_request(
         self,
         request: Request,
-    ) -> tuple[tuple[int, int, str] | None, JSONResponse | None]:
+    ) -> tuple[AuthIdentity | None, JSONResponse | None]:
         """执行不消费请求体的同步认证决策。"""
         from src.security.api_access_policy import AuthMode
 
@@ -732,7 +766,13 @@ class AuthMiddleware:
                 logger.warning("管理端点认证失败", path=request.url.path)
                 return None, _unauthorized("管理端点需要 X-Admin-Key")
             logger.info("管理端点 API Key 认证完成", path=request.url.path)
-            return (SUPER_ADMIN_USER_ID, DEFAULT_TENANT_ID, "super_admin"), None
+            return (
+                SUPER_ADMIN_USER_ID,
+                DEFAULT_TENANT_ID,
+                "super_admin",
+                "default",
+                "super_admin",
+            ), None
         logger.debug(
             "认证令牌来源已选择",
             source="bearer" if bearer_token else "cookie" if cookie_token else "missing",
@@ -740,11 +780,23 @@ class AuthMiddleware:
         if not token:
             if auth_mode is AuthMode.OPTIONAL:
                 logger.debug("可选认证匿名放行", path=request.url.path)
-                return (ANONYMOUS_USER_ID, DEFAULT_TENANT_ID, ANONYMOUS_ROLE), None
+                return (
+                    ANONYMOUS_USER_ID,
+                    DEFAULT_TENANT_ID,
+                    ANONYMOUS_ROLE,
+                    "default",
+                    "",
+                ), None
             logger.warning("认证令牌缺失", path=request.url.path, auth_mode=auth_mode.value)
             return None, _unauthorized("未提供认证令牌")
 
-        identity = (ANONYMOUS_USER_ID, DEFAULT_TENANT_ID, ANONYMOUS_ROLE)
+        identity: AuthIdentity = (
+            ANONYMOUS_USER_ID,
+            DEFAULT_TENANT_ID,
+            ANONYMOUS_ROLE,
+            "default",
+            "",
+        )
         try:
             if token:
                 payload = jwt.decode(token, _secret(), algorithms=["HS256"])
@@ -752,6 +804,8 @@ class AuthMiddleware:
                     int(payload["user_id"]),
                     int(payload["tenant_id"]),
                     str(payload["role"]).strip().lower(),
+                    str(payload.get("tenant_code", "default")).strip().lower(),
+                    str(payload.get("username", "")),
                 )
         except jwt.ExpiredSignatureError:
             logger.info("JWT 已过期")
@@ -793,32 +847,48 @@ class AuthMiddleware:
         return identity, None
 
     # 方法作用：把认证身份写入当前协程 ContextVar。
-    # Args: identity - user_id、tenant_id、role 身份元组。
-    # Returns: 用于后续精确 reset 的三个 ContextVar Token。
+    # Args: identity - user_id、tenant_id、role、tenant_code、username 身份元组。
+    # Returns: 用于后续精确 reset 的五个 ContextVar Token。
     def _set_identity(
         self,
-        identity: tuple[int, int, str],
-    ) -> tuple[Token[int], Token[int], Token[str]]:
+        identity: AuthIdentity,
+    ) -> tuple[Token[int], Token[int], Token[str], Token[str], Token[str]]:
         """注入请求身份并返回上下文令牌。"""
         logger.debug("请求身份注入入口", user_id=identity[0], tenant_id=identity[1])
         user_context = _current_user_id.set(identity[0])
         tenant_context = _current_tenant_id.set(identity[1])
         role_context = _current_role.set(identity[2])
+        tenant_code_context = _current_tenant_code.set(identity[3])
+        username_context = _current_username.set(identity[4])
         logger.debug("请求身份已注入", user_id=identity[0], tenant_id=identity[1], role=identity[2])
-        return user_context, tenant_context, role_context
+        return (
+            user_context,
+            tenant_context,
+            role_context,
+            tenant_code_context,
+            username_context,
+        )
 
-    # 方法作用：使用请求进入时的 Token 精确恢复三个身份 ContextVar。
-    # Args: contexts - 三个 ContextVar Token；path - 当前请求路径。
+    # 方法作用：使用请求进入时的 Token 精确恢复五个身份 ContextVar。
+    # Args: contexts - 五个 ContextVar Token；path - 当前请求路径。
     # Returns: 无返回值。
     def _reset_identity(
         self,
-        contexts: tuple[Token[int], Token[int], Token[str]],
+        contexts: tuple[Token[int], Token[int], Token[str], Token[str], Token[str]],
         path: str,
     ) -> None:
         """清理请求身份，防止连接复用或并发请求间污染。"""
         logger.debug("请求身份清理入口", path=path)
-        user_context, tenant_context, role_context = contexts
+        (
+            user_context,
+            tenant_context,
+            role_context,
+            tenant_code_context,
+            username_context,
+        ) = contexts
         _current_user_id.reset(user_context)
         _current_tenant_id.reset(tenant_context)
         _current_role.reset(role_context)
+        _current_tenant_code.reset(tenant_code_context)
+        _current_username.reset(username_context)
         logger.debug("请求身份已清理", path=path)

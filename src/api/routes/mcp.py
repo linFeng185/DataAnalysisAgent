@@ -7,9 +7,9 @@ from contextlib import asynccontextmanager
 
 from fastapi import APIRouter, HTTPException
 
+from src.api.routes._helpers import _authorize_extension_scope
 from src.api.schemas import MCPServerCreate
 from src.logging_config import get_logger
-from src.api.routes._helpers import _authorize_extension_scope
 
 logger = get_logger(__name__)
 router = APIRouter()
@@ -92,7 +92,9 @@ async def _connect_scoped_mcp_db() -> AsyncIterator:
     """所有 MCP 管理 SQL 必须经过事务局部 RLS 身份注入。"""
     logger.debug("连接 MCP 作用域数据库入口")
     from src.api.auth import (
-        get_current_role, get_current_tenant_id, get_current_user_id,
+        get_current_role,
+        get_current_tenant_id,
+        get_current_user_id,
     )
     from src.memory.pg_pool import pg_connection
 
@@ -196,6 +198,7 @@ async def create_mcp_server(req: MCPServerCreate):
     )
     try:
         import json
+
         import src.api.routes as routes_package
 
         async with routes_package._connect_scoped_mcp_db() as conn:

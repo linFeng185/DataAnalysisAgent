@@ -176,3 +176,13 @@ class ExternalActionRegistry:
         logger.debug("写入外部动作审计入口", action=request.action_name, status=result.status)
         self._audit.append({"action_name": request.action_name, "idempotency_key": request.idempotency_key, "status": result.status, "timestamp": datetime.now(timezone.utc).isoformat()})
         logger.info("写入外部动作审计完成", action=request.action_name, status=result.status)
+
+
+def get_action_registry() -> ExternalActionRegistry:
+    """从当前应用上下文获取请求共享的外部动作注册表。"""
+    from src.app_context import get_app_context
+
+    context = get_app_context()
+    result = context.get_or_create("external_action_registry", ExternalActionRegistry)
+    logger.info("获取外部动作注册表完成")
+    return result

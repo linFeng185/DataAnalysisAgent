@@ -11,11 +11,10 @@ interface ProgressNode {
 }
 interface StreamBuffer {
   node: string;
-  reasoning: string;
   tokens: string;
 }
 interface AssistantContent {
-  reasoning: string;
+  decisionSummary: string;
   tokens: string;
   streamBuffers: Record<string, StreamBuffer>;
   sql: string;
@@ -36,7 +35,7 @@ export interface ChatTurn {
 
 function emptyAssistant(): AssistantContent {
   return {
-    reasoning: '', tokens: '', sql: '',
+    decisionSummary: '', tokens: '', sql: '',
     streamBuffers: {},
     progressNodes: {}, validationErrors: [], analysisText: '',
   };
@@ -53,7 +52,7 @@ function turnFromData(d: ChatTurnData, datasource: string): ChatTurn {
     assistant: {
       ...emptyAssistant(),
       sql: (finalResult?.sql as string) || d.sql,
-      reasoning: (finalResult?.sql_reasoning_content as string) || '',
+      decisionSummary: (finalResult?.decision_summary as string) || '',
       tokens: d.assistant_summary,
     },
     finalResult,
@@ -88,6 +87,9 @@ function clearStorage() {
   } catch { /* ignore */ }
 }
 
+// 方法作用：管理对话轮次、SSE 事件、会话恢复和当前租户模型选择透传。
+// Args: 无。
+// Returns: 对话状态、发送/取消/恢复操作及加载状态。
 export function useChat() {
   const saved = useRef(loadFromStorage());
   const [turns, setTurns] = useState<ChatTurn[]>(saved.current?.turns || []);
@@ -111,6 +113,7 @@ export function useChat() {
     datasource: string,
     _datasources?: string[],
     _modelId?: string,
+    _llmConnectionId?: number,
     enabledSkillIds?: string[],
   ) => {
     aborterRef.current?.abort();
@@ -135,6 +138,7 @@ export function useChat() {
 
     const dss = _datasources && _datasources.length > 1 ? _datasources : undefined;
     const mid = _modelId || undefined;
+    const cid = _llmConnectionId;
     aborterRef.current = streamChat(query, datasource, sid,
       (evt: Record<string, unknown>) => {
         const e = evt as Record<string, unknown>;
@@ -169,38 +173,20 @@ export function useChat() {
               return { streamBuffers: {
                 ...existingBuffers,
                 [e.stream_id as string]: existingBuffers[e.stream_id as string] || {
-                  node: (e.node as string) || 'unknown', reasoning: '', tokens: '',
+                  node: (e.node as string) || 'unknown', tokens: '',
                 },
               } };
             });
             break;
           case 'thinking':
-            if (e.reasoning_content) updateAssistant(a => {
-              const streamId = (e.stream_id as string) || `legacy:${(e.node as string) || 'unknown'}`;
-              const existingBuffers = a.streamBuffers || {};
-              const current = existingBuffers[streamId] || {
-                node: (e.node as string) || 'unknown', reasoning: '', tokens: '',
-              };
-              const streamBuffers = {
-                ...existingBuffers,
-                [streamId]: {
-                  ...current,
-                  reasoning: current.reasoning + (e.reasoning_content as string),
-                },
-              };
-              const reasoning = Object.entries(streamBuffers)
-                .filter(([, buffer]) => buffer.reasoning)
-                .map(([id, buffer]) => `【${buffer.node} · ${id.slice(0, 8)}】\n${buffer.reasoning}`)
-                .join('\n\n');
-              return { streamBuffers, reasoning };
-            });
+            // 兼容旧事件但不保存或展示原始模型推理内容。
             break;
           case 'token':
             if (e.content) updateAssistant(a => {
               const streamId = (e.stream_id as string) || `legacy:${(e.node as string) || 'unknown'}`;
               const existingBuffers = a.streamBuffers || {};
               const current = existingBuffers[streamId] || {
-                node: (e.node as string) || 'unknown', reasoning: '', tokens: '',
+                node: (e.node as string) || 'unknown', tokens: '',
               };
               const streamBuffers = {
                 ...existingBuffers,
@@ -234,11 +220,15 @@ export function useChat() {
               analysisText: (e.analysis as Record<string, unknown>).summary as string || '',
             }));
             break;
+          case 'decision_summary':
+            if (e.summary) updateAssistant(() => ({ decisionSummary: String(e.summary) }));
+            break;
           case 'result':
             setTurns(prev => prev.map(t => t.id === turnId ? {
               ...t,
               assistant: {
                 ...t.assistant,
+                decisionSummary: String((e.decision_summary as string) || t.assistant.decisionSummary || ''),
                 sql: (e.sql as string) || t.assistant.sql,
               },
               finalResult: e as unknown as Record<string, unknown>, status: 'done',
@@ -269,13 +259,14 @@ export function useChat() {
       },
       dss,
       mid,
+      cid,
       enabledSkillIds,
     );
   }, [sessionId]);
 
-  const sendMulti = useCallback((query: string, datasourcesList: string[], modelId: string) => {
+  const sendMulti = useCallback((query: string, datasourcesList: string[], modelId: string, connectionId?: number) => {
     if (datasourcesList.length > 0) {
-      send(query, datasourcesList[0], datasourcesList, modelId);
+      send(query, datasourcesList[0], datasourcesList, modelId, connectionId);
     }
   }, [send]);
 

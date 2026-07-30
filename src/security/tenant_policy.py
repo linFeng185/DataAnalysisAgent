@@ -6,7 +6,6 @@ from dataclasses import dataclass
 
 from src.logging_config import get_logger
 
-
 logger = get_logger(__name__)
 
 SYSTEM_TENANT_ID = 0

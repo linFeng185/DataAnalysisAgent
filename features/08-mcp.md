@@ -38,10 +38,10 @@
 
 | # | 功能 | 文件 | 描述 | 状态 |
 |---|------|------|------|------|
-| 8.3.1 | mcp_agent_node() | `src/graph/workflow.py` | 使用 create_react_agent 为文件分析场景创建动态工具调用 Node | 开发完成 |
-| 8.3.2 | route_by_intent() 集成 | 同上 | intent == "file_analysis" → 路由到 mcp_agent Node | 开发完成 |
-| 8.3.3 | MCP Agent system prompt | 同上 | Agent 内联 system prompt | 开发完成 |
-| 8.3.4 | MCP Agent 失败契约 `[P1]` | 同上 | 模型不可用时返回标准 mcp_agent 失败响应并经过统一历史出口 | 单测完成 |
+| 8.3.1 | mcp_agent_node() | `src/graph/nodes/mcp_agent.py` | 使用 create_react_agent 为文件分析和市场研究子图提供受控动态工具调用 | 单测完成 |
+| 8.3.2 | route_by_intent() 集成 | `src/graph/workflow.py`、`src/graph/subgraphs/file_analysis.py` | file_analysis 能力路由到独立子图，由子图调用 mcp_agent_node 并回到统一响应出口 | 单测完成 |
+| 8.3.3 | MCP Agent system prompt | `src/llm/prompts.py`、`src/llm/invocation.py` | Agent 提示词通过 PromptRegistry 版本化注册并走统一调用边界 | 单测完成 |
+| 8.3.4 | MCP Agent 失败契约 `[P1]` | `src/graph/nodes/mcp_agent.py`、`src/graph/subgraphs/file_analysis.py` | 模型不可用时返回标准 mcp_agent 失败响应并经过统一历史出口 | 单测完成 |
 
 ### 8.4 MCP 管理与授权
 

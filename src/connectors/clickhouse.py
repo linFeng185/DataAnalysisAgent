@@ -9,9 +9,9 @@ from typing import Any
 
 from sqlalchemy import URL
 
+from src.config import get_settings
 from src.connectors.base import ConnectorBase
 from src.connectors.registry import register_connector
-from src.config import get_settings
 from src.logging_config import get_logger
 from src.security.network import validate_outbound_host
 
@@ -44,7 +44,7 @@ class ClickHouseResult:
     # Returns: 无返回值。
     def __init__(self, column_names: list[str], rows: list[tuple]) -> None:
         logger.debug("ClickHouseResult.__init__ 入口", row_count=len(rows))
-        self._rows = [ClickHouseRow(dict(zip(column_names, row))) for row in rows]
+        self._rows = [ClickHouseRow(dict(zip(column_names, row, strict=False))) for row in rows]
         self._cursor = 0
         logger.info("ClickHouseResult.__init__ 完成", row_count=len(rows))
 
@@ -366,7 +366,7 @@ class ClickHouseConnector(ConnectorBase):
                 settings={"max_execution_time": get_settings().max_execution_time},
             )
             rows = [
-                self._row_to_dict(dict(zip(result.column_names, row)))
+                self._row_to_dict(dict(zip(result.column_names, row, strict=False)))
                 for row in result.result_rows
             ]
         except Exception as exc:

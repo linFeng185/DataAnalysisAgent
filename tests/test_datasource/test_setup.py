@@ -8,7 +8,6 @@ from types import SimpleNamespace
 
 import sqlalchemy as sa
 
-
 logger = logging.getLogger(__name__)
 ROOT = Path(__file__).resolve().parents[2]
 

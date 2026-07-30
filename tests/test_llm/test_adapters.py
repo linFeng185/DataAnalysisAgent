@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import pytest
-
 from src.llm.adapters.base import SupportedFeatures
 from src.llm.adapters.deepseek import DeepSeekV4ProAdapter
 from src.llm.adapters.openai_adapter import OpenAIAdapter

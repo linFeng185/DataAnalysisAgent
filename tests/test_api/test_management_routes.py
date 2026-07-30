@@ -391,6 +391,7 @@ class TestKnowledgeUploadSafety:
         """Word 段落和表格单元格的 HTML 特殊字符必须转义。"""
         # Arrange
         from docx import Document
+
         import src.api.routes as routes
 
         document = Document()
@@ -413,8 +414,8 @@ class TestKnowledgeUploadSafety:
         """上传内容超过 MAX_UPLOAD_BYTES 时应在处理前返回 413。"""
         # Arrange
         import src.api.auth as auth
-        import src.config as config_module
         import src.api.routes as routes
+        import src.config as config_module
 
         monkeypatch.setattr(auth, "get_current_role", lambda: "analyst")
         monkeypatch.setattr(auth, "get_current_tenant_id", lambda: 1)
@@ -547,8 +548,8 @@ class TestKnowledgeVectorStoreRoutes:
         """删除用户知识条目前必须校验租户和所有者。"""
         # Arrange
         import src.api.routes as routes
-        import src.memory.vector_store as vector_module
         import src.config as config_module
+        import src.memory.vector_store as vector_module
         from src.memory.vector_store import VectorEntry
 
         store = SimpleNamespace(
@@ -574,8 +575,8 @@ class TestKnowledgeVectorStoreRoutes:
         """租户管理员可治理本租户公共知识，不受上传者所有权限制。"""
         # Arrange
         import src.api.routes as routes
-        import src.memory.vector_store as vector_module
         import src.config as config_module
+        import src.memory.vector_store as vector_module
         from src.memory.vector_store import VectorEntry
 
         store = SimpleNamespace(
@@ -605,8 +606,8 @@ class TestKnowledgeVectorStoreRoutes:
         """租户管理员删除公共文档时应同时清理原文件和对应向量。"""
         # Arrange
         import src.api.routes as routes
-        import src.memory.vector_store as vector_module
         import src.knowledge.file_store as file_module
+        import src.memory.vector_store as vector_module
         from src.memory.vector_store import VectorEntry
 
         entry = VectorEntry(

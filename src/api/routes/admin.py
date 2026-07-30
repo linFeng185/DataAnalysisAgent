@@ -9,7 +9,6 @@ from pydantic import BaseModel, Field
 
 from src.logging_config import get_logger
 
-
 logger = get_logger(__name__)
 router = APIRouter(prefix="/admin", tags=["platform-admin"])
 _MANAGED_ROLES = {"tenant_admin", "analyst", "viewer"}
@@ -18,6 +17,12 @@ _MANAGED_ROLES = {"tenant_admin", "analyst", "viewer"}
 class TenantCreateRequest(BaseModel):
     """创建租户及首个租户管理员的请求。"""
 
+    code: str = Field(
+        ...,
+        min_length=1,
+        max_length=32,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9-]{0,31}$",
+    )
     name: str = Field(..., min_length=1, max_length=128)
     admin_username: str = Field(..., min_length=1, max_length=64)
     admin_password: str = Field(..., min_length=8, max_length=72)
@@ -30,9 +35,8 @@ class TenantStatusRequest(BaseModel):
 
 
 class UserCreateRequest(BaseModel):
-    """由平台管理员创建租户用户的请求。"""
+    """由当前租户管理员创建租户用户的请求。"""
 
-    tenant_id: int = Field(..., ge=1)
     username: str = Field(..., min_length=1, max_length=64)
     password: str = Field(..., min_length=8, max_length=72)
     role: str = Field(default="analyst")
@@ -63,6 +67,56 @@ def _raise_write_error(exc: Exception, message: str) -> None:
     raise HTTPException(500, "平台管理操作失败") from exc
 
 
+# 方法作用：阻止角色或状态更新移除租户最后一个启用管理员。
+# Args: connection - 数据库连接；user_id - 目标用户；tenant_id - 当前租户；role - 目标角色；is_active - 目标状态。
+# Returns: 目标用户当前角色与状态，不存在时抛出 HTTP 404。
+async def _ensure_tenant_admin_continuity(
+    connection,
+    *,
+    user_id: int,
+    tenant_id: int,
+    role: str | None,
+    is_active: bool | None,
+) -> dict:
+    logger.info(
+        "租户管理员连续性检查边界",
+        user_id=user_id,
+        tenant_id=tenant_id,
+        requested_role=role or "",
+        requested_active=is_active,
+    )
+    current = await connection.fetchrow(
+        "SELECT role, is_active FROM users WHERE id=$1 AND tenant_id=$2",
+        user_id,
+        tenant_id,
+    )
+    if current is None:
+        raise HTTPException(404, "用户不存在")
+    current_role = str(current["role"])
+    current_active = bool(current["is_active"])
+    next_role = role if role is not None else current_role
+    next_active = is_active if is_active is not None else current_active
+    removes_active_admin = (
+        current_role == "tenant_admin"
+        and current_active
+        and not (next_role == "tenant_admin" and next_active)
+    )
+    if removes_active_admin:
+        active_admins = int(await connection.fetchval(
+            "SELECT COUNT(*) FROM users WHERE tenant_id=$1 "
+            "AND role='tenant_admin' AND is_active=TRUE",
+            tenant_id,
+        ) or 0)
+        if active_admins <= 1:
+            logger.warning(
+                "租户管理员连续性检查拒绝",
+                user_id=user_id,
+                tenant_id=tenant_id,
+            )
+            raise HTTPException(409, "租户必须至少保留一个启用的管理员")
+    return dict(current)
+
+
 @router.get("/tenants")
 # 方法作用：分页列出租户、状态和账号数量。
 # Args: page - 页码；page_size - 每页数量。
@@ -83,9 +137,10 @@ async def list_tenants(
         async with pool.acquire() as connection:
             total = int(await connection.fetchval("SELECT COUNT(*) FROM tenants") or 0)
             rows = await connection.fetch(
-                "SELECT t.id, t.name, t.is_active, t.created_at, COUNT(u.id) AS user_count "
+                "SELECT t.id, t.code, t.name, t.is_active, t.created_at, "
+                "COUNT(u.id) AS user_count "
                 "FROM tenants t LEFT JOIN users u ON u.tenant_id=t.id "
-                "GROUP BY t.id, t.name, t.is_active, t.created_at "
+                "GROUP BY t.id, t.code, t.name, t.is_active, t.created_at "
                 "ORDER BY t.id LIMIT $1 OFFSET $2",
                 page_size,
                 offset,
@@ -110,7 +165,13 @@ async def create_tenant(request: TenantCreateRequest) -> dict:
     from src.api.auth import _hash_password, require_super_admin
     from src.memory.pg_pool import get_pg_pool
 
-    logger.debug("平台租户创建入口", tenant_name=request.name, admin=request.admin_username)
+    tenant_code = request.code.strip().lower()
+    logger.debug(
+        "平台租户创建入口",
+        tenant_name=request.name,
+        tenant_code=tenant_code,
+        admin=request.admin_username,
+    )
     require_super_admin()
     try:
         password_hash = await asyncio.to_thread(_hash_password, request.admin_password)
@@ -118,12 +179,17 @@ async def create_tenant(request: TenantCreateRequest) -> dict:
         async with pool.acquire() as connection:
             async with connection.transaction():
                 duplicate_tenant = await connection.fetchval(
-                    "SELECT id FROM tenants WHERE LOWER(name)=LOWER($1)", request.name.strip(),
+                    "SELECT id FROM tenants WHERE LOWER(code)=LOWER($1) "
+                    "OR LOWER(name)=LOWER($2)",
+                    tenant_code,
+                    request.name.strip(),
                 )
                 if duplicate_tenant is not None:
-                    raise HTTPException(409, "租户名称已存在")
+                    raise HTTPException(409, "租户编码或名称已存在")
                 tenant_id = await connection.fetchval(
-                    "INSERT INTO tenants (name, is_active) VALUES ($1, TRUE) RETURNING id",
+                    "INSERT INTO tenants (code, name, is_active) "
+                    "VALUES ($1, $2, TRUE) RETURNING id",
+                    tenant_code,
                     request.name.strip(),
                 )
                 user_id = await connection.fetchval(
@@ -134,7 +200,12 @@ async def create_tenant(request: TenantCreateRequest) -> dict:
                     tenant_id,
                 )
         result = {
-            "tenant": {"id": int(tenant_id), "name": request.name.strip(), "is_active": True},
+            "tenant": {
+                "id": int(tenant_id),
+                "code": tenant_code,
+                "name": request.name.strip(),
+                "is_active": True,
+            },
             "admin": {
                 "id": int(user_id), "username": request.admin_username.strip(),
                 "role": "tenant_admin", "tenant_id": int(tenant_id), "is_active": True,
@@ -186,31 +257,31 @@ async def update_tenant_status(tenant_id: int, request: TenantStatusRequest) -> 
 # Args: tenant_id - 可选租户；role - 可选角色；is_active - 可选状态；page/page_size - 分页。
 # Returns: 用户分页结果，不含密码哈希。
 async def list_users(
-    tenant_id: int | None = Query(default=None, ge=1),
     role: str | None = None,
     is_active: bool | None = None,
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=20, ge=1, le=100),
 ) -> dict:
     """返回管理页面所需的最小账号信息。"""
-    from src.api.auth import require_super_admin
+    from src.api.auth import get_current_tenant_id, require_tenant_user_admin
     from src.memory.pg_pool import get_pg_pool
 
-    logger.debug("平台用户列表入口", tenant_id=tenant_id, role=role or "", page=page)
-    require_super_admin()
+    tenant_id = get_current_tenant_id()
+    logger.debug("租户用户列表入口", tenant_id=tenant_id, role=role or "", page=page)
+    require_tenant_user_admin()
     pool = await get_pg_pool()
     try:
         offset = (page - 1) * page_size
         async with pool.acquire() as connection:
             total = int(await connection.fetchval(
-                "SELECT COUNT(*) FROM users WHERE ($1::int IS NULL OR tenant_id=$1) "
+                "SELECT COUNT(*) FROM users WHERE tenant_id=$1 "
                 "AND ($2::text IS NULL OR role=$2) AND ($3::bool IS NULL OR is_active=$3)",
                 tenant_id, role, is_active,
             ) or 0)
             rows = await connection.fetch(
                 "SELECT id, username, tenant_id, role, is_active, failed_login_attempts, "
                 "locked_until, last_login_at, created_at FROM users "
-                "WHERE ($1::int IS NULL OR tenant_id=$1) "
+                "WHERE tenant_id=$1 "
                 "AND ($2::text IS NULL OR role=$2) AND ($3::bool IS NULL OR is_active=$3) "
                 "ORDER BY id LIMIT $4 OFFSET $5",
                 tenant_id, role, is_active, page_size, offset,
@@ -230,11 +301,16 @@ async def list_users(
 # Returns: 新用户摘要。
 async def create_user(request: UserCreateRequest) -> dict:
     """禁止通过通用端点创建第二个 super_admin。"""
-    from src.api.auth import _hash_password, require_super_admin
+    from src.api.auth import (
+        _hash_password,
+        get_current_tenant_id,
+        require_tenant_user_admin,
+    )
     from src.memory.pg_pool import get_pg_pool
 
-    logger.debug("平台用户创建入口", tenant_id=request.tenant_id, role=request.role)
-    require_super_admin()
+    tenant_id = get_current_tenant_id()
+    logger.debug("租户用户创建入口", tenant_id=tenant_id, role=request.role)
+    require_tenant_user_admin()
     role = request.role.strip().lower()
     if role not in _MANAGED_ROLES:
         raise HTTPException(400, "不支持的用户角色")
@@ -242,21 +318,17 @@ async def create_user(request: UserCreateRequest) -> dict:
         password_hash = await asyncio.to_thread(_hash_password, request.password)
         pool = await get_pg_pool()
         async with pool.acquire() as connection:
-            tenant_active = await connection.fetchval(
-                "SELECT is_active FROM tenants WHERE id=$1", request.tenant_id,
-            )
-            if tenant_active is None:
-                raise HTTPException(404, "租户不存在")
-            if not tenant_active:
-                raise HTTPException(409, "租户已停用")
             row = await connection.fetchrow(
                 "INSERT INTO users (username, password_hash, role, tenant_id, is_active) "
-                "VALUES ($1, $2, $3, $4, TRUE) "
+                "SELECT $1, $2, $3, $4, TRUE FROM tenants "
+                "WHERE id=$4 AND is_active=TRUE "
                 "RETURNING id, username, tenant_id, role, is_active, created_at",
-                request.username.strip(), password_hash, role, request.tenant_id,
+                request.username.strip(), password_hash, role, tenant_id,
             )
+        if row is None:
+            raise HTTPException(409, "当前租户不存在或已停用")
         result = dict(row)
-        logger.info("平台用户创建完成", user_id=result["id"], tenant_id=request.tenant_id)
+        logger.info("租户用户创建完成", user_id=result["id"], tenant_id=tenant_id)
         return result
     except HTTPException:
         raise
@@ -270,11 +342,21 @@ async def create_user(request: UserCreateRequest) -> dict:
 # Returns: 更新后的用户摘要。
 async def update_user(user_id: int, request: UserUpdateRequest) -> dict:
     """固定超级管理员不能通过后台被降权或停用。"""
-    from src.api.auth import SUPER_ADMIN_USER_ID, require_super_admin
+    from src.api.auth import (
+        SUPER_ADMIN_USER_ID,
+        get_current_tenant_id,
+        require_tenant_user_admin,
+    )
     from src.memory.pg_pool import get_pg_pool
 
-    logger.debug("平台用户更新入口", user_id=user_id, role=request.role or "")
-    require_super_admin()
+    tenant_id = get_current_tenant_id()
+    logger.debug(
+        "租户用户更新入口",
+        user_id=user_id,
+        tenant_id=tenant_id,
+        role=request.role or "",
+    )
+    require_tenant_user_admin()
     if user_id == SUPER_ADMIN_USER_ID:
         raise HTTPException(403, "固定超级管理员不能修改")
     role = request.role.strip().lower() if request.role is not None else None
@@ -285,12 +367,20 @@ async def update_user(user_id: int, request: UserUpdateRequest) -> dict:
     pool = await get_pg_pool()
     try:
         async with pool.acquire() as connection:
+            await _ensure_tenant_admin_continuity(
+                connection,
+                user_id=user_id,
+                tenant_id=tenant_id,
+                role=role,
+                is_active=request.is_active,
+            )
             row = await connection.fetchrow(
                 "UPDATE users SET role=COALESCE($1, role), is_active=COALESCE($2, is_active), "
                 "failed_login_attempts=CASE WHEN $2=TRUE THEN 0 ELSE failed_login_attempts END, "
                 "locked_until=CASE WHEN $2=TRUE THEN NULL ELSE locked_until END "
-                "WHERE id=$3 RETURNING id, username, tenant_id, role, is_active, created_at",
-                role, request.is_active, user_id,
+                "WHERE id=$3 AND tenant_id=$4 "
+                "RETURNING id, username, tenant_id, role, is_active, created_at",
+                role, request.is_active, user_id, tenant_id,
             )
         if row is None:
             raise HTTPException(404, "用户不存在")
@@ -309,19 +399,24 @@ async def update_user(user_id: int, request: UserUpdateRequest) -> dict:
 # Returns: 重置成功状态。
 async def reset_user_password(user_id: int, request: PasswordResetRequest) -> dict:
     """密码重置不返回任何哈希或明文。"""
-    from src.api.auth import _hash_password, require_super_admin
+    from src.api.auth import (
+        _hash_password,
+        get_current_tenant_id,
+        require_tenant_user_admin,
+    )
     from src.memory.pg_pool import get_pg_pool
 
-    logger.debug("平台用户密码重置入口", user_id=user_id)
-    require_super_admin()
+    tenant_id = get_current_tenant_id()
+    logger.debug("租户用户密码重置入口", user_id=user_id, tenant_id=tenant_id)
+    require_tenant_user_admin()
     try:
         password_hash = await asyncio.to_thread(_hash_password, request.password)
         pool = await get_pg_pool()
         async with pool.acquire() as connection:
             status = await connection.execute(
                 "UPDATE users SET password_hash=$1, failed_login_attempts=0, locked_until=NULL "
-                "WHERE id=$2",
-                password_hash, user_id,
+                "WHERE id=$2 AND tenant_id=$3",
+                password_hash, user_id, tenant_id,
             )
         if status == "UPDATE 0":
             raise HTTPException(404, "用户不存在")
@@ -348,7 +443,7 @@ async def get_config_summary() -> dict:
     result = {
         "environment": settings.env,
         "multi_tenant": settings.multi_tenant,
-        "registration_enabled": settings.registration_enabled,
+        "registration_enabled": False,
         "database_configured": bool(settings.database_url),
         "jwt_configured": bool(settings.jwt_secret),
         "credential_key_configured": bool(settings.credential_encryption_key),

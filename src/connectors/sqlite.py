@@ -8,7 +8,6 @@ from src.connectors.base import ConnectorBase
 from src.connectors.registry import register_connector
 from src.logging_config import get_logger
 
-
 logger = get_logger(__name__)
 
 
@@ -42,6 +41,7 @@ class SQLiteConnector(ConnectorBase):
     async def create_engine(self) -> AsyncEngine:
         """覆盖基类: SQLite 不需要 pool_size/max_overflow。"""
         import sqlalchemy as sa
+
         from src.config import get_settings
         logger.debug("SQLite 引擎创建入口", datasource=self.config.name)
         try:

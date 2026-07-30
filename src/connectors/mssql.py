@@ -11,7 +11,6 @@ from src.connectors.base import ConnectorBase
 from src.connectors.registry import register_connector
 from src.logging_config import get_logger
 
-
 logger = get_logger(__name__)
 
 

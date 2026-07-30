@@ -6,7 +6,7 @@ import pytest
 
 
 class TestPromptRegistry:
-    """覆盖提示词 ID、版本、变量渲染和结构化解析。"""
+    """覆盖功能 10.2.10 的提示词 ID、版本、回滚和结构化解析。"""
 
     # 方法作用：验证注册 Prompt 能校验变量并渲染方言和 Skill 内容。
     # Args: self - pytest 测试类实例。
@@ -141,3 +141,45 @@ class TestPromptRegistry:
         assert parsed.answer == "完成"
         with pytest.raises(ValueError):
             parse_json_model("not-json", TextAnswerOutput)
+
+    def test_prompt_versions_can_activate_and_rollback(self) -> None:
+        """新版本激活后必须可回滚，并保留稳定 Prompt ID。"""
+        # Arrange
+        from src.llm.prompts import (
+            PROMPT_REGISTRY,
+            PromptDefinition,
+            activate_prompt_version,
+            get_prompt_definition,
+            list_prompt_versions,
+            register_prompt,
+            rollback_prompt,
+        )
+
+        first = PromptDefinition(
+            prompt_id="versioned.test",
+            version="1.0.0",
+            task="version_test",
+            template="第一版",
+        )
+        second = PromptDefinition(
+            prompt_id="versioned.test",
+            version="2.0.0",
+            task="version_test",
+            template="第二版",
+        )
+
+        try:
+            # Act
+            register_prompt(first)
+            register_prompt(second)
+            active = get_prompt_definition("versioned.test")
+            rolled_back = rollback_prompt("versioned.test")
+            activated = activate_prompt_version("versioned.test", "2.0.0")
+
+            # Assert
+            assert list_prompt_versions("versioned.test") == ("1.0.0", "2.0.0")
+            assert active.version == "2.0.0"
+            assert rolled_back.version == "1.0.0"
+            assert activated.version == "2.0.0"
+        finally:
+            PROMPT_REGISTRY.pop("versioned.test", None)

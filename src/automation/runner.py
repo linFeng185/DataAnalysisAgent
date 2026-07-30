@@ -176,6 +176,24 @@ class ScheduledAnalysisRunner:
                     payload["notification"]["title"],
                     payload["notification"]["body"],
                 )
+                failed_channels = [
+                    channel for channel, status in payload["delivery"].items()
+                    if status != "success"
+                ]
+                if failed_channels:
+                    payload["success"] = False
+                    payload["error"] = "通知投递失败"
+                    payload["delivery_error_channels"] = failed_channels
+                    await self._store.record_failure(
+                        schedule,
+                        f"通知渠道失败: {', '.join(failed_channels)}",
+                    )
+                    logger.warning(
+                        "自动化任务通知失败，未记录成功基线",
+                        schedule_id=schedule.id,
+                        failed_channels=failed_channels,
+                    )
+                    return payload
             await self._store.record_success(schedule, payload, payload["notification"])
             logger.info(
                 "自动化任务执行完成",

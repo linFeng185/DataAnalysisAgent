@@ -11,7 +11,6 @@ from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 from pydantic import ValidationError
 
-
 logger = logging.getLogger(__name__)
 
 
@@ -287,9 +286,10 @@ class TestApiAccessPolicyAuthIntegration:
     async def test_super_admin_policy_rejects_regular_jwt(self, monkeypatch) -> None:
         """有效身份不等于平台管理员身份，固定管理策略必须二次校验。"""
         logger.debug("test_super_admin_policy_rejects_regular_jwt 入口")
-        import src.api.auth as auth
         from starlette.requests import Request
         from starlette.responses import Response
+
+        import src.api.auth as auth
         from src.config import ApiAccessConfig
         from src.security.api_access_policy import ApiAccessPolicyManager
         from src.security.tenant_policy import TenantPolicy

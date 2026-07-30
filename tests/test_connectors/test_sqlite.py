@@ -8,7 +8,6 @@ from unittest.mock import MagicMock
 
 from src.datasource.config import DataSourceConfig
 
-
 logger = logging.getLogger(__name__)
 
 

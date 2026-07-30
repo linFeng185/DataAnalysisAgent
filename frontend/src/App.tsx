@@ -37,15 +37,15 @@ function ProtectedApp() {
   return <AppContent />;
 }
 
-// 方法作用：仅允许固定角色的前端会话进入平台管理路由。
+// 方法作用：允许平台超级管理员或当前租户管理员进入角色化管理工作区。
 // Args: 无，读取 AuthContext 当前身份。
 // Returns: 超级管理员页面或首页重定向。
 function AdminRoute() {
   const { user } = useAuth();
   console.debug('AdminRoute 入口', { role: user?.role || '' });
-  const result = user?.role === 'super_admin' && user.user_id === 1
+  const result = ['super_admin', 'tenant_admin'].includes(user?.role || '')
     ? <AdminPage /> : <Navigate to="/" replace />;
-  console.info('AdminRoute 完成', { allowed: user?.role === 'super_admin' && user.user_id === 1 });
+  console.info('AdminRoute 完成', { allowed: ['super_admin', 'tenant_admin'].includes(user?.role || '') });
   return result;
 }
 
@@ -100,8 +100,8 @@ function AppContent() {
       {['super_admin', 'tenant_admin'].includes(user?.role || '') && <Menu.Item key="mcp" icon={<ApiOutlined />}>
         <NavLink to="/mcp">MCP</NavLink>
       </Menu.Item>}
-      {user?.role === 'super_admin' && user.user_id === 1 && <Menu.Item key="admin" icon={<SafetyCertificateOutlined />}>
-        <NavLink to="/admin">平台管理</NavLink>
+      {['super_admin', 'tenant_admin'].includes(user?.role || '') && <Menu.Item key="admin" icon={<SafetyCertificateOutlined />}>
+        <NavLink to="/admin">管理工作区</NavLink>
       </Menu.Item>}
     </Menu>
   );
@@ -138,7 +138,7 @@ function AppContent() {
           ) : (
             <Tag className="mobile-health" icon={<LoadingOutlined />} color="default">检查连接中</Tag>
           )}
-          <Tag icon={<UserOutlined />}>{user?.username || `用户 ${user?.user_id ?? ''}`}</Tag>
+          <Tag icon={<UserOutlined />}>{user?.tenant_code ? `${user.tenant_code} / ` : ''}{user?.username || `用户 ${user?.user_id ?? ''}`}</Tag>
           <Tag className="role-tag" color={user?.role === 'super_admin' ? 'red' : 'default'}>{user?.role || '-'}</Tag>
           <Button type="text" icon={<LogoutOutlined />} onClick={() => void logout()}
             style={{ color: '#fff' }}><span className="logout-label">退出</span></Button>

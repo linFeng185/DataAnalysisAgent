@@ -12,9 +12,11 @@ LLM 驱动的数据分析智能体。用自然语言提问，自动完成：轮�
 ├── src/
 │   ├── api/              ① Web 接口层 — 访问策略/领域路由/纯 ASGI 认证/安全头 + SSE 流式
 │   ├── graph/            ② 核心流水线 — LangGraph 主图 + 可复用 SQL 子图
+│   │   ├── context.py       请求/权限/路由/执行四组轻量上下文适配
+│   │   ├── contracts.py     任务计划与多数据源请求/结果 Pydantic 契约
 │   │   └── nodes/           状态准备、SQL 主链、直接回答与多源节点
-│   │   └── subgraphs/       多源 worker 复用主图语义的 SQL 执行与结果展示子图
-│   ├── llm/              ③ LLM 调用层 — Provider 注册表 + 适配器 + 版本化 Prompt
+│   │   └── subgraphs/       SQL 复用、结果展示及文件/研究/预测/报告/动作能力子图
+│   ├── llm/              ③ LLM 调用层 — Provider 注册表 + 租户连接选择 + 适配器 + 版本化 Prompt
 │   │   └── adapters/         模型适配器
 │   ├── datasource/       ④ 数据源管理 — 注册/发现/Schema/凭证加密
 │   │   └── providers/        数据源提供者
@@ -31,7 +33,10 @@ LLM 驱动的数据分析智能体。用自然语言提问，自动完成：轮�
 │   ├── app_context.py        应用级依赖容器 + ASGI 请求绑定 + 资源关闭
 │   ├── config.py             配置管理 (pydantic-settings)
 │   ├── bootstrap.py          分阶段启动/关闭编排
-│   └── skill_manager.py      技能引擎
+│   ├── skill_manager.py      技能发现、作用域与激活
+│   ├── skill_security.py     Skill 包摘要与 Ed25519 验签
+│   ├── skill_runtime.py      Skill 契约、资源和隔离执行入口
+│   └── skill_worker.py       非内置 Skill 子进程 Worker
 ├── frontend/                 React SPA (Vite + Ant Design + ECharts)
 │   ├── Dockerfile               Node builder + Nginx runtime
 │   └── nginx.conf               SPA、API 代理和 SSE 配置
@@ -54,16 +59,19 @@ POST /api/v1/chat {"query": "本月 GMV 排名？", "stream": true}
   │
   ├─ API 访问策略        YAML/PG 策略 → 可信代理 IP → deny/allow → 分级访问日志
   ├─ API 安全入口        public/optional/JWT/Admin Key/超级管理员认证 → 请求预算 → 数据源授权候选
-  ├─ prepare_turn        保留轻量历史/快照，清理不落 checkpoint 的当前轮状态
-  ├─ classify_intent     关键词匹配 → 8 种意图 + 第一阶段 Skill 激活
+  ├─ prepare_turn        保留轻量历史/快照，清理瞬态字段并重建四组请求级上下文
+  ├─ classify_intent     意图 + TaskPlan 能力 + Skill 候选集
+  │    ├─ 文件分析 / 市场研究 / 外部动作 → 对应独立子图
   ├─ restore_previous_result  仅 meta 且数据源一致时从 HistoryStore 恢复上轮富结果
-  ├─ retrieve_schema     SchemaManager 三级回退 → 表结构 + 知识库上下文
+  ├─ retrieve_schema     SchemaManager 三级回退 → 表结构 + 知识上下文 + Skill 精确激活
   ├─ generate_sql        LLM 生成 SQL（对话历史注入 + 重试上下文 + Pydantic 契约）
   ├─ layer3_validate     委托统一 SQL 服务做 AST 只读安全校验
   ├─ layer4_explain      统一 SQL 服务按 Registry 权威方言执行 EXPLAIN
   ├─ execute_sql         统一有界执行（权限 / 限流 / 脱敏 / 审计）
-  ├─ analyze_result      统计计算 + LLM 洞察 + 第二阶段 Skill 工具执行
-  ├─ generate_chart      ECharts 配置生成（桩）
+  ├─ analyze_result      统计计算 + LLM 洞察 + Skill 输出扩展
+  │    ├─ 预测 → forecast_subgraph（回测/区间/模型卡）
+  │    └─ 报告 → report_subgraph（custom-report 真实执行）
+  ├─ generate_chart      默认 SQL 分析的 ECharts 配置生成
   └─ build_response      响应组装 + 轻量会话历史 + HistoryStore 富结果
 ```
 
@@ -74,7 +82,7 @@ POST /api/v1/chat {"query": "本月 GMV 排名？", "stream": true}
 | 文件 | 职责 |
 |------|------|
 | `routes/__init__.py` | 组合各领域 APIRouter，并保留旧模块导出兼容 |
-| `routes/*.py` | chat、datasource、schema、session、mcp、knowledge、skills、management、admin、access_policy 领域端点 |
+| `routes/*.py` | chat、datasource、schema、session、mcp、knowledge、skills、management、admin、llm_admin、access_policy 领域端点 |
 | `routes/automation.py` | 自动化任务 CRUD、立即运行和用户私有站内通知 |
 | `schemas.py` | Pydantic 请求/响应模型 |
 | `streaming.py` | SSE 流式（13 种事件类型，LLM 调用按 stream_id 隔离） |
@@ -88,26 +96,33 @@ POST /api/v1/chat {"query": "本月 GMV 排名？", "stream": true}
 
 | 文件 | 职责 |
 |------|------|
-| `state.py` | `AnalysisState` TypedDict（会话持久字段 + `UntrackedValue` 请求字段） |
+| `state.py` | `AnalysisState` TypedDict（会话持久字段 + `UntrackedValue` 请求字段和四组轻量上下文） |
+| `context.py` | 请求、权限、路由、执行上下文 Pydantic 模型与扁平字段兼容适配 |
+| `contracts.py` | `TaskPlan`、`SourceQueryRequest`、`SourceQueryResult`、`MultiSourceResult` 契约 |
 | `workflow.py` | 从节点目录装配 StateGraph，显式保留条件业务路由 + Checkpointer |
 | `node_registry.py` | 节点 handler 与流式进度文案目录 |
 | `nodes/prepare_turn.py` | 固化上一轮轻量索引，压缩旧历史并清空当前轮 SQL/错误/结果/分析状态 |
 | `nodes/restore_previous_result.py` | 校验数据源集合后从 HistoryStore 恢复上轮 SQL、结果样本和统计 |
 | `nodes/classify_intent.py` | 意图分类 + Skill 激活 |
-| `skill_activation.py` | 意图阶段和 Schema 阶段的两阶段 Skill 激活与预算聚合 |
+| `skill_activation.py` | 意图候选集、Schema 精确激活、复合资源 ID 和预算聚合 |
 | `subgraphs/sql_analysis.py` | 主图与多源 worker 共享的 Schema、分解、SQL、校验、EXPLAIN、执行拓扑装配 |
 | `subgraphs/result_presentation.py` | 多源合并复用的分析、图表固定边与精确分析短路子图 |
+| `subgraphs/file_analysis.py` | 授权文件/MCP 工具执行与统一失败语义 |
+| `subgraphs/market_research.py` | 授权外部证据研究简报，保留证据范围限制 |
+| `subgraphs/forecast.py` | 时间序列预测、滚动回测、区间和模型卡 |
+| `subgraphs/report.py` | custom-report 工具执行和 report Artifact 数据准备 |
+| `subgraphs/action.py` | 人工确认、幂等和默认拒绝的外部动作分发 |
 | `nodes/retrieve_schema.py` | Schema 检索 + 知识库上下文 + 按真实表名再次激活 Skill |
 | `nodes/generate_sql.py` | LLM SQL 生成（对话历史注入） |
 | `nodes/layer3_validate.py` | sqlglot AST 只读白名单与危险语句阻断 |
 | `nodes/execute_sql.py` | SQL 执行（空 SQL 跳过保护） |
-| `nodes/multi_source.py` | 多源 worker 并行执行、维度/指标列契约对齐和来源失败隔离 |
+| `nodes/multi_source.py` | 契约化多源 worker、并行执行、维度/指标列对齐和来源失败隔离 |
 | `nodes/analyze_result.py` | 统计 + LLM 分析 |
 | `nodes/build_response.py` | 响应组装、最终 SQL 列表 + 轻量 checkpoint 历史 + 富结果持久化 |
 
 ### ③ `src/llm/` — LLM 调用层
 
-`client.py`（兼容工厂 + local/remote/none 任务路由）+ `provider_registry.py`（OpenAI/Anthropic Provider 注册）+ `adapters/` + `prompts.py` + `prompt_budget.py` + `output_contracts.py`。Prompt 通过稳定 ID/版本注册，System 与动态上下文共享字符预算，节点输出优先由 Pydantic 校验；默认只有 `generate_sql` 可调用远程模型，轻量节点优先 `LOCAL_LLM_*`。
+`client.py`（兼容工厂 + local/remote/none 任务路由）+ `provider_registry.py`（协议别名与 Provider 注册）+ `tenant_config.py`（租户命名连接、默认值、凭证解密和请求级 ContextVar）+ `invocation.py`（统一调用出口）+ `adapters/` + `prompts.py` + `prompt_budget.py` + `output_contracts.py`。`routes/llm_admin.py` 由 super_admin 维护厂商/模型目录，由 tenant_admin 维护当前租户连接和默认值；Chat/SSE 入口解析 `llm_connection_id + model_id` 后绑定请求上下文，多租户未配置时失败关闭，单租户保留 Settings 兼容回退。Prompt 通过稳定 ID/多版本注册，支持激活和回滚；System 与动态上下文共享字符预算，所有业务调用统一附加 Prompt/任务追踪 metadata，节点输出优先由 Pydantic 校验；默认只有 `generate_sql` 可调用远程模型，轻量节点优先 `LOCAL_LLM_*`。
 
 ### ④ `src/datasource/` — 数据源管理
 
@@ -148,7 +163,7 @@ POST /api/v1/chat {"query": "本月 GMV 排名？", "stream": true}
 |------|------|
 | `checkpointer.py` | `AsyncPostgresSaver` + `MemorySaver` 工厂（自动创建 PG 库；Windows 使用 SelectorEventLoop） |
 | `context_builder.py` | 上下文裁剪（热/温/冷三层） |
-| `history_store.py` | PostgreSQL 查询历史 + 内存环形缓冲回退；工作流 await 写入，final_result JSONB 持久化逐轮 SQL、数据、分析、图表和推理 |
+| `history_store.py` | PostgreSQL 查询历史 + 内存环形缓冲回退；工作流 await 写入，final_result JSONB 持久化逐轮 SQL、数据、分析和图表，不保存原始推理 |
 | `long_term_store.py` | 长期记忆（ChromaDB + PG 双写） |
 | `session_archive.py` | 会话归档 |
 
@@ -183,6 +198,7 @@ POST /api/v1/chat {"query": "本月 GMV 排名？", "stream": true}
 
 `migrations.py` 在应用启动早期按编号扫描 `migrations/*.sql`，使用 PostgreSQL advisory lock
 避免多实例并发，按文件事务执行，并在 `schema_migrations` 记录版本、文件名与 checksum。
+`013_tenant_identity_llm.sql` 为租户增加全局不可变 `code` 和租户内大小写敏感用户名约束，并建立平台 LLM 厂商/模型目录、租户命名连接、模型绑定和默认配置表。
 `007_api_access_policy.sql` 为动态策略和 CIDR 规则启用强制 RLS。API 策略加载属于必需启动步骤，
 任一环境加载失败均阻断启动，防止数据库规则静默失效。
 `009_automation.sql` 为自动化任务、运行记录和站内通知建表并启用租户/用户 RLS，
@@ -190,7 +206,7 @@ POST /api/v1/chat {"query": "本月 GMV 排名？", "stream": true}
 
 ## Skills 系统
 
-`src/skill_manager.py` — system/tenant/private 受管目录扫描 + 复合标识 + 请求级身份过滤。匹配同名 Skill 时按 private > tenant > system 选择：
+`src/skill_manager.py` — system/tenant/private 受管目录扫描 + 复合标识 + 请求级身份过滤。匹配同名 Skill 时按 private > tenant > system 选择。内置仓库 Skill 可进程内执行；其他 Skill 必须通过 `skill_security.py` 验签，并由 `skill_runtime.py` 交给隔离 Worker，强制超时、资源、网络/文件、输入输出 Schema、脱敏和引用边界：
 - `data-quality-check` — 空值/重复/异常检测
 - `custom-report` — Jinja2 模板报告
 - `feature-dev` — 开发流程指南
@@ -198,23 +214,27 @@ POST /api/v1/chat {"query": "本月 GMV 排名？", "stream": true}
 
 ## 前端
 
-`frontend/` — React 18 + TypeScript 5 + Ant Design 5 + ECharts。登录后按角色展示业务菜单；`AutomationPage` 提供任务创建、立即运行、删除和站内通知视图；固定 `users.id=1` 超级管理员可进入平台管理页维护租户、用户、安全摘要、API 访问策略、接口 IP 黑白名单以及 system Skills/知识/MCP。
+`frontend/` — React 18 + TypeScript 5 + Ant Design 5 + ECharts。登录固定输入 `tenant_code + username + password`，不展示公开注册；登录后按角色展示业务菜单。`AdminPage` 对 super_admin 展示租户与平台 LLM 目录，对 tenant_admin 展示当前租户用户、命名连接和默认模型；`ChatPage` 只提交当前租户可见的连接与模型。`AutomationPage` 提供任务创建、立即运行、删除和站内通知视图。
 
 ## 快速上手
 
 1. `src/main.py` → `src/bootstrap.py` → `src/api/routes/` — 启动与 API 入口
 2. `src/app_context.py` → `src/security/tenant_policy.py` — 应用依赖与租户策略
-3. `src/graph/workflow.py` — 流水线组装
-4. `src/graph/state.py` — 状态定义
-5. `src/graph/nodes/generate_sql.py` — 核心 LLM 调用
-6. `spec/README.md` — 技术规格索引
-6. `features/README.md` — 功能清单索引
+3. `src/api/auth.py` → `src/api/routes/admin.py` — 租户身份、用户自治和管理员边界
+4. `src/api/routes/llm_admin.py` → `src/llm/tenant_config.py` — LLM 目录、连接和默认选择
+5. `src/graph/workflow.py` — 流水线组装
+6. `src/graph/state.py` — 状态定义
+7. `src/graph/nodes/generate_sql.py` — 核心 LLM 调用
+8. `spec/README.md` — 技术规格索引
+9. `features/README.md` — 功能清单索引
 
 ## 关键设计模式
 
 - **分类重试**：SQL/字段/EXPLAIN 语义错误 → generate_sql；连接瞬态错误 → 原 SQL 重试 execute_sql；配置/权限错误终止
 - **应用级依赖容器**：每个 FastAPI 应用持有独立 `AppContext`；兼容 `get_*()` 只委托当前 Context，异步资源并发单次初始化并按创建逆序关闭
 - **租户策略集中化**：`TenantPolicy` 统一认证门禁、数据源/知识隔离、身份校验和三级作用域写权限，业务模块不直接读取 `settings.multi_tenant`
+- **租户 LLM 失败关闭**：多租户对话必须解析当前租户启用的命名连接和模型；显式跨租户、停用或缺失选择返回冲突，不回退其他租户凭证；单租户无命名连接时才允许 Settings 兼容路径
+- **LLM 协议扩展**：Provider 目录保存协议元数据，`openai_compatible` 映射到统一 OpenAI Adapter；增加同协议厂商或模型只需配置目录，新增协议才实现并注册 Adapter
 - **异常回退可见性**：可恢复回退保留原返回契约但必须记录完整堆栈；Provider 等基础设施故障不得伪装成空数据
 - **覆盖率门禁**：`coverage run -m pytest -q -m "not live_llm"` 后执行 `coverage report`，branch coverage 最低 67%，生产模块禁止 0% 覆盖
 - **多源失败隔离**：每个 worker 独立执行 Schema/SQL/Layer3/EXPLAIN/Execute，不可达来源返回来源级错误
@@ -232,17 +252,30 @@ POST /api/v1/chat {"query": "本月 GMV 排名？", "stream": true}
 - **版本化迁移**：启动时用 advisory lock + checksum + 单文件事务应用 SQL，生产失败停止启动
 - **容器部署边界**：`docker-compose.example.yml` 只发布前端端口，Nginx 同源代理后端；实际 Compose/配置文件忽略，PG/Redis/Chroma/Skills/日志使用宿主机持久化目录
 - **状态持久化分层**：checkpoint 只保存轻量 `conversation_history/messages/previous_turn_snapshot`；权限、Schema、结果、分析、图表和响应使用 `UntrackedValue`
+- **状态上下文分组**：请求、权限、路由、执行上下文只保存轻量元数据；兼容期保留扁平字段，每轮由 `prepare_turn` 重建，禁止真值回退复活旧状态
 - **Windows 异步兼容**：`src.main` 为 Uvicorn 显式创建 SelectorEventLoop，保证 psycopg `AsyncPostgresSaver` 可持久化
-- **会话逐轮恢复**：每轮完整 `final_response` 只写 `query_history.final_result` JSONB；前端逐轮消费，checkpoint 不复制数据与图表
+- **会话逐轮恢复**：每轮经过脱敏的 `final_response` 只写 `query_history.final_result` JSONB；前端逐轮消费，checkpoint 不复制数据与图表
 - **会话恢复回退**：逐轮 JSONB 是富结果权威来源；Checkpointer 只补轻量摘要和消息，旧/缺失状态回退贫化摘要/SQL
 - **单一路径工作流**：执行路由统一走条件边，避免并行分支状态丢失
 - **子图复用**：多数据源 worker 通过子图复用主图节点和条件路由语义，合并展示使用固定分析/图表边；两者均传递父级 RunnableConfig 的 metadata/tags
+- **能力子图分层**：文件/市场研究/动作在路由后直接进入子图；预测/报告复用 SQL 主链后再进入子图；所有能力统一进入 build_response 和 AnalysisArtifact
+- **多源强类型边界**：调度器通过 `SourceQueryRequest/SourceQueryResult/MultiSourceResult` 校验来源覆盖、权限和结果统计，worker 只接收显式白名单状态
 - **结果状态统一**：`success/status/source/error_code/error_message` 是所有 SQL、MCP、直接回答和多源路径的共同契约；内部推理与数据库异常不进入 SSE、历史或会话恢复
 - **Prompt 可扩展**：新增能力先注册 PromptDefinition 和输出模型，再由节点声明 PromptSection 的优先级、最低保留量和上限；解析失败只能走显式兼容回退
 - **三级扩展隔离**：Skill/MCP 使用 system/tenant/private 统一作用域；系统写入仅 super_admin，租户写入仅 tenant_admin/super_admin，个人资源仅本人
+- **Skill 两阶段激活**：意图阶段记录包含表触发项的候选集，Schema 阶段按真实表名收敛最终资源 ID；显式选择始终重新校验身份可见性
+- **Skill 供应链与运行隔离**：受管 Skill 默认要求可信 Ed25519 签名；非内置 tools.py 不在主进程导入，Worker 强制超时、资源、文件/网络权限、输出大小和契约校验
 - **跨轮结果索引**：`previous_turn_snapshot` 只保存来源、SQL 和可用性标记；明确 meta 追问校验数据源后从 HistoryStore 恢复
 - **统一 SQL 安全执行**：Graph Layer 3/4、执行节点和 DB Tools 均委托 `security/sql_execution.py`，Registry 方言覆盖调用方提示
 - **向量后端一致性**：Chroma/Milvus/pgvector 共享等值、`not:key`、`$ne` 过滤 DSL，空过滤删除统一阻断
-- **节点级模型降级**：轻量任务本地模型不可用 → 确定性规则；远程任务需显式授权；PG 不可用 → MemorySaver
+- **节点级模型降级**：轻量任务本地模型不可用 → 确定性规则；远程任务需显式授权；仅开发/测试环境允许 PG 不可用时使用 MemorySaver，生产环境必须持久化 Checkpointer
 - **行情先持久化**：MarketDataProvider 请求成功后必须先写入 `market_bars`，写入失败不向分析层返回数据
 - **外部动作安全边界**：动作默认拒绝，必须人工确认和幂等键；本项目不实现自动交易
+- **受控处理摘要**：`decision_summary` 只由来源、状态、行数、重试次数和能力数量生成并限制长度；模型原始 `reasoning_content` 不进入响应、SSE、历史或会话恢复
+- **数据源租户复合键**：外挂数据源持久化使用 `(tenant_id, name)` 唯一键，运行时 Provider/Registry 使用复合缓存键；单租户模式保留旧数据兼容读取
+- **双写补偿**：长期记忆 PostgreSQL 与 VectorStore 发生部分失败时执行回滚或写入 `pending_vector_sync`，删除操作使用可重放 tombstone
+- **Schema 刷新保护**：过期 Schema 先刷新、成功后再清理旧条目；刷新失败保留旧缓存并等待下一轮重试；隔离模式的条目 ID 包含租户命名空间
+- **自动化成功语义**：通知任一渠道返回非 `success` 时任务记为失败，不推进成功基线；月度调度按日历月末日截断
+- **统一任务计划与分析产物**：路由节点写回 `task_plan`；最终响应同时提供兼容旧字段和 `artifact`，产物使用 `AnalysisArtifact`、证据和复现信息。
+- **统一结构化 Prompt 调用**：新增能力必须注册 `PromptDefinition` 与输出模型，节点通过 `src/llm/invocation.py` 统一预算、模型调用和 Pydantic 解析。
+- **固定评测门禁**：`tests/fixtures/graph_benchmark.json` 离线覆盖路由、安全和 Artifact；真实本地 SQLite 双源验收默认运行，外部数据源与 LangSmith 仅在显式开关下运行。
