@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1.7
 
-FROM python:3.14-slim AS builder
+FROM python:3.14.0-slim AS builder
 
 ARG INSTALL_EXTRAS="connectors,documents,structured"
 
@@ -19,7 +19,7 @@ COPY src ./src
 RUN python -m pip wheel --wheel-dir=/wheels ".[${INSTALL_EXTRAS}]"
 
 
-FROM python:3.14-slim AS runtime
+FROM python:3.14.0-slim AS runtime
 
 ARG INSTALL_EXTRAS="connectors,documents,structured"
 

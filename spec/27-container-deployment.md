@@ -23,7 +23,7 @@ postgres:5432           redis:6379
 
 ### 2.1 后端
 
-- `Dockerfile` 使用 `python:3.14-slim` 的 builder/runtime 多阶段构建。
+- `Dockerfile` 使用 `python:3.14.0-slim` 的 builder/runtime 多阶段构建，后端运行时固定为 Python 3.14.0。
 - builder 将项目及可选依赖构造成 wheel，runtime 不保留编译工具链。
 - 默认安装 `connectors,documents,structured`，Milvus 本地嵌入模型通过
   `INSTALL_EXTRAS=connectors,documents,structured,embeddings` 显式启用。

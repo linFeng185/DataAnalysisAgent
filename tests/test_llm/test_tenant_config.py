@@ -65,6 +65,7 @@ class TestTenantLLMSelection:
             "protocol": "openai_compatible",
             "model_catalog_id": 21,
             "model_id": "gpt-4o",
+            "capabilities": {"reasoning": True, "reasoning_efforts": ["high", "max"]},
             "base_url": "https://llm.example/v1",
             "encrypted_api_key": "encrypted-value",
         })
@@ -93,6 +94,90 @@ class TestTenantLLMSelection:
         assert selection.api_key == "decrypted-key"
         assert "encrypted_api_key" not in selection.to_public_dict()
         assert "api_key" not in selection.to_public_dict()
+
+    # 方法作用：验证租户模型能力允许时解析并归一化对话推理偏好。
+    # Args: self - pytest 测试类实例；monkeypatch - pytest 补丁工具。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    async def test_resolver_accepts_supported_reasoning_preference(self, monkeypatch) -> None:
+        """用户选择 max 时应写入请求级选择且不进入持久化状态。"""
+        # Arrange
+        import src.llm.tenant_config as tenant_config
+
+        connection = MagicMock()
+        connection.fetchrow = AsyncMock(return_value={
+            "connection_id": 11,
+            "connection_name": "deepseek-primary",
+            "provider_code": "deepseek",
+            "protocol": "openai_compatible",
+            "model_catalog_id": 22,
+            "model_id": "deepseek-v4-pro",
+            "capabilities": '{"reasoning":true,"reasoning_efforts":["high","max"],"reasoning_default_effort":"high"}',
+            "base_url": "https://api.deepseek.com",
+            "encrypted_api_key": "encrypted-value",
+        })
+        monkeypatch.setattr(
+            tenant_config,
+            "get_pg_pool",
+            AsyncMock(return_value=_fake_pool(connection)),
+        )
+        monkeypatch.setattr(
+            tenant_config,
+            "CredentialManager",
+            lambda: SimpleNamespace(decrypt=lambda value: "decrypted-key"),
+        )
+
+        # Act
+        selection = await tenant_config.resolve_tenant_llm_selection(
+            tenant_id=7,
+            connection_id=11,
+            model_id="deepseek-v4-pro",
+            reasoning_enabled=True,
+            reasoning_effort="max",
+        )
+
+        # Assert
+        assert selection.reasoning_enabled is True
+        assert selection.reasoning_effort == "max"
+        assert selection.capabilities["reasoning"] is True
+        assert selection.to_public_dict()["reasoning_effort"] == "max"
+
+    # 方法作用：验证不支持推理的模型拒绝用户开启思考模式。
+    # Args: self - pytest 测试类实例；monkeypatch - pytest 补丁工具。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    async def test_resolver_rejects_reasoning_for_unsupported_model(self, monkeypatch) -> None:
+        """模型能力是服务端授权依据，不能只依赖前端禁用控件。"""
+        # Arrange
+        import pytest
+
+        import src.llm.tenant_config as tenant_config
+
+        connection = MagicMock()
+        connection.fetchrow = AsyncMock(return_value={
+            "connection_id": 11,
+            "connection_name": "plain",
+            "provider_code": "custom",
+            "protocol": "openai_compatible",
+            "model_catalog_id": 23,
+            "model_id": "plain-model",
+            "capabilities": {"reasoning": False},
+            "base_url": "https://llm.example/v1",
+            "encrypted_api_key": "encrypted-value",
+        })
+        monkeypatch.setattr(
+            tenant_config,
+            "get_pg_pool",
+            AsyncMock(return_value=_fake_pool(connection)),
+        )
+
+        # Act / Assert
+        with pytest.raises(ValueError, match="不支持推理"):
+            await tenant_config.resolve_tenant_llm_selection(
+                tenant_id=7,
+                connection_id=11,
+                model_id="plain-model",
+                reasoning_enabled=True,
+                reasoning_effort="high",
+            )
 
     # 方法作用：验证跨租户连接无法被显式对话选择解析。
     # Args: self - pytest 测试类实例；monkeypatch - pytest 补丁工具。
@@ -145,23 +230,28 @@ class TestTenantLLMSelection:
             provider_code="deepseek",
             protocol="openai_compatible",
             model_catalog_id=22,
-            model_id="deepseek-chat",
-            base_url="https://deepseek.example/v1",
+            model_id="deepseek-v4-pro",
+            base_url="https://api.deepseek.com",
             api_key="tenant-key",
+            capabilities={"reasoning": True, "reasoning_efforts": ["high", "max"]},
+            reasoning_enabled=True,
+            reasoning_effort="max",
         )
 
         # Act
         with use_tenant_llm_selection(selection):
-            result = client.get_task_llm("generate_sql", reasoning=False)
+            result = client.get_task_llm("direct_answer", reasoning=None)
 
         # Assert
         assert result is chat_model
         assert get_provider.call_args.kwargs == {
-            "model_id": "deepseek-chat",
+            "model_id": "deepseek-v4-pro",
             "provider_name": "openai_compatible",
-            "base_url": "https://deepseek.example/v1",
+            "base_url": "https://api.deepseek.com",
             "api_key": "tenant-key",
         }
+        assert provider.get_chat_model.call_args.kwargs["reasoning"] is True
+        assert provider.get_chat_model.call_args.kwargs["reasoning_effort"] == "max"
 
 
 class TestTenantModelOptions:

@@ -120,13 +120,19 @@ def _create_model_registry() -> ModelRegistry:
 def _register_defaults(r: ModelRegistry):
     """注册内置模型。"""
     r.register(ModelInfo("deepseek-v4-flash", "openai", "DeepSeek V4 Flash",
-        SupportedFeatures(streaming=True, reasoning=False, function_calling=False,
-                          json_mode=True, max_tokens_limit=8192,
-                          context_window=1_000_000, vision=False)))
+        SupportedFeatures(streaming=True, reasoning=True, reasoning_content_in_response=True,
+                          function_calling=True, json_mode=True, max_tokens_limit=8192,
+                          context_window=1_000_000, vision=False,
+                          reasoning_efforts=("high", "max"),
+                          default_reasoning_effort="high",
+                          reasoning_ignores_sampling=True)))
     r.register(ModelInfo("deepseek-v4-pro", "openai", "DeepSeek V4 Pro",
         SupportedFeatures(streaming=True, reasoning=True, reasoning_content_in_response=True,
-                          function_calling=False, json_mode=True, max_tokens_limit=8192,
-                          context_window=1_000_000, vision=False)))
+                          function_calling=True, json_mode=True, max_tokens_limit=8192,
+                          context_window=1_000_000, vision=False,
+                          reasoning_efforts=("high", "max"),
+                          default_reasoning_effort="high",
+                          reasoning_ignores_sampling=True)))
     r.register(ModelInfo("gpt-4o", "openai", "GPT-4o",
         SupportedFeatures(streaming=True, reasoning=True, function_calling=True,
                           json_mode=True, max_tokens_limit=16384,

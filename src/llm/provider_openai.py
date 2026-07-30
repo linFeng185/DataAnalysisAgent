@@ -50,7 +50,7 @@ class OpenAIProvider(LLMProvider):
         self._api_key = api_key
         self._adapter = get_adapter(model_id)
         self._capabilities = self._adapter.supported_features
-        self._cached_llm = None  # 非流式实例缓存
+        self._cached_llms: dict[tuple, object] = {}
 
     @property
     def capabilities(self):
@@ -103,7 +103,7 @@ class OpenAIProvider(LLMProvider):
             yield LLMStreamChunk(content=p.content, reasoning=p.reasoning_content)
 
     # 方法作用：创建供 LangGraph 使用的 OpenAI-compatible ChatModel。
-    # Args: temperature - 温度；max_tokens - 输出上限；stream - 是否流式；reasoning - 是否启用推理参数。
+    # Args: temperature - 温度；max_tokens - 输出上限；stream - 是否流式；reasoning - 是否启用推理参数；reasoning_effort - 推理深度。
     # Returns: ReasoningChatOpenAI 实例。
     def get_chat_model(
         self,
@@ -111,6 +111,7 @@ class OpenAIProvider(LLMProvider):
         max_tokens: int | None = None,
         stream: bool = True,
         reasoning: bool = True,
+        reasoning_effort: str | None = None,
         timeout: int | None = None,
     ):
         """通过 Provider 统一暴露现有 ReasoningChatOpenAI 工厂。"""
@@ -128,6 +129,7 @@ class OpenAIProvider(LLMProvider):
             resolved_max_tokens,
             stream,
             reasoning=reasoning,
+            reasoning_effort=reasoning_effort,
             timeout=timeout,
         )
         logger.info("OpenAIProvider.get_chat_model 完成", model=self._model_id, stream=stream)
@@ -135,10 +137,11 @@ class OpenAIProvider(LLMProvider):
 
     def _get_llm(
         self,
-        temperature: float,
+        temperature: float | None,
         max_tokens: int,
         stream: bool,
         reasoning: bool = True,
+        reasoning_effort: str | None = None,
         timeout: int | None = None,
     ):
         """获取 ChatOpenAI 实例。
@@ -155,21 +158,26 @@ class OpenAIProvider(LLMProvider):
         """
         from src.llm.reasoning_chat_openai import ReasoningChatOpenAI
         resolved_timeout = timeout if timeout is not None else get_settings().llm_timeout
-        adapter_kwargs = self._adapter.get_chat_openai_kwargs()
-        if not reasoning:
-            adapter_kwargs.pop("reasoning_effort", None)
-            adapter_kwargs.pop("extra_body", None)
+        adapter_kwargs = self._adapter.get_chat_openai_kwargs(
+            reasoning=reasoning,
+            reasoning_effort=reasoning_effort,
+        )
+        effective_temperature = (
+            None
+            if reasoning and self._adapter.supported_features.reasoning_ignores_sampling
+            else temperature
+        )
         if stream:
             # 流式不缓存——每次创建新实例，防止并发覆盖 streaming 属性
             return ReasoningChatOpenAI(
-                model=self._model_id, temperature=temperature, max_tokens=max_tokens,
+                model=self._model_id, temperature=effective_temperature, max_tokens=max_tokens,
                 api_key=self._api_key or None, base_url=self._base_url or None,
                 timeout=resolved_timeout, streaming=True,
                 **adapter_kwargs)
         if not reasoning:
             return ReasoningChatOpenAI(
                 model=self._model_id,
-                temperature=temperature,
+                temperature=effective_temperature,
                 max_tokens=max_tokens,
                 api_key=self._api_key or None,
                 base_url=self._base_url or None,
@@ -177,12 +185,18 @@ class OpenAIProvider(LLMProvider):
                 streaming=False,
                 **adapter_kwargs,
             )
-        # 非流式复用实例
-        if self._cached_llm is None:
-            self._cached_llm = ReasoningChatOpenAI(
+        # 非流式按完整调用配置缓存，避免不同推理深度复用错误参数。
+        cache_key = (
+            effective_temperature,
+            max_tokens,
+            reasoning,
+            self._adapter.normalize_reasoning_effort(reasoning_effort) if reasoning else "",
+            resolved_timeout,
+        )
+        if cache_key not in self._cached_llms:
+            self._cached_llms[cache_key] = ReasoningChatOpenAI(
                 model=self._model_id, api_key=self._api_key or None,
                 base_url=self._base_url or None, timeout=resolved_timeout,
+                temperature=effective_temperature, max_tokens=max_tokens,
                 streaming=False, **adapter_kwargs)
-        self._cached_llm.temperature = temperature
-        self._cached_llm.max_tokens = max_tokens
-        return self._cached_llm
+        return self._cached_llms[cache_key]

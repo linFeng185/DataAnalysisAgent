@@ -38,8 +38,9 @@ def list_registered() -> dict[str, dict]:
 
 
 # 初始化注册
-from src.llm.adapters.deepseek import DeepSeekV4ProAdapter
+from src.llm.adapters.deepseek import DeepSeekV4FlashAdapter, DeepSeekV4ProAdapter
 from src.llm.adapters.openai_adapter import OpenAIAdapter
 
-register("deepseek", DeepSeekV4ProAdapter())
+register("deepseek-v4-pro", DeepSeekV4ProAdapter())
+register("deepseek-v4-flash", DeepSeekV4FlashAdapter())
 register("gpt", OpenAIAdapter())

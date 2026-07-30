@@ -192,6 +192,8 @@ async def _resolve_chat_llm_selection(req: ChatRequest) -> TenantLLMSelection | 
             tenant_id=tenant_id,
             connection_id=req.llm_connection_id,
             model_id=req.model_id,
+            reasoning_enabled=req.reasoning_enabled,
+            reasoning_effort=req.reasoning_effort,
         )
     except (LookupError, ValueError) as exc:
         if not explicit and not get_tenant_policy().multi_tenant:

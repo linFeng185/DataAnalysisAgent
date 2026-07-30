@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from src.llm.adapters.base import SupportedFeatures
-from src.llm.adapters.deepseek import DeepSeekV4ProAdapter
+from src.llm.adapters.deepseek import DeepSeekV4FlashAdapter, DeepSeekV4ProAdapter
 from src.llm.adapters.openai_adapter import OpenAIAdapter
 from src.llm.adapters.registry import get_adapter, list_registered
 
@@ -27,13 +27,36 @@ class TestSupportedFeatures:
 
 
 class TestDeepSeekAdapter:
+    # 方法作用：验证 DeepSeek 思考开关和标准深度被转换为官方请求参数。
+    # Args: self - pytest 测试类实例。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
     def test_get_chat_openai_kwargs(self):
         adapter = DeepSeekV4ProAdapter()
-        kwargs = adapter.get_chat_openai_kwargs()
+        kwargs = adapter.get_chat_openai_kwargs(reasoning=True, reasoning_effort="max")
         assert "reasoning_effort" in kwargs
-        assert kwargs["reasoning_effort"] == "high"
+        assert kwargs["reasoning_effort"] == "max"
         assert "extra_body" in kwargs
         assert kwargs["extra_body"]["thinking"]["type"] == "enabled"
+
+    # 方法作用：验证 DeepSeek 兼容深度别名和关闭思考模式的协议映射。
+    # Args: self - pytest 测试类实例。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    def test_reasoning_effort_aliases_and_disabled_mode(self):
+        """low/medium 应归一为 high，xhigh 归一为 max，关闭时显式发送 disabled。"""
+        # Arrange
+        adapter = DeepSeekV4FlashAdapter()
+
+        # Act / Assert
+        assert adapter.get_chat_openai_kwargs(
+            reasoning=True,
+            reasoning_effort="medium",
+        )["reasoning_effort"] == "high"
+        assert adapter.get_chat_openai_kwargs(
+            reasoning=True,
+            reasoning_effort="xhigh",
+        )["reasoning_effort"] == "max"
+        disabled = adapter.get_chat_openai_kwargs(reasoning=False)
+        assert disabled == {"extra_body": {"thinking": {"type": "disabled"}}}
 
     def test_default_base_url(self):
         assert DeepSeekV4ProAdapter().default_base_url == "https://api.deepseek.com"
@@ -108,9 +131,12 @@ class TestOpenAIAdapter:
 
 
 class TestRegistry:
+    # 方法作用：验证两个 DeepSeek V4 模型分别命中明确适配器。
+    # Args: self - pytest 测试类实例。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
     def test_deepseek_match(self):
-        adapter = get_adapter("deepseek-v4-pro")
-        assert isinstance(adapter, DeepSeekV4ProAdapter)
+        assert isinstance(get_adapter("deepseek-v4-pro"), DeepSeekV4ProAdapter)
+        assert isinstance(get_adapter("deepseek-v4-flash"), DeepSeekV4FlashAdapter)
 
     def test_gpt_match(self):
         adapter = get_adapter("gpt-4o")
@@ -122,10 +148,65 @@ class TestRegistry:
 
     def test_list_registered(self):
         items = list_registered()
-        assert "deepseek" in items
+        assert "deepseek-v4-pro" in items
+        assert "deepseek-v4-flash" in items
         assert "gpt" in items
-        assert items["deepseek"]["reasoning"] is True
-        assert items["deepseek"]["streaming"] is True
+        assert items["deepseek-v4-pro"]["reasoning"] is True
+        assert items["deepseek-v4-flash"]["streaming"] is True
+
+
+class TestReasoningChatOpenAI:
+    """覆盖 DeepSeek 非流式响应和工具调用上下文中的 reasoning_content。"""
+
+    # 方法作用：验证非流式响应中的 reasoning_content 不被 LangChain 丢弃。
+    # Args: self - pytest 测试类实例。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    def test_non_stream_response_keeps_reasoning_content(self) -> None:
+        """官方响应字段必须保存在 AIMessage.additional_kwargs。"""
+        # Arrange
+        from src.llm.reasoning_chat_openai import ReasoningChatOpenAI
+
+        model = ReasoningChatOpenAI(model="deepseek-v4-pro", api_key="test-key")
+
+        # Act
+        result = model._create_chat_result({
+            "choices": [{
+                "index": 0,
+                "finish_reason": "stop",
+                "message": {
+                    "role": "assistant",
+                    "content": "最终回答",
+                    "reasoning_content": "内部推理",
+                },
+            }],
+            "model": "deepseek-v4-pro",
+        })
+
+        # Assert
+        message = result.generations[0].message
+        assert message.additional_kwargs["reasoning_content"] == "内部推理"
+
+    # 方法作用：验证工具调用后的 assistant 推理字段会在下一请求中完整回传。
+    # Args: self - pytest 测试类实例。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    def test_request_payload_returns_reasoning_content_for_tool_chain(self) -> None:
+        """DeepSeek 工具调用链缺失 reasoning_content 会触发上游 400。"""
+        # Arrange
+        from langchain_core.messages import AIMessage, HumanMessage
+
+        from src.llm.reasoning_chat_openai import ReasoningChatOpenAI
+
+        model = ReasoningChatOpenAI(model="deepseek-v4-pro", api_key="test-key")
+        messages = [
+            HumanMessage(content="天气如何"),
+            AIMessage(content="", additional_kwargs={"reasoning_content": "先查天气"}),
+        ]
+
+        # Act
+        payload = model._get_request_payload(messages)
+
+        # Assert
+        assert payload["messages"][1]["reasoning_content"] == "先查天气"
 
 
 class TestBaseAdapter:

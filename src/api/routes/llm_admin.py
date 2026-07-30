@@ -9,6 +9,12 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
 from src.datasource.credential_manager import CredentialManager
+from src.llm.capability_schema import (
+    CapabilityFormSchema,
+    default_capability_schema,
+    normalize_json_object,
+    validate_capability_values,
+)
 from src.llm.tenant_config import resolve_tenant_llm_selection
 from src.logging_config import get_logger
 from src.memory.pg_pool import get_pg_pool
@@ -24,6 +30,11 @@ class ProviderCatalogCreateRequest(BaseModel):
     display_name: str = Field(..., min_length=1, max_length=128)
     protocol: Literal["openai_compatible", "anthropic"]
     default_base_url: str = Field(default="", max_length=2048)
+    capability_schema: CapabilityFormSchema = Field(
+        default_factory=lambda: CapabilityFormSchema.model_validate(
+            default_capability_schema(),
+        ),
+    )
 
 
 class ProviderCatalogUpdateRequest(BaseModel):
@@ -31,6 +42,7 @@ class ProviderCatalogUpdateRequest(BaseModel):
 
     display_name: str | None = Field(default=None, min_length=1, max_length=128)
     default_base_url: str | None = Field(default=None, max_length=2048)
+    capability_schema: CapabilityFormSchema | None = None
     is_active: bool | None = None
 
 
@@ -92,6 +104,30 @@ def _public_connection(row, *, api_key_configured: bool) -> dict:
     }
 
 
+# 方法作用：把厂商数据库行转换为 capability_schema 恒为对象的公开响应。
+# Args: row - asyncpg 厂商记录。
+# Returns: 可供管理端动态渲染的厂商字典。
+def _public_provider(row) -> dict:
+    result = dict(row)
+    result["capability_schema"] = normalize_json_object(
+        result.get("capability_schema"),
+        field_name="capability_schema",
+    )
+    return result
+
+
+# 方法作用：把模型数据库行转换为 capabilities 恒为对象的公开响应。
+# Args: row - asyncpg 模型记录。
+# Returns: 可供模型表单和对话选择使用的模型字典。
+def _public_model(row) -> dict:
+    result = dict(row)
+    result["capabilities"] = normalize_json_object(
+        result.get("capabilities"),
+        field_name="capabilities",
+    )
+    return result
+
+
 @router.get("/providers")
 # 方法作用：列出平台支持的厂商目录。
 # Args: 无。
@@ -103,10 +139,11 @@ async def list_provider_catalog() -> dict:
     pool = await get_pg_pool()
     async with pool.acquire() as connection:
         rows = await connection.fetch(
-            "SELECT id, code, display_name, protocol, default_base_url, is_active "
+            "SELECT id, code, display_name, protocol, default_base_url, "
+            "capability_schema, is_active "
             "FROM llm_provider_catalog ORDER BY display_name",
         )
-    return {"providers": [dict(row) for row in rows]}
+    return {"providers": [_public_provider(row) for row in rows]}
 
 
 @router.post("/providers", status_code=201)
@@ -123,16 +160,18 @@ async def create_provider_catalog_entry(request: ProviderCatalogCreateRequest) -
         async with pool.acquire() as connection:
             row = await connection.fetchrow(
                 "INSERT INTO llm_provider_catalog "
-                "(code, display_name, protocol, default_base_url) "
-                "VALUES ($1, $2, $3, $4) "
-                "RETURNING id, code, display_name, protocol, default_base_url, is_active",
+                "(code, display_name, protocol, default_base_url, capability_schema) "
+                "VALUES ($1, $2, $3, $4, $5::jsonb) "
+                "RETURNING id, code, display_name, protocol, default_base_url, "
+                "capability_schema, is_active",
                 request.code.strip().lower(),
                 request.display_name.strip(),
                 request.protocol,
                 request.default_base_url.strip(),
+                json.dumps(request.capability_schema.model_dump(by_alias=True)),
             )
         logger.info("平台 LLM 厂商创建完成", provider_id=row["id"], code=row["code"])
-        return dict(row)
+        return _public_provider(row)
     except Exception as exc:
         if type(exc).__name__ == "UniqueViolationError":
             raise HTTPException(409, "厂商编码已存在") from exc
@@ -153,21 +192,99 @@ async def update_provider_catalog_entry(
     require_super_admin()
     pool = await get_pg_pool()
     async with pool.acquire() as connection:
+        if request.capability_schema is not None:
+            existing_models = await connection.fetch(
+                "SELECT model_id, capabilities FROM llm_model_catalog WHERE provider_id=$1",
+                provider_id,
+            )
+            try:
+                for model in existing_models:
+                    validate_capability_values(
+                        request.capability_schema.model_dump(by_alias=True),
+                        model["capabilities"],
+                    )
+            except ValueError as exc:
+                logger.warning(
+                    "平台 LLM 厂商能力表单更新阻断",
+                    provider_id=provider_id,
+                    model_id=str(model["model_id"]),
+                    reason=str(exc),
+                )
+                raise HTTPException(
+                    422,
+                    f"现有模型 {model['model_id']} 不符合新能力表单: {exc}",
+                ) from exc
         row = await connection.fetchrow(
             "UPDATE llm_provider_catalog SET "
             "display_name=COALESCE($1, display_name), "
             "default_base_url=COALESCE($2, default_base_url), "
-            "is_active=COALESCE($3, is_active), updated_at=NOW() "
-            "WHERE id=$4 RETURNING id, code, display_name, protocol, "
-            "default_base_url, is_active",
+            "capability_schema=COALESCE($3::jsonb, capability_schema), "
+            "is_active=COALESCE($4, is_active), updated_at=NOW() "
+            "WHERE id=$5 RETURNING id, code, display_name, protocol, "
+            "default_base_url, capability_schema, is_active",
             request.display_name,
             request.default_base_url,
+            (
+                json.dumps(request.capability_schema.model_dump(by_alias=True))
+                if request.capability_schema is not None
+                else None
+            ),
             request.is_active,
             provider_id,
         )
     if row is None:
         raise HTTPException(404, "厂商不存在")
-    return dict(row)
+    return _public_provider(row)
+
+
+@router.delete("/providers/{provider_id}")
+# 方法作用：物理删除未被租户连接引用的模型厂商及其模型目录。
+# Args: provider_id - 厂商目录 ID。
+# Returns: 被删除厂商 ID；存在租户引用时返回 409。
+async def delete_provider_catalog_entry(provider_id: int) -> dict:
+    from src.api.auth import require_super_admin
+
+    require_super_admin()
+    logger.debug("平台 LLM 厂商删除入口", provider_id=provider_id)
+    try:
+        pool = await get_pg_pool()
+        async with pool.acquire() as connection:
+            async with connection.transaction():
+                connection_count = int(await connection.fetchval(
+                    "SELECT COUNT(*) FROM tenant_llm_connections WHERE provider_id=$1",
+                    provider_id,
+                ) or 0)
+                if connection_count:
+                    logger.warning(
+                        "平台 LLM 厂商删除阻断",
+                        provider_id=provider_id,
+                        tenant_connection_count=connection_count,
+                    )
+                    raise HTTPException(409, "厂商仍被租户连接使用，请先删除相关租户连接")
+                await connection.execute(
+                    "DELETE FROM llm_model_catalog WHERE provider_id=$1",
+                    provider_id,
+                )
+                status = await connection.execute(
+                    "DELETE FROM llm_provider_catalog WHERE id=$1",
+                    provider_id,
+                )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        if type(exc).__name__ == "ForeignKeyViolationError":
+            logger.warning(
+                "平台 LLM 厂商删除阻断",
+                provider_id=provider_id,
+                reason="厂商或模型出现并发租户引用",
+            )
+            raise HTTPException(409, "厂商仍被租户连接使用，请先删除相关租户连接") from exc
+        logger.error("平台 LLM 厂商删除失败", error=str(exc), exc_info=True)
+        raise HTTPException(500, "厂商删除失败") from exc
+    if status == "DELETE 0":
+        raise HTTPException(404, "厂商不存在")
+    logger.info("平台 LLM 厂商删除完成", provider_id=provider_id)
+    return {"status": "ok", "provider_id": provider_id}
 
 
 @router.get("/providers/{provider_id}/models")
@@ -185,7 +302,13 @@ async def list_model_catalog(provider_id: int) -> dict:
             "FROM llm_model_catalog WHERE provider_id=$1 ORDER BY display_name",
             provider_id,
         )
-    return {"models": [dict(row) for row in rows]}
+    logger.info(
+        "平台模型目录读取边界",
+        provider_id=provider_id,
+        model_count=len(rows),
+        capability_types=sorted({type(row["capabilities"]).__name__ for row in rows}),
+    )
+    return {"models": [_public_model(row) for row in rows]}
 
 
 @router.post("/providers/{provider_id}/models", status_code=201)
@@ -202,6 +325,16 @@ async def create_model_catalog_entry(
     pool = await get_pg_pool()
     try:
         async with pool.acquire() as connection:
+            capability_schema = await connection.fetchval(
+                "SELECT capability_schema FROM llm_provider_catalog WHERE id=$1",
+                provider_id,
+            )
+            if capability_schema is None:
+                raise HTTPException(404, "厂商不存在")
+            capabilities = validate_capability_values(
+                capability_schema,
+                request.capabilities,
+            )
             row = await connection.fetchrow(
                 "INSERT INTO llm_model_catalog "
                 "(provider_id, model_id, display_name, capabilities) "
@@ -211,8 +344,18 @@ async def create_model_catalog_entry(
                 provider_id,
                 request.model_id.strip(),
                 request.display_name.strip(),
-                json.dumps(request.capabilities),
+                json.dumps(capabilities),
             )
+    except HTTPException:
+        raise
+    except ValueError as exc:
+        logger.warning(
+            "平台模型能力校验拒绝",
+            provider_id=provider_id,
+            model_id=request.model_id,
+            reason=str(exc),
+        )
+        raise HTTPException(422, str(exc)) from exc
     except Exception as exc:
         if type(exc).__name__ == "UniqueViolationError":
             raise HTTPException(409, "该厂商模型已存在") from exc
@@ -220,7 +363,7 @@ async def create_model_catalog_entry(
         raise HTTPException(500, "模型创建失败") from exc
     if row is None:
         raise HTTPException(404, "厂商不存在")
-    return dict(row)
+    return _public_model(row)
 
 
 @router.patch("/models/{model_catalog_id}")
@@ -238,6 +381,26 @@ async def update_model_catalog_entry(
     require_super_admin()
     pool = await get_pg_pool()
     async with pool.acquire() as connection:
+        capability_schema = await connection.fetchval(
+            "SELECT p.capability_schema FROM llm_model_catalog m "
+            "JOIN llm_provider_catalog p ON p.id=m.provider_id WHERE m.id=$1",
+            model_catalog_id,
+        )
+        if capability_schema is None:
+            raise HTTPException(404, "模型不存在")
+        try:
+            capabilities = (
+                validate_capability_values(capability_schema, request.capabilities)
+                if request.capabilities is not None
+                else None
+            )
+        except ValueError as exc:
+            logger.warning(
+                "平台模型能力更新拒绝",
+                model_catalog_id=model_catalog_id,
+                reason=str(exc),
+            )
+            raise HTTPException(422, str(exc)) from exc
         row = await connection.fetchrow(
             "UPDATE llm_model_catalog SET display_name=COALESCE($1, display_name), "
             "capabilities=COALESCE($2::jsonb, capabilities), "
@@ -245,13 +408,45 @@ async def update_model_catalog_entry(
             "WHERE id=$4 RETURNING id, provider_id, model_id, display_name, "
             "capabilities, is_active",
             request.display_name,
-            json.dumps(request.capabilities) if request.capabilities is not None else None,
+            json.dumps(capabilities) if capabilities is not None else None,
             request.is_active,
             model_catalog_id,
         )
     if row is None:
         raise HTTPException(404, "模型不存在")
-    return dict(row)
+    return _public_model(row)
+
+
+@router.delete("/models/{model_catalog_id}")
+# 方法作用：物理删除未被租户连接或默认值引用的平台模型。
+# Args: model_catalog_id - 模型目录 ID。
+# Returns: 被删除模型 ID；存在租户引用时返回 409。
+async def delete_model_catalog_entry(model_catalog_id: int) -> dict:
+    from src.api.auth import require_super_admin
+
+    require_super_admin()
+    logger.debug("平台 LLM 模型删除入口", model_catalog_id=model_catalog_id)
+    try:
+        pool = await get_pg_pool()
+        async with pool.acquire() as connection:
+            status = await connection.execute(
+                "DELETE FROM llm_model_catalog WHERE id=$1",
+                model_catalog_id,
+            )
+    except Exception as exc:
+        if type(exc).__name__ == "ForeignKeyViolationError":
+            logger.warning(
+                "平台 LLM 模型删除阻断",
+                model_catalog_id=model_catalog_id,
+                reason="模型仍被租户连接引用",
+            )
+            raise HTTPException(409, "模型仍被租户连接或默认值使用") from exc
+        logger.error("平台 LLM 模型删除失败", error=str(exc), exc_info=True)
+        raise HTTPException(500, "模型删除失败") from exc
+    if status == "DELETE 0":
+        raise HTTPException(404, "模型不存在")
+    logger.info("平台 LLM 模型删除完成", model_catalog_id=model_catalog_id)
+    return {"status": "ok", "model_catalog_id": model_catalog_id}
 
 
 @router.get("/connections")

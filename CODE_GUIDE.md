@@ -4,7 +4,7 @@
 
 LLM 驱动的数据分析智能体。用自然语言提问，自动完成：轮次状态初始化 → 意图识别 → 表结构检索 → SQL 生成 → 本地安全校验 → 目标库 EXPLAIN → 执行 → 分析 → 图表生成 → 响应组装。
 
-**技术栈**：FastAPI + LangGraph + LangChain + sqlglot + SQLAlchemy + React + TypeScript。
+**技术栈**：Python 3.14.0 + FastAPI + LangGraph + LangChain + sqlglot + SQLAlchemy + React + TypeScript。
 
 ## 目录结构
 
@@ -122,7 +122,7 @@ POST /api/v1/chat {"query": "本月 GMV 排名？", "stream": true}
 
 ### ③ `src/llm/` — LLM 调用层
 
-`client.py`（兼容工厂 + local/remote/none 任务路由）+ `provider_registry.py`（协议别名与 Provider 注册）+ `tenant_config.py`（租户命名连接、默认值、凭证解密和请求级 ContextVar）+ `invocation.py`（统一调用出口）+ `adapters/` + `prompts.py` + `prompt_budget.py` + `output_contracts.py`。`routes/llm_admin.py` 由 super_admin 维护厂商/模型目录，由 tenant_admin 维护当前租户连接和默认值；Chat/SSE 入口解析 `llm_connection_id + model_id` 后绑定请求上下文，多租户未配置时失败关闭，单租户保留 Settings 兼容回退。Prompt 通过稳定 ID/多版本注册，支持激活和回滚；System 与动态上下文共享字符预算，所有业务调用统一附加 Prompt/任务追踪 metadata，节点输出优先由 Pydantic 校验；默认只有 `generate_sql` 可调用远程模型，轻量节点优先 `LOCAL_LLM_*`。
+`client.py`（兼容工厂 + local/remote/none 任务路由）+ `provider_registry.py`（协议别名与 Provider 注册）+ `tenant_config.py`（租户命名连接、默认值、凭证解密、模型能力和请求级推理 ContextVar）+ `capability_schema.py`（厂商动态能力表单和值校验）+ `invocation.py`（统一调用出口）+ `adapters/` + `prompts.py` + `prompt_budget.py` + `output_contracts.py`。`routes/llm_admin.py` 由 super_admin 维护、启停和物理删除厂商/模型目录，由 tenant_admin 维护当前租户连接和默认值；Chat/SSE 入口解析 `llm_connection_id + model_id + reasoning_enabled + reasoning_effort` 后绑定请求上下文，多租户未配置时失败关闭，单租户保留 Settings 兼容回退。DeepSeek V4 Pro/Flash Adapter 统一映射 thinking、high/max 和 reasoning_content 工具链回传，原始推理不进入公开响应或历史。Prompt 通过稳定 ID/多版本注册，支持激活和回滚；System 与动态上下文共享字符预算，所有业务调用统一附加 Prompt/任务追踪 metadata，节点输出优先由 Pydantic 校验；默认只有 `generate_sql` 可调用远程模型，轻量节点优先 `LOCAL_LLM_*`。
 
 ### ④ `src/datasource/` — 数据源管理
 
@@ -199,6 +199,7 @@ POST /api/v1/chat {"query": "本月 GMV 排名？", "stream": true}
 `migrations.py` 在应用启动早期按编号扫描 `migrations/*.sql`，使用 PostgreSQL advisory lock
 避免多实例并发，按文件事务执行，并在 `schema_migrations` 记录版本、文件名与 checksum。
 `013_tenant_identity_llm.sql` 为租户增加全局不可变 `code` 和租户内大小写敏感用户名约束，并建立平台 LLM 厂商/模型目录、租户命名连接、模型绑定和默认配置表。
+`014_llm_catalog_reasoning.sql` 增加厂商能力表单定义，初始化 DeepSeek V4 Pro/Flash，并把旧 `deepseek-chat` 的租户绑定和默认值平滑迁移到 Pro 后删除旧目录项。
 `007_api_access_policy.sql` 为动态策略和 CIDR 规则启用强制 RLS。API 策略加载属于必需启动步骤，
 任一环境加载失败均阻断启动，防止数据库规则静默失效。
 `009_automation.sql` 为自动化任务、运行记录和站内通知建表并启用租户/用户 RLS，
@@ -214,7 +215,7 @@ POST /api/v1/chat {"query": "本月 GMV 排名？", "stream": true}
 
 ## 前端
 
-`frontend/` — React 18 + TypeScript 5 + Ant Design 5 + ECharts。登录固定输入 `tenant_code + username + password`，不展示公开注册；登录后按角色展示业务菜单。`AdminPage` 对 super_admin 展示租户与平台 LLM 目录，对 tenant_admin 展示当前租户用户、命名连接和默认模型；`ChatPage` 只提交当前租户可见的连接与模型。`AutomationPage` 提供任务创建、立即运行、删除和站内通知视图。
+`frontend/` — React 18 + TypeScript 5 + Ant Design 5 + ECharts。登录固定输入 `tenant_code + username + password`，不展示公开注册；登录后按角色展示业务菜单。`AdminPage` 对 super_admin 展示租户、厂商能力字段编辑器和可物理删除的平台模型目录，对 tenant_admin 展示当前租户用户、命名连接和默认模型；`ChatPage` 只提交当前租户可见的连接与模型，并按模型能力展示推理开关和深度。`AutomationPage` 提供任务创建、立即运行、删除和站内通知视图。
 
 ## 快速上手
 

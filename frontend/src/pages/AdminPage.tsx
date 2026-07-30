@@ -1,10 +1,11 @@
 import { useEffect, useMemo, useState } from 'react';
+import type { ReactNode } from 'react';
 import {
   Alert, Button, Descriptions, Divider, Form, Input, InputNumber, Modal, Select,
   Space, Switch, Table, Tabs, Tag, Tooltip, Typography, message,
 } from 'antd';
 import {
-  DeleteOutlined, EditOutlined, KeyOutlined, PlusOutlined, ReloadOutlined,
+  DeleteOutlined, EditOutlined, KeyOutlined, MinusCircleOutlined, PlusOutlined, ReloadOutlined,
   SafetyCertificateOutlined, SettingOutlined, TeamOutlined,
 } from '@ant-design/icons';
 import { useNavigate } from 'react-router-dom';
@@ -26,7 +27,31 @@ interface LLMProvider {
   display_name: string;
   protocol: 'openai_compatible' | 'anthropic';
   default_base_url: string;
+  capability_schema: CapabilityFormSchema;
   is_active: boolean;
+}
+
+type CapabilityFieldType = 'boolean' | 'integer' | 'number' | 'text' | 'select' | 'multiselect';
+
+interface CapabilityOption {
+  label: string;
+  value: string;
+}
+
+interface CapabilityFieldDefinition {
+  key: string;
+  label: string;
+  type: CapabilityFieldType;
+  required?: boolean;
+  default?: unknown;
+  options?: CapabilityOption[];
+  minimum?: number | null;
+  maximum?: number | null;
+  description?: string;
+}
+
+interface CapabilityFormSchema {
+  fields: CapabilityFieldDefinition[];
 }
 
 interface LLMModel {
@@ -125,6 +150,98 @@ const ACCESS_LOG_OPTIONS = [
   { value: 'none', label: '静默成功访问' },
 ];
 
+const CAPABILITY_TYPE_OPTIONS = [
+  { value: 'boolean', label: '开关' },
+  { value: 'integer', label: '整数' },
+  { value: 'number', label: '数值' },
+  { value: 'text', label: '文本' },
+  { value: 'select', label: '单选' },
+  { value: 'multiselect', label: '多选' },
+];
+
+// 方法作用：把数据库能力表单转换为厂商编辑器使用的字段数组。
+// Args: schema - 厂商能力表单定义。
+// Returns: options 已转为可编辑字符串数组的字段列表。
+function capabilitySchemaToForm(schema?: CapabilityFormSchema): Record<string, unknown>[] {
+  return (schema?.fields || []).map(field => ({
+    ...field,
+    options: (field.options || []).map(option => option.value),
+  }));
+}
+
+// 方法作用：把厂商编辑器字段转换为后端动态表单定义。
+// Args: fields - Form.List 产生的能力字段数组。
+// Returns: 可提交给 capability_schema.fields 的字段定义。
+function capabilityFieldsToSchema(fields: Record<string, unknown>[] = []): CapabilityFormSchema {
+  return {
+    fields: fields.map(field => ({
+      key: String(field.key || '').trim(),
+      label: String(field.label || '').trim(),
+      type: field.type as CapabilityFieldType,
+      required: Boolean(field.required),
+      ...('default' in field ? { default: field.default } : {}),
+      options: ['select', 'multiselect'].includes(String(field.type))
+        ? ((field.options as string[] | undefined) || []).filter(Boolean).map(value => ({
+          label: value,
+          value,
+        }))
+        : [],
+      minimum: typeof field.minimum === 'number' ? field.minimum : null,
+      maximum: typeof field.maximum === 'number' ? field.maximum : null,
+      description: String(field.description || ''),
+    })),
+  };
+}
+
+// 方法作用：从厂商能力定义生成新模型表单默认值。
+// Args: provider - 当前选中的模型厂商。
+// Returns: 以字段 key 为键的能力默认值对象。
+function capabilityDefaults(provider?: LLMProvider): Record<string, unknown> {
+  return Object.fromEntries(
+    (provider?.capability_schema?.fields || [])
+      .filter(field => field.default !== undefined && field.default !== null)
+      .map(field => [field.key, field.default]),
+  );
+}
+
+// 方法作用：根据厂商字段类型渲染模型能力输入控件。
+// Args: field - 一个厂商级能力字段定义。
+// Returns: 绑定 capabilities.<key> 的 Ant Design 表单项。
+function renderCapabilityField(field: CapabilityFieldDefinition): ReactNode {
+  const rules = field.required ? [{ required: true, message: `请填写${field.label}` }] : [];
+  const name = ['capabilities', field.key];
+  if (field.type === 'boolean') {
+    return <Form.Item key={field.key} name={name} label={field.label}
+      valuePropName="checked" tooltip={field.description} rules={rules}><Switch /></Form.Item>;
+  }
+  if (field.type === 'integer' || field.type === 'number') {
+    return <Form.Item key={field.key} name={name} label={field.label}
+      tooltip={field.description} rules={rules}><InputNumber min={field.minimum ?? undefined}
+        max={field.maximum ?? undefined} precision={field.type === 'integer' ? 0 : undefined}
+        style={{ width: '100%' }} /></Form.Item>;
+  }
+  if (field.type === 'select' || field.type === 'multiselect') {
+    return <Form.Item key={field.key} name={name} label={field.label}
+      tooltip={field.description} rules={rules}><Select mode={field.type === 'multiselect' ? 'multiple' : undefined}
+        options={field.options || []} /></Form.Item>;
+  }
+  return <Form.Item key={field.key} name={name} label={field.label}
+    tooltip={field.description} rules={rules}><Input /></Form.Item>;
+}
+
+// 方法作用：把模型能力对象按厂商字段标签转换为可扫描摘要。
+// Args: capabilities - 模型能力值；provider - 所属厂商。
+// Returns: 标签化的能力摘要 React 节点。
+function renderCapabilitySummary(
+  capabilities: Record<string, unknown>,
+  provider?: LLMProvider,
+): ReactNode {
+  const labels = new Map((provider?.capability_schema?.fields || []).map(field => [field.key, field.label]));
+  return <Space size={[4, 4]} wrap>{Object.entries(capabilities || {}).map(([key, value]) => (
+    <Tag key={key}>{labels.get(key) || key}: {Array.isArray(value) ? value.join(', ') : String(value)}</Tag>
+  ))}</Space>;
+}
+
 // 方法作用：提供超级管理员的租户、用户和安全配置工作台。
 // Args: 无。
 // Returns: 平台管理 React 页面。
@@ -153,6 +270,8 @@ export default function AdminPage() {
   const [selectedDefaultConnectionId, setSelectedDefaultConnectionId] = useState<number | undefined>();
   const [providerModal, setProviderModal] = useState(false);
   const [modelModal, setModelModal] = useState(false);
+  const [editingProvider, setEditingProvider] = useState<LLMProvider | null>(null);
+  const [editingModel, setEditingModel] = useState<LLMModel | null>(null);
   const [connectionModal, setConnectionModal] = useState(false);
   const [editingConnection, setEditingConnection] = useState<TenantLLMConnection | null>(null);
   const [tenantForm] = Form.useForm();
@@ -163,6 +282,7 @@ export default function AdminPage() {
   const [providerForm] = Form.useForm();
   const [modelForm] = Form.useForm();
   const [connectionForm] = Form.useForm();
+  const [defaultConnectionForm] = Form.useForm();
 
   // 方法作用：按当前角色加载租户用户治理或平台管理与 LLM 目录数据。
   // Args: 无。
@@ -261,36 +381,89 @@ export default function AdminPage() {
     }
   };
 
-  // 方法作用：创建平台支持的模型厂商目录。
-  // Args: 无，读取 providerForm 当前值。
-  // Returns: 创建完成后无返回值。
-  const createProvider = async () => {
-    try {
-      const values = await providerForm.validateFields();
-      await post('/admin/llm/providers', values);
-      providerForm.resetFields();
-      setProviderModal(false);
-      await load();
-      message.success('模型厂商已创建');
-    } catch (error) { console.error('AdminPage.createProvider 异常', error); }
+  // 方法作用：打开模型厂商创建或编辑表单并恢复动态字段定义。
+  // Args: provider - 可选待编辑厂商，缺失时创建新厂商。
+  // Returns: 无返回值。
+  const openProviderEditor = (provider?: LLMProvider) => {
+    setEditingProvider(provider || null);
+    providerForm.setFieldsValue(provider ? {
+      code: provider.code,
+      display_name: provider.display_name,
+      protocol: provider.protocol,
+      default_base_url: provider.default_base_url,
+      capability_fields: capabilitySchemaToForm(provider.capability_schema),
+    } : {
+      protocol: 'openai_compatible',
+      capability_fields: [],
+    });
+    setProviderModal(true);
   };
 
-  // 方法作用：创建选中厂商下的平台模型目录。
-  // Args: 无，读取 modelForm 当前值和选中厂商。
-  // Returns: 创建完成后无返回值。
-  const createModel = async () => {
+  // 方法作用：创建或更新平台模型厂商及其动态能力表单定义。
+  // Args: 无，读取 providerForm 和 editingProvider。
+  // Returns: 保存完成后无返回值。
+  const saveProvider = async () => {
+    try {
+      const values = await providerForm.validateFields();
+      const { capability_fields: fields, ...metadata } = values;
+      const payload = {
+        ...metadata,
+        ...(editingProvider || (fields || []).length > 0
+          ? { capability_schema: capabilityFieldsToSchema(fields) }
+          : {}),
+      };
+      if (editingProvider) {
+        const { code: _code, protocol: _protocol, ...updates } = payload;
+        await patch(`/admin/llm/providers/${editingProvider.id}`, updates);
+      } else {
+        await post('/admin/llm/providers', payload);
+      }
+      providerForm.resetFields();
+      setProviderModal(false);
+      setEditingProvider(null);
+      await load();
+      message.success(editingProvider ? '模型厂商已更新' : '模型厂商已创建');
+    } catch (error) { console.error('AdminPage.saveProvider 异常', error); }
+  };
+
+  // 方法作用：打开模型创建或编辑表单并按厂商 schema 设置能力值。
+  // Args: model - 可选待编辑模型，缺失时创建新模型。
+  // Returns: 无返回值。
+  const openModelEditor = (model?: LLMModel) => {
+    const provider = providers.find(item => item.id === selectedProviderId);
+    setEditingModel(model || null);
+    modelForm.setFieldsValue({
+      model_id: model?.model_id || '',
+      display_name: model?.display_name || '',
+      capabilities: model?.capabilities || capabilityDefaults(provider),
+    });
+    setModelModal(true);
+  };
+
+  // 方法作用：创建或更新选中厂商模型及动态能力值。
+  // Args: 无，读取 modelForm、editingModel 和 selectedProviderId。
+  // Returns: 保存完成后无返回值。
+  const saveModel = async () => {
     if (!selectedProviderId) return;
     try {
       const values = await modelForm.validateFields();
-      const capabilities = typeof values.capabilities === 'string'
-        ? JSON.parse(values.capabilities || '{}')
-        : (values.capabilities || {});
-      await post(`/admin/llm/providers/${selectedProviderId}/models`, { ...values, capabilities });
+      if (editingModel) {
+        await patch(`/admin/llm/models/${editingModel.id}`, {
+          display_name: values.display_name,
+          capabilities: values.capabilities || {},
+        });
+      } else {
+        await post(`/admin/llm/providers/${selectedProviderId}/models`, {
+          ...values,
+          capabilities: values.capabilities || {},
+        });
+      }
       modelForm.resetFields();
       setModelModal(false);
+      setEditingModel(null);
       await loadProviderModels(selectedProviderId);
-      message.success('模型已创建');
-    } catch (error) { console.error('AdminPage.createModel 异常', error); }
+      message.success(editingModel ? '模型已更新' : '模型已创建');
+    } catch (error) { console.error('AdminPage.saveModel 异常', error); }
   };
 
   // 方法作用：创建或更新当前租户的命名 LLM 连接。
@@ -298,7 +471,22 @@ export default function AdminPage() {
   // Returns: 保存完成后无返回值。
   const saveConnection = async () => {
     try {
+      const snapshot = connectionForm.getFieldsValue(true);
+      console.info('命名连接保存校验边界', {
+        editing: Boolean(editingConnection),
+        field_names: Object.keys(snapshot),
+        provider_id: snapshot.provider_id,
+        model_count: Array.isArray(snapshot.model_catalog_ids) ? snapshot.model_catalog_ids.length : 0,
+        api_key_configured: Boolean(snapshot.api_key),
+        default_connection_present: Boolean(snapshot.default_connection_id),
+        default_model_present: Boolean(snapshot.default_model_catalog_id),
+      });
       const values = await connectionForm.validateFields();
+      console.info('命名连接表单校验通过', {
+        editing: Boolean(editingConnection),
+        provider_id: values.provider_id,
+        model_count: Array.isArray(values.model_catalog_ids) ? values.model_catalog_ids.length : 0,
+      });
       if (editingConnection) {
         await patch(`/admin/llm/connections/${editingConnection.id}`, values);
       } else {
@@ -309,7 +497,17 @@ export default function AdminPage() {
       setConnectionModal(false);
       await load();
       message.success('LLM 连接已保存');
-    } catch (error) { console.error('AdminPage.saveConnection 异常', error); }
+    } catch (error) {
+      const errorFields = (
+        typeof error === 'object' && error !== null && 'errorFields' in error
+          ? (error as { errorFields?: Array<{ name?: Array<string | number> }> }).errorFields
+          : []
+      ) || [];
+      console.info('命名连接表单校验阻断', {
+        error_fields: errorFields.map(item => item.name?.join('.') || ''),
+      });
+      console.error('AdminPage.saveConnection 异常', error);
+    }
   };
 
   // 方法作用：删除当前租户不再使用的命名 LLM 连接。
@@ -324,11 +522,11 @@ export default function AdminPage() {
   };
 
   // 方法作用：设置当前租户默认的命名连接和对话模型。
-  // Args: 无，读取 connectionForm 当前默认选择字段。
+  // Args: 无，读取 defaultConnectionForm 当前默认选择字段。
   // Returns: 保存完成后无返回值。
   const setDefaultConnection = async () => {
     try {
-      const values = await connectionForm.validateFields(['default_connection_id', 'default_model_catalog_id']);
+      const values = await defaultConnectionForm.validateFields();
       await put('/admin/llm/default', {
         connection_id: values.default_connection_id,
         model_catalog_id: values.default_model_catalog_id,
@@ -534,6 +732,34 @@ export default function AdminPage() {
     } catch (error) { console.error('AdminPage.toggleModel 异常', error); message.error('模型状态更新失败'); }
   };
 
+  // 方法作用：物理删除未被租户连接引用的平台模型。
+  // Args: model - 待删除模型目录项。
+  // Returns: 删除完成后无返回值。
+  const deleteModel = async (model: LLMModel) => {
+    try {
+      await del(`/admin/llm/models/${model.id}`);
+      if (selectedProviderId) await loadProviderModels(selectedProviderId);
+      message.success('模型已删除');
+    } catch (error) {
+      console.error('AdminPage.deleteModel 异常', error);
+      message.error('模型仍被租户连接使用或删除失败');
+    }
+  };
+
+  // 方法作用：物理删除无租户连接引用的厂商及其模型目录。
+  // Args: provider - 待删除模型厂商。
+  // Returns: 删除完成后无返回值。
+  const deleteProvider = async (provider: LLMProvider) => {
+    try {
+      await del(`/admin/llm/providers/${provider.id}`);
+      await load();
+      message.success('模型厂商已删除');
+    } catch (error) {
+      console.error('AdminPage.deleteProvider 异常', error);
+      message.error('厂商仍被租户连接使用或删除失败');
+    }
+  };
+
   // 方法作用：启用或停用当前租户命名连接并刷新列表。
   // Args: connection - 目标连接；isActive - 目标状态。
   // Returns: 更新完成后无返回值。
@@ -547,6 +773,10 @@ export default function AdminPage() {
   const tenantNames = useMemo(
     () => new Map(tenants.map(tenant => [tenant.id, tenant.name])),
     [tenants],
+  );
+  const selectedProvider = useMemo(
+    () => providers.find(provider => provider.id === selectedProviderId),
+    [providers, selectedProviderId],
   );
 
   const tenantWorkspace = (
@@ -646,25 +876,37 @@ export default function AdminPage() {
 
   const providerWorkspace = <Space direction="vertical" size={16} style={{ width: '100%' }}>
     <Table<LLMProvider> rowKey="id" dataSource={providers} loading={loading} pagination={{ pageSize: 10 }}
+      scroll={{ x: 990 }}
       title={() => <Space>
-        <Button type="primary" icon={<PlusOutlined />} onClick={() => setProviderModal(true)}>新增厂商</Button>
+        <Button type="primary" icon={<PlusOutlined />} onClick={() => openProviderEditor()}>新增厂商</Button>
         <Button icon={<ReloadOutlined />} onClick={() => void load()} aria-label="刷新厂商" />
       </Space>}
       columns={[
-        { title: '编码', dataIndex: 'code' },
-        { title: '名称', dataIndex: 'display_name' },
-        { title: '协议', dataIndex: 'protocol' },
-        { title: '默认地址', dataIndex: 'default_base_url', ellipsis: true },
-        { title: '状态', render: (_: unknown, provider: LLMProvider) => <Switch checked={provider.is_active} onChange={value => void toggleProvider(provider, value)} /> },
-        { title: '模型', render: (_: unknown, provider: LLMProvider) => <Button type="link" onClick={() => void loadProviderModels(provider.id)}>查看</Button> },
+        { title: '编码', dataIndex: 'code', width: 130 },
+        { title: '名称', dataIndex: 'display_name', width: 140 },
+        { title: '协议', dataIndex: 'protocol', width: 180 },
+        { title: '默认地址', dataIndex: 'default_base_url', width: 260, ellipsis: true },
+        { title: '状态', width: 90, render: (_: unknown, provider: LLMProvider) => <Switch checked={provider.is_active} onChange={value => void toggleProvider(provider, value)} /> },
+        { title: '操作', width: 190, render: (_: unknown, provider: LLMProvider) => <Space size={4}>
+          <Tooltip title="查看模型"><Button type="link" onClick={() => void loadProviderModels(provider.id)}>模型</Button></Tooltip>
+          <Tooltip title="编辑厂商"><Button icon={<EditOutlined />} onClick={() => openProviderEditor(provider)} aria-label={`编辑 ${provider.display_name}`} /></Tooltip>
+          <Tooltip title="删除厂商"><Button danger icon={<DeleteOutlined />} aria-label={`删除 ${provider.display_name}`}
+            onClick={() => Modal.confirm({ title: '删除模型厂商', content: `将同时删除 ${provider.display_name} 下未被引用的模型。`, okButtonProps: { danger: true }, onOk: () => deleteProvider(provider) })} /></Tooltip>
+        </Space> },
       ]} />
     <Table<LLMModel> rowKey="id" dataSource={providerModels} pagination={{ pageSize: 10 }}
-      title={() => <Space><Typography.Text>当前厂商模型目录</Typography.Text><Button type="primary" icon={<PlusOutlined />} disabled={!selectedProviderId} onClick={() => setModelModal(true)}>新增模型</Button></Space>}
+      scroll={{ x: 990 }}
+      title={() => <Space><Typography.Text>当前厂商模型目录</Typography.Text><Button type="primary" icon={<PlusOutlined />} disabled={!selectedProviderId} onClick={() => openModelEditor()}>新增模型</Button></Space>}
       columns={[
-        { title: '模型 ID', dataIndex: 'model_id' },
-        { title: '展示名称', dataIndex: 'display_name' },
-        { title: '能力', dataIndex: 'capabilities', render: value => JSON.stringify(value || {}) },
-        { title: '状态', render: (_: unknown, model: LLMModel) => <Switch checked={model.is_active} onChange={value => void toggleModel(model, value)} /> },
+        { title: '模型 ID', dataIndex: 'model_id', width: 180 },
+        { title: '展示名称', dataIndex: 'display_name', width: 180 },
+        { title: '能力', dataIndex: 'capabilities', width: 420, render: value => renderCapabilitySummary(value || {}, selectedProvider) },
+        { title: '状态', width: 90, render: (_: unknown, model: LLMModel) => <Switch checked={model.is_active} onChange={value => void toggleModel(model, value)} /> },
+        { title: '操作', width: 120, render: (_: unknown, model: LLMModel) => <Space size={4}>
+          <Tooltip title="编辑模型"><Button icon={<EditOutlined />} onClick={() => openModelEditor(model)} aria-label={`编辑 ${model.display_name}`} /></Tooltip>
+          <Tooltip title="删除模型"><Button danger icon={<DeleteOutlined />} aria-label={`删除 ${model.display_name}`}
+            onClick={() => Modal.confirm({ title: '删除模型', content: `确认物理删除 ${model.display_name}？`, okButtonProps: { danger: true }, onOk: () => deleteModel(model) })} /></Tooltip>
+        </Space> },
       ]} />
   </Space>;
 
@@ -686,7 +928,7 @@ export default function AdminPage() {
           <Button danger icon={<DeleteOutlined />} onClick={() => void deleteConnection(connection)} />
         </Space> },
       ]} />
-    <Form form={connectionForm} layout="inline" onFinish={() => void setDefaultConnection()}>
+    <Form form={defaultConnectionForm} layout="inline" onFinish={() => void setDefaultConnection()}>
       <Form.Item name="default_connection_id" label="默认连接" rules={[{ required: true }]}>
         <Select placeholder="选择默认连接" style={{ minWidth: 190 }} onChange={value => { setSelectedDefaultConnectionId(value); const connection = connections.find(item => item.id === value); if (connection) void loadProviderModels(connection.provider_id); }} options={connections.filter(item => item.is_active).map(item => ({ value: item.id, label: item.name }))} />
       </Form.Item>
@@ -728,20 +970,64 @@ export default function AdminPage() {
       </Form>
     </Modal>
 
-    <Modal title="新增模型厂商" open={providerModal} onOk={() => void createProvider()} onCancel={() => setProviderModal(false)} destroyOnClose>
+    <Modal title={editingProvider ? '编辑模型厂商' : '新增模型厂商'} open={providerModal}
+      onOk={() => void saveProvider()} onCancel={() => { setProviderModal(false); setEditingProvider(null); }}
+      width={920} destroyOnClose>
       <Form form={providerForm} layout="vertical">
-        <Form.Item name="code" label="厂商编码" rules={[{ required: true, pattern: /^[A-Za-z0-9][A-Za-z0-9_-]*$/ }]}><Input /></Form.Item>
+        <Form.Item name="code" label="厂商编码" rules={[{ required: true, pattern: /^[A-Za-z0-9][A-Za-z0-9_-]*$/ }]}><Input disabled={Boolean(editingProvider)} /></Form.Item>
         <Form.Item name="display_name" label="展示名称" rules={[{ required: true }]}><Input /></Form.Item>
-        <Form.Item name="protocol" label="协议" rules={[{ required: true }]} initialValue="openai_compatible"><Select options={[{ value: 'openai_compatible', label: 'OpenAI Compatible' }, { value: 'anthropic', label: 'Anthropic' }]} /></Form.Item>
+        <Form.Item name="protocol" label="协议" rules={[{ required: true }]}><Select disabled={Boolean(editingProvider)} options={[{ value: 'openai_compatible', label: 'OpenAI Compatible' }, { value: 'anthropic', label: 'Anthropic' }]} /></Form.Item>
         <Form.Item name="default_base_url" label="默认请求地址"><Input /></Form.Item>
+        <Divider orientation="left" plain>模型能力表单</Divider>
+        <Form.List name="capability_fields">
+          {(fields, { add, remove }) => <Space direction="vertical" size={12} style={{ width: '100%' }}>
+            {fields.map(field => <div key={field.key} style={{ paddingBottom: 12, borderBottom: '1px solid #f0f0f0' }}>
+              <Space wrap align="start">
+                <Form.Item {...field} name={[field.name, 'key']} label="字段键"
+                  rules={[{ required: true, pattern: /^[a-z][a-z0-9_]*$/ }]}><Input style={{ width: 180 }} /></Form.Item>
+                <Form.Item {...field} name={[field.name, 'label']} label="显示名称"
+                  rules={[{ required: true }]}><Input style={{ width: 160 }} /></Form.Item>
+                <Form.Item {...field} name={[field.name, 'type']} label="控件类型"
+                  rules={[{ required: true }]}><Select options={CAPABILITY_TYPE_OPTIONS} style={{ width: 120 }} /></Form.Item>
+                <Form.Item {...field} name={[field.name, 'required']} label="必填" valuePropName="checked"><Switch /></Form.Item>
+                <Tooltip title="删除能力字段"><Button danger type="text" icon={<MinusCircleOutlined />}
+                  onClick={() => remove(field.name)} aria-label="删除能力字段" style={{ marginTop: 30 }} /></Tooltip>
+              </Space>
+              <Form.Item noStyle shouldUpdate>
+                {({ getFieldValue }) => {
+                  const type = getFieldValue(['capability_fields', field.name, 'type']) as CapabilityFieldType;
+                  const options = (getFieldValue(['capability_fields', field.name, 'options']) || []) as string[];
+                  return <Space wrap align="start">
+                    {(type === 'select' || type === 'multiselect') && <Form.Item name={[field.name, 'options']} label="可选值"
+                      rules={[{ required: true }]}><Select mode="tags" tokenSeparators={[',']} style={{ minWidth: 260 }} /></Form.Item>}
+                    {(type === 'integer' || type === 'number') && <>
+                      <Form.Item name={[field.name, 'minimum']} label="最小值"><InputNumber /></Form.Item>
+                      <Form.Item name={[field.name, 'maximum']} label="最大值"><InputNumber /></Form.Item>
+                    </>}
+                    <Form.Item name={[field.name, 'default']} label="默认值" valuePropName={type === 'boolean' ? 'checked' : 'value'}>
+                      {type === 'boolean' ? <Switch />
+                        : type === 'integer' || type === 'number' ? <InputNumber precision={type === 'integer' ? 0 : undefined} />
+                          : type === 'select' || type === 'multiselect' ? <Select mode={type === 'multiselect' ? 'multiple' : undefined}
+                            options={options.map(value => ({ label: value, value }))} style={{ minWidth: 180 }} />
+                            : <Input style={{ width: 180 }} />}
+                    </Form.Item>
+                    <Form.Item name={[field.name, 'description']} label="说明"><Input style={{ width: 260 }} /></Form.Item>
+                  </Space>;
+                }}
+              </Form.Item>
+            </div>)}
+            <Button type="dashed" icon={<PlusOutlined />} onClick={() => add({ type: 'boolean', required: false })}>添加能力字段</Button>
+          </Space>}
+        </Form.List>
       </Form>
     </Modal>
 
-    <Modal title="新增模型目录" open={modelModal} onOk={() => void createModel()} onCancel={() => setModelModal(false)} destroyOnClose>
+    <Modal title={editingModel ? '编辑模型目录' : '新增模型目录'} open={modelModal}
+      onOk={() => void saveModel()} onCancel={() => { setModelModal(false); setEditingModel(null); }} destroyOnClose>
       <Form form={modelForm} layout="vertical">
-        <Form.Item name="model_id" label="模型 ID" rules={[{ required: true }]}><Input /></Form.Item>
+        <Form.Item name="model_id" label="模型 ID" rules={[{ required: true }]}><Input disabled={Boolean(editingModel)} /></Form.Item>
         <Form.Item name="display_name" label="展示名称" rules={[{ required: true }]}><Input /></Form.Item>
-        <Form.Item name="capabilities" label="能力 JSON" initialValue="{}"><Input.TextArea rows={4} /></Form.Item>
+        {(selectedProvider?.capability_schema?.fields || []).map(renderCapabilityField)}
       </Form>
     </Modal>
 

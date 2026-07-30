@@ -20,8 +20,8 @@ class TestContainerDeployment:
         normalized = source.lower()
 
         # Assert
-        assert "from python:3.14-slim as builder" in normalized
-        assert "from python:3.14-slim as runtime" in normalized
+        assert "from python:3.14.0-slim as builder" in normalized
+        assert "from python:3.14.0-slim as runtime" in normalized
         assert normalized.count('arg install_extras="connectors,documents,structured"') == 2
         assert '"data-analysis-agent[${install_extras}]"' in normalized
         assert "user app" in normalized

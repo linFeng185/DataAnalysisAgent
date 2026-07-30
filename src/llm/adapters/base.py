@@ -17,6 +17,9 @@ class SupportedFeatures:
     context_window: int = 128000
     vision: bool = False
     default_temperature: float = 0.0
+    reasoning_efforts: tuple[str, ...] = ()
+    default_reasoning_effort: str = ""
+    reasoning_ignores_sampling: bool = False
 
 
 @dataclass
@@ -45,13 +48,28 @@ class ModelAdapter:
     default_base_url: str = ""
     supported_features: SupportedFeatures = SupportedFeatures()
 
-    def get_chat_openai_kwargs(self) -> dict:
+    # 方法作用：把统一推理偏好转换为 OpenAI-compatible 模型构造参数。
+    # Args: reasoning - 是否开启推理；reasoning_effort - 统一推理深度。
+    # Returns: 可传给 ChatOpenAI 的额外参数。
+    def get_chat_openai_kwargs(
+        self,
+        *,
+        reasoning: bool = True,
+        reasoning_effort: str | None = None,
+    ) -> dict:
         """返回 ChatOpenAI 构造函数的额外参数。
 
         子类重写此方法来注入模型特有参数，如 reasoning_effort、model_kwargs 等。
         streaming 参数由 client.py 统一设置，不在此返回。
         """
+        del reasoning, reasoning_effort
         return {}
+
+    # 方法作用：把统一推理深度转换为当前模型接受的等级。
+    # Args: reasoning_effort - 用户或模型默认推理深度。
+    # Returns: 当前模型可接受的深度字符串，空值表示不发送。
+    def normalize_reasoning_effort(self, reasoning_effort: str | None) -> str:
+        return str(reasoning_effort or self.supported_features.default_reasoning_effort)
 
     def get_default_base_url(self) -> str:
         return self.default_base_url

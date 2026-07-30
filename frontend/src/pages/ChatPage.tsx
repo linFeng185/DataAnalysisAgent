@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
-import { Input, Select, Tag, Typography, Space, Tooltip, message, Card, Button, Spin } from 'antd';
+import { Input, Select, Tag, Typography, Space, Tooltip, message, Card, Button, Spin, Switch } from 'antd';
 import {
   SendOutlined, RobotOutlined, ClearOutlined,
   LoadingOutlined, ThunderboltOutlined, ReadOutlined,
@@ -23,7 +23,14 @@ const SUGGESTIONS = [
 
 const DS_STORAGE_KEY = 'selected_datasource';
 
-type ModelOption = { id: string; name: string; connection_id?: number; connection_name?: string; provider?: string };
+type ModelOption = {
+  id: string;
+  name: string;
+  connection_id?: number;
+  connection_name?: string;
+  provider?: string;
+  capabilities?: Record<string, unknown>;
+};
 
 // 方法作用：生成连接与模型组合的稳定选择值，避免同一模型跨连接重名。
 // Args: option - 当前租户模型选项。
@@ -53,6 +60,8 @@ export default function ChatPage() {
   const [ds, setDs] = useState<string[]>(() => { const v = loadDs(); return v ? [v] : []; });
   const [modelId, setModelId] = useState('');
   const [llmConnectionId, setLlmConnectionId] = useState<number | undefined>();
+  const [reasoningEnabled, setReasoningEnabled] = useState(false);
+  const [reasoningEffort, setReasoningEffort] = useState('');
   const [models, setModels] = useState<ModelOption[]>([]);
   const [datasources, setDatasources] = useState<DatasourceConfig[]>([]);
   const [skills, setSkills] = useState<SkillInfo[]>([]);
@@ -88,8 +97,19 @@ export default function ChatPage() {
           ? undefined
           : data.default;
         if (!modelId && selectedDefault?.connection_id && selectedDefault.model_id) {
+          const defaultModel = connectedModels.find(item => (
+            item.connection_id === selectedDefault.connection_id
+            && item.id === selectedDefault.model_id
+          ));
           setLlmConnectionId(selectedDefault.connection_id);
           setModelId(selectedDefault.model_id);
+          const capabilities = defaultModel?.capabilities || {};
+          const defaultReasoning = Boolean(capabilities.reasoning)
+            && Boolean(capabilities.reasoning_default_enabled);
+          setReasoningEnabled(defaultReasoning);
+          setReasoningEffort(defaultReasoning
+            ? String(capabilities.reasoning_default_effort || '')
+            : '');
         }
       })
       .catch(() => message.warning('无法加载模型列表'));
@@ -122,7 +142,8 @@ export default function ChatPage() {
       message.warning('请选择有效的数据源');
       return;
     }
-    send(query, ds[0], ds.length > 1 ? ds : undefined, modelId || undefined, llmConnectionId, selectedSkillIds);
+    send(query, ds[0], ds.length > 1 ? ds : undefined, modelId || undefined,
+      llmConnectionId, selectedSkillIds, reasoningEnabled, reasoningEffort);
     setQuery('');
   };
 
@@ -225,7 +246,7 @@ export default function ChatPage() {
         ) : (
           /* 对话列表 */
           turns.map((t) => <TurnBubble key={t.id} turn={t}
-            onSendMessage={(msg: string) => { send(`${t.userQuery} - ${msg}`, ds[0] || 'demo', ds.length > 1 ? ds : undefined, modelId || undefined, llmConnectionId, selectedSkillIds); }} />)
+            onSendMessage={(msg: string) => { send(`${t.userQuery} - ${msg}`, ds[0] || 'demo', ds.length > 1 ? ds : undefined, modelId || undefined, llmConnectionId, selectedSkillIds, reasoningEnabled, reasoningEffort); }} />)
         )}
         <div ref={bottomRef} />
       </div>
@@ -239,18 +260,19 @@ export default function ChatPage() {
           <div style={{ marginBottom: 8, display: 'flex', flexWrap: 'wrap', gap: 4 }}>
             {(lastAnalysis.follow_up_questions as string[])?.slice(0, 4).map((q, i) => (
               <Tag key={i} color="processing" style={{ cursor: 'pointer', fontSize: 12, borderRadius: 6 }}
-                onClick={() => send(q, ds[0] || '', undefined, modelId || undefined, llmConnectionId, selectedSkillIds)}>{q}</Tag>
+                onClick={() => send(q, ds[0] || '', undefined, modelId || undefined, llmConnectionId, selectedSkillIds, reasoningEnabled, reasoningEffort)}>{q}</Tag>
             ))}
           </div>
         )}
 
-        <div style={{
+        <div className="chat-composer" style={{
           display: 'flex', flexWrap: 'wrap', gap: 10, alignItems: 'flex-end',
           background: '#fff', borderRadius: 16, padding: '8px 8px 8px 16px',
           border: '1px solid #e8e8e8', boxShadow: '0 2px 8px rgba(0,0,0,0.04)',
           transition: 'box-shadow 0.2s',
         }}>
           <Input.TextArea
+            className="chat-query-input"
             value={query} onChange={e => setQuery(e.target.value)}
             onPressEnter={e => { if (!e.shiftKey) { e.preventDefault(); handleSend(); } }}
             placeholder="输入分析问题，Shift+Enter 换行"
@@ -261,14 +283,14 @@ export default function ChatPage() {
               fontSize: 14, lineHeight: 1.6, padding: '4px 0',
             }}
           />
-          <Select mode="multiple" maxTagCount={1}
+          <Select className="chat-datasource-select" mode="multiple" maxTagCount={1}
             value={ds.length > 0 ? ds : undefined}
             onChange={v => { const arr = Array.isArray(v) ? v : [v]; setDs(arr); saveDs(arr[0]||''); }}
             options={dsOptions} disabled={loading}
             size="small" style={{ minWidth: 130, flexShrink: 0 }}
             dropdownMatchSelectWidth={false}
           />
-          <Space size={4} style={{ flexShrink: 0 }}>
+          <Space className="chat-composer-actions" size={4} style={{ flexShrink: 0 }}>
             {loading ? (
               <Button size="small" onClick={cancel} style={{ borderRadius: 10 }}>取消</Button>
             ) : null}
@@ -281,18 +303,18 @@ export default function ChatPage() {
         </div>
 
         {/* 工具栏 */}
-        <div style={{
+        <div className="chat-toolbar" style={{
           display: 'flex', flexWrap: 'wrap', justifyContent: 'space-between',
           gap: 6, marginTop: 6, padding: '0 4px',
         }}>
-          <Space size={8}>
+          <Space className="chat-toolbar-controls" size={[8, 6]} wrap>
             {sessionId && (
               <Typography.Text type="secondary" style={{ fontSize: 11 }}>
                 会话: {sessionId.slice(-8)}
               </Typography.Text>
             )}
             {models.length > 0 && (
-              <Select size="small"
+              <Select className="chat-model-select" size="small"
                 value={models.find(m => m.id === modelId && m.connection_id === llmConnectionId)
                   ? modelOptionValue(models.find(m => m.id === modelId && m.connection_id === llmConnectionId)!)
                   : undefined}
@@ -300,12 +322,47 @@ export default function ChatPage() {
                   const selected = models.find(option => modelOptionValue(option) === value);
                   setLlmConnectionId(selected?.connection_id);
                   setModelId(selected?.id || '');
+                  const capabilities = selected?.capabilities || {};
+                  const enabled = Boolean(capabilities.reasoning)
+                    && Boolean(capabilities.reasoning_default_enabled);
+                  setReasoningEnabled(enabled);
+                  setReasoningEffort(enabled
+                    ? String(capabilities.reasoning_default_effort || '')
+                    : '');
                 }}
                 options={models.map(m => ({ value: modelOptionValue(m), label: `${m.connection_name || '连接'} / ${m.name}` }))}
-                style={{ minWidth: 140 }} dropdownMatchSelectWidth={false} />
+                style={{ width: 240, maxWidth: '100%' }} dropdownMatchSelectWidth={false} />
             )}
+            {models.length > 0 && (() => {
+              const selected = models.find(m => m.id === modelId && m.connection_id === llmConnectionId);
+              const capabilities = selected?.capabilities || {};
+              const supported = Boolean(capabilities.reasoning);
+              const reasoningEfforts = Array.isArray(capabilities.reasoning_efforts)
+                ? capabilities.reasoning_efforts.map(String)
+                : [];
+              return <>
+                <Tooltip title={supported ? '控制当前对话是否启用模型推理' : '当前模型不支持推理'}>
+                  <Space className="chat-reasoning-toggle" size={4}>
+                    <Typography.Text type="secondary" style={{ fontSize: 12 }}>推理</Typography.Text>
+                    <Switch size="small" checked={reasoningEnabled} disabled={!supported}
+                      onChange={enabled => {
+                        setReasoningEnabled(enabled);
+                        setReasoningEffort(enabled
+                          ? String(capabilities.reasoning_default_effort || reasoningEfforts[0] || '')
+                          : '');
+                      }} />
+                  </Space>
+                </Tooltip>
+                {supported && reasoningEnabled && reasoningEfforts.length > 0 && <Select className="chat-depth-select" size="small"
+                  aria-label="推理深度" value={reasoningEffort || undefined}
+                  onChange={setReasoningEffort} placeholder="推理深度"
+                  options={reasoningEfforts.map(effort => ({ value: effort, label: effort }))}
+                  style={{ width: 100 }} dropdownMatchSelectWidth={false} />}
+              </>;
+            })()}
             {skills.length > 0 && (
               <Select
+                className="chat-skills-select"
                 aria-label="选择 Skills"
                 mode="multiple"
                 size="small"

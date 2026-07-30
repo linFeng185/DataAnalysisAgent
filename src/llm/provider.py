@@ -95,6 +95,7 @@ class LLMProvider(ABC):
         max_tokens: int | None = None,
         stream: bool = True,
         reasoning: bool = True,
+        reasoning_effort: str | None = None,
         timeout: int | None = None,
     ):
         """创建供 LangGraph/LangChain 组合使用的 ChatModel。
@@ -104,6 +105,7 @@ class LLMProvider(ABC):
             max_tokens: 最大输出 Token 数。
             stream: 是否启用流式。
             reasoning: 是否启用模型推理模式。
+            reasoning_effort: 统一推理深度，由具体 Provider 转换协议。
             timeout: 单次调用超时秒数，None 时使用应用配置。
 
         Returns:
@@ -127,5 +129,8 @@ class LLMProvider(ABC):
         if r == "system":
             return SystemMessage(content=c)
         if r == "assistant":
-            return AIMessage(content=c)
+            additional_kwargs = {}
+            if m.get("reasoning_content"):
+                additional_kwargs["reasoning_content"] = str(m["reasoning_content"])
+            return AIMessage(content=c, additional_kwargs=additional_kwargs)
         return HumanMessage(content=c)

@@ -39,6 +39,7 @@ class TestPlatformLLMCatalog:
             "display_name": "Moonshot",
             "protocol": "openai_compatible",
             "default_base_url": "https://api.moonshot.cn/v1",
+            "capability_schema": {"fields": []},
             "is_active": True,
         })
         monkeypatch.setattr(auth, "require_super_admin", lambda: None)
@@ -55,12 +56,14 @@ class TestPlatformLLMCatalog:
                 display_name="Moonshot",
                 protocol="openai_compatible",
                 default_base_url="https://api.moonshot.cn/v1",
+                capability_schema={"fields": []},
             ),
         )
 
         # Assert
         assert result["protocol"] == "openai_compatible"
         assert "api_key" not in result
+        assert json.loads(connection.fetchrow.await_args.args[-1]) == {"fields": []}
 
     # 方法作用：验证模型能力以能力对象本身写入 JSONB，而不是再次嵌套 capabilities。
     # Args: self - pytest 测试类实例；monkeypatch - pytest 补丁工具。
@@ -83,6 +86,16 @@ class TestPlatformLLMCatalog:
             "capabilities": {"streaming": True, "context_window": 32000},
             "is_active": True,
         })
+        connection.fetchval = AsyncMock(return_value={
+            "fields": [
+                {"key": "streaming", "label": "流式输出", "type": "boolean"},
+                {
+                    "key": "context_window",
+                    "label": "上下文窗口",
+                    "type": "integer",
+                },
+            ],
+        })
         monkeypatch.setattr(auth, "require_super_admin", lambda: None)
         monkeypatch.setattr(
             llm_admin,
@@ -91,7 +104,7 @@ class TestPlatformLLMCatalog:
         )
 
         # Act
-        await llm_admin.create_model_catalog_entry(
+        result = await llm_admin.create_model_catalog_entry(
             5,
             llm_admin.ModelCatalogCreateRequest(
                 model_id="model-a",
@@ -103,6 +116,203 @@ class TestPlatformLLMCatalog:
         # Assert
         stored = json.loads(connection.fetchrow.await_args.args[-1])
         assert stored == {"streaming": True, "context_window": 32000}
+        assert result["id"] == 21
+        assert result["capabilities"] == stored
+
+    # 方法作用：验证数据库返回的 JSONB 字符串会在 API 边界恢复为能力对象。
+    # Args: self - pytest 测试类实例；monkeypatch - pytest 补丁工具。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    async def test_model_list_normalizes_jsonb_string_capabilities(self, monkeypatch) -> None:
+        """前端动态表单必须收到对象，不能收到再次编码的 JSON 字符串。"""
+        # Arrange
+        import src.api.auth as auth
+        import src.api.routes.llm_admin as llm_admin
+
+        connection = MagicMock()
+        connection.fetch = AsyncMock(return_value=[{
+            "id": 21,
+            "provider_id": 5,
+            "model_id": "model-a",
+            "display_name": "Model A",
+            "capabilities": '{"reasoning":true,"reasoning_efforts":["high"]}',
+            "is_active": True,
+        }])
+        monkeypatch.setattr(auth, "require_tenant_admin", lambda: None)
+        monkeypatch.setattr(
+            llm_admin,
+            "get_pg_pool",
+            AsyncMock(return_value=_fake_pool(connection)),
+        )
+
+        # Act
+        result = await llm_admin.list_model_catalog(5)
+
+        # Assert
+        assert result["models"][0]["capabilities"] == {
+            "reasoning": True,
+            "reasoning_efforts": ["high"],
+        }
+
+    # 方法作用：验证超级管理员可以物理删除未被租户连接引用的模型。
+    # Args: self - pytest 测试类实例；monkeypatch - pytest 补丁工具。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    async def test_super_admin_deletes_unused_model(self, monkeypatch) -> None:
+        """删除成功后目录记录必须真正消失，而不是只写 is_active=false。"""
+        # Arrange
+        import src.api.auth as auth
+        import src.api.routes.llm_admin as llm_admin
+
+        connection = MagicMock()
+        connection.execute = AsyncMock(return_value="DELETE 1")
+        monkeypatch.setattr(auth, "require_super_admin", lambda: None)
+        monkeypatch.setattr(
+            llm_admin,
+            "get_pg_pool",
+            AsyncMock(return_value=_fake_pool(connection)),
+        )
+
+        # Act
+        result = await llm_admin.delete_model_catalog_entry(21)
+
+        # Assert
+        assert result == {"status": "ok", "model_catalog_id": 21}
+        assert "DELETE FROM llm_model_catalog" in connection.execute.await_args.args[0]
+
+    # 方法作用：验证被租户连接引用的模型不会被物理删除。
+    # Args: self - pytest 测试类实例；monkeypatch - pytest 补丁工具。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    async def test_referenced_model_delete_returns_conflict(self, monkeypatch) -> None:
+        """平台删除不能静默破坏租户连接和默认模型。"""
+        # Arrange
+        from fastapi import HTTPException
+
+        import src.api.auth as auth
+        import src.api.routes.llm_admin as llm_admin
+
+        class ForeignKeyViolationError(Exception):
+            """模拟 asyncpg 外键冲突。"""
+
+        connection = MagicMock()
+        connection.execute = AsyncMock(side_effect=ForeignKeyViolationError("referenced"))
+        monkeypatch.setattr(auth, "require_super_admin", lambda: None)
+        monkeypatch.setattr(
+            llm_admin,
+            "get_pg_pool",
+            AsyncMock(return_value=_fake_pool(connection)),
+        )
+
+        # Act / Assert
+        try:
+            await llm_admin.delete_model_catalog_entry(21)
+        except HTTPException as exc:
+            assert exc.status_code == 409
+            assert "租户连接" in exc.detail
+        else:
+            raise AssertionError("被引用模型应返回 409")
+
+    # 方法作用：验证超级管理员删除无租户连接的厂商及其模型目录。
+    # Args: self - pytest 测试类实例；monkeypatch - pytest 补丁工具。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    async def test_super_admin_deletes_unused_provider_and_models(self, monkeypatch) -> None:
+        """厂商无租户连接时应在同一事务删除子模型和厂商记录。"""
+        # Arrange
+        import src.api.auth as auth
+        import src.api.routes.llm_admin as llm_admin
+
+        connection = MagicMock()
+        connection.fetchval = AsyncMock(return_value=0)
+        connection.execute = AsyncMock(side_effect=["DELETE 2", "DELETE 1"])
+        transaction = MagicMock()
+        transaction.__aenter__ = AsyncMock(return_value=None)
+        transaction.__aexit__ = AsyncMock(return_value=False)
+        connection.transaction.return_value = transaction
+        monkeypatch.setattr(auth, "require_super_admin", lambda: None)
+        monkeypatch.setattr(
+            llm_admin,
+            "get_pg_pool",
+            AsyncMock(return_value=_fake_pool(connection)),
+        )
+
+        # Act
+        result = await llm_admin.delete_provider_catalog_entry(5)
+
+        # Assert
+        assert result == {"status": "ok", "provider_id": 5}
+        statements = [call.args[0] for call in connection.execute.await_args_list]
+        assert "DELETE FROM llm_model_catalog" in statements[0]
+        assert "DELETE FROM llm_provider_catalog" in statements[1]
+
+    # 方法作用：验证仍被租户连接引用的厂商不能被物理删除。
+    # Args: self - pytest 测试类实例；monkeypatch - pytest 补丁工具。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    async def test_referenced_provider_delete_returns_conflict(self, monkeypatch) -> None:
+        """删除厂商前必须检查租户连接，且冲突时不能触碰模型目录。"""
+        # Arrange
+        from fastapi import HTTPException
+
+        import src.api.auth as auth
+        import src.api.routes.llm_admin as llm_admin
+
+        connection = MagicMock()
+        connection.fetchval = AsyncMock(return_value=1)
+        connection.execute = AsyncMock()
+        transaction = MagicMock()
+        transaction.__aenter__ = AsyncMock(return_value=None)
+        transaction.__aexit__ = AsyncMock(return_value=False)
+        connection.transaction.return_value = transaction
+        monkeypatch.setattr(auth, "require_super_admin", lambda: None)
+        monkeypatch.setattr(
+            llm_admin,
+            "get_pg_pool",
+            AsyncMock(return_value=_fake_pool(connection)),
+        )
+
+        # Act / Assert
+        try:
+            await llm_admin.delete_provider_catalog_entry(5)
+        except HTTPException as exc:
+            assert exc.status_code == 409
+            assert "租户连接" in exc.detail
+        else:
+            raise AssertionError("被租户连接引用的厂商应返回 409")
+        connection.execute.assert_not_awaited()
+
+    # 方法作用：验证检查后并发出现外键引用时仍返回业务冲突而不是 500。
+    # Args: self - pytest 测试类实例；monkeypatch - pytest 补丁工具。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    async def test_provider_delete_maps_foreign_key_race_to_conflict(self, monkeypatch) -> None:
+        """引用检查与删除之间的竞态必须由数据库外键兜底并转换为 409。"""
+        # Arrange
+        from fastapi import HTTPException
+
+        import src.api.auth as auth
+        import src.api.routes.llm_admin as llm_admin
+
+        class ForeignKeyViolationError(Exception):
+            """模拟 asyncpg 外键冲突。"""
+
+        connection = MagicMock()
+        connection.fetchval = AsyncMock(return_value=0)
+        connection.execute = AsyncMock(side_effect=ForeignKeyViolationError("referenced"))
+        transaction = MagicMock()
+        transaction.__aenter__ = AsyncMock(return_value=None)
+        transaction.__aexit__ = AsyncMock(return_value=False)
+        connection.transaction.return_value = transaction
+        monkeypatch.setattr(auth, "require_super_admin", lambda: None)
+        monkeypatch.setattr(
+            llm_admin,
+            "get_pg_pool",
+            AsyncMock(return_value=_fake_pool(connection)),
+        )
+
+        # Act / Assert
+        try:
+            await llm_admin.delete_provider_catalog_entry(5)
+        except HTTPException as exc:
+            assert exc.status_code == 409
+            assert "租户连接" in exc.detail
+        else:
+            raise AssertionError("并发外键引用应返回 409")
 
 
 class TestTenantLLMConnections:

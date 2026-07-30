@@ -18,6 +18,9 @@
 | 10.1.10 | 租户 LLM 命名连接 | `src/llm/tenant_config.py`、`src/api/routes/llm_admin.py` | 同厂商/跨厂商多连接，地址独立且 API Key 加密持久化 | 单测完成 | P0 |
 | 10.1.11 | 租户默认与对话选择 | `src/llm/tenant_config.py`、Chat API | tenant 默认连接/模型，对话可从当前租户启用模型中覆盖 | 单测完成 | P0 |
 | 10.1.12 | 租户统一 Provider 解析 | `src/llm/client.py`、`src/llm/invocation.py` | 调用入口按请求租户选择协议 Adapter，跨租户和停用配置失败关闭 | 单测完成 | P0 |
+| 10.1.13 | 平台模型目录物理删除 | `src/api/routes/llm_admin.py` | super_admin 可删除未被租户引用的模型和厂商，引用冲突返回 409 | 单测完成 | P0 |
+| 10.1.14 | 厂商级模型能力动态表单 | `src/llm/capability_schema.py`、`migrations/014_llm_catalog_reasoning.sql` | 厂商维护字段定义，模型能力按类型、选项和范围验证，不再手写 JSON | 单测完成 | P0 |
+| 10.1.15 | 对话推理偏好与 DeepSeek V4 | `src/llm/adapters/deepseek.py`、`tenant_config.py` | Pro/Flash 完整适配 thinking、high/max、reasoning_content 和工具链回传 | 单测完成 | P0 |
 
 ### 10.2 Prompt 模板
 
@@ -34,7 +37,7 @@
 
 ### 模块收尾
 
-模块功能点共 20 项，已完成 20 项，待开发 0 项。
+模块功能点共 23 项，已完成 23 项，待开发 0 项。
 
 本模块本轮没有待开发功能点。
 

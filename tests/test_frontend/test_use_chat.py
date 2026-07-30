@@ -45,6 +45,9 @@ process.stdout.write(JSON.stringify({
   datasources: args[6] || '',
   model_id: args[7] || '',
   connection_id: args[8] || '',
+  skills: args[9] || '',
+  reasoning_enabled: args[10] || '',
+  reasoning_effort: args[11] || '',
 }));
 """
 
@@ -58,12 +61,15 @@ process.stdout.write(JSON.stringify({
         )
         call = json.loads(completed.stdout)
 
-        # Assert：末尾参数必须分别传入多数据源、模型、连接和 Skill。
+        # Assert：末尾参数必须分别传入多数据源、模型、连接、Skill 和推理偏好。
         assert call == {
-            "argument_count": 10,
+            "argument_count": 12,
             "datasources": "dss",
             "model_id": "mid",
             "connection_id": "cid",
+            "skills": "enabledSkillIds",
+            "reasoning_enabled": "reasoningEnabled",
+            "reasoning_effort": "reasoningEffort",
         }
         logger.info("test_use_chat_forwards_multi_datasource_and_model_arguments 完成", extra=call)
     except Exception as exc:

@@ -59,7 +59,7 @@ class AnthropicProvider(LLMProvider):
         return self._capabilities
 
     # 方法作用：创建 LangChain ChatAnthropic 实例。
-    # Args: temperature - 温度；max_tokens - 输出上限；stream - 是否流式；reasoning - 是否允许推理模式。
+    # Args: temperature - 温度；max_tokens - 输出上限；stream - 是否流式；reasoning - 是否允许推理模式；reasoning_effort - 统一推理深度。
     # Returns: 配置完成的 ChatAnthropic 实例。
     def get_chat_model(
         self,
@@ -67,10 +67,10 @@ class AnthropicProvider(LLMProvider):
         max_tokens: int | None = None,
         stream: bool = True,
         reasoning: bool = True,
+        reasoning_effort: str | None = None,
         timeout: int | None = None,
     ):
         """使用统一参数创建 ChatAnthropic，不发起网络请求。"""
-        del reasoning
         settings = get_settings()
         logger.debug(
             "Anthropic ChatModel 创建入口",
@@ -89,6 +89,9 @@ class AnthropicProvider(LLMProvider):
         }
         if self._base_url:
             kwargs["base_url"] = self._base_url
+        kwargs["thinking"] = {"type": "enabled" if reasoning else "disabled"}
+        if reasoning and reasoning_effort:
+            kwargs["output_config"] = {"effort": reasoning_effort}
         model = ChatAnthropic(**kwargs)
         logger.info("Anthropic ChatModel 创建完成", model_id=self._model_id, stream=stream)
         return model

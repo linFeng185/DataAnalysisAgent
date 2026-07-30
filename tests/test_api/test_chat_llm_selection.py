@@ -98,6 +98,40 @@ class TestChatLLMResolution:
         # Assert
         assert result is None
 
+    # 方法作用：验证 Chat API 将用户推理偏好传入租户模型授权解析器。
+    # Args: self - pytest 测试类实例；monkeypatch - pytest 补丁工具。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    async def test_chat_resolution_forwards_reasoning_preference(self, monkeypatch) -> None:
+        """推理开关和深度必须与连接、模型一起完成服务端能力校验。"""
+        # Arrange
+        import src.api.auth as auth
+        import src.llm.tenant_config as tenant_config
+        from src.api.schemas import ChatRequest
+
+        chat_routes = import_module("src.api.routes.chat")
+        resolver = AsyncMock(return_value=_selection())
+        monkeypatch.setattr(auth, "get_current_tenant_id", lambda: 7)
+        monkeypatch.setattr(tenant_config, "resolve_tenant_llm_selection", resolver)
+        request = ChatRequest(
+            query="q",
+            llm_connection_id=11,
+            model_id="gpt-4o",
+            reasoning_enabled=True,
+            reasoning_effort="high",
+        )
+
+        # Act
+        await chat_routes._resolve_chat_llm_selection(request)
+
+        # Assert
+        assert resolver.await_args.kwargs == {
+            "tenant_id": 7,
+            "connection_id": 11,
+            "model_id": "gpt-4o",
+            "reasoning_enabled": True,
+            "reasoning_effort": "high",
+        }
+
 
 class TestChatLLMContext:
     """覆盖功能 10.1.12 的非流式和 SSE ContextVar 生命周期。"""

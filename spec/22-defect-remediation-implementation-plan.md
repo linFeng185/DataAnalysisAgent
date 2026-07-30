@@ -6,7 +6,7 @@
 
 **架构：** 保留 FastAPI、LangGraph、DataSourceRegistry 和 VectorStore 边界，在边界层增加生产配置验证、认证上下文、租户过滤、只读 SQL AST 校验和有界结果处理。管理 API 复用全局 Provider，不引入新重量级依赖。
 
-**技术栈：** Python 3.12+、FastAPI、Pydantic、sqlglot、SQLAlchemy、structlog、pytest、React、TypeScript。
+**技术栈：** Python 3.14.0、FastAPI、Pydantic、sqlglot、SQLAlchemy、structlog、pytest、React、TypeScript。
 
 ## 全局约束
 

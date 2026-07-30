@@ -4,7 +4,7 @@
 
 | 层次 | 技术 | 说明 |
 |-----|------|------|
-| 后端框架 | Python FastAPI | 异步支持、生态完善 |
+| 后端框架 | Python 3.14.0 + FastAPI | 运行时锁定精确版本，提供异步支持和完善生态 |
 | LLM 接入 | OpenAI API / Claude API | 支持多模型切换 |
 | LLM 框架 | LangChain + LangGraph | StateGraph 管理复杂流水线；BaseTool 封装工具复用；ChatPromptTemplate 统一 Prompt 管理；checkpointer 内置会话持久化 |
 | MCP 协议 | mcp (Python SDK) + FastMCP | MCP Client 导入外部工具；MCP Server 对外暴露能力；stdio + SSE 双传输 |

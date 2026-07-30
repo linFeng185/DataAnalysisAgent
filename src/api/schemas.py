@@ -14,6 +14,12 @@ class ChatRequest(BaseModel):
     datasources: list[str] = Field(default_factory=list, max_length=20)
     model_id: str = Field(default="", max_length=128)
     llm_connection_id: int | None = Field(default=None, ge=1)
+    reasoning_enabled: bool = False
+    reasoning_effort: str = Field(
+        default="",
+        max_length=32,
+        pattern=r"^$|^[A-Za-z0-9][A-Za-z0-9_-]{0,31}$",
+    )
     enabled_skill_ids: list[str] = Field(default_factory=list, max_length=20)
     stream: bool = False
 
@@ -26,6 +32,8 @@ class ChatRequest(BaseModel):
         has_model = bool(self.model_id.strip())
         if has_connection != has_model:
             raise ValueError("llm_connection_id 与 model_id 必须同时提交")
+        if self.reasoning_effort and not self.reasoning_enabled:
+            raise ValueError("reasoning_effort 只能在 reasoning_enabled=true 时提交")
         return self
 
 

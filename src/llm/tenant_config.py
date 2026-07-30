@@ -4,10 +4,11 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from contextvars import ContextVar, Token
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Iterator
 
 from src.datasource.credential_manager import CredentialManager
+from src.llm.capability_schema import normalize_json_object
 from src.logging_config import get_logger
 from src.memory.pg_pool import get_pg_pool
 
@@ -27,6 +28,9 @@ class TenantLLMSelection:
     model_id: str
     base_url: str
     api_key: str
+    capabilities: dict = field(default_factory=dict)
+    reasoning_enabled: bool = False
+    reasoning_effort: str = ""
 
     # 方法作用：返回不含明文或密文 API Key 的对话选择摘要。
     # Args: self - 当前租户 LLM 选择。
@@ -41,6 +45,8 @@ class TenantLLMSelection:
             "model_catalog_id": self.model_catalog_id,
             "model_id": self.model_id,
             "base_url": self.base_url,
+            "reasoning_enabled": self.reasoning_enabled,
+            "reasoning_effort": self.reasoning_effort,
         }
 
 
@@ -98,13 +104,15 @@ def use_tenant_llm_selection(
 
 
 # 方法作用：从数据库解析当前租户的显式选择或默认 LLM 连接。
-# Args: tenant_id - 当前认证租户；connection_id - 可选显式连接；model_id - 可选显式模型标识。
+# Args: tenant_id - 当前认证租户；connection_id - 可选显式连接；model_id - 可选显式模型标识；reasoning_enabled/reasoning_effort - 用户推理偏好。
 # Returns: 已授权并解密凭证的 TenantLLMSelection。
 async def resolve_tenant_llm_selection(
     *,
     tenant_id: int,
     connection_id: int | None = None,
     model_id: str = "",
+    reasoning_enabled: bool = False,
+    reasoning_effort: str = "",
 ) -> TenantLLMSelection:
     explicit = connection_id is not None or bool(model_id.strip())
     if explicit and (connection_id is None or not model_id.strip()):
@@ -122,7 +130,7 @@ async def resolve_tenant_llm_selection(
             row = await connection.fetchrow(
                 "SELECT c.id AS connection_id, c.name AS connection_name, "
                 "p.code AS provider_code, p.protocol, "
-                "m.id AS model_catalog_id, m.model_id, "
+                "m.id AS model_catalog_id, m.model_id, m.capabilities, "
                 "COALESCE(NULLIF(c.base_url, ''), p.default_base_url) AS base_url, "
                 "c.encrypted_api_key FROM tenant_llm_connections c "
                 "JOIN llm_provider_catalog p ON p.id=c.provider_id "
@@ -139,7 +147,7 @@ async def resolve_tenant_llm_selection(
             row = await connection.fetchrow(
                 "SELECT c.id AS connection_id, c.name AS connection_name, "
                 "p.code AS provider_code, p.protocol, "
-                "m.id AS model_catalog_id, m.model_id, "
+                "m.id AS model_catalog_id, m.model_id, m.capabilities, "
                 "COALESCE(NULLIF(c.base_url, ''), p.default_base_url) AS base_url, "
                 "c.encrypted_api_key FROM tenant_llm_defaults d "
                 "JOIN tenant_llm_connections c ON c.id=d.connection_id "
@@ -163,6 +171,29 @@ async def resolve_tenant_llm_selection(
     api_key = CredentialManager().decrypt(str(row["encrypted_api_key"] or ""))
     if not api_key:
         raise ValueError("当前 LLM 连接未配置 API Key")
+    capabilities = normalize_json_object(
+        row["capabilities"],
+        field_name="capabilities",
+    )
+    normalized_effort = reasoning_effort.strip()
+    if normalized_effort and not reasoning_enabled:
+        raise ValueError("关闭推理时不能设置 reasoning_effort")
+    if reasoning_enabled:
+        if not bool(capabilities.get("reasoning", False)):
+            raise ValueError("当前模型不支持推理")
+        supported_efforts = [
+            str(value)
+            for value in (capabilities.get("reasoning_efforts", []) or [])
+            if str(value)
+        ]
+        if not normalized_effort:
+            normalized_effort = str(
+                capabilities.get("reasoning_default_effort", "") or "",
+            )
+        if supported_efforts and normalized_effort not in supported_efforts:
+            raise ValueError(
+                f"当前模型不支持推理深度: {normalized_effort or '未指定'}",
+            )
     selection = TenantLLMSelection(
         tenant_id=int(tenant_id),
         connection_id=int(row["connection_id"]),
@@ -173,6 +204,9 @@ async def resolve_tenant_llm_selection(
         model_id=str(row["model_id"]),
         base_url=str(row["base_url"] or ""),
         api_key=api_key,
+        capabilities=capabilities,
+        reasoning_enabled=reasoning_enabled,
+        reasoning_effort=normalized_effort,
     )
     logger.info(
         "租户 LLM 选择解析完成",
@@ -180,6 +214,8 @@ async def resolve_tenant_llm_selection(
         connection_id=selection.connection_id,
         provider_code=selection.provider_code,
         model_id=selection.model_id,
+        reasoning_enabled=selection.reasoning_enabled,
+        reasoning_effort=selection.reasoning_effort,
     )
     return selection
 
@@ -219,7 +255,10 @@ async def list_tenant_model_options(*, tenant_id: int) -> dict:
             "model_catalog_id": int(row["model_catalog_id"]),
             "id": str(row["model_id"]),
             "name": str(row["display_name"]),
-            "capabilities": dict(row["capabilities"] or {}),
+            "capabilities": normalize_json_object(
+                row["capabilities"],
+                field_name="capabilities",
+            ),
         }
         for row in rows
     ]

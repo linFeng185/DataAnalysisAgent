@@ -20,6 +20,21 @@ body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sa
   .chat-page { height: calc(100dvh - 64px) !important; width: 100%; }
   .chat-messages { padding-left: 10px !important; padding-right: 10px !important; }
   .chat-input-area { padding: 8px 10px 10px !important; }
+  .chat-composer {
+    display: grid !important;
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: center !important;
+    gap: 8px !important;
+    padding: 8px !important;
+  }
+  .chat-query-input { grid-column: 1 / -1; width: 100% !important; min-width: 0; }
+  .chat-datasource-select { grid-column: 1; width: 100% !important; min-width: 0 !important; }
+  .chat-composer-actions { grid-column: 2; }
+  .chat-toolbar { justify-content: flex-start !important; }
+  .chat-toolbar-controls { display: flex !important; flex-wrap: wrap; width: 100%; }
+  .chat-toolbar-controls > .ant-space-item { max-width: 100%; }
+  .chat-model-select { width: min(240px, 100%) !important; }
+  .chat-reasoning-toggle { white-space: nowrap; }
   .chart-container { height: 280px !important; min-height: 240px; margin: 8px 0; }
   .ant-table-wrapper { max-width: 100%; overflow: hidden; }
   .ant-modal { max-width: calc(100vw - 20px); margin: 10px auto; }

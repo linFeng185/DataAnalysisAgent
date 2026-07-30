@@ -56,7 +56,7 @@ def is_llm_available() -> bool:
 def get_llm(temperature: float = 0.3):
     """创建结果分析模型，默认使用快速本地模型。"""
     logger.debug("创建分析任务模型入口", temperature=temperature)
-    model = _get_task_llm("analyze_result", temperature=temperature, reasoning=False)
+    model = _get_task_llm("analyze_result", temperature=temperature, reasoning=None)
     logger.info("创建分析任务模型完成")
     return model
 
@@ -197,7 +197,7 @@ async def analyze_result_node(state: AnalysisState) -> dict:
 async def _llm_polish(summary: str, insights: list[str], data_sample: str) -> dict | None:
     """LLM 对处理器输出做自然语言润色，不参与数值计算。"""
     try:
-        llm = _get_task_llm("polish_result", temperature=0.3, reasoning=False)
+        llm = _get_task_llm("polish_result", temperature=0.3, reasoning=None)
         from src.llm.invocation import invoke_structured
         from src.llm.output_contracts import PolishOutput
 

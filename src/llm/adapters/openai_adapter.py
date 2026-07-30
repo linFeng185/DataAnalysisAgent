@@ -16,5 +16,14 @@ class OpenAIAdapter(ModelAdapter):
         json_mode=True,
     )
 
-    def get_chat_openai_kwargs(self) -> dict:
+    # 方法作用：保持标准 OpenAI 模型不注入厂商私有推理参数。
+    # Args: reasoning - 是否开启推理；reasoning_effort - 可选推理深度。
+    # Returns: 空参数字典。
+    def get_chat_openai_kwargs(
+        self,
+        *,
+        reasoning: bool = True,
+        reasoning_effort: str | None = None,
+    ) -> dict:
+        del reasoning, reasoning_effort
         return {}

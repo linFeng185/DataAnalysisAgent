@@ -18,13 +18,14 @@ logger = get_logger(__name__)
 
 
 # 方法作用：通过统一 Provider 入口创建 OpenAI-compatible ChatModel。
-# Args: model - 模型名；temperature - 温度；max_tokens - 输出上限；reasoning - 是否启用推理；base_url/api_key/timeout - 可选连接覆盖。
+# Args: model - 模型名；temperature - 温度；max_tokens - 输出上限；reasoning - 是否启用推理；reasoning_effort - 推理深度；base_url/api_key/timeout - 可选连接覆盖。
 # Returns: Provider 创建的 BaseChatModel。
 def get_openai_llm(
     model: str | None = None,
     temperature: float | None = None,
     max_tokens: int | None = None,
     reasoning: bool = True,
+    reasoning_effort: str | None = None,
     *,
     base_url: str | None = None,
     api_key: str | None = None,
@@ -57,6 +58,7 @@ def get_openai_llm(
         max_tokens=max_tokens or s.llm_max_tokens,
         stream=True,
         reasoning=reasoning,
+        reasoning_effort=reasoning_effort,
         timeout=resolved_timeout,
     )
     logger.info("OpenAI-compatible LLM 创建完成", model=model_name)
@@ -82,13 +84,14 @@ def get_anthropic_llm(model: str | None = None, temperature: float | None = None
 
 
 # 方法作用：兼容旧调用并通过统一 Provider 入口创建 ChatModel。
-# Args: provider - Provider 名称；model - 模型名；temperature - 温度；reasoning - 是否推理；max_tokens - 输出上限。
+# Args: provider - Provider 名称；model - 模型名；temperature - 温度；reasoning - 是否推理；reasoning_effort - 推理深度；max_tokens - 输出上限。
 # Returns: Provider 创建的 BaseChatModel。
 def get_llm(
     provider: str | None = None,
     model: str | None = None,
     temperature: float | None = None,
     reasoning: bool = True,
+    reasoning_effort: str | None = None,
     max_tokens: int | None = None,
 ) -> BaseChatModel:
     """10.1.3 路由器。"""
@@ -107,6 +110,7 @@ def get_llm(
         temperature=temperature,
         stream=True,
         reasoning=reasoning,
+        reasoning_effort=reasoning_effort,
         max_tokens=max_tokens,
     )
     logger.info("兼容 LLM 路由完成", provider=provider_name, model=model_name)
@@ -208,12 +212,13 @@ def is_task_llm_available(task: str) -> bool:
 
 
 # 方法作用：根据节点任务创建本地或远程 ChatModel 实例。
-# Args: task - 节点任务标识；temperature - 温度；reasoning - 是否启用模型推理模式；max_tokens - 输出上限。
+# Args: task - 节点任务标识；temperature - 温度；reasoning - 是否允许用户推理偏好；reasoning_effort - 显式深度覆盖；max_tokens - 输出上限。
 # Returns: 已按任务策略配置的 BaseChatModel。
 def get_task_llm(
     task: str,
     temperature: float | None = None,
-    reasoning: bool = False,
+    reasoning: bool | None = None,
+    reasoning_effort: str | None = None,
     max_tokens: int | None = None,
 ) -> BaseChatModel:
     """创建节点级模型，未授权任何模型时抛出明确异常。"""
@@ -222,6 +227,16 @@ def get_task_llm(
 
     tenant_selection = get_current_tenant_llm_selection()
     if tenant_selection is not None:
+        effective_reasoning = (
+            tenant_selection.reasoning_enabled
+            if reasoning is None
+            else bool(reasoning and tenant_selection.reasoning_enabled)
+        )
+        effective_effort = (
+            (reasoning_effort or tenant_selection.reasoning_effort)
+            if effective_reasoning
+            else None
+        )
         logger.info(
             "租户任务 LLM 路由完成",
             task=task,
@@ -240,14 +255,16 @@ def get_task_llm(
             temperature=temperature,
             max_tokens=max_tokens,
             stream=True,
-            reasoning=reasoning,
+            reasoning=effective_reasoning,
+            reasoning_effort=effective_effort,
             timeout=settings.llm_timeout,
         )
         from src.observability import attach_llm_metrics
 
         return attach_llm_metrics(model, task)
     target = resolve_llm_task_target(task, settings=settings)
-    logger.debug("创建任务 LLM 入口", task=task, target=target, reasoning=reasoning)
+    effective_reasoning = bool(reasoning)
+    logger.debug("创建任务 LLM 入口", task=task, target=target, reasoning=effective_reasoning)
     if target == "local":
         provider = get_provider(
             model_id=settings.local_llm_model,
@@ -259,13 +276,15 @@ def get_task_llm(
             temperature=temperature,
             max_tokens=max_tokens,
             stream=True,
-            reasoning=reasoning,
+            reasoning=effective_reasoning,
+            reasoning_effort=reasoning_effort,
             timeout=settings.local_llm_timeout,
         )
     elif target == "remote":
         model = get_llm(
             temperature=temperature,
-            reasoning=reasoning,
+            reasoning=effective_reasoning,
+            reasoning_effort=reasoning_effort,
         )
     else:
         logger.error("创建任务 LLM 失败", task=task, reason="没有授权的可用模型")

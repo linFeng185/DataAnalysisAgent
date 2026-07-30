@@ -74,7 +74,7 @@ export async function deleteSession(id: string): Promise<void> {
 }
 
 // 方法作用：发送带租户 LLM 连接和模型选择的 SSE 聊天请求并分发事件。
-// Args: query - 用户问题；datasource - 主数据源；sessionId - 会话；onEvent/onDone/onError - 事件回调；datasources - 多数据源；modelId - 模型标识；llmConnectionId - 命名连接；enabledSkillIds - Skill 资源 ID。
+// Args: query - 用户问题；datasource - 主数据源；sessionId - 会话；onEvent/onDone/onError - 事件回调；datasources - 多数据源；modelId - 模型标识；llmConnectionId - 命名连接；enabledSkillIds - Skill 资源 ID；reasoningEnabled/reasoningEffort - 推理偏好。
 // Returns: 可取消当前请求的 AbortController。
 export function streamChat(
   query: string,
@@ -87,6 +87,8 @@ export function streamChat(
   modelId?: string,
   llmConnectionId?: number,
   enabledSkillIds?: string[],
+  reasoningEnabled = false,
+  reasoningEffort = '',
 ): AbortController {
   const controller = new AbortController();
   fetch(`${BASE}/chat`, {
@@ -100,6 +102,8 @@ export function streamChat(
       model_id: modelId || '',
       llm_connection_id: llmConnectionId ?? null,
       enabled_skill_ids: enabledSkillIds || [],
+      reasoning_enabled: reasoningEnabled,
+      reasoning_effort: reasoningEffort,
       stream: true,
       session_id: sessionId,
     }),

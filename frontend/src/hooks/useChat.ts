@@ -87,7 +87,7 @@ function clearStorage() {
   } catch { /* ignore */ }
 }
 
-// 方法作用：管理对话轮次、SSE 事件、会话恢复和当前租户模型选择透传。
+// 方法作用：管理对话轮次、SSE 事件、会话恢复以及模型和推理偏好透传。
 // Args: 无。
 // Returns: 对话状态、发送/取消/恢复操作及加载状态。
 export function useChat() {
@@ -115,6 +115,8 @@ export function useChat() {
     _modelId?: string,
     _llmConnectionId?: number,
     enabledSkillIds?: string[],
+    reasoningEnabled = false,
+    reasoningEffort = '',
   ) => {
     aborterRef.current?.abort();
     setRetryInfo(null);
@@ -261,6 +263,8 @@ export function useChat() {
       mid,
       cid,
       enabledSkillIds,
+      reasoningEnabled,
+      reasoningEffort,
     );
   }, [sessionId]);
 

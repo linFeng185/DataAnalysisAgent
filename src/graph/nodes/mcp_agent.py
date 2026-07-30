@@ -117,7 +117,7 @@ async def mcp_agent_node(state: AnalysisState) -> dict:
                 success=False,
             )
 
-        llm = get_task_llm("mcp_agent", temperature=0, reasoning=False)
+        llm = get_task_llm("mcp_agent", temperature=0, reasoning=None)
         from src.llm.invocation import prepare_invocation
 
         prepared = prepare_invocation(
