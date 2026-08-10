@@ -271,6 +271,69 @@ class TestLoggingRetention:
         assert len(redacted["sql_preview_hash"]) == 64
         assert redacted["datasource"] == "prod"
 
+    # 方法作用：验证嵌套凭证、认证 URL 和 API Key 会被递归脱敏。
+    # Args: self - pytest 测试类实例。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    def test_nested_credentials_and_auth_urls_are_redacted(self) -> None:
+        """结构化日志不得通过嵌套字典或连接串泄露认证信息。"""
+        # Arrange
+        from src import logging_config
+
+        event = {
+            "event": "连接失败",
+            "database": {
+                "password": "db-secret",
+                "url": "postgresql://app:db-secret@localhost/app",
+            },
+            "api_key": "sk-test-secret",
+            "redis_url": "redis://:redis-secret@localhost:6379/0",
+        }
+
+        # Act
+        redacted = logging_config._redact_sensitive_fields(None, "error", event)  # noqa: SLF001
+        rendered = repr(redacted)
+
+        # Assert
+        assert "db-secret" not in rendered
+        assert "redis-secret" not in rendered
+        assert "sk-test-secret" not in rendered
+        assert redacted["database"]["password"] == "[REDACTED]"
+        assert redacted["api_key"] == "[REDACTED]"
+
+    # 方法作用：验证异常堆栈保留定位信息但不输出函数局部敏感变量。
+    # Args: self - pytest 测试类实例；tmp_path - pytest 临时目录；monkeypatch - pytest 运行时替换工具。
+    # Returns: 无返回值，断言日志文件不包含局部密码。
+    def test_exception_traceback_hides_local_secrets(self, tmp_path, monkeypatch) -> None:
+        """ConsoleRenderer 的 Rich traceback 默认 locals 不得进入日志文件。"""
+        # Arrange
+        from src import logging_config
+        from src.config import Settings
+
+        log_file = tmp_path / "logs" / "app.log"
+        settings = Settings(log_file=str(log_file), log_format="console", log_level="INFO")
+        monkeypatch.setattr(logging_config, "get_settings", lambda: settings)
+        logging_config.setup_logging()
+
+        # 方法作用：制造带局部密码的异常，验证日志渲染边界。
+        # Args: database_password - 仅存在于调用栈局部变量中的测试密码。
+        # Returns: 无返回值，始终抛出 RuntimeError。
+        def raise_with_secret(database_password: str) -> None:
+            raise RuntimeError(f"connection failed for password length {len(database_password)}")
+
+        # Act
+        secret_value = "traceback" + "-local-secret"
+        try:
+            raise_with_secret(secret_value)
+        except RuntimeError:
+            logging_config.get_logger("tests.logging").exception("数据库连接失败")
+        for handler in logging.getLogger().handlers:
+            handler.flush()
+
+        # Assert
+        content = log_file.read_text(encoding="utf-8")
+        assert "RuntimeError" in content
+        assert "traceback-local-secret" not in content
+
     # 方法作用：验证 JSON 文件日志直接保留中文字符而不是 Unicode 转义序列。
     # Args: self - pytest 测试类实例；tmp_path - pytest 临时目录；monkeypatch - pytest 运行时替换工具。
     # Returns: 无返回值，断言日志文件包含原始中文文本。

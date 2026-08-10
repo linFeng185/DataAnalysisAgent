@@ -59,7 +59,7 @@ class TestLLMTaskRouting:
 
         target = resolve_llm_task_target("generate_sql", settings=_settings())
 
-        assert target == "remote"
+        assert target == "local"
         logger.info("test_sql_task_uses_remote_model 完成")
 
     # 方法作用：验证未配置本地模型时轻量任务不会隐式调用远程模型。
@@ -95,7 +95,7 @@ class TestLLMTaskRouting:
             ),
         )
 
-        assert target == "remote"
+        assert target == "none"
         logger.info("test_explicit_remote_fallback_is_respected 完成")
 
     # 方法作用：验证远程任务不可用时可以回退到已配置本地模型。

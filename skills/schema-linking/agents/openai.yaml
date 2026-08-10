@@ -1,0 +1,4 @@
+interface:
+  display_name: "模式语义映射"
+  short_description: "将用户自然语言术语映射为表、字段、枚举值和关联键候选"
+  default_prompt: "使用 $schema-linking 将问题中的术语映射到给定数据库模式。"

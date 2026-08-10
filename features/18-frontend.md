@@ -70,7 +70,7 @@
 | 18.7.3 | TypeScript 类型 | `frontend/src/types/index.ts` | SSEEvent / ChatResponse / DatasourceConfig / TableInfo / ColumnInfo | 开发完成 | P2 |
 | 18.7.4 | 公共组件库 | `frontend/src/components/` | SqlPanel / DataTable / ChartPanel / ProgressBar / ReasoningPanel / ResultCard | 开发完成 | P2 |
 | 18.7.5 | ErrorBoundary | `frontend/src/components/ErrorBoundary.tsx` | React Error Boundary 包裹所有页面路由 | 开发完成 | P2 |
-| 18.7.6 | 连接状态指示器 | `App.tsx` Header | 启动时 GET /health, Header 显示 LLM 可用性 + 数据源计数 | 开发完成 | P2 |
+| 18.7.6 | 服务状态指示器 | `App.tsx` Header | 启动时 GET /health，仅展示应用服务正常或不可用；租户 LLM 状态由管理连接测试负责 | 开发完成 | P2 |
 | 18.7.7 | 响应式布局 | 全局 | 767px 以下使用抽屉导航，Header/对话/图表/表格和 Modal 自适应 | 单测完成 | P3 |
 | 18.7.8 | SSE 读取失败处理与依赖安全 | `frontend/src/api/client.ts`、`package.json` | reader 异常调用 onError 且不触发 onDone；ECharts 6.1.x，npm audit 无漏洞 | 单测完成 | P1 |
 

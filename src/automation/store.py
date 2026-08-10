@@ -12,6 +12,32 @@ from src.automation.models import ScheduleDefinition
 from src.logging_config import get_logger
 
 logger = get_logger(__name__)
+_DELIVERY_CHANNELS = {"in_app", "email", "feishu", "slack"}
+
+
+# 方法作用：把 asyncpg JSONB、列表或空值规范化为安全投递渠道列表。
+# Args: value - 数据库 channels 字段原值。
+# Returns: 去重后的合法渠道，缺失或非法时回退站内渠道。
+def _parse_channels(value: Any) -> list[str]:
+    loaded = value
+    if isinstance(value, str):
+        try:
+            loaded = json.loads(value)
+        except (TypeError, ValueError):
+            logger.warning("自动化渠道 JSONB 解析失败，回退站内通知")
+            return ["in_app"]
+    if not isinstance(loaded, (list, tuple)):
+        logger.warning("自动化渠道类型非法，回退站内通知", value_type=type(loaded).__name__)
+        return ["in_app"]
+    channels = [
+        channel
+        for channel in dict.fromkeys(str(item).strip().lower() for item in loaded)
+        if channel in _DELIVERY_CHANNELS
+    ]
+    if not channels:
+        logger.warning("自动化渠道为空或不受支持，回退站内通知")
+        return ["in_app"]
+    return channels
 _FREQUENCY_SECONDS = {
     "hourly": 60 * 60,
     "daily": 24 * 60 * 60,
@@ -278,7 +304,7 @@ class AutomationStore:
             dialect=str(row["dialect"]),
             frequency=str(row["frequency"]),
             threshold_pct=float(row["threshold_pct"]),
-            channels=list(row["channels"] or ["in_app"]),
+            channels=_parse_channels(row["channels"]),
             recipient_email=str(row["recipient_email"] or ""),
             enabled=bool(row["enabled"]),
             next_run_at=row["next_run_at"],

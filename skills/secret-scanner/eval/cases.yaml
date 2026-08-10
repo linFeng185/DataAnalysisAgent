@@ -1,0 +1,24 @@
+version: 1
+feature_id: 9.8.4
+cases:
+  - id: scanner_detects_assigned_credential
+    description: 配置中的敏感字段赋值应返回哈希而不是原值
+    input:
+      documents: [{source_id: config, text: "password = 'example-value-123'"}]
+    assertions:
+      - contains_sensitive_material 等于 true
+      - findings 包含类别 assigned_credential
+      - raw_values_returned 等于 false
+  - id: scanner_accepts_clean_text
+    description: 不含凭据特征的普通配置应通过
+    input:
+      documents: [{source_id: config, text: "timeout_ms = 1000"}]
+    assertions:
+      - contains_sensitive_material 等于 false
+      - findings 为空
+  - id: scanner_rejects_raw_allowlist
+    description: 白名单不是合法指纹时必须拒绝
+    input:
+      documents: []
+      allowlist_hashes: [raw-value]
+    expected_error: allowlist_hashes 必须是 16 位

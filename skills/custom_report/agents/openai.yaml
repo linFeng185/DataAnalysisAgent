@@ -1,0 +1,4 @@
+interface:
+  display_name: "周期数据报告"
+  short_description: "将已验证的分析结果渲染为结构稳定的周报或月报"
+  default_prompt: "使用 $custom-report 将当前分析结果渲染为一份周期数据报告。"

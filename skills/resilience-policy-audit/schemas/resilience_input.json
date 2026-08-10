@@ -1,0 +1,47 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "韧性策略审计输入",
+  "type": "object",
+  "required": ["policies"],
+  "properties": {
+    "policies": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 1000,
+      "items": {
+        "type": "object",
+        "required": ["operation", "timeout_ms"],
+        "properties": {
+          "operation": {"type": "string", "minLength": 1},
+          "timeout_ms": {"type": "number", "exclusiveMinimum": 0},
+          "max_attempts": {"type": "integer", "minimum": 1, "maximum": 10, "default": 1},
+          "backoff": {"type": "string", "enum": ["none", "fixed", "exponential"], "default": "none"},
+          "initial_delay_ms": {"type": "number", "minimum": 0, "default": 0},
+          "max_delay_ms": {"type": "number", "minimum": 0, "default": 0},
+          "jitter": {"type": "boolean", "default": false},
+          "remote": {"type": "boolean", "default": false},
+          "side_effecting": {"type": "boolean", "default": false},
+          "idempotent": {"type": "boolean", "default": false},
+          "idempotency_key_required": {"type": "boolean", "default": false},
+          "compensation_enabled": {"type": "boolean", "default": false},
+          "retryable_errors": {"type": "array", "default": [], "items": {"type": "string", "minLength": 1}},
+          "non_retryable_errors": {"type": "array", "default": [], "items": {"type": "string", "minLength": 1}},
+          "circuit_breaker": {
+            "type": ["object", "null"],
+            "default": null,
+            "properties": {
+              "failure_threshold": {"type": "integer"},
+              "recovery_timeout_ms": {"type": "number", "minimum": 0},
+              "half_open_max_calls": {"type": "integer"}
+            },
+            "additionalProperties": false
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "maximum_timeout_ms": {"type": "number", "exclusiveMinimum": 0, "default": 30000},
+    "maximum_total_time_ms": {"type": "number", "exclusiveMinimum": 0, "default": 120000}
+  },
+  "additionalProperties": false
+}

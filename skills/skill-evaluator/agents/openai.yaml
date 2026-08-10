@@ -1,0 +1,4 @@
+interface:
+  display_name: "技能质量评测"
+  short_description: "离线检查执行记录的契约、期望、确定性、耗时和得分门禁"
+  default_prompt: "使用 $skill-evaluator 对这些固定执行记录执行发布前质量评测。"

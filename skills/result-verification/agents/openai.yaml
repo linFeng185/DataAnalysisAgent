@@ -1,0 +1,4 @@
+interface:
+  display_name: "结果核验"
+  short_description: "检查结果完整性、字段约束以及汇总与明细的一致性"
+  default_prompt: "使用 $result-verification 按这些规则核验分析结果。"

@@ -54,10 +54,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         logger.info("智能体启动", env=settings.env, version="0.1.0")
         logger.info(
             "LLM 配置",
-            provider=settings.llm_provider,
-            model=settings.llm_model,
-            base_url=settings.openai_base_url or "https://api.openai.com/v1",
-            api_key_set=bool(settings.openai_api_key),
+            source="tenant_admin",
+            local_model_configured=bool(settings.local_llm_model and settings.local_llm_base_url),
         )
         logger.info("=" * 50)
 

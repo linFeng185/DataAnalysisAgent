@@ -189,6 +189,40 @@ class TestAutomationStore:
         args = connection.fetchrow.await_args.args
         assert args[2:4] == (3, 7)
 
+    # 方法作用：验证 asyncpg 返回 JSONB 字符串时渠道列表会正确反序列化。
+    # Args: self - pytest 测试类实例。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    async def test_schedule_jsonb_channels_are_deserialized(self) -> None:
+        """JSONB 字符串不能被 list() 拆成逐字符渠道。"""
+        # Arrange
+        from src.automation.store import AutomationStore
+
+        now = datetime.now(timezone.utc)
+        row = {
+            "id": "7e152d59-80c6-4327-bb5f-21ec3b351328",
+            "tenant_id": 3,
+            "user_id": 7,
+            "user_role": "analyst",
+            "name": "销售日报",
+            "kind": "report",
+            "datasource": "sales",
+            "sql_text": "SELECT 1",
+            "dialect": "postgres",
+            "frequency": "daily",
+            "threshold_pct": 10,
+            "channels": '["in_app", "email"]',
+            "recipient_email": "ops@example.com",
+            "enabled": True,
+            "next_run_at": now,
+            "last_run_at": None,
+        }
+
+        # Act
+        schedule = AutomationStore._to_schedule(row)  # noqa: SLF001
+
+        # Assert
+        assert schedule.channels == ["in_app", "email"]
+
     # 方法作用：验证站内通知列表始终限定当前用户并限制分页上限。
     # Args: self - pytest 测试类实例；monkeypatch - pytest 补丁工具。
     # Returns: 无返回值，断言失败时由 pytest 报告。

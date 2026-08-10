@@ -1,0 +1,32 @@
+version: 1
+feature_id: 9.7.6
+cases:
+  - id: normalization_applies_explicit_rules
+    description: 空值、布尔、单位和枚举规则应按顺序产生规范值
+    input:
+      rows: [{enabled: 是, distance_km: 1.5, status: 已完成, note: N/A}]
+      rules:
+        - {column: enabled, operation: boolean}
+        - {column: distance_km, operation: scale, factor: 1000}
+        - {column: status, operation: enum, enum_mapping: {已完成: completed}}
+        - {column: note, operation: null, null_values: [N/A]}
+    assertions:
+      - rows[0].enabled 等于 true
+      - rows[0].distance_km 等于 1500
+      - summary.changed_values 等于 4
+  - id: normalization_preserves_unknown_enum
+    description: 未知枚举应保留原值并记录问题
+    input:
+      rows: [{status: 未知}]
+      rules: [{column: status, operation: enum, enum_mapping: {正常: normal}}]
+    assertions:
+      - rows[0].status 等于 未知
+      - summary.issue_count 等于 1
+  - id: normalization_rejects_duplicate_rule
+    description: 同字段同操作重复声明时必须拒绝
+    input:
+      rows: [{value: 1}]
+      rules:
+        - {column: value, operation: scale, factor: 10}
+        - {column: value, operation: scale, factor: 100}
+    expected_error: 规范化规则重复

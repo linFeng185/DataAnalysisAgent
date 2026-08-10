@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "文档证据提取输入",
+  "type": "object",
+  "required": ["query", "chunks"],
+  "properties": {
+    "query": {"type": "string", "minLength": 1, "maxLength": 2000},
+    "chunks": {
+      "type": "array",
+      "maxItems": 500,
+      "items": {
+        "type": "object",
+        "required": ["content", "source_id", "version", "locator"],
+        "properties": {
+          "content": {"type": "string", "minLength": 1, "maxLength": 100000},
+          "source_id": {"type": "string", "minLength": 1},
+          "version": {"type": "string", "minLength": 1},
+          "locator": {"type": "object", "minProperties": 1}
+        },
+        "additionalProperties": false
+      }
+    },
+    "max_evidence": {"type": "integer", "minimum": 1, "maximum": 50, "default": 8},
+    "excerpt_chars": {"type": "integer", "minimum": 100, "maximum": 2000, "default": 400}
+  },
+  "additionalProperties": false
+}

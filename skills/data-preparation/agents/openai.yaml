@@ -1,0 +1,4 @@
+interface:
+  display_name: "数据准备"
+  short_description: "以非破坏方式执行可审计的数据清洗、类型转换和结构整理"
+  default_prompt: "使用 $data-preparation 按指定步骤清洗数据并返回审计记录。"

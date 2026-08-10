@@ -51,13 +51,18 @@ def is_llm_available() -> bool:
 
 
 # 方法作用：兼容旧 Mock 接口并创建关闭 reasoning 的 SQL 任务模型。
-# Args: temperature - 生成温度。
+# Args: temperature - 生成温度；stream - 是否创建流式模型。
 # Returns: 按 generate_sql 任务策略创建的 ChatModel。
-def get_llm(temperature: float = 0):
+def get_llm(temperature: float = 0, *, stream: bool = True):
     """创建 SQL 生成模型，强制关闭推理模式以降低延迟。"""
-    logger.debug("创建 SQL 任务模型入口", temperature=temperature)
-    model = _get_task_llm("generate_sql", temperature=temperature, reasoning=False)
-    logger.info("创建 SQL 任务模型完成")
+    logger.debug("创建 SQL 任务模型入口", temperature=temperature, stream=stream)
+    model = _get_task_llm(
+        "generate_sql",
+        temperature=temperature,
+        reasoning=False,
+        stream=stream,
+    )
+    logger.info("创建 SQL 任务模型完成", stream=stream)
     return model
 
 
@@ -79,9 +84,57 @@ async def generate_sql_node(state: AnalysisState, config: RunnableConfig) -> dic
     dialect = contexts.execution.dialect or "clickhouse"
     query = contexts.request.user_query
     retry = contexts.execution.retry_count
+    task_plan = contexts.routing.task_plan
+
+    # 指标目录先按结构化计划处理，禁止把目录问题交给 LLM 编造跨表 SQL。
+    if task_plan.get("operation") == "indicator_catalog":
+        from src.graph.indicator_catalog import (
+            build_indicator_catalog_plan,
+            build_indicator_catalog_sql,
+            build_indicator_catalog_summary,
+        )
+
+        catalog_plan = build_indicator_catalog_plan(tables)
+        sql = build_indicator_catalog_sql(catalog_plan, dialect)
+        logger.info(
+            "指标目录 SQL 规划完成",
+            mode=catalog_plan.mode,
+            requires_data_query=catalog_plan.requires_data_query,
+            selected_table=catalog_plan.selected_table,
+            sql_present=bool(sql),
+        )
+        return {
+            "generated_sql": sql,
+            "retry_count": retry + 1,
+            "needs_input": catalog_plan.needs_input,
+            "input_explanation": build_indicator_catalog_summary(catalog_plan),
+            "needs_time_range": False,
+            "time_range_explanation": "",
+            "validation_errors": [],
+            "explain_errors": [],
+            "execution_error": "",
+            "execution_error_type": "",
+            "execution_retry_count": 0,
+        }
+
+    # 时间补参只接受 classify_intent 写入的结构化任务计划。
+    if bool(task_plan.get("needs_time_range", False)):
+        logger.info("需要用户指定时间范围", query=query[:80], source="task_plan")
+        return {
+            "generated_sql": "",
+            "needs_input": True,
+            "input_explanation": "请指定查询的时间范围（最近一周/一月/一年/两年/三年/五年 或 全部数据）",
+            "needs_time_range": True,
+            "time_range_explanation": "请指定查询的时间范围（最近一周/一月/一年/两年/三年/五年 或 全部数据）",
+            "retry_count": retry + 1,
+            "validation_errors": [],
+            "execution_error": "",
+            "execution_error_type": "",
+        }
 
     # 表结构 → Markdown 格式（用于 Prompt）
     schema_text = format_schema_for_prompt(tables, dialect)
+    table_whitelist = build_table_whitelist_context(tables)
     # 获取该方言的 SQL 语法速查表
     dialect_hint = get_dialect_cheatsheet(dialect)
     # 技能系统注入的额外 Prompt（Phase 2）
@@ -90,22 +143,20 @@ async def generate_sql_node(state: AnalysisState, config: RunnableConfig) -> dic
     grounding_context = build_sql_grounding_context(state)
 
     # ── 重试时的错误上下文 ──
-    error_context = ""
+    error_context = build_retry_context(state, retry, tables)
     if retry > 0:
-        prev_sql = state.get("generated_sql", "")
-        exec_err = state.get("execution_error", "")
-        val_errors = state.get("validation_errors", [])
-        all_errors: list[str] = list(val_errors)
-        if exec_err:
-            all_errors.append(exec_err)
-        error_context = (
-            f"\n## 第 {retry} 次重试 — 上一轮 SQL 执行失败，请修正\n"
-            f"失败的 SQL: {prev_sql}\n"
-            f"错误原因: {json.dumps(all_errors, ensure_ascii=False)}\n"
-            "请严格检查：1) 列名是否来自 Schema 2) 函数是否存在 3) 数据类型是否匹配\n"
+        prev_sql = str(state.get("generated_sql", "") or "")
+        exec_err = str(state.get("execution_error", "") or "")
+        val_errors = state.get("validation_errors", []) or []
+        logger.info(
+            "SQL 重试上下文边界",
+            retry=retry,
+            previous_sql_chars=len(prev_sql),
+            validation_error_types=[
+                str(error.get("type", "")) for error in val_errors if isinstance(error, dict)
+            ],
+            has_execution_error=bool(exec_err),
         )
-        if retry >= 2:
-            error_context += "⛔ 这是最后一次尝试，必须使用 Schema 中明确列出的列名！\n"
 
     # 新轮次的 retry_count 由 prepare_turn 统一清零；节点内再次按历史判断会把同轮重试误判为新问题。
     history = state.get("conversation_history", []) or []
@@ -139,6 +190,7 @@ async def generate_sql_node(state: AnalysisState, config: RunnableConfig) -> dic
         logger.info("SQL 生成: 调用 LLM", query=query[:80], dialect=dialect, retry=retry)
         sql, reasoning, explanation = await _llm_generate(
             schema_text=schema_text,
+            table_whitelist=table_whitelist,
             dialect_hint=dialect_hint,
             dialect=dialect,
             query=query,
@@ -159,29 +211,30 @@ async def generate_sql_node(state: AnalysisState, config: RunnableConfig) -> dic
 
     logger.info("SQL 生成完成", sql=sql[:200], reasoning_chars=len(reasoning))
 
-    # 检查是否需要用户提供时间范围
-    # 方式1：LLM 主动返回空了
-    time_keywords = ("最近一周", "最近一月", "最近一年", "最近两年", "最近三年", "最近五年",
-                     "时间范围", "时间过滤", "请选择时间", "请指定时间", "选择时间范围")
-    needs_time_range = (not sql or sql.strip() == "") and any(
-        kw in explanation for kw in time_keywords)
-    # 方式2：LLM 绕过了提示生成了无时间过滤的 SQL — 代码层硬拦截
-    if not needs_time_range and sql and sql.strip():
-        needs_time_range = _missing_time_filter(sql, query)
+    logger.info(
+        "SQL 时间补参判定边界",
+        task_plan_needs_time_range=bool(contexts.routing.task_plan.get("needs_time_range", False)),
+        sql_present=bool(sql.strip()),
+        explanation_chars=len(explanation),
+        explanation_triggered=False,
+    )
 
-    if needs_time_range:
-        logger.info("需要用户指定时间范围", query=query[:80])
-        result = {"generated_sql": "",
-                  "needs_time_range": True,
-                  "time_range_explanation": "请指定查询的时间范围（最近一周/一月/一年/两年/三年/五年 或 全部数据）",
-                  "retry_count": retry + 1,
-                  "validation_errors": [],
-                  "execution_error": "",
-                  "execution_error_type": ""}
+    if not sql.strip() and not fallback_error:
+        input_explanation = explanation.strip() or "请补充具体业务目标或目标表后重试。"
+        logger.info("SQL 生成需要补充输入", explanation_chars=len(input_explanation))
+        result = {
+            "generated_sql": "",
+            "needs_input": True,
+            "input_explanation": input_explanation,
+            "needs_time_range": False,
+            "time_range_explanation": "",
+            "retry_count": retry + 1,
+            "validation_errors": [],
+            "execution_error": "",
+            "execution_error_type": "",
+        }
         if reasoning:
             result["sql_reasoning_content"] = reasoning
-        logger.info("节点完成", node="generate_sql",
-                   elapsed_ms=round((time.monotonic() - _start) * 1000))
         return result
 
     # 12.1.6 LLM 输出二次校验 — 拦截表名幻觉
@@ -203,6 +256,8 @@ async def generate_sql_node(state: AnalysisState, config: RunnableConfig) -> dic
     result = {
         "generated_sql": sql,
         "retry_count": retry + 1,
+        "needs_input": False,
+        "input_explanation": "",
         "needs_time_range": False,
         "time_range_explanation": "",
         "validation_errors": [],
@@ -213,9 +268,75 @@ async def generate_sql_node(state: AnalysisState, config: RunnableConfig) -> dic
     }
     if fallback_error:
         result["execution_error"] = fallback_error
+        result["execution_error_type"] = "llm_unavailable"
+        logger.info(
+            "SQL 生成失败边界写回",
+            error_type="llm_unavailable",
+            generated_sql=False,
+            retry_count=result["retry_count"],
+        )
     if reasoning:
         result["sql_reasoning_content"] = reasoning
     return result
+
+
+# 方法作用：构造不依赖详细字段预算的完整合法表名白名单。
+# Args: tables - retrieve_schema 返回的相关表结构。
+# Returns: 每个合法物理表独占一行的紧凑 Prompt 文本。
+def build_table_whitelist_context(tables: list[dict]) -> str:
+    """白名单只包含 Schema 已确认的表名，CTE 仍可由 SQL 自行定义。"""
+    names = [
+        str(table.get("name", "") or "").strip()
+        for table in tables
+        if isinstance(table, dict) and str(table.get("name", "") or "").strip()
+    ]
+    unique_names = list(dict.fromkeys(names))
+    if not unique_names:
+        return "合法物理表白名单为空，不得猜测任何表名。"
+    return "合法物理表白名单（只能使用以下物理表或 SQL 内定义的 CTE）：\n" + "\n".join(
+        f"- {name}" for name in unique_names
+    )
+
+
+# 方法作用：按错误类型构造 SQL 重试上下文，防止幻觉 SQL 被完整回注强化。
+# Args: state - 当前执行状态；retry - 当前重试序号；tables - Schema 合法表列表。
+# Returns: 首次调用返回空文本；幻觉仅返回未知表和白名单，其他错误返回受限 SQL 上下文。
+def build_retry_context(state: AnalysisState, retry: int, tables: list[dict]) -> str:
+    """表名幻觉与普通语义错误使用不同回注策略。"""
+    if retry <= 0:
+        return ""
+    validation_errors = state.get("validation_errors", []) or []
+    hallucinations = [
+        error for error in validation_errors
+        if isinstance(error, dict) and error.get("type") == "hallucination"
+    ]
+    if hallucinations:
+        unknown_tables = list(dict.fromkeys(
+            str(name)
+            for error in hallucinations
+            for name in (error.get("unknown_tables", []) or [])
+            if str(name).strip()
+        ))
+        return (
+            f"## 第 {retry} 次生成：纠正表名幻觉\n"
+            f"上一轮引用了不存在的表：{', '.join(unknown_tables) or '未知'}。\n"
+            f"{build_table_whitelist_context(tables)}\n"
+            "禁止复用上一轮 SQL，必须仅基于合法表名和字段 Schema 重新生成。"
+        )
+    previous_sql = str(state.get("generated_sql", "") or "")[:3000]
+    execution_error = str(state.get("execution_error", "") or "")
+    errors: list[object] = list(validation_errors)
+    if execution_error:
+        errors.append(execution_error)
+    context = (
+        f"## 第 {retry} 次重试：修正上一轮 SQL\n"
+        f"失败的 SQL: {previous_sql}\n"
+        f"错误原因: {json.dumps(errors, ensure_ascii=False)}\n"
+        "请严格检查列名、函数和数据类型是否来自当前 Schema。"
+    )
+    if retry >= 2:
+        context += "\n这是最后一次尝试，必须使用 Schema 中明确列出的标识符。"
+    return context
 
 
 # 将 state 中分散的业务证据组装为 SQL 模型可审计的上下文块。
@@ -305,6 +426,7 @@ async def _llm_generate(
     grounding_context: str,
     config: RunnableConfig,
     conversation_history: list | None = None,
+    table_whitelist: str = "",
 ) -> tuple[str, str, str]:
     """
     调用 LLM 流式生成 SQL 的核心逻辑，返回 (sql, reasoning_content, explanation)。
@@ -355,6 +477,7 @@ async def _llm_generate(
         f"UTC: {_utc}。{dialect} 当前时间函数: {_time_function}；"
         "用户指定具体日期时使用明确边界，不混用其他方言函数。"
     )
+    whitelist_prompt = f"## 物理表强约束\n{table_whitelist}" if table_whitelist else ""
     prompt_sections = [
             PromptSection(
                 "skill",
@@ -364,23 +487,30 @@ async def _llm_generate(
                 target="system",
             ),
             PromptSection(
+                "table_whitelist",
+                whitelist_prompt,
+                priority=110,
+                min_chars=len(whitelist_prompt),
+                max_chars=len(whitelist_prompt),
+            ),
+            PromptSection(
                 "query",
                 f"## 用户问题\n{query}\n请生成 SQL:",
-                priority=100,
+                priority=105,
                 min_chars=600,
                 max_chars=2500,
             ),
             PromptSection(
                 "retry_error",
                 error_ctx,
-                priority=98,
+                priority=90,
                 min_chars=300,
                 max_chars=1800,
             ),
             PromptSection(
                 "schema",
                 f"## 数据库表结构\n{schema_text}",
-                priority=95,
+                priority=100,
                 min_chars=2500,
                 max_chars=6000,
             ),
@@ -427,25 +557,78 @@ async def _llm_generate(
         )
 
         # ── 流式消费：逐 chunk 累积，LangGraph 自动捕获事件推送到前端 ──
+        stream_started_at = time.monotonic()
+        logger.info(
+            "SQL LLM 流式调用边界输入",
+            model_type=type(prepared.model).__name__,
+            streaming=bool(getattr(prepared.model, "streaming", False)),
+            stream_chunk_timeout=getattr(prepared.model, "stream_chunk_timeout", None),
+            message_count=len(prepared.messages),
+            prompt_chars=sum(len(str(getattr(message, "content", "") or "")) for message in prepared.messages),
+        )
         content_parts: list[str] = []
         reasoning_parts: list[str] = []
-        async for chunk in prepared.model.astream(
-            prepared.messages,
-            config=prepared.config,
-        ):
-            # 提取 content（兼容 AIMessageChunk.content 和 ChatGenerationChunk.text）
-            chunk_content = ""
-            if hasattr(chunk, "content") and chunk.content:
-                chunk_content = chunk.content if isinstance(chunk.content, str) else str(chunk.content)
-            elif hasattr(chunk, "text") and chunk.text:
-                chunk_content = chunk.text if isinstance(chunk.text, str) else str(chunk.text)
-            if chunk_content:
-                content_parts.append(chunk_content)
+        chunk_count = 0
+        try:
+            async for chunk in prepared.model.astream(
+                prepared.messages,
+                config=prepared.config,
+            ):
+                chunk_count += 1
+                if chunk_count == 1:
+                    logger.info(
+                        "SQL LLM 首个流式块到达",
+                        elapsed_ms=round((time.monotonic() - stream_started_at) * 1000),
+                        chunk_type=type(chunk).__name__,
+                    )
+                # 提取 content（兼容 AIMessageChunk.content 和 ChatGenerationChunk.text）
+                chunk_content = ""
+                if hasattr(chunk, "content") and chunk.content:
+                    chunk_content = chunk.content if isinstance(chunk.content, str) else str(chunk.content)
+                elif hasattr(chunk, "text") and chunk.text:
+                    chunk_content = chunk.text if isinstance(chunk.text, str) else str(chunk.text)
+                if chunk_content:
+                    content_parts.append(chunk_content)
 
-            # 提取 reasoning_content（DeepSeek 思考链）
-            reasoning = _extract_chunk_reasoning(chunk)
-            if reasoning:
-                reasoning_parts.append(reasoning)
+                # 提取 reasoning_content（DeepSeek 思考链）
+                reasoning = _extract_chunk_reasoning(chunk)
+                if reasoning:
+                    reasoning_parts.append(reasoning)
+        except Exception as stream_exc:
+            from langchain_openai import StreamChunkTimeoutError
+
+            received_chunks = max(
+                chunk_count,
+                int(getattr(stream_exc, "chunks_received", 0) or 0),
+            )
+            if not isinstance(stream_exc, StreamChunkTimeoutError) or received_chunks > 0:
+                raise
+            logger.warning(
+                "SQL LLM 流式首块超时，切换非流式回退",
+                timeout_s=getattr(stream_exc, "timeout_s", None),
+                chunks_received=received_chunks,
+                prompt_id=prepared.prompt_id,
+            )
+            fallback_llm = await asyncio.to_thread(get_llm, 0, stream=False)
+            response = await fallback_llm.ainvoke(
+                prepared.messages,
+                config=prepared.config,
+            )
+            fallback_content = getattr(response, "content", response)
+            if fallback_content:
+                content_parts.append(
+                    fallback_content
+                    if isinstance(fallback_content, str)
+                    else str(fallback_content)
+                )
+            fallback_reasoning = _extract_chunk_reasoning(response)
+            if fallback_reasoning:
+                reasoning_parts.append(fallback_reasoning)
+            logger.info(
+                "SQL LLM 非流式回退完成",
+                content_chars=sum(len(part) for part in content_parts),
+                reasoning_chars=sum(len(part) for part in reasoning_parts),
+            )
 
         raw = "".join(content_parts)
         reasoning_text = "".join(reasoning_parts)

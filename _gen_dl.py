@@ -1,5 +1,3 @@
-import os
-
 code = []
 code.append('"""')
 code.append('文档加载器.')

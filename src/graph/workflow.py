@@ -63,7 +63,7 @@ def after_generate_sql(state: AnalysisState) -> str:
         from src.config import get_settings
         target = (
             "generate_sql"
-            if contexts.execution.retry_count < get_settings().max_retry_count
+            if contexts.execution.retry_count < min(get_settings().max_retry_count, 2)
             else "build_response"
         )
         logger.info("SQL 生成后路由", target=target, reason="表名幻觉")
@@ -154,14 +154,20 @@ def route_by_intent(state: AnalysisState) -> str:
     intent = contexts.routing.intent
     task_plan = contexts.routing.task_plan
     capability = str(task_plan.get("capability", "") or "")
+    action_request = state.get("action_request") or {}
     logger.info(
         "意图路由输入",
         intent=intent,
         capability=capability,
         operation=task_plan.get("operation", ""),
+        has_action_request=bool(action_request),
         selected_sources=sources,
         datasource=contexts.routing.datasource,
     )
+    # API 已完成结构化动作校验时，优先进入确认/执行子图，不能让 LLM 意图覆盖显式动作。
+    if isinstance(action_request, dict) and action_request:
+        logger.info("意图路由输出", target="action_subgraph", reason="显式结构化动作")
+        return "action_subgraph"
     if capability == "file_analysis" or intent == "file_analysis":
         logger.info("意图路由输出", target="file_analysis_subgraph", reason="文件分析")
         return "file_analysis_subgraph"
@@ -171,6 +177,9 @@ def route_by_intent(state: AnalysisState) -> str:
     if capability == "external_action":
         logger.info("意图路由输出", target="action_subgraph", reason="外部动作")
         return "action_subgraph"
+    if capability == "memory_update":
+        logger.info("意图路由输出", target="save_preference", reason="显式用户偏好写入")
+        return "save_preference"
     if intent == "chat" and capability in {"", "direct_answer"}:
         logger.info("意图路由输出", target="llm_direct_answer", reason="chat")
         return "llm_direct_answer"
@@ -193,10 +202,18 @@ def route_by_intent(state: AnalysisState) -> str:
 def after_retrieve_schema(state: AnalysisState) -> str:
     """确保 metadata 问题先获得真实 Schema，再交给直接回答节点。"""
     contexts = read_contexts(state)
-    target = "llm_direct_answer" if contexts.routing.intent == "metadata" else "decompose_query"
+    operation = str(contexts.routing.task_plan.get("operation", "") or "")
+    if contexts.routing.intent == "metadata" and operation == "indicator_catalog":
+        from src.graph.indicator_catalog import build_indicator_catalog_plan
+
+        catalog_plan = build_indicator_catalog_plan(state.get("relevant_tables", []) or [])
+        target = "generate_sql" if catalog_plan.requires_data_query else "llm_direct_answer"
+    else:
+        target = "llm_direct_answer" if contexts.routing.intent == "metadata" else "decompose_query"
     logger.info(
         "Schema 检索后路由",
         intent=contexts.routing.intent,
+        operation=operation,
         target=target,
         table_count=len(state.get("relevant_tables", []) or []),
     )
@@ -273,6 +290,7 @@ async def build_workflow() -> StateGraph:
          "file_analysis_subgraph": "file_analysis_subgraph",
          "market_research_subgraph": "market_research_subgraph",
          "action_subgraph": "action_subgraph",
+         "save_preference": "save_preference",
          "llm_direct_answer": "llm_direct_answer",
          "multi_source_dispatch": "multi_source_dispatch",
          "restore_previous_result": "restore_previous_result"}
@@ -301,6 +319,7 @@ async def build_workflow() -> StateGraph:
     workflow.add_edge("file_analysis_subgraph", "build_response")
     workflow.add_edge("market_research_subgraph", "build_response")
     workflow.add_edge("action_subgraph", "build_response")
+    workflow.add_edge("save_preference", "build_response")
     workflow.add_edge("build_response", END)
 
     # Step 5: 编译 — 注入 Checkpointer 实现多轮对话状态持久化

@@ -80,6 +80,7 @@ def add_sql_analysis_flow(
         after_retrieve_schema,
         {
             "decompose_query": "decompose_query",
+            "generate_sql": "generate_sql",
             "llm_direct_answer": direct_target,
         },
     )

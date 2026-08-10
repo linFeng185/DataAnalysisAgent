@@ -1,0 +1,29 @@
+version: 1
+feature_id: 9.8.1
+cases:
+  - id: trace_accepts_complete_execution
+    description: 顺序完整、成功结束且写回必需字段的轨迹应通过
+    input:
+      spans:
+        - {span_id: s1, node: classify, sequence: 1, status: success, started_ms: 0, ended_ms: 10, state_writes: [intent]}
+        - {span_id: s2, node: query, sequence: 2, status: success, started_ms: 10, ended_ms: 30, state_writes: [rows]}
+      expected_nodes: [classify, query]
+      required_state_fields: [intent, rows]
+    assertions:
+      - valid 等于 true
+      - summary.errors 等于 0
+  - id: trace_reports_recovered_retry
+    description: 首次错误后成功重试应保留恢复警告
+    input:
+      spans:
+        - {span_id: s1, node: query, sequence: 1, attempt: 1, status: error, started_ms: 0, ended_ms: 5}
+        - {span_id: s2, node: query, sequence: 2, attempt: 2, status: success, started_ms: 10, ended_ms: 20}
+    assertions:
+      - valid 等于 true
+      - findings 包含代码 RECOVERED_ERROR
+  - id: trace_rejects_duplicate_expectations
+    description: 预期节点数组重复时必须拒绝
+    input:
+      spans: []
+      expected_nodes: [query, query]
+    expected_error: expected_nodes 不能包含重复节点

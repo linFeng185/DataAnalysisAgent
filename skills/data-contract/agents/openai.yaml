@@ -1,0 +1,4 @@
+interface:
+  display_name: "数据契约校验"
+  short_description: "按显式契约检查字段、类型、空值、唯一性、范围和复合键"
+  default_prompt: "使用 $data-contract 校验这组数据是否满足给定数据契约。"

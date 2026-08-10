@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "执行轨迹审计输入",
+  "type": "object",
+  "required": ["spans"],
+  "properties": {
+    "spans": {
+      "type": "array",
+      "maxItems": 10000,
+      "items": {
+        "type": "object",
+        "required": ["span_id", "node", "sequence", "status", "started_ms", "ended_ms"],
+        "properties": {
+          "span_id": {"type": "string", "minLength": 1},
+          "node": {"type": "string", "minLength": 1},
+          "sequence": {"type": "integer", "minimum": 1},
+          "attempt": {"type": "integer", "minimum": 1, "default": 1},
+          "status": {"type": "string", "enum": ["success", "error", "cancelled"]},
+          "started_ms": {"type": "number"},
+          "ended_ms": {"type": "number"},
+          "state_writes": {"type": "array", "default": [], "items": {"type": "string", "minLength": 1}}
+        },
+        "additionalProperties": false
+      }
+    },
+    "expected_nodes": {"type": ["array", "null"], "default": null, "items": {"type": "string", "minLength": 1}},
+    "required_state_fields": {"type": ["array", "null"], "default": null, "items": {"type": "string", "minLength": 1}},
+    "max_node_duration_ms": {"type": "number", "exclusiveMinimum": 0, "default": 30000},
+    "max_retries": {"type": "integer", "minimum": 0, "maximum": 20, "default": 3},
+    "max_findings": {"type": "integer", "minimum": 1, "maximum": 1000, "default": 200}
+  },
+  "additionalProperties": false
+}

@@ -1,0 +1,4 @@
+interface:
+  display_name: "分布漂移测量"
+  short_description: "比较数值与类别分布并输出稳定性指标和漂移判定"
+  default_prompt: "使用 $distribution-drift 比较基准集与当前集的字段分布。"

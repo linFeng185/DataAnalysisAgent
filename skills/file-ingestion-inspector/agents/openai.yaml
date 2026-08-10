@@ -1,0 +1,4 @@
+interface:
+  display_name: "文件摄取检查"
+  short_description: "检查编码、分隔符、表头、公式前缀及归档解压风险"
+  default_prompt: "使用 $file-ingestion-inspector 检查这个文件样本是否适合安全摄取。"

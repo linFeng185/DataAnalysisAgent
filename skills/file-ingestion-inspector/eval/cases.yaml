@@ -1,0 +1,26 @@
+version: 1
+feature_id: 9.8.7
+cases:
+  - id: ingestion_inspects_utf8_csv
+    description: 标准 UTF-8 CSV 样本应识别逗号和两列
+    input:
+      filename: sample.csv
+      sample_base64: aWQsbmFtZQoxLEEK
+    assertions:
+      - safe_to_ingest 等于 true
+      - encoding 等于 utf-8
+      - delimiter 等于逗号
+      - estimated_columns 等于 2
+  - id: ingestion_blocks_archive_bomb_metadata
+    description: 归档解压比超过上限时必须阻断
+    input:
+      filename: sample.zip
+      sample_base64: YSxiCjEsMgo=
+      archive_metadata: {compressed_bytes: 10, uncompressed_bytes: 100000, entry_count: 2}
+    assertions:
+      - safe_to_ingest 等于 false
+      - findings 包含代码 ARCHIVE_RATIO_EXCEEDED
+  - id: ingestion_rejects_invalid_base64
+    description: 非法 Base64 样本必须拒绝
+    input: {filename: bad.csv, sample_base64: "%%%"}
+    expected_error: 不是有效的 Base64

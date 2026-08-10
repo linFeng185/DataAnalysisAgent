@@ -29,10 +29,30 @@ class TestProviderRegistry:
         )
         monkeypatch.setattr(client_module, "get_settings", lambda: settings)
 
-        provider = client_module.get_provider("claude-sonnet-4-6")
+        provider = client_module.get_provider(
+            "claude-sonnet-4-6",
+            provider_name="anthropic",
+            base_url="",
+            api_key="anthropic-test-key",
+        )
 
         assert isinstance(provider, AnthropicProvider)
         logger.info("test_claude_model_creates_anthropic_provider 完成")
+
+    def test_provider_rejects_global_credentials(self, monkeypatch) -> None:
+        """Provider 不得从全局 Settings 读取模型凭证。"""
+        import pytest
+
+        import src.llm.client as client_module
+
+        monkeypatch.setattr(
+            client_module,
+            "get_settings",
+            lambda: SimpleNamespace(llm_model="gpt-4o"),
+        )
+
+        with pytest.raises(RuntimeError, match="管理后台"):
+            client_module.get_provider("gpt-4o", provider_name="openai")
 
     # 方法作用：验证 Provider 装饰器支持注册自定义实现。
     # Args: self - pytest 测试类实例。

@@ -1,0 +1,38 @@
+version: 1
+feature_id: 9.6.4
+cases:
+  - id: fusion_one_to_one
+    description: 完全匹配的一对一连接应可直接生成预览
+    input:
+      left_asset_id: left
+      right_asset_id: right
+      left_rows: [{id: 1}, {id: 2}]
+      right_rows: [{id: 1, label: 甲}, {id: 2, label: 乙}]
+      left_key: id
+      right_key: id
+    assertions:
+      - decision 等于 ready
+      - contract.cardinality 等于 one_to_one
+  - id: fusion_low_match_rate
+    description: 左侧低匹配率必须默认阻断
+    input:
+      left_asset_id: left
+      right_asset_id: right
+      left_rows: [{id: 1}, {id: 2}, {id: 3}, {id: 4}]
+      right_rows: [{id: 1}]
+      left_key: id
+      right_key: id
+    assertions:
+      - decision 等于 blocked
+      - join_preview 为空
+  - id: fusion_many_to_many
+    description: 多对多连接必须要求确认
+    input:
+      left_asset_id: left
+      right_asset_id: right
+      left_rows: [{id: 1}, {id: 1}]
+      right_rows: [{id: 1}, {id: 1}]
+      left_key: id
+      right_key: id
+    assertions:
+      - contract.requires_confirmation 等于 true

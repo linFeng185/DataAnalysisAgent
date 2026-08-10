@@ -1,0 +1,45 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "数据契约校验输入",
+  "type": "object",
+  "required": ["rows", "contract"],
+  "properties": {
+    "rows": {
+      "type": "array",
+      "maxItems": 10000,
+      "items": {"type": "object"},
+      "description": "待校验的行式数据"
+    },
+    "contract": {
+      "type": "object",
+      "required": ["columns"],
+      "properties": {
+        "columns": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "required": ["name"],
+            "properties": {
+              "name": {"type": "string", "minLength": 1},
+              "type": {"type": "string", "enum": ["string", "integer", "number", "boolean", "datetime", "object", "array"], "default": "string"},
+              "required": {"type": "boolean", "default": false},
+              "nullable": {"type": "boolean", "default": true},
+              "unique": {"type": "boolean", "default": false},
+              "enum_values": {"type": "array", "default": []},
+              "minimum": {"type": ["number", "null"], "default": null},
+              "maximum": {"type": ["number", "null"], "default": null},
+              "pattern": {"type": "string", "default": ""}
+            },
+            "additionalProperties": false
+          }
+        },
+        "primary_key": {"type": "array", "items": {"type": "string", "minLength": 1}, "default": []},
+        "allow_extra_columns": {"type": "boolean", "default": true}
+      },
+      "additionalProperties": false
+    },
+    "max_violations": {"type": "integer", "minimum": 1, "maximum": 10000, "default": 1000}
+  },
+  "additionalProperties": false
+}

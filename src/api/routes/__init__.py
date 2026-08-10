@@ -139,7 +139,8 @@ for domain_router in (
     knowledge_router,
     llm_admin_router,
 ):
-    router.include_router(domain_router)
+    # 各领域路由已经包含自身 prefix，直接展开可让 FastAPI 新版和路由审计看到完整 APIRoute。
+    router.routes.extend(domain_router.routes)
 
 
 __all__ = [

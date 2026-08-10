@@ -1,0 +1,37 @@
+version: 1
+feature_id: 9.8.10
+cases:
+  - id: resilience_accepts_guarded_remote_retry
+    description: 有退避、抖动、熔断和明确错误分类的远程只读重试应通过
+    input:
+      policies:
+        - operation: fetch-data
+          timeout_ms: 1000
+          max_attempts: 3
+          backoff: exponential
+          initial_delay_ms: 100
+          max_delay_ms: 500
+          jitter: true
+          remote: true
+          retryable_errors: [timeout, unavailable]
+          non_retryable_errors: [invalid_request]
+          circuit_breaker: {failure_threshold: 5, recovery_timeout_ms: 30000, half_open_max_calls: 1}
+    assertions:
+      - valid 等于 true
+      - summary.errors 等于 0
+  - id: resilience_blocks_unsafe_side_effect_retry
+    description: 非幂等副作用重试缺少幂等键和补偿时必须失败
+    input:
+      policies:
+        - {operation: send-message, timeout_ms: 1000, max_attempts: 2, backoff: fixed, initial_delay_ms: 100, max_delay_ms: 100, side_effecting: true, retryable_errors: [timeout]}
+    assertions:
+      - valid 等于 false
+      - findings 包含代码 IDEMPOTENCY_MISSING
+      - findings 包含代码 COMPENSATION_MISSING
+  - id: resilience_rejects_duplicate_operation
+    description: 同一操作重复声明策略时必须拒绝
+    input:
+      policies:
+        - {operation: query, timeout_ms: 1000}
+        - {operation: query, timeout_ms: 2000}
+    expected_error: 操作策略重复

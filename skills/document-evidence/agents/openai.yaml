@@ -1,0 +1,4 @@
+interface:
+  display_name: "文档证据提取"
+  short_description: "从带来源定位的文档片段提取可追溯证据并标记潜在冲突"
+  default_prompt: "使用 $document-evidence 从这些文档片段中构建可追溯证据。"

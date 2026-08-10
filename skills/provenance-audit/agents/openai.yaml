@@ -1,0 +1,4 @@
+interface:
+  display_name: "来源链审计"
+  short_description: "核查资产指纹、证据定位、代码版本和变换链连续性"
+  default_prompt: "使用 $provenance-audit 审核这组资产与变换记录的可追溯性。"

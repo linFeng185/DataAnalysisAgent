@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "语义规范化输入",
+  "type": "object",
+  "required": ["rows", "rules"],
+  "properties": {
+    "rows": {"type": "array", "maxItems": 10000, "items": {"type": "object"}},
+    "rules": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 100,
+      "items": {
+        "type": "object",
+        "required": ["column", "operation"],
+        "properties": {
+          "column": {"type": "string", "minLength": 1},
+          "operation": {"type": "string", "enum": ["null", "boolean", "datetime", "scale", "enum"]},
+          "null_values": {"type": "array", "default": [], "items": {}},
+          "true_values": {"type": "array", "default": [], "items": {}},
+          "false_values": {"type": "array", "default": [], "items": {}},
+          "source_timezone": {"type": "string", "default": "UTC"},
+          "target_timezone": {"type": "string", "default": "UTC"},
+          "factor": {"type": "number", "default": 1},
+          "offset": {"type": "number", "default": 0},
+          "enum_mapping": {"type": "object", "default": {}}
+        },
+        "additionalProperties": false,
+        "allOf": [
+          {"if": {"properties": {"operation": {"const": "enum"}}}, "then": {"properties": {"enum_mapping": {"minProperties": 1}}}}
+        ]
+      }
+    }
+  },
+  "additionalProperties": false
+}

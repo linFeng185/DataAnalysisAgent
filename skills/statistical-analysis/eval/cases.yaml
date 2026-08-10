@@ -1,0 +1,28 @@
+version: 1
+feature_id: 9.6.5
+cases:
+  - id: statistics_descriptive_and_correlation
+    description: 两个数值列应输出描述统计和相关系数
+    input:
+      rows:
+        - {x: 1, y: 2}
+        - {x: 2, y: 4}
+        - {x: 3, y: 6}
+      modes: [descriptive, correlation]
+    assertions:
+      - numeric_columns 包含 x 和 y
+      - analyses.correlation 第一项 pearson 等于 1
+  - id: statistics_no_numeric_columns
+    description: 无数值列时应记录跳过原因
+    input:
+      rows: [{name: 甲}, {name: 乙}]
+      modes: [correlation, concentration]
+    assertions:
+      - skipped 长度等于 2
+  - id: statistics_unknown_mode
+    description: 未声明的统计模式必须拒绝
+    input:
+      rows: []
+      modes: [unknown]
+    assertions:
+      - 输入 Schema 或工具参数校验失败

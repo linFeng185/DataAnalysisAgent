@@ -117,10 +117,19 @@ async def build_response_node(state: AnalysisState) -> dict:
         data_rows=len(state.get("query_result_sample", []) or []),
         has_analysis=bool(state.get("analysis_result")),
         has_execution_error=bool(state.get("execution_error")),
+        execution_error_type=contexts.execution.execution_error_type,
         validation_error_count=len(state.get("validation_errors", []) or []),
     )
     is_time_prompt = (
         bool(state.get("needs_time_range", False))
+        and not state.get("multi_source_results")
+        and sql == ""
+        and not state.get("execution_error")
+        and not state.get("validation_errors")
+    )
+    is_generic_prompt = (
+        bool(state.get("needs_input", False))
+        and not state.get("needs_time_range", False)
         and not state.get("multi_source_results")
         and sql == ""
         and not state.get("execution_error")
@@ -133,14 +142,15 @@ async def build_response_node(state: AnalysisState) -> dict:
     is_direct_response = (
         existing_response.get("source") in {
             "llm_direct", "mcp_agent", "file_analysis", "market_research",
-            "forecast", "report", "external_action",
+            "forecast", "report", "external_action", "indicator_catalog",
         }
         and existing_response.get("user_query", "") == contexts.request.user_query
     )
 
     if is_direct_response:
         final_result = dict(existing_response)
-        if final_result.get("success") is False:
+        direct_status = str(final_result.get("status", "") or "")
+        if final_result.get("success") is False and direct_status != "needs_confirmation":
             final_result.setdefault(
                 "error_code",
                 "MCP_AGENT_FAILED" if final_result.get("source") == "mcp_agent" else "TASK_FAILED",
@@ -150,6 +160,8 @@ async def build_response_node(state: AnalysisState) -> dict:
                 fallback=str(final_result.get("error_message") or "任务执行失败"),
             )
             final_result["status"] = "failed"
+        elif direct_status == "needs_confirmation":
+            final_result["status"] = "needs_confirmation"
         else:
             final_result.setdefault("status", "success")
         logger.info("保留直接响应", source=final_result.get("source", ""))
@@ -161,6 +173,26 @@ async def build_response_node(state: AnalysisState) -> dict:
             "user_query": contexts.request.user_query, "sql": "", "data": [],
             "sql_statements": [],
             "analysis": {"summary": explanation, "insights": [], "recommended_chart_type": "table"},
+            "chart": {"type": "table", "option": {}},
+        }
+    elif is_generic_prompt:
+        explanation = state.get("input_explanation") or "请补充具体业务目标或目标表后重试。"
+        logger.info("提示用户补充必要输入", explanation=str(explanation)[:100])
+        final_result = {
+            "success": False,
+            "status": "needs_input",
+            "source": "prompt",
+            "needs_input": True,
+            "needs_time_range": False,
+            "user_query": contexts.request.user_query,
+            "sql": "",
+            "data": [],
+            "sql_statements": [],
+            "analysis": {
+                "summary": explanation,
+                "insights": [],
+                "recommended_chart_type": "table",
+            },
             "chart": {"type": "table", "option": {}},
         }
     elif multi_source_results and not successful_sources:
@@ -194,6 +226,8 @@ async def build_response_node(state: AnalysisState) -> dict:
     else:
         exec_error = state.get("execution_error", "")
         success = not bool(exec_error)
+        error_type = contexts.execution.execution_error_type
+        error_code = "LLM_UNAVAILABLE" if error_type == "llm_unavailable" else "SQL_EXECUTION_FAILED"
         final_result = {
             "success": success, "status": "success" if success else "failed",
             "source": "sql_query", "session_id": "",
@@ -207,8 +241,8 @@ async def build_response_node(state: AnalysisState) -> dict:
             "chart": state.get("chart_config", {}),
         }
         if exec_error:
-            final_result["error_code"] = "SQL_EXECUTION_FAILED"
-            final_result["error_message"] = public_error_message("SQL_EXECUTION_FAILED")
+            final_result["error_code"] = error_code
+            final_result["error_message"] = public_error_message(error_code)
 
     if multi_source_results and successful_sources:
         final_result["source"] = "multi_source_query"

@@ -1,0 +1,55 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "数据集差异比较输出",
+  "type": "object",
+  "required": ["identical", "primary_key", "compared_columns", "summary", "added_keys", "removed_keys", "modified_rows", "field_change_counts", "details_truncated"],
+  "properties": {
+    "identical": {"type": "boolean"},
+    "primary_key": {"type": "array", "minItems": 1, "items": {"type": "string"}},
+    "compared_columns": {"type": "array", "items": {"type": "string"}},
+    "summary": {
+      "type": "object",
+      "required": ["baseline_rows", "current_rows", "added", "removed", "modified", "unchanged"],
+      "properties": {
+        "baseline_rows": {"type": "integer", "minimum": 0},
+        "current_rows": {"type": "integer", "minimum": 0},
+        "added": {"type": "integer", "minimum": 0},
+        "removed": {"type": "integer", "minimum": 0},
+        "modified": {"type": "integer", "minimum": 0},
+        "unchanged": {"type": "integer", "minimum": 0}
+      },
+      "additionalProperties": false
+    },
+    "added_keys": {"type": "array", "items": {"type": "array"}},
+    "removed_keys": {"type": "array", "items": {"type": "array"}},
+    "modified_rows": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["key", "changes"],
+        "properties": {
+          "key": {"type": "array"},
+          "changes": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "object",
+              "required": ["column", "before", "after"],
+              "properties": {
+                "column": {"type": "string"},
+                "before": {},
+                "after": {},
+                "absolute_difference": {"type": "number"}
+              },
+              "additionalProperties": false
+            }
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "field_change_counts": {"type": "object", "additionalProperties": {"type": "integer", "minimum": 0}},
+    "details_truncated": {"type": "boolean"}
+  },
+  "additionalProperties": false
+}

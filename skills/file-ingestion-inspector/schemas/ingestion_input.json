@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "文件摄取检查输入",
+  "type": "object",
+  "required": ["filename", "sample_base64"],
+  "properties": {
+    "filename": {"type": "string", "minLength": 1, "maxLength": 512},
+    "sample_base64": {"type": "string", "maxLength": 2000000},
+    "declared_encoding": {"type": ["string", "null"], "default": null},
+    "archive_metadata": {
+      "type": ["object", "null"],
+      "default": null,
+      "properties": {
+        "compressed_bytes": {"type": "integer", "minimum": 0, "default": 0},
+        "uncompressed_bytes": {"type": "integer", "minimum": 0, "default": 0},
+        "entry_count": {"type": "integer", "minimum": 0, "default": 0},
+        "encrypted": {"type": "boolean", "default": false},
+        "contains_macros": {"type": "boolean", "default": false},
+        "external_links": {"type": "boolean", "default": false}
+      },
+      "additionalProperties": false
+    },
+    "max_archive_ratio": {"type": "number", "exclusiveMinimum": 1, "default": 100},
+    "max_archive_entries": {"type": "integer", "minimum": 1, "default": 10000}
+  },
+  "additionalProperties": false
+}

@@ -122,39 +122,32 @@ def create_provider_from_settings(
     model_id: str,
     settings: Any,
 ) -> LLMProvider:
-    """配置字段由注册元数据驱动，client.py 不再硬编码厂商。"""
-    _load_default_providers()
+    """拒绝从全局配置创建 Provider，凭证必须来自租户管理后台。"""
+    del settings
     normalized = _PROTOCOL_ALIASES.get(name.strip().lower(), name.strip().lower())
-    logger.debug("按配置创建 Provider 入口", provider=normalized, model_id=model_id)
-    registration = _registry.get(normalized)
-    if registration is None:
-        logger.error("按配置创建 Provider 失败", provider=normalized, reason="实现未注册")
-        raise ValueError(f"不支持的 Provider: {normalized}")
-    api_key = str(getattr(settings, registration.api_key_setting, "") or "")
-    base_url = str(getattr(settings, registration.base_url_setting, "") or "")
-    if not api_key:
-        logger.error("按配置创建 Provider 失败", provider=normalized, reason="API Key 缺失")
-        raise ValueError(f"模型 {model_id} 需要 {registration.api_key_setting.upper()}")
-    provider = create_provider(normalized, model_id, base_url, api_key)
-    logger.info("按配置创建 Provider 完成", provider=normalized, model_id=model_id)
-    return provider
+    logger.error(
+        "按全局配置创建 Provider 拒绝",
+        provider=normalized,
+        model_id=model_id,
+        reason="LLM 凭证必须通过租户管理后台配置",
+    )
+    raise RuntimeError("LLM 凭证必须通过租户管理后台配置")
 
 
 # 方法作用：判断指定 Provider 的凭证是否已配置。
 # Args: name - Provider 名称；settings - Settings 或测试配置。
 # Returns: API Key 非空返回 True。
 def provider_has_credentials(name: str, settings: Any) -> bool:
-    """只检查配置，不触发网络请求或创建模型客户端。"""
-    _load_default_providers()
+    """全局 Provider 凭证已停用，保留接口仅用于兼容调用方。"""
+    del settings
     normalized = _PROTOCOL_ALIASES.get(name.strip().lower(), name.strip().lower())
-    logger.debug("Provider 凭证检查入口", provider=normalized)
-    registration = _registry.get(normalized)
-    available = bool(
-        registration
-        and getattr(settings, registration.api_key_setting, "")
+    logger.info(
+        "Provider 全局凭证检查拒绝",
+        provider=normalized,
+        available=False,
+        reason="凭证必须来自租户管理后台",
     )
-    logger.info("Provider 凭证检查完成", provider=normalized, available=available)
-    return available
+    return False
 
 
 # 方法作用：返回 Provider 声明的默认模型。

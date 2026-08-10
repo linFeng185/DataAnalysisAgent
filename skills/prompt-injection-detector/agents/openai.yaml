@@ -1,0 +1,4 @@
+interface:
+  display_name: "提示注入检测"
+  short_description: "识别不可信文本中的越权指令、工具诱导、外传和绕过特征"
+  default_prompt: "使用 $prompt-injection-detector 检查这些不可信文本是否包含提示注入。"

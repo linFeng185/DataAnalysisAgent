@@ -1,0 +1,4 @@
+interface:
+  display_name: "抽样与代表性审计"
+  short_description: "用固定种子抽样并检查样本与总体的结构偏差"
+  default_prompt: "使用 $sampling-audit 生成可复现样本并审计代表性。"

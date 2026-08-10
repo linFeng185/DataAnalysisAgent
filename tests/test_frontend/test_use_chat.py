@@ -48,6 +48,8 @@ process.stdout.write(JSON.stringify({
   skills: args[9] || '',
   reasoning_enabled: args[10] || '',
   reasoning_effort: args[11] || '',
+  file_ids: args[12] || '',
+  action_request: args[13] || '',
 }));
 """
 
@@ -63,13 +65,15 @@ process.stdout.write(JSON.stringify({
 
         # Assert：末尾参数必须分别传入多数据源、模型、连接、Skill 和推理偏好。
         assert call == {
-            "argument_count": 12,
+            "argument_count": 14,
             "datasources": "dss",
             "model_id": "mid",
             "connection_id": "cid",
             "skills": "enabledSkillIds",
             "reasoning_enabled": "reasoningEnabled",
             "reasoning_effort": "reasoningEffort",
+            "file_ids": "fileIds",
+            "action_request": "actionRequest",
         }
         logger.info("test_use_chat_forwards_multi_datasource_and_model_arguments 完成", extra=call)
     except Exception as exc:

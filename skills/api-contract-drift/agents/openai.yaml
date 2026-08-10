@@ -1,0 +1,4 @@
+interface:
+  display_name: "接口契约漂移"
+  short_description: "比较两版 OpenAPI 的路径、参数、请求和响应兼容性"
+  default_prompt: "使用 $api-contract-drift 检查这两版 OpenAPI 契约的破坏性变化。"

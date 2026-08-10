@@ -1,0 +1,41 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "模式映射输入",
+  "type": "object",
+  "required": ["query", "tables"],
+  "properties": {
+    "query": {"type": "string", "minLength": 1, "maxLength": 2000},
+    "tables": {
+      "type": "array",
+      "maxItems": 500,
+      "items": {
+        "type": "object",
+        "required": ["name", "columns"],
+        "properties": {
+          "name": {"type": "string", "minLength": 1},
+          "description": {"type": "string", "default": ""},
+          "aliases": {"type": "array", "default": [], "items": {"type": "string"}},
+          "columns": {
+            "type": "array",
+            "maxItems": 1000,
+            "items": {
+              "type": "object",
+              "required": ["name"],
+              "properties": {
+                "name": {"type": "string", "minLength": 1},
+                "description": {"type": "string", "default": ""},
+                "data_type": {"type": "string", "default": ""},
+                "aliases": {"type": "array", "default": [], "items": {"type": "string"}}
+              },
+              "additionalProperties": false
+            }
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "threshold": {"type": "number", "minimum": 0, "maximum": 1, "default": 0.35},
+    "max_matches": {"type": "integer", "minimum": 1, "maximum": 100, "default": 20}
+  },
+  "additionalProperties": false
+}

@@ -69,6 +69,34 @@ class TestAutomationApi:
         route._validate_schedule_request.assert_awaited_once_with(identity, request)
         store.create.assert_awaited_once_with(identity, request, "postgres")
 
+    # 方法作用：验证 Registry 后端故障不会被伪装成数据源不存在。
+    # Args: self - pytest 测试类实例；monkeypatch - pytest 补丁工具。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    async def test_registry_failure_returns_service_unavailable(self, monkeypatch) -> None:
+        """连接配置库失败属于 503，只有明确 DataSourceNotFoundError 才是 404。"""
+        # Arrange
+        import src.api.routes.automation as route
+        from src.api.schemas import AutomationScheduleCreateRequest
+
+        registry = SimpleNamespace(resolve=AsyncMock(side_effect=RuntimeError("database unavailable")))
+        monkeypatch.setattr(route, "get_registry", lambda: registry)
+        request = AutomationScheduleCreateRequest(
+            name="销售日报",
+            kind="report",
+            datasource="sales",
+            sql="SELECT 1",
+            frequency="daily",
+            channels=["in_app"],
+        )
+
+        # Act / Assert
+        with pytest.raises(HTTPException) as exc_info:
+            await route._validate_schedule_request(
+                SimpleNamespace(tenant_id=3, user_id=7, role="analyst"),
+                request,
+            )
+        assert exc_info.value.status_code == 503
+
     # 方法作用：验证创建 API 在写入前阻断危险 SQL。
     # Args: self - pytest 测试类实例；monkeypatch - pytest 补丁工具。
     # Returns: 无返回值，断言失败时由 pytest 报告。

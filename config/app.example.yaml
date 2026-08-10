@@ -1,17 +1,16 @@
-# 应用统一配置示例。复制为 app.yaml 后按环境修改；密钥由 .env 注入。
+# 应用统一配置示例。复制为 app.yaml 后按环境修改；LLM 凭证由管理后台维护。
 env: dev
 log_level: INFO
 log_format: console
 log_file: logs/app.log
 
+# 仅保留模型路由元数据；远程服务地址和凭证由管理后台维护。
 llm_provider: openai
 llm_model: gpt-4o
 llm_temperature: 0.0
 llm_max_tokens: 4096
 llm_timeout: 60
-openai_api_key: ""
-openai_base_url: ""
-anthropic_api_key: ""
+llm_stream_chunk_timeout: 30
 cheap_llm_model: gpt-4o-mini
 local_llm_model: ""
 local_llm_base_url: ""

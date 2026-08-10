@@ -1,0 +1,4 @@
+interface:
+  display_name: "数据集差异比较"
+  short_description: "按唯一主键检查新增、删除、修改和字段级差异"
+  default_prompt: "使用 $dataset-diff 比较这两版数据并给出可审计差异。"

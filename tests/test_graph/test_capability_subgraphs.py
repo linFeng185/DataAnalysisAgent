@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from langgraph.checkpoint.memory import MemorySaver
@@ -18,6 +18,7 @@ class TestCapabilityRouting:
             ("生成订单月报", "report"),
             ("做一份竞品研究", "market_research"),
             ("发送通知给负责人", "external_action"),
+            ("请记住我偏好折线图", "memory_update"),
         ],
     )
     def test_task_plan_detects_extension_capability(self, query: str, capability: str) -> None:
@@ -118,9 +119,15 @@ class TestCapabilityExecution:
                     "success": True,
                     "status": "success",
                     "source": "mcp_agent",
-                    "analysis": {"summary": "研究完成"},
+                    "analysis": {
+                        "summary": "研究完成",
+                        "citations": [{"source_id": "source-1", "locator": {"url": "https://example.com"}}],
+                    },
                 },
-                "analysis_result": {"summary": "研究完成"},
+                "analysis_result": {
+                    "summary": "研究完成",
+                    "citations": [{"source_id": "source-1", "locator": {"url": "https://example.com"}}],
+                },
             }),
         )
 
@@ -129,7 +136,69 @@ class TestCapabilityExecution:
 
         # Assert
         assert result["final_response"]["source"] == "market_research"
+        assert result["final_response"]["success"] is True
         assert "授权" in result["analysis_result"]["limitations"][0]
+
+    # 方法作用：验证市场研究没有可追溯引用时失败关闭。
+    # Args: self - pytest 测试类实例；monkeypatch - pytest 补丁工具。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    async def test_market_research_rejects_success_without_citations(self, monkeypatch) -> None:
+        """模型摘要不能在没有真实外部证据引用时伪装成研究成功。"""
+        # Arrange
+        import src.graph.subgraphs.market_research as module
+
+        monkeypatch.setattr(
+            module,
+            "mcp_agent_node",
+            AsyncMock(return_value={
+                "final_response": {
+                    "success": True,
+                    "status": "success",
+                    "source": "mcp_agent",
+                    "analysis": {"summary": "无来源研究"},
+                },
+                "analysis_result": {"summary": "无来源研究"},
+            }),
+        )
+
+        # Act
+        result = await module.market_research_node({"user_query": "竞品研究"})
+
+        # Assert
+        assert result["final_response"]["success"] is False
+        assert result["final_response"]["status"] == "failed"
+        assert result["final_response"]["error_code"] == "MARKET_RESEARCH_EVIDENCE_MISSING"
+
+    # 方法作用：验证市场研究没有授权工具时不调用模型生成无证据答案。
+    # Args: self - pytest 测试类实例；monkeypatch - pytest 补丁工具。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    async def test_market_research_without_tools_fails_closed(self, monkeypatch) -> None:
+        """MCP 和 Skill 工具均为空时必须明确失败，不能返回 success=true。"""
+        # Arrange
+        import src.graph.nodes.mcp_agent as module
+        import src.llm.client as client_module
+        import src.mcp_client.client_manager as manager_module
+
+        manager = type("Manager", (), {
+            "ensure_scoped_servers": AsyncMock(),
+            "get_all_tools": lambda self, **kwargs: [],
+        })()
+        get_llm = MagicMock()
+        monkeypatch.setattr(manager_module, "get_mcp_client_manager", lambda: manager)
+        monkeypatch.setattr(client_module, "get_task_llm", get_llm)
+        monkeypatch.setattr(client_module, "is_task_llm_available", lambda task: True)
+
+        # Act
+        result = await module.mcp_agent_node({
+            "user_query": "做竞品研究",
+            "task_plan": {"capability": "market_research"},
+            "skill_tools": [],
+        })
+
+        # Assert
+        assert result["final_response"]["success"] is False
+        assert result["final_response"]["error_code"] == "MCP_AGENT_FAILED"
+        get_llm.assert_not_called()
 
     async def test_external_action_requires_confirmation_without_structured_request(self) -> None:
         """自然语言动作请求不得直接执行，必须返回人工确认状态。"""
@@ -141,9 +210,64 @@ class TestCapabilityExecution:
         response = result["final_response"]
 
         # Assert
-        assert response["success"] is True
+        assert response["success"] is False
         assert response["status"] == "needs_confirmation"
         assert response["data"]["action_status"] == "confirmation_required"
+
+    # 方法作用：验证待确认响应回传可安全重放的原始动作请求。
+    # Args: self - pytest 测试类实例。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    async def test_external_action_confirmation_returns_original_request(self) -> None:
+        """前端确认时必须复用原动作参数和幂等键，只修改 confirmed。"""
+        # Arrange
+        from src.graph.subgraphs.action import action_node
+
+        action_request = {
+            "action_name": "notify",
+            "payload": {"text": "库存不足"},
+            "idempotency_key": "notify-low-stock-1",
+            "confirmed": False,
+            "metadata": {"source": "chat"},
+        }
+
+        # Act
+        result = await action_node({"user_query": "发送库存通知", "action_request": action_request})
+
+        # Assert
+        response = result["final_response"]
+        assert response["status"] == "needs_confirmation"
+        assert response["data"]["action_request"] == action_request
+
+    # 方法作用：验证结构化且已确认的动作请求可以到达动作注册表。
+    # Args: self - pytest 测试类实例；monkeypatch - pytest 补丁工具。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    async def test_external_action_dispatches_structured_request(self, monkeypatch) -> None:
+        """API 传入的动作参数、确认标记和幂等键必须原样进入分派边界。"""
+        # Arrange
+        import src.graph.subgraphs.action as module
+
+        dispatch = AsyncMock(return_value=type("Result", (), {
+            "status": "executed", "message": "已发送", "result": {"message_id": "m-1"},
+        })())
+        monkeypatch.setattr(module, "get_action_registry", lambda: type("Registry", (), {"dispatch": dispatch})())
+
+        # Act
+        result = await module.action_node({
+            "user_query": "发送通知",
+            "action_request": {
+                "action_name": "notify",
+                "payload": {"channel": "email"},
+                "idempotency_key": "notify-1",
+                "confirmed": True,
+            },
+        })
+
+        # Assert
+        assert result["final_response"]["success"] is True
+        request = dispatch.await_args.args[0]
+        assert request.action_name == "notify"
+        assert request.idempotency_key == "notify-1"
+        assert request.confirmed is True
 
     async def test_capability_failure_keeps_safe_specific_message(self, monkeypatch) -> None:
         """统一出口不得把能力子图的安全错误文案覆盖成笼统直接回答失败。"""

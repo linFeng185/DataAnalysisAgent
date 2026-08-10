@@ -70,11 +70,10 @@ class TestChatLLMResolution:
     # 方法作用：验证单租户未配置租户连接时保留 Settings 兼容路径。
     # Args: self - pytest 测试类实例；monkeypatch - pytest 补丁工具。
     # Returns: 无返回值，断言失败时由 pytest 报告。
-    async def test_single_tenant_missing_default_uses_settings_fallback(self, monkeypatch) -> None:
-        """只有单租户且未显式选择时允许返回 None 走旧配置。"""
+    async def test_single_tenant_missing_default_fails_closed(self, monkeypatch) -> None:
+        """单租户未配置管理后台模型时也必须拒绝对话。"""
         # Arrange
         import src.api.auth as auth
-        import src.app_context as app_context
         import src.llm.tenant_config as tenant_config
         from src.api.schemas import ChatRequest
 
@@ -82,21 +81,15 @@ class TestChatLLMResolution:
 
         monkeypatch.setattr(auth, "get_current_tenant_id", lambda: 1)
         monkeypatch.setattr(
-            app_context,
-            "get_tenant_policy",
-            lambda: SimpleNamespace(multi_tenant=False),
-        )
-        monkeypatch.setattr(
             tenant_config,
             "resolve_tenant_llm_selection",
             AsyncMock(side_effect=LookupError("missing")),
         )
 
-        # Act
-        result = await chat_routes._resolve_chat_llm_selection(ChatRequest(query="q"))
-
-        # Assert
-        assert result is None
+        # Act / Assert
+        with pytest.raises(HTTPException) as caught:
+            await chat_routes._resolve_chat_llm_selection(ChatRequest(query="q"))
+        assert caught.value.status_code == 409
 
     # 方法作用：验证 Chat API 将用户推理偏好传入租户模型授权解析器。
     # Args: self - pytest 测试类实例；monkeypatch - pytest 补丁工具。
@@ -153,6 +146,7 @@ class TestChatLLMContext:
 
         selection = _selection()
         observed = []
+        observed_states = []
 
         class Workflow:
             """记录工作流执行时的 LLM 请求上下文。"""
@@ -161,8 +155,9 @@ class TestChatLLMContext:
             # Args: self - 工作流替身；state - 工作流状态；config - LangGraph 配置。
             # Returns: 最小成功响应。
             async def ainvoke(self, state, config):
-                del self, state, config
+                del self, config
                 observed.append(get_current_tenant_llm_selection())
+                observed_states.append(state)
                 return {"final_response": {"success": True}}
 
         # 方法作用：关闭测试生成的后台协程，避免访问真实 SessionStore。
@@ -203,10 +198,19 @@ class TestChatLLMContext:
             session_id="session-1",
             llm_connection_id=11,
             model_id="gpt-4o",
+            file_ids=[31],
+            action_request={
+                "action_name": "notify",
+                "payload": {"channel": "email"},
+                "idempotency_key": "notify-31",
+                "confirmed": True,
+            },
         ))
 
         # Assert
         assert observed == [selection]
+        assert observed_states[0]["file_ids"] == [31]
+        assert observed_states[0]["action_request"]["idempotency_key"] == "notify-31"
         assert get_current_tenant_llm_selection() is None
 
     # 方法作用：验证 SSE 的整个 astream_events 生命周期绑定租户选择。
@@ -222,6 +226,7 @@ class TestChatLLMContext:
 
         selection = _selection()
         observed = []
+        observed_states = []
 
         class StreamingWorkflow:
             """记录流式工作流开始和恢复时的选择。"""
@@ -230,7 +235,8 @@ class TestChatLLMContext:
             # Args: self - 工作流替身；args/kwargs - 工作流输入与配置。
             # Returns: 两个链事件的异步生成器。
             async def astream_events(self, *args, **kwargs):
-                del self, args, kwargs
+                del self, kwargs
+                observed_states.append(args[0])
                 observed.append(get_current_tenant_llm_selection())
                 yield {"event": "on_chain_start", "name": "prepare_turn"}
                 observed.append(get_current_tenant_llm_selection())
@@ -258,11 +264,15 @@ class TestChatLLMContext:
                 user_role="analyst",
                 datasource_access={"demo": {"allowed_columns": [], "row_filter_sql": ""}},
                 llm_selection=selection,
+                file_ids=[41],
+                action_request={"action_name": "notify", "idempotency_key": "notify-41"},
             )
         ]
 
         # Assert
         assert observed == [selection, selection]
+        assert observed_states[0]["file_ids"] == [41]
+        assert observed_states[0]["action_request"]["idempotency_key"] == "notify-41"
         assert events[-1] == {"type": "done", "status": "complete"}
         assert get_current_tenant_llm_selection() is None
 
@@ -297,4 +307,21 @@ class TestTenantModelsRoute:
         result = await management.list_models()
 
         # Assert
+        assert result == {"models": [], "default": {}}
+
+    async def test_single_tenant_models_use_admin_catalog_only(self, monkeypatch) -> None:
+        """单租户模型列表也只能来自管理后台目录。"""
+        import src.api.auth as auth
+        import src.api.routes.management as management
+        import src.llm.tenant_config as tenant_config
+
+        monkeypatch.setattr(auth, "get_current_tenant_id", lambda: 1)
+        monkeypatch.setattr(
+            tenant_config,
+            "list_tenant_model_options",
+            AsyncMock(return_value={"models": [], "default": {}}),
+        )
+
+        result = await management.list_models()
+
         assert result == {"models": [], "default": {}}

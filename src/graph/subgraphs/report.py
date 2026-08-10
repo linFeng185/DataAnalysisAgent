@@ -2,11 +2,10 @@
 
 from __future__ import annotations
 
-from decimal import Decimal
-
 from langgraph.graph import END, StateGraph
 
 from src.graph.context import read_contexts
+from src.graph.skill_activation import resolve_active_skill_tools
 from src.graph.state import AnalysisState
 from src.logging_config import get_logger
 
@@ -20,7 +19,12 @@ async def report_node(state: AnalysisState) -> dict:
     if analysis.get("rendered_report"):
         logger.info("报告子图复用分析后 Skill 输出")
         return {"analysis_result": analysis}
-    tools = [tool for tool in (state.get("skill_tools", []) or []) if getattr(tool, "name", "") == "render_report"]
+    # 工具对象不写入 checkpoint，在消费边界按激活资源即时恢复。
+    tools = [
+        tool
+        for tool in resolve_active_skill_tools(state)
+        if getattr(tool, "name", "") == "render_report"
+    ]
     if not tools:
         from src.skill_manager import get_skill_manager
 
@@ -49,11 +53,9 @@ async def report_node(state: AnalysisState) -> dict:
             }
         }
     rows = list(state.get("query_result_sample", []) or [])
-    metrics = {
-        key: value
-        for key, value in (rows[0] if rows else {}).items()
-        if not isinstance(value, bool) and isinstance(value, (int, float, Decimal))
-    }
+    from src.graph.reporting import build_report_metrics
+
+    metrics = build_report_metrics(rows)
     template = "monthly_report" if "月报" in contexts.request.user_query else "weekly_report"
     report = await tools[0].ainvoke({
         "template": template,

@@ -1,0 +1,27 @@
+version: 1
+feature_id: 9.8.5
+cases:
+  - id: reproducibility_accepts_identical_runs
+    description: 完整上下文和输出指纹一致的重复执行应可复现
+    input:
+      runs:
+        - {run_id: r1, input_fingerprint: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa, code_version: abc123, dependencies: {python: 3.14.6}, config_fingerprint: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb, environment: {os: windows}, random_seed: 7, output_fingerprint: cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc}
+        - {run_id: r2, input_fingerprint: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa, code_version: abc123, dependencies: {python: 3.14.6}, config_fingerprint: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb, environment: {os: windows}, random_seed: 7, output_fingerprint: cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc}
+    assertions:
+      - reproducible 等于 true
+      - summary.comparable_runs 等于 2
+  - id: reproducibility_detects_output_drift
+    description: 相同上下文下输出指纹不同必须失败
+    input:
+      runs:
+        - {run_id: r1, input_fingerprint: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa, code_version: v1, dependencies: {runtime: 1.0}, config_fingerprint: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb, environment: {os: linux}, random_seed: null, output_fingerprint: cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc}
+        - {run_id: r2, input_fingerprint: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa, code_version: v1, dependencies: {runtime: 1.0}, config_fingerprint: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb, environment: {os: linux}, random_seed: null, output_fingerprint: dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd}
+    assertions:
+      - reproducible 等于 false
+      - findings 包含代码 OUTPUT_DRIFT
+  - id: reproducibility_rejects_bad_fingerprint
+    description: 不完整输入指纹必须拒绝
+    input:
+      runs:
+        - {run_id: r1, input_fingerprint: bad, code_version: v1, dependencies: {runtime: 1.0}, config_fingerprint: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb, environment: {os: linux}, random_seed: 1, output_fingerprint: cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc}
+    expected_error: input_fingerprint

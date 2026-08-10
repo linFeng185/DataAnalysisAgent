@@ -1,0 +1,41 @@
+version: 1
+feature_id: 9.2
+cases:
+  - id: quality_counts_missing_values
+    description: 字段缺失和显式空值都应计入空值率
+    tool: check_null_rate
+    input:
+      rows: [{id: 1, amount: 10}, {id: 2, amount: null}, {id: 3}]
+      column: amount
+    assertions:
+      - total 等于 3
+      - null_count 等于 2
+      - null_rate 约等于 0.6667
+  - id: quality_counts_duplicate_values
+    description: 重复值检查应忽略空值并返回稳定计数
+    tool: check_duplicates
+    input:
+      rows: [{code: A}, {code: A}, {code: B}, {code: null}]
+      column: code
+    assertions:
+      - unique 等于 2
+      - duplicated 等于 1
+      - duplicates 中 A 等于 2
+  - id: quality_detects_numeric_outlier
+    description: 足量数值样本中超过阈值的记录应返回原始行索引
+    tool: detect_outliers
+    input:
+      rows: [{value: 10}, {value: 10}, {value: 10}, {value: 10}, {value: 10}, {value: 10}, {value: 10}, {value: 100}]
+      column: value
+      threshold: 2
+    assertions:
+      - outlier_count 等于 1
+      - outlier_indices 包含 7
+  - id: quality_rejects_small_outlier_sample
+    description: 少于八行时不应输出不可靠的异常值结论
+    tool: detect_outliers
+    input:
+      rows: [{value: 1}, {value: 2}]
+      column: value
+    assertions:
+      - error 等于至少需要 8 行数据

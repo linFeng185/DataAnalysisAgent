@@ -13,6 +13,7 @@ from src.automation.models import ScheduleDefinition
 from src.automation.runner import get_scheduled_analysis_runner
 from src.automation.store import get_automation_store
 from src.datasource.registry import get_registry
+from src.exceptions import DataSourceNotFoundError
 from src.logging_config import get_logger
 
 logger = get_logger(__name__)
@@ -59,13 +60,18 @@ async def _validate_schedule_request(
     registry = get_registry()
     try:
         datasource = await registry.resolve(request.datasource)
+    except DataSourceNotFoundError as exc:
+        logger.warning("自动化任务数据源不存在", datasource=request.datasource)
+        raise HTTPException(404, f"数据源 '{request.datasource}' 不可用") from exc
     except Exception as exc:
-        logger.warning(
-            "自动化任务数据源解析失败",
+        logger.error(
+            "自动化任务数据源 Registry 故障",
             datasource=request.datasource,
             error_type=type(exc).__name__,
+            error=str(exc),
+            exc_info=True,
         )
-        raise HTTPException(404, f"数据源 '{request.datasource}' 不可用") from exc
+        raise HTTPException(503, "数据源服务暂时不可用") from exc
 
     policy = get_tenant_policy()
     if policy.datasource_isolation_enabled:

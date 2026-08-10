@@ -3,7 +3,7 @@ import { BrowserRouter, Routes, Route, NavLink, Navigate, useLocation } from 're
 import { Layout, Menu, ConfigProvider, Tag, Typography, theme, Grid, Button, Drawer } from 'antd';
 import {
   MessageOutlined, DatabaseOutlined, HistoryOutlined, SettingOutlined,
-  CheckCircleOutlined, CloseCircleOutlined, LoadingOutlined,
+  CheckCircleOutlined, LoadingOutlined,
   ThunderboltOutlined, ReadOutlined, ApiOutlined,
   SafetyCertificateOutlined, LogoutOutlined, UserOutlined,
   MenuOutlined, ScheduleOutlined,
@@ -56,6 +56,7 @@ function AppContent() {
   const [collapsed, setCollapsed] = useState(false);
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const [health, setHealth] = useState<HealthResponse | null>(null);
+  const [healthChecked, setHealthChecked] = useState(false);
   const location = useLocation();
   const screens = Grid.useBreakpoint();
   const isCompact = screens.md === false;
@@ -64,7 +65,8 @@ function AppContent() {
   useEffect(() => {
     get<HealthResponse>('/health')
       .then(h => setHealth(h))
-      .catch(() => setHealth(null));
+      .catch(() => setHealth(null))
+      .finally(() => setHealthChecked(true));
   }, []);
 
   const menuKey = location.pathname === '/' ? 'chat' : location.pathname.replace('/', '') || 'chat';
@@ -129,12 +131,10 @@ function AppContent() {
         <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
           {health ? (
             <span className="mobile-health" style={{ display: 'contents' }}>
-              <Tag icon={health.llm_available ? <CheckCircleOutlined /> : <CloseCircleOutlined />}
-                color={health.llm_available ? 'green' : 'red'}>
-                LLM {health.llm_available ? '可用' : '不可用'}
-              </Tag>
-              <Tag color="blue">{health.datasources ?? '-'} 个数据源</Tag>
+              <Tag icon={<CheckCircleOutlined />} color="green">服务正常</Tag>
             </span>
+          ) : healthChecked ? (
+            <Tag className="mobile-health" color="red">服务不可用</Tag>
           ) : (
             <Tag className="mobile-health" icon={<LoadingOutlined />} color="default">检查连接中</Tag>
           )}

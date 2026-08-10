@@ -18,6 +18,30 @@ _SAFE_SKILL_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 
 
+class _TrustedRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """在 urllib 发出下一跳请求前校验重定向目标。"""
+
+    # 方法作用：保存每次重定向必须满足的主机白名单。
+    # Args: self - Handler；trusted_hosts - Registry 允许访问的主机。
+    # Returns: 无返回值。
+    def __init__(self, trusted_hosts: set[str]) -> None:
+        super().__init__()
+        self._trusted_hosts = trusted_hosts
+
+    # 方法作用：在 urllib 创建重定向请求前阻断跨白名单目标。
+    # Args: self - Handler；req - 原请求；fp/code/msg/headers - 原响应信息；newurl - 下一跳 URL。
+    # Returns: 校验通过后的下一跳 Request。
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        target = urljoin(req.full_url, newurl)
+        SkillRegistryClient._validate_url(target, self._trusted_hosts)
+        logger.info(
+            "Skill Registry 重定向校验完成",
+            status_code=code,
+            target_host=urlparse(target).hostname,
+        )
+        return super().redirect_request(req, fp, code, msg, headers, target)
+
+
 @dataclass(frozen=True)
 class RegistrySkillPackage:
     """Registry 中一个已审核 Skill 版本的不可变元数据。"""
@@ -153,7 +177,8 @@ class SkillRegistryClient:
     @staticmethod
     def _fetch_sync(url: str, max_bytes: int, trusted_hosts: set[str]) -> bytes:
         request = urllib.request.Request(url, headers={"Accept": "application/json, application/zip"})
-        with urllib.request.urlopen(request, timeout=15) as response:  # noqa: S310
+        opener = urllib.request.build_opener(_TrustedRedirectHandler(trusted_hosts))
+        with opener.open(request, timeout=15) as response:  # noqa: S310
             SkillRegistryClient._validate_url(response.geturl(), trusted_hosts)
             content_length = int(response.headers.get("Content-Length", 0) or 0)
             if content_length > max_bytes:

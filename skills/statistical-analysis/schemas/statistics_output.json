@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "统计分析输出",
+  "type": "object",
+  "required": ["row_count", "numeric_columns", "analyses", "skipped", "limitations"],
+  "properties": {
+    "row_count": {"type": "integer", "minimum": 0},
+    "numeric_columns": {"type": "array", "items": {"type": "string"}},
+    "analyses": {"type": "object"},
+    "skipped": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["mode", "reason"],
+        "properties": {"mode": {"type": "string"}, "reason": {"type": "string"}},
+        "additionalProperties": false
+      }
+    },
+    "limitations": {"type": "array", "minItems": 1, "items": {"type": "string"}}
+  },
+  "additionalProperties": false
+}

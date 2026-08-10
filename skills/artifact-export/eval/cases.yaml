@@ -1,0 +1,27 @@
+version: 1
+feature_id: 9.6.8
+cases:
+  - id: export_stable_json
+    description: 相同对象应生成稳定 JSON 和校验值
+    input:
+      artifact: {b: 2, a: 1}
+      format: json
+    assertions:
+      - content 中 a 位于 b 之前
+      - sha256 长度等于 64
+      - written_to_filesystem 等于 false
+  - id: export_csv_formula_injection
+    description: CSV 公式前缀必须被中和
+    input:
+      artifact: [{name: "=CMD()", value: 1}]
+      format: csv
+    assertions:
+      - sanitized_formula_cells 等于 1
+      - content 不以未转义公式写入单元格
+  - id: export_csv_invalid_shape
+    description: 非对象数组不得导出为 CSV
+    input:
+      artifact: {value: 1}
+      format: csv
+    assertions:
+      - 返回行式结构错误

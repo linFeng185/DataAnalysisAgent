@@ -1,0 +1,12 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "隐私分类输入",
+  "type": "object",
+  "required": ["rows"],
+  "properties": {
+    "rows": {"type": "array", "maxItems": 10000, "items": {"type": "object"}},
+    "columns": {"type": ["array", "null"], "items": {"type": "string", "minLength": 1}, "default": null},
+    "max_sample_hashes": {"type": "integer", "minimum": 0, "maximum": 10, "default": 3}
+  },
+  "additionalProperties": false
+}

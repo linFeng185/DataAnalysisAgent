@@ -259,7 +259,7 @@ class LongTermMemoryStore:
                 if preference:
                     result[str(preference)] = memory.payload.get("value")
             if expired_ids:
-                await self._delete_ids(expired_ids)
+                await self._delete_ids(expired_ids, identity=identity)
             logger.info("向量用户偏好查询完成", count=len(result), user_id=identity.user_id)
             return result
         except Exception as exc:
@@ -308,7 +308,7 @@ class LongTermMemoryStore:
                         entry.tenant_id,
                         entry.owner_user_id,
                         entry.content,
-                        entry.payload,
+                        json.dumps(entry.payload, ensure_ascii=False, default=str),
                         entry.created_at,
                         entry.last_accessed_at,
                         entry.access_count,

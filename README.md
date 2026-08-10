@@ -72,9 +72,7 @@ DATABASE_URL=postgresql+asyncpg://postgres:postgres@localhost:5432/data_agent
 SUPER_ADMIN_USERNAME=admin
 SUPER_ADMIN_PASSWORD=replace-with-a-strong-password
 JWT_SECRET=replace-with-at-least-32-random-characters
-OPENAI_API_KEY=sk-your-deepseek-api-key
-OPENAI_BASE_URL=https://api.deepseek.com
-LLM_MODEL=deepseek-v4-pro
+# LLM 模型、服务地址和凭证请在管理后台配置
 ```
 
 首次启动会运行迁移并创建唯一的 `users.id=1` 超级管理员。后续启动不会使用配置密码覆盖已有账号。
@@ -189,13 +187,10 @@ docker compose down
 
 | 变量 | 说明 | 默认值 |
 |------|------|--------|
-| `LLM_PROVIDER` | 供应商（openai/anthropic） | openai |
-| `LLM_MODEL` | 模型名称 | deepseek-v4-pro |
-| `OPENAI_API_KEY` | API Key | — |
-| `OPENAI_BASE_URL` | API 地址 | https://api.deepseek.com |
 | `LLM_TEMPERATURE` | 生成温度 | 0.0 |
 | `LLM_MAX_TOKENS` | 最大 Token 数 | 4096 |
 | `LLM_TIMEOUT` | 超时（秒） | 60 |
+| `LLM_STREAM_CHUNK_TIMEOUT` | 流式首块超时（秒），触发非流式回退 | 30 |
 | `CHEAP_LLM_MODEL` | 摘要/低成本任务模型 | deepseek-v4-pro |
 
 ### 嵌入模型

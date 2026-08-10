@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "数据画像输出",
+  "type": "object",
+  "required": ["row_count", "column_count", "duplicate_row_count", "columns", "candidate_primary_keys", "time_columns", "warnings", "fingerprint"],
+  "properties": {
+    "row_count": {"type": "integer", "minimum": 0},
+    "column_count": {"type": "integer", "minimum": 0},
+    "duplicate_row_count": {"type": "integer", "minimum": 0},
+    "columns": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["name", "observed_types", "null_count", "null_rate", "unique_count", "sample_values", "numeric", "datetime", "candidate_key"],
+        "properties": {
+          "name": {"type": "string", "minLength": 1},
+          "observed_types": {"type": "array", "items": {"type": "string"}},
+          "null_count": {"type": "integer", "minimum": 0},
+          "null_rate": {"type": "number", "minimum": 0, "maximum": 1},
+          "unique_count": {"type": "integer", "minimum": 0},
+          "sample_values": {"type": "array"},
+          "numeric": {"type": "boolean"},
+          "datetime": {"type": "boolean"},
+          "candidate_key": {"type": "boolean"}
+        },
+        "additionalProperties": false
+      }
+    },
+    "candidate_primary_keys": {"type": "array", "items": {"type": "string"}},
+    "time_columns": {"type": "array", "items": {"type": "string"}},
+    "warnings": {"type": "array", "items": {"type": "string"}},
+    "fingerprint": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+  },
+  "additionalProperties": false
+}

@@ -39,6 +39,72 @@ class TestOutcomeContract:
         assert known == "查询执行失败，请检查数据源、权限或查询条件"
         assert unknown == "处理失败"
 
+    # 方法作用：验证 LLM 未配置错误明确引导租户配置模型。
+    # Args: self - pytest 测试类实例。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    def test_llm_unavailable_has_model_configuration_message(self) -> None:
+        """模型未配置时必须返回模型配置提示，而不是伪装成数据库执行失败。"""
+        # Arrange
+        from src.graph.outcome import public_error_message
+
+        # Act
+        message = public_error_message("LLM_UNAVAILABLE")
+
+        # Assert
+        assert "管理后台" in message
+        assert "数据源" not in message
+
+    # 方法作用：验证统一响应出口保留外部动作的人工确认状态。
+    # Args: self - pytest 测试类实例。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    async def test_build_response_preserves_action_confirmation(self, monkeypatch) -> None:
+        """success=false 代表尚未执行，不能把 needs_confirmation 覆盖为 failed。"""
+        # Arrange
+        from types import SimpleNamespace
+        from unittest.mock import AsyncMock
+
+        import src.memory.history_store as history_store_module
+        from src.graph.nodes.build_response import build_response_node
+
+        monkeypatch.setattr(
+            history_store_module,
+            "get_history_store",
+            lambda: SimpleNamespace(add=AsyncMock()),
+        )
+
+        action_request = {
+            "action_name": "notify",
+            "payload": {"text": "库存不足"},
+            "idempotency_key": "notify-1",
+            "confirmed": False,
+        }
+        state = {
+            "user_query": "发送库存通知",
+            "final_response": {
+                "success": False,
+                "status": "needs_confirmation",
+                "source": "external_action",
+                "user_query": "发送库存通知",
+                "sql": "",
+                "data": {
+                    "action_status": "confirmation_required",
+                    "result": None,
+                    "action_request": action_request,
+                },
+                "analysis": {"summary": "需要人工确认"},
+                "chart": {"type": "table", "option": {}},
+            },
+            "conversation_history": [],
+        }
+
+        # Act
+        result = await build_response_node(state)
+
+        # Assert
+        final = result["final_response"]
+        assert final["status"] == "needs_confirmation"
+        assert final["data"]["action_request"] == action_request
+
     # 方法作用：验证旧响应中的显式失败优先于矛盾的 success 状态文本。
     # Args: self - pytest 测试类实例。
     # Returns: 无返回值，断言失败时由 pytest 报告。

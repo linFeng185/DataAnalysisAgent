@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "SQL 诊断输出",
+  "type": "object",
+  "required": ["valid", "dialect", "errors", "warnings", "rewritten_sql", "tables", "columns", "complexity", "risk_flags", "executed"],
+  "properties": {
+    "valid": {"type": "boolean"},
+    "dialect": {"type": "string"},
+    "errors": {"type": "array"},
+    "warnings": {"type": "array"},
+    "rewritten_sql": {"type": "string"},
+    "tables": {"type": "array", "items": {"type": "string"}},
+    "columns": {"type": "array", "items": {"type": "string"}},
+    "complexity": {
+      "type": "object",
+      "required": ["joins", "subqueries", "unions", "windows", "ctes", "wildcards"],
+      "properties": {
+        "joins": {"type": "integer", "minimum": 0},
+        "subqueries": {"type": "integer", "minimum": 0},
+        "unions": {"type": "integer", "minimum": 0},
+        "windows": {"type": "integer", "minimum": 0},
+        "ctes": {"type": "integer", "minimum": 0},
+        "wildcards": {"type": "integer", "minimum": 0}
+      },
+      "additionalProperties": false
+    },
+    "risk_flags": {"type": "array", "items": {"type": "object"}},
+    "executed": {"type": "boolean", "const": false}
+  },
+  "additionalProperties": false
+}

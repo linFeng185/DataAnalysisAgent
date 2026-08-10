@@ -10,10 +10,10 @@
 | 10.1.2 | ChatAnthropic 工厂 | 同上 | get_anthropic_llm() — ChatAnthropic 实例 | 单测完成 | P0 |
 | 10.1.3 | LLM 路由器 | 同上 | get_llm() — provider 自动路由 | 单测完成 | P0 |
 | 10.1.4 | cheap_llm 工厂 | 同上 | get_cheap_llm() 使用配置的 Provider 与 cheap_llm_model，不硬编码 OpenAI | 单测完成 | P0 |
-| 10.1.5 | is_llm_available() | 同上 | API Key 可用性检测 | 单测完成 | P0 |
-| 10.1.6 | 节点级模型路由 `[P1]` | 同上 | resolve_llm_task_target() 在 local/remote/none 间确定性选择 | 单测完成 |
+| 10.1.5 | is_llm_available() | 同上 | 检查当前租户或本地模型可用性，不读取全局 API Key | 单测完成 | P0 |
+| 10.1.6 | 节点级模型路由 `[P1]` | 同上 | resolve_llm_task_target() 在 local/none 间确定性选择，租户模型由请求上下文直接路由 | 单测完成 |
 | 10.1.7 | 本地模型优先 `[P1]` | 同上 + `src/config.py` | 轻量节点默认 LOCAL_LLM_*，未配置时规则回退，不隐式等待远程 | 单测完成 |
-| 10.1.8 | 远程任务授权 `[P1]` | 同上 | LLM_REMOTE_TASKS 默认仅 generate_sql，SQL 强制 reasoning=False | 单测完成 |
+| 10.1.8 | 远程任务授权 `[P1]` | 同上 | LLM_REMOTE_TASKS 默认仅 generate_sql，凭证来自租户连接，SQL 强制 reasoning=False | 单测完成 |
 | 10.1.9 | 平台厂商与模型目录 | `src/api/routes/llm_admin.py`、`migrations/013_tenant_identity_llm.sql` | super_admin 动态维护厂商协议和模型能力目录，不保存平台 API Key | 单测完成 | P0 |
 | 10.1.10 | 租户 LLM 命名连接 | `src/llm/tenant_config.py`、`src/api/routes/llm_admin.py` | 同厂商/跨厂商多连接，地址独立且 API Key 加密持久化 | 单测完成 | P0 |
 | 10.1.11 | 租户默认与对话选择 | `src/llm/tenant_config.py`、Chat API | tenant 默认连接/模型，对话可从当前租户启用模型中覆盖 | 单测完成 | P0 |

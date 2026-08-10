@@ -1,5 +1,55 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "数据质量检查输出",
   "type": "object",
-  "additionalProperties": true
+  "oneOf": [
+    {
+      "required": ["column", "total", "null_count", "null_rate"],
+      "properties": {
+        "column": {"type": "string", "minLength": 1},
+        "total": {"type": "integer", "minimum": 1},
+        "null_count": {"type": "integer", "minimum": 0},
+        "null_rate": {"type": "number", "minimum": 0, "maximum": 1}
+      },
+      "additionalProperties": false
+    },
+    {
+      "required": ["column", "total", "unique", "duplicated", "duplicates"],
+      "properties": {
+        "column": {"type": "string", "minLength": 1},
+        "total": {"type": "integer", "minimum": 1},
+        "unique": {"type": "integer", "minimum": 0},
+        "duplicated": {"type": "integer", "minimum": 0},
+        "duplicates": {
+          "type": "object",
+          "additionalProperties": {"type": "integer", "minimum": 2}
+        }
+      },
+      "additionalProperties": false
+    },
+    {
+      "required": ["column", "total", "outlier_count", "outlier_indices", "mean", "std"],
+      "properties": {
+        "column": {"type": "string", "minLength": 1},
+        "total": {"type": "integer", "minimum": 8},
+        "outlier_count": {"type": "integer", "minimum": 0},
+        "outlier_indices": {
+          "type": "array",
+          "items": {"type": "integer", "minimum": 0},
+          "uniqueItems": true
+        },
+        "mean": {"type": "number"},
+        "std": {"type": "number", "minimum": 0},
+        "message": {"type": "string", "minLength": 1}
+      },
+      "additionalProperties": false
+    },
+    {
+      "required": ["error"],
+      "properties": {
+        "error": {"type": "string", "minLength": 1}
+      },
+      "additionalProperties": false
+    }
+  ]
 }

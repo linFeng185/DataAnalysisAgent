@@ -6,7 +6,9 @@
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import os
+import socket
 from contextlib import AsyncExitStack
 from pathlib import Path
 from typing import Any
@@ -19,6 +21,35 @@ from src.logging_config import get_logger
 logger = get_logger(__name__)
 
 _MAX_RECONNECT_RETRIES = 5
+
+
+# 方法作用：解析远程主机并确认所有候选地址均为公网地址。
+# Args: host - 待解析主机名或 IP；port - 远程服务端口。
+# Returns: 至少解析到一个地址且全部为公网地址时返回 True。
+def _host_resolves_to_public_addresses(host: str, port: int) -> bool:
+    try:
+        addresses = [ipaddress.ip_address(host.split("%", maxsplit=1)[0])]
+    except ValueError:
+        try:
+            resolved = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+            addresses = [
+                ipaddress.ip_address(str(item[4][0]).split("%", maxsplit=1)[0])
+                for item in resolved
+            ]
+        except (OSError, ValueError) as exc:
+            logger.warning("受管 MCP 主机解析失败", host=host, error=str(exc))
+            return False
+    if not addresses:
+        logger.warning("受管 MCP 主机未解析到地址", host=host)
+        return False
+    allowed = all(address.is_global for address in addresses)
+    if not allowed:
+        logger.warning(
+            "受管 MCP 私网地址已阻断",
+            host=host,
+            address_count=len(addresses),
+        )
+    return allowed
 
 
 # 方法作用：验证数据库受管 MCP 配置只能连接 allowlist 中的远程 SSE 主机。
@@ -54,6 +85,10 @@ def _is_managed_remote_config_allowed(config: Any) -> bool:
         and not parsed.username
         and not parsed.password
         and host in allowlist
+        and _host_resolves_to_public_addresses(
+            host,
+            parsed.port or (443 if parsed.scheme == "https" else 80),
+        )
     )
     if not allowed:
         logger.warning("受管 MCP 数据库配置跳过", transport=transport, host=host)

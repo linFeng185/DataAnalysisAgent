@@ -5,14 +5,16 @@ from __future__ import annotations
 from copy import deepcopy
 from typing import Any, Literal
 
-TaskStatus = Literal["success", "failed", "needs_input", "partial"]
+TaskStatus = Literal["success", "failed", "needs_input", "needs_confirmation", "partial"]
 
 
 _ERROR_MESSAGES = {
     "VALIDATION_FAILED": "查询未通过安全校验",
     "EXPLAIN_FAILED": "查询未通过执行计划校验",
+    "LLM_UNAVAILABLE": "当前租户未配置可用的 LLM，请先在管理后台配置并启用模型",
     "SQL_EXECUTION_FAILED": "查询执行失败，请检查数据源、权限或查询条件",
     "MCP_AGENT_FAILED": "工具分析失败，请检查输入和已授权工具",
+    "MARKET_RESEARCH_EVIDENCE_MISSING": "市场研究未获得可追溯证据，无法生成可靠结论",
     "MULTI_SOURCE_FAILED": "所有数据源查询均失败，请检查数据源状态和访问权限",
     "MULTI_SOURCE_PARTIAL": "部分数据源查询失败，当前结果仅包含成功的数据源",
     "STREAM_FAILED": "流式处理失败，请稍后重试",
@@ -29,12 +31,14 @@ def public_error_message(error_code: str, *, fallback: str = "处理失败") -> 
 
 # 方法作用：从新旧响应字段中解析统一任务状态。
 # Args: response - 最终响应或历史恢复响应。
-# Returns: success、failed、needs_input 或 partial 状态。
+# Returns: success、failed、needs_input、needs_confirmation 或 partial 状态。
 def status_from_response(response: dict[str, Any]) -> TaskStatus:
     """从统一响应读取状态，并兼容旧响应中的 success 字段。"""
     status = str(response.get("status", "") or "").strip()
     if status == "needs_input" or response.get("needs_time_range"):
         return "needs_input"
+    if status == "needs_confirmation":
+        return "needs_confirmation"
     # 旧数据可能同时存在互相矛盾的 status/success；显式失败必须优先，避免历史伪成功。
     if "success" in response and not bool(response.get("success")):
         return "failed"
@@ -76,6 +80,8 @@ def build_decision_summary(
         parts.append("已完成当前任务处理")
     if status == "needs_input":
         parts.append("等待补充必要参数")
+    elif status == "needs_confirmation":
+        parts.append("等待人工确认")
     elif status == "failed":
         parts.append("处理未完成")
     elif status == "partial":
@@ -83,10 +89,9 @@ def build_decision_summary(
     row_count = response.get("row_count", state.get("query_result_full_count", 0))
     if isinstance(row_count, int) and row_count > 0:
         parts.append(f"返回{row_count}行结果")
-    retry_count = max(
-        int(state.get("retry_count", 0) or 0),
-        int(state.get("execution_retry_count", 0) or 0),
-    )
+    generation_retries = max(int(state.get("retry_count", 0) or 0) - 1, 0)
+    execution_retries = int(state.get("execution_retry_count", 0) or 0)
+    retry_count = max(generation_retries, execution_retries)
     if retry_count > 0:
         parts.append(f"已自动重试{min(retry_count, 9)}次")
     skills = state.get("activated_skills") or response.get("activated_skills") or []

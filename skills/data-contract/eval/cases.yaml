@@ -1,0 +1,35 @@
+version: 1
+feature_id: 9.7.1
+cases:
+  - id: contract_accepts_valid_rows
+    description: 完整数据满足类型、唯一性和范围约束时应通过
+    input:
+      rows: [{id: 1, status: active, amount: 10}, {id: 2, status: inactive, amount: 20}]
+      contract:
+        columns:
+          - {name: id, type: integer, required: true, nullable: false, unique: true}
+          - {name: status, type: string, enum_values: [active, inactive]}
+          - {name: amount, type: number, minimum: 0}
+        primary_key: [id]
+    assertions:
+      - valid 等于 true
+      - total_violations 等于 0
+  - id: contract_limits_violation_details
+    description: 多条违规超过明细上限时应保留总数并标记截断
+    input:
+      rows: [{id: null}, {id: null}]
+      contract:
+        columns: [{name: id, type: integer, required: true, nullable: false}]
+        primary_key: [id]
+      max_violations: 1
+    assertions:
+      - valid 等于 false
+      - violations_truncated 等于 true
+      - violations 长度等于 1
+  - id: contract_rejects_unknown_type
+    description: 契约声明不受支持的字段类型时必须拒绝
+    input:
+      rows: []
+      contract:
+        columns: [{name: id, type: mystery}]
+    expected_error: 不支持的契约类型

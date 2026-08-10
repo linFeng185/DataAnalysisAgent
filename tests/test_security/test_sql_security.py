@@ -201,6 +201,39 @@ class TestPermissionFailureClosed:
         with pytest.raises(SQLSecurityError, match="行过滤"):
             inject_row_filter("SELECT * FROM orders", "tenant_id = 'unterminated")
 
+    # 方法作用：验证 UNION 的每个物理表读取分支都会注入行过滤。
+    # Args: self - pytest 测试类实例。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    def test_row_filter_is_injected_into_every_union_branch(self) -> None:
+        """攻击者不能把未过滤查询放进 UNION 第一分支绕过租户隔离。"""
+        # Arrange
+        from src.security.permission_check import inject_row_filter
+
+        sql = "SELECT id FROM orders UNION ALL SELECT id FROM archived_orders"
+
+        # Act
+        filtered = inject_row_filter(sql, "tenant_id = 9")
+
+        # Assert
+        assert filtered.upper().count("TENANT_ID = 9") == 2
+
+    # 方法作用：验证限定表名的列白名单不会错误放行同名敏感列。
+    # Args: self - pytest 测试类实例。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    def test_qualified_column_whitelist_distinguishes_same_named_columns(self) -> None:
+        """只允许 public.id 时，secret.id 必须被识别为越权列。"""
+        # Arrange
+        from src.security.permission_check import check_column_whitelist
+
+        # Act
+        allowed_error = check_column_whitelist("SELECT public.id FROM public", ["public.id"])
+        denied_error = check_column_whitelist("SELECT secret.id FROM secret", ["public.id"])
+
+        # Assert
+        assert allowed_error is None
+        assert denied_error is not None
+        assert "secret.id" in denied_error
+
 
 class TestAuditSanitization:
     """覆盖查询审计不记录明文 SQL。"""

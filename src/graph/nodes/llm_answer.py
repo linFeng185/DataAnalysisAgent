@@ -46,6 +46,44 @@ async def llm_direct_answer_node(state: AnalysisState) -> dict:
         history_turns=len(state.get("conversation_history", []) or []),
     )
 
+    if contexts.routing.task_plan.get("operation") == "indicator_catalog":
+        from src.graph.indicator_catalog import (
+            build_indicator_catalog_plan,
+            build_indicator_catalog_summary,
+        )
+
+        catalog_plan = build_indicator_catalog_plan(state.get("relevant_tables", []) or [])
+        answer = build_indicator_catalog_summary(catalog_plan)
+        status = "needs_input" if catalog_plan.needs_input else "success"
+        logger.info(
+            "指标目录直接回答完成",
+            mode=catalog_plan.mode,
+            status=status,
+            table_count=len(catalog_plan.tables),
+        )
+        return {
+            "final_response": {
+                "success": status == "success",
+                "status": status,
+                "source": "indicator_catalog",
+                "needs_input": catalog_plan.needs_input,
+                "needs_time_range": False,
+                "user_query": query,
+                "sql": "",
+                "data": [],
+                "analysis": {
+                    "summary": answer,
+                    "insights": [],
+                    "recommended_chart_type": "table",
+                },
+                "chart": {"type": "table", "option": {}},
+                "activated_skills": state.get("activated_skills", []),
+                "activated_knowledge": "",
+            },
+            "analysis_result": {"summary": answer, "insights": []},
+            "chart_config": {"type": "table", "option": {}},
+        }
+
     # 对话历史先转为紧凑文本，再交由统一预算器分配。
     history = state.get("conversation_history", []) or []
     history_text = ""

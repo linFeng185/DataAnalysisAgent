@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "抽样审计输入",
+  "type": "object",
+  "required": ["rows", "sample_size"],
+  "properties": {
+    "rows": {"type": "array", "maxItems": 10000, "items": {"type": "object"}},
+    "sample_size": {"type": "integer", "minimum": 1, "maximum": 10000},
+    "method": {"type": "string", "enum": ["random", "systematic", "stratified", "time_window"], "default": "random"},
+    "seed": {"type": "integer", "default": 0},
+    "strata_column": {"type": ["string", "null"], "default": null},
+    "time_column": {"type": ["string", "null"], "default": null},
+    "start_time": {"type": ["string", "null"], "default": null},
+    "end_time": {"type": ["string", "null"], "default": null}
+  },
+  "additionalProperties": false
+}

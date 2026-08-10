@@ -88,6 +88,35 @@ class TestDatasourcePersistence:
         assert datasource.password == "v2:salt:ciphertext"
         logger.info("test_load_persisted_restores_datasource 完成")
 
+    # 方法作用：验证 asyncpg 默认返回 JSON 字符串时仍能恢复方言参数。
+    # Args: self - pytest 测试类实例；monkeypatch - PG 池补丁。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    async def test_load_persisted_parses_json_string_extra_params(self, monkeypatch) -> None:
+        """PostgreSQL JSONB 未注册 codec 时返回字符串，启动恢复不能因此中断。"""
+        # Arrange
+        import src.memory.pg_pool as pg_pool
+        from src.datasource.providers.external import ExternalDataSourceProvider
+
+        pool, connection = _fake_pool()
+        connection.fetch.return_value = [{
+            "name": "managed-json", "tenant_id": 2, "owner_user_id": 9,
+            "dialect": "clickhouse", "version": "24", "host": "db.internal",
+            "port": 9000, "database_name": "analytics", "username": "reader",
+            "encrypted_password": "v2:salt:ciphertext", "description": "分析库",
+            "extra_params": '{"connect_timeout": 5, "secure": true}',
+        }]
+        monkeypatch.setattr(pg_pool, "get_pg_pool", AsyncMock(return_value=pool))
+        provider = ExternalDataSourceProvider()
+
+        # Act
+        count = await provider.load_persisted()
+        datasource = await provider.lookup("managed-json", tenant_id=2)
+
+        # Assert
+        assert count == 1
+        assert datasource is not None
+        assert datasource.extra_params == {"connect_timeout": 5, "secure": True}
+
     # 方法作用：验证服务重启恢复的数据源可使用稳定应用密钥完成解析。
     # Args: self - pytest 测试类实例；monkeypatch - pytest 补丁工具。
     # Returns: 无返回值，断言失败时由 pytest 报告。

@@ -9,6 +9,9 @@ function redirectToLogin(): void {
   console.info('redirectToLogin 完成');
 }
 
+// 方法作用：发送统一 JSON API 请求并处理认证失效和错误响应。
+// Args: method - HTTP 方法；path - API 相对路径；body - 可选 JSON 请求体。
+// Returns: 解析后的响应对象。
 async function request<T>(method: string, path: string, body?: Record<string, unknown>): Promise<T> {
   const opts: RequestInit = {
     method,
@@ -46,7 +49,10 @@ export function del(path: string): Promise<void> {
 }
 
 // 会话列表 API
-import type { SessionListResponse, SessionDetailResponse, ChatTurnData } from '../types';
+import type {
+  ActionRequestPayload, ChatTurnData, ChatUploadedFile,
+  SessionDetailResponse, SessionListResponse,
+} from '../types';
 
 export async function fetchSessions(cursor?: string | null, limit = 20): Promise<SessionListResponse> {
   const params = new URLSearchParams();
@@ -73,8 +79,28 @@ export async function deleteSession(id: string): Promise<void> {
   return del(`/sessions/${id}`);
 }
 
+// 方法作用：把聊天附件以 multipart/form-data 上传到当前用户私有文件存储。
+// Args: files - 用户当前选择的附件列表。
+// Returns: 后续 ChatRequest.file_ids 使用的文件摘要。
+export async function uploadChatFiles(files: File[]): Promise<ChatUploadedFile[]> {
+  const form = new FormData();
+  files.forEach(file => form.append('files', file));
+  const response = await fetch(`${BASE}/chat/files`, {
+    method: 'POST',
+    credentials: 'include',
+    body: form,
+  });
+  if (response.status === 401) redirectToLogin();
+  if (!response.ok) {
+    const payload = await response.json().catch(() => null) as { detail?: string } | null;
+    throw new Error(payload?.detail || `附件上传失败: HTTP ${response.status}`);
+  }
+  const payload = await response.json() as { files?: ChatUploadedFile[] };
+  return payload.files || [];
+}
+
 // 方法作用：发送带租户 LLM 连接和模型选择的 SSE 聊天请求并分发事件。
-// Args: query - 用户问题；datasource - 主数据源；sessionId - 会话；onEvent/onDone/onError - 事件回调；datasources - 多数据源；modelId - 模型标识；llmConnectionId - 命名连接；enabledSkillIds - Skill 资源 ID；reasoningEnabled/reasoningEffort - 推理偏好。
+// Args: query - 用户问题；datasource - 主数据源；sessionId - 会话；onEvent/onDone/onError - 事件回调；datasources - 多数据源；modelId - 模型标识；llmConnectionId - 命名连接；enabledSkillIds - Skill 资源 ID；reasoningEnabled/reasoningEffort - 推理偏好；fileIds - 请求级附件；actionRequest - 结构化动作请求。
 // Returns: 可取消当前请求的 AbortController。
 export function streamChat(
   query: string,
@@ -89,6 +115,8 @@ export function streamChat(
   enabledSkillIds?: string[],
   reasoningEnabled = false,
   reasoningEffort = '',
+  fileIds: number[] = [],
+  actionRequest?: ActionRequestPayload,
 ): AbortController {
   const controller = new AbortController();
   fetch(`${BASE}/chat`, {
@@ -104,6 +132,8 @@ export function streamChat(
       enabled_skill_ids: enabledSkillIds || [],
       reasoning_enabled: reasoningEnabled,
       reasoning_effort: reasoningEffort,
+      file_ids: fileIds,
+      action_request: actionRequest || null,
       stream: true,
       session_id: sessionId,
     }),

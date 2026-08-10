@@ -25,6 +25,19 @@ logger = get_logger(__name__)
 _DIALECT_DEFAULTS = {"clickhouse": 9000, "mysql": 3306, "postgres": 5432}
 
 
+# 方法作用：把 asyncpg 返回的 JSONB 字符串或映射统一还原为方言参数字典。
+# Args: value - 数据库 extra_params 原始值。
+# Returns: 可传给 DataSourceConfig 的字典；非 JSON 对象输入抛出 ValueError。
+def _decode_extra_params(value: object) -> dict:
+    """恢复持久化方言参数，并拒绝不符合对象契约的 JSON。"""
+    if value in (None, ""):
+        return {}
+    decoded = json.loads(value) if isinstance(value, str) else value
+    if not isinstance(decoded, dict):
+        raise ValueError("数据源 extra_params 必须是 JSON 对象")
+    return dict(decoded)
+
+
 class ExternalDataSourceProvider(DataSourceProvider):
     """外挂模式 — 独立部署，一个 Agent 连接多个项目的数据源。
 
@@ -340,6 +353,12 @@ class ExternalDataSourceProvider(DataSourceProvider):
                 )
             logger.info("持久化数据源读取边界", row_count=len(rows))
             for row in rows:
+                logger.info(
+                    "持久化数据源反序列化边界",
+                    datasource=str(row["name"]),
+                    extra_params_type=type(row["extra_params"]).__name__,
+                    extra_params_present=bool(row["extra_params"]),
+                )
                 ds = DataSourceConfig(
                     name=str(row["name"]),
                     mode="external",
@@ -351,7 +370,7 @@ class ExternalDataSourceProvider(DataSourceProvider):
                     username=str(row["username"] or ""),
                     password=str(row["encrypted_password"] or ""),
                     description=str(row["description"] or ""),
-                    extra_params=dict(row["extra_params"] or {}),
+                    extra_params=_decode_extra_params(row["extra_params"]),
                     tenant_id=int(row["tenant_id"]),
                     owner_user_id=int(row["owner_user_id"]),
                 )

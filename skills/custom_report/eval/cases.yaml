@@ -1,0 +1,42 @@
+version: 1
+feature_id: 9.3
+cases:
+  - id: report_renders_weekly_template
+    description: 周报模板应渲染标题、摘要、指标、洞察和建议
+    input:
+      template: weekly_report
+      data:
+        title: 订单周报
+        summary: 订单量保持增长
+        insights: [华东区域增幅最高]
+        metrics: {订单量: 120, 成交额: 35000}
+        recommendations: [复核华东区域库存]
+    assertions:
+      - 输出包含订单周报
+      - 输出包含关键指标
+      - 输出包含复核华东区域库存
+  - id: report_renders_monthly_template
+    description: 月报模板应渲染环比和下月关注事项
+    input:
+      template: monthly_report
+      data:
+        title: 订单月报
+        summary: 月度成交额提升
+        insights: [高价值客户贡献增加]
+        metrics: {成交额: 180000}
+        changes: {成交额: +12%}
+        next_steps: [跟踪重点客户复购]
+    assertions:
+      - 输出包含环比
+      - 输出包含 +12%
+      - 输出包含跟踪重点客户复购
+  - id: report_rejects_unknown_template
+    description: 未登记的模板名称必须在渲染前被拒绝
+    input:
+      template: unknown_report
+      data:
+        title: 非法报告
+        summary: ""
+        insights: []
+        metrics: {}
+    expected_error: 不支持的报告模板

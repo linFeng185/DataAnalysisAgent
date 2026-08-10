@@ -173,6 +173,31 @@ class TestEstimateRowCount:
         c = asyncio.run(estimate_row_count(_ds("clickhouse"), "t", _exec([{"count": 1234567}])))
         assert c == 1_234_567
 
+    # 方法作用：验证 ClickHouse 行数查询替换并安全引用真实表名。
+    # Args: self - pytest 测试类实例。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    def test_clickhouse_count_formats_quoted_table(self) -> None:
+        """执行器不能收到残留 `{table}` 占位符，也不能拼接未校验标识符。"""
+        # Arrange
+        captured: list[str] = []
+
+        # 方法作用：记录 ClickHouse 行数查询 SQL。
+        # Args: datasource - 数据源；sql - SQL；params - 参数。
+        # Returns: 固定行数结果。
+        async def executor(datasource, sql, params):
+            del datasource, params
+            captured.append(sql)
+            return [{"count": 3}]
+
+        # Act
+        count = asyncio.run(estimate_row_count(_ds("clickhouse"), "analytics.orders", executor))
+
+        # Assert
+        assert count == 3
+        assert captured == ["SELECT COUNT(*) AS count FROM `analytics`.`orders`"]
+        with pytest.raises(ValueError):
+            asyncio.run(estimate_row_count(_ds("clickhouse"), "orders; DROP TABLE x", executor))
+
     def test_mysql_table_rows(self):
         """正常路径: MySQL INFORMATION_SCHEMA.TABLES。"""
         c = asyncio.run(estimate_row_count(_ds("mysql"), "t", _exec([{"table_rows": 50000}])))

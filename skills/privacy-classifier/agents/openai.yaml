@@ -1,0 +1,4 @@
+interface:
+  display_name: "隐私分类"
+  short_description: "识别常见敏感字段和值，只输出分类统计和不可逆哈希"
+  default_prompt: "使用 $privacy-classifier 对这些字段和值进行隐私分类。"

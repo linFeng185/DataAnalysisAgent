@@ -1,0 +1,39 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Skill 清单校验输出",
+  "type": "object",
+  "required": ["valid", "score", "errors", "warnings", "checks", "filesystem_accessed"],
+  "properties": {
+    "valid": {"type": "boolean"},
+    "score": {"type": "integer", "minimum": 0, "maximum": 100},
+    "errors": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["code", "message"],
+        "properties": {"code": {"type": "string"}, "message": {"type": "string"}},
+        "additionalProperties": false
+      }
+    },
+    "warnings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["code", "message"],
+        "properties": {"code": {"type": "string"}, "message": {"type": "string"}},
+        "additionalProperties": false
+      }
+    },
+    "checks": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "passed", "message"],
+        "properties": {"id": {"type": "string"}, "passed": {"type": "boolean"}, "message": {"type": "string"}},
+        "additionalProperties": false
+      }
+    },
+    "filesystem_accessed": {"type": "boolean", "const": false}
+  },
+  "additionalProperties": false
+}

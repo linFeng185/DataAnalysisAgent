@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Skill 清单校验输入",
+  "type": "object",
+  "required": ["manifest", "instructions", "schemas"],
+  "properties": {
+    "manifest": {"type": "object"},
+    "instructions": {"type": "string", "minLength": 1, "maxLength": 100000},
+    "schemas": {"type": "object", "additionalProperties": {"type": "object"}},
+    "existing_skills": {
+      "type": "array",
+      "default": [],
+      "maxItems": 1000,
+      "items": {
+        "type": "object",
+        "required": ["name", "keywords"],
+        "properties": {
+          "name": {"type": "string", "minLength": 1},
+          "keywords": {"type": "array", "items": {"type": "string"}}
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "additionalProperties": false
+}

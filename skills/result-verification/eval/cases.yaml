@@ -1,0 +1,31 @@
+version: 1
+feature_id: 9.7.8
+cases:
+  - id: verification_matches_summary_and_detail
+    description: 明细非空、主键唯一且金额汇总一致时应通过
+    input:
+      rows: [{id: 1, amount: 10}, {id: 2, amount: 20}]
+      summary: {total_amount: 30}
+      checks:
+        - {id: non-empty, operation: non_empty}
+        - {id: unique-id, operation: unique, columns: [id]}
+        - {id: total, operation: aggregate, column: amount, summary_field: total_amount, aggregation: sum}
+    assertions:
+      - verified 等于 true
+      - summary.failed_checks 等于 0
+  - id: verification_blocks_truncated_result
+    description: 内容规则通过但结果截断时不能标记为已验证
+    input:
+      rows: [{id: 1}]
+      checks: [{operation: non_empty}]
+      truncated: true
+    assertions:
+      - valid 等于 true
+      - complete 等于 false
+      - verified 等于 false
+  - id: verification_rejects_unknown_operation
+    description: 未声明的核验操作必须拒绝
+    input:
+      rows: []
+      checks: [{operation: unknown}]
+    expected_error: 不支持的核验操作

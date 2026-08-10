@@ -150,3 +150,62 @@ class TestGenerateSQLHallucination:
         assert result["validation_errors"] == []
         assert llm_generate.await_args.kwargs["dialect"] == "mysql"
         logger.info("test_generate_node_forwards_mysql_dialect 完成")
+
+    # 方法作用：验证表名白名单完整包含所有已检索表且不依赖详细 Schema 长度。
+    # Args: self - pytest 测试类实例。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    def test_compact_table_whitelist_contains_every_table(self) -> None:
+        """详细 Schema 即使被预算裁剪，合法表名仍必须完整进入独立白名单。"""
+        # Arrange
+        from src.graph.nodes.generate_sql import build_table_whitelist_context
+
+        tables = [{"name": f"table_{index}", "columns": []} for index in range(27)]
+
+        # Act
+        result = build_table_whitelist_context(tables)
+
+        # Assert
+        assert all(f"table_{index}" in result for index in range(27))
+        assert result.count("table_") == 27
+
+    # 方法作用：验证幻觉重试只回注未知表和合法白名单。
+    # Args: self - pytest 测试类实例。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    def test_hallucination_retry_context_excludes_failed_sql(self) -> None:
+        """数千字符失败 SQL 不得再次挤占 Schema 预算并强化错误表名。"""
+        # Arrange
+        from src.graph.nodes.generate_sql import build_retry_context
+
+        failed_sql = "SELECT * FROM invented_table " + "x" * 4000
+        state = {
+            "generated_sql": failed_sql,
+            "validation_errors": [{
+                "type": "hallucination",
+                "unknown_tables": ["invented_table"],
+            }],
+        }
+
+        # Act
+        result = build_retry_context(state, 1, [{"name": "orders"}])
+
+        # Assert
+        assert failed_sql not in result
+        assert "invented_table" in result
+        assert "orders" in result
+
+    # 方法作用：验证第二次表名幻觉后停止无效重试。
+    # Args: self - pytest 测试类实例。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    def test_second_hallucination_stops_retry(self) -> None:
+        """同类幻觉最多执行初次生成加一次纠正。"""
+        # Arrange
+        from src.graph.workflow import after_generate_sql
+
+        state = {
+            "generated_sql": "SELECT * FROM invented_table",
+            "retry_count": 2,
+            "validation_errors": [{"type": "hallucination"}],
+        }
+
+        # Act / Assert
+        assert after_generate_sql(state) == "build_response"

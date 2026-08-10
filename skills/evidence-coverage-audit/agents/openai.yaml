@@ -1,0 +1,4 @@
+interface:
+  display_name: "证据覆盖审计"
+  short_description: "核对主张引用、证据定位、独立来源数量和关键结论覆盖率"
+  default_prompt: "使用 $evidence-coverage-audit 审核这些主张是否具有充分且可定位的证据。"

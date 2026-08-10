@@ -1,0 +1,52 @@
+version: 1
+feature_id: 9.6.10
+cases:
+  - id: validator_valid_manifest
+    description: 完整 Manifest v2 和有效 Schema 应通过
+    input:
+      manifest:
+        name: sample-skill
+        version: 1.0.0
+        api_version: data-agent/v2
+        description: 用于固定样例校验的测试技能
+        triggers: {keywords: [样例校验], intents: [], tables: []}
+        capabilities: [sample.validate]
+        accepts: [document]
+        permissions: {network: [], files: none, datasources: none}
+        resources: {timeout_seconds: 30, cpu_seconds: 10, memory_mb: 256, max_tool_calls: 1}
+        tools: [{name: validate_sample, input_schema: schemas/input.json, output_schema: schemas/output.json}]
+        evaluation: {dataset: eval/cases.yaml, minimum_score: 0.9}
+      instructions: 按照固定流程校验样例输入并返回结构化结果，不执行外部动作。
+      schemas:
+        schemas/input.json: {type: object}
+        schemas/output.json: {type: object}
+    assertions:
+      - valid 等于 true
+      - filesystem_accessed 等于 false
+  - id: validator_path_traversal
+    description: Schema 目录穿越必须被拒绝
+    input:
+      manifest:
+        name: unsafe-skill
+        version: 1.0.0
+        api_version: data-agent/v2
+        description: 用于验证不安全路径会被拒绝
+        triggers: {keywords: [], intents: [], tables: []}
+        capabilities: [sample.validate]
+        accepts: [document]
+        permissions: {network: [], files: none, datasources: none}
+        resources: {timeout_seconds: 30, cpu_seconds: 10, memory_mb: 256, max_tool_calls: 1}
+        tools: [{name: unsafe, input_schema: ../input.json, output_schema: schemas/output.json}]
+        evaluation: {dataset: eval/cases.yaml, minimum_score: 0.9}
+      instructions: 该正文长度足够但工具声明包含不安全路径，应由校验器明确拒绝。
+      schemas:
+        schemas/output.json: {type: object}
+    assertions:
+      - valid 等于 false
+      - errors 包含 TOOLS
+  - id: validator_trigger_collision
+    description: 与现有技能重复关键词应返回发布警告
+    input:
+      existing_skills: [{name: existing, keywords: [重复触发]}]
+    assertions:
+      - warnings 包含 TRIGGER_COLLISION

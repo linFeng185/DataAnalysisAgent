@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "跨源连接检查输入",
+  "type": "object",
+  "required": ["left_asset_id", "right_asset_id", "left_rows", "right_rows", "left_key", "right_key"],
+  "properties": {
+    "left_asset_id": {"type": "string", "minLength": 1},
+    "right_asset_id": {"type": "string", "minLength": 1},
+    "left_rows": {"type": "array", "maxItems": 10000, "items": {"type": "object"}},
+    "right_rows": {"type": "array", "maxItems": 10000, "items": {"type": "object"}},
+    "left_key": {"type": "string", "minLength": 1},
+    "right_key": {"type": "string", "minLength": 1},
+    "confirmed": {"type": "boolean", "default": false},
+    "preview_limit": {"type": "integer", "minimum": 1, "maximum": 100, "default": 20}
+  },
+  "additionalProperties": false
+}

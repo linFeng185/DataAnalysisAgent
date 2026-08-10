@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "工作流状态差异输入",
+  "type": "object",
+  "required": ["before_state", "after_state"],
+  "properties": {
+    "before_state": {"type": "object"},
+    "after_state": {"type": "object"},
+    "ignore_fields": {"type": ["array", "null"], "default": null, "items": {"type": "string", "minLength": 1}},
+    "protected_fields": {"type": ["array", "null"], "default": null, "items": {"type": "string", "minLength": 1}},
+    "required_fields_after": {"type": ["array", "null"], "default": null, "items": {"type": "string", "minLength": 1}},
+    "expected_changes": {"type": ["array", "null"], "default": null, "items": {"type": "string", "minLength": 1}},
+    "persisted_state": {"type": ["object", "null"], "default": null},
+    "persistence_fields": {"type": ["array", "null"], "default": null, "items": {"type": "string", "minLength": 1}},
+    "max_differences": {"type": "integer", "minimum": 1, "maximum": 1000, "default": 200}
+  },
+  "additionalProperties": false
+}

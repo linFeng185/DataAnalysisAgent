@@ -1,0 +1,27 @@
+version: 1
+feature_id: 9.7.5
+cases:
+  - id: distribution_detects_numeric_shift
+    description: 明显平移的数值分布应超过稳定性阈值
+    input:
+      baseline_rows: [{value: 1}, {value: 2}, {value: 3}, {value: 4}]
+      current_rows: [{value: 101}, {value: 102}, {value: 103}, {value: 104}]
+      columns: [value]
+    assertions:
+      - drift_detected 等于 true
+      - drifted_columns 包含 value
+  - id: distribution_handles_empty_sets
+    description: 两侧空数据应返回零字段且不报告漂移
+    input:
+      baseline_rows: []
+      current_rows: []
+    assertions:
+      - summary.total_columns 等于 0
+      - drift_detected 等于 false
+  - id: distribution_rejects_missing_column
+    description: 显式字段在两侧都不存在时必须拒绝
+    input:
+      baseline_rows: [{value: 1}]
+      current_rows: [{value: 2}]
+      columns: [missing]
+    expected_error: 待比较字段不存在

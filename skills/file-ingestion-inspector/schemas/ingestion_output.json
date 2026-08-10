@@ -1,0 +1,68 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "文件摄取检查输出",
+  "type": "object",
+  "required": ["safe_to_ingest", "filename", "sample_bytes", "sample_sha256", "encoding", "encoding_confidence", "bom", "newline_style", "delimiter", "delimiter_confidence", "estimated_rows", "estimated_columns", "header", "formula_prefix_cells", "archive", "summary", "findings", "filesystem_accessed"],
+  "properties": {
+    "safe_to_ingest": {"type": "boolean"},
+    "filename": {"type": "string"},
+    "sample_bytes": {"type": "integer", "minimum": 0},
+    "sample_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "encoding": {"type": "string"},
+    "encoding_confidence": {"type": "string", "enum": ["high", "medium", "low"]},
+    "bom": {"type": "string", "enum": ["none", "utf-8", "utf-16-le", "utf-16-be"]},
+    "newline_style": {"type": "string", "enum": ["none", "lf", "crlf", "cr", "mixed"]},
+    "delimiter": {"type": ["string", "null"]},
+    "delimiter_confidence": {"type": "number", "minimum": 0, "maximum": 1},
+    "estimated_rows": {"type": "integer", "minimum": 0},
+    "estimated_columns": {"type": "integer", "minimum": 0},
+    "header": {
+      "type": "object",
+      "required": ["present", "empty_column_indices", "duplicate_names"],
+      "properties": {
+        "present": {"type": "boolean"},
+        "empty_column_indices": {"type": "array", "items": {"type": "integer", "minimum": 0}},
+        "duplicate_names": {"type": "array", "items": {"type": "string"}}
+      },
+      "additionalProperties": false
+    },
+    "formula_prefix_cells": {"type": "integer", "minimum": 0},
+    "archive": {
+      "type": "object",
+      "required": ["provided", "compression_ratio", "entry_count", "encrypted", "contains_macros", "external_links"],
+      "properties": {
+        "provided": {"type": "boolean"},
+        "compression_ratio": {"type": ["number", "null"], "minimum": 0},
+        "entry_count": {"type": ["integer", "null"], "minimum": 0},
+        "encrypted": {"type": "boolean"},
+        "contains_macros": {"type": "boolean"},
+        "external_links": {"type": "boolean"}
+      },
+      "additionalProperties": false
+    },
+    "summary": {
+      "type": "object",
+      "required": ["errors", "warnings"],
+      "properties": {
+        "errors": {"type": "integer", "minimum": 0},
+        "warnings": {"type": "integer", "minimum": 0}
+      },
+      "additionalProperties": false
+    },
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["code", "severity", "message"],
+        "properties": {
+          "code": {"type": "string"},
+          "severity": {"type": "string", "enum": ["error", "warning"]},
+          "message": {"type": "string"}
+        },
+        "additionalProperties": false
+      }
+    },
+    "filesystem_accessed": {"const": false}
+  },
+  "additionalProperties": false
+}

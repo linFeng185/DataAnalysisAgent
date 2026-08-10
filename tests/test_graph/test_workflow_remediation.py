@@ -82,6 +82,56 @@ class TestTurnPreparation:
         logger.info("test_prepare_turn_preserves_previous_result_snapshot 完成")
 
 
+class TestHistoryIntentRouting:
+    """覆盖历史追问在规则未命中时的保守路由。"""
+
+    # 方法作用：验证有历史的模糊追问不会默认生成一条全新 SQL。
+    # Args: self - pytest 测试类实例；monkeypatch - pytest 补丁工具。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    async def test_unmatched_history_follow_up_restores_previous_result(self, monkeypatch) -> None:
+        """“这意味着什么”应分析上一轮结果，而不是被强制识别为 query。"""
+        # Arrange
+        import src.graph.nodes.classify_intent as module
+
+        monkeypatch.setattr(module, "_llm_classify", AsyncMock(return_value=None))
+        state = {
+            "user_query": "这意味着什么",
+            "conversation_history": [{"user_query": "查询订单趋势"}],
+            "datasource": "demo",
+        }
+
+        # Act
+        result = await module.classify_intent_node(state)
+
+        # Assert
+        assert result["intent"] == "meta"
+        assert result["task_plan"]["capability"] == "restore_previous_result"
+
+    # 方法作用：验证用户显式引用“刚才的数据”时稳定进入历史结果恢复。
+    # Args: self - pytest 测试类实例；monkeypatch - pytest 补丁工具。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    async def test_explicit_previous_data_follow_up_restores_result(self, monkeypatch) -> None:
+        """明确的历史指代不能交给模型误判为普通闲聊。"""
+        # Arrange
+        import src.graph.nodes.classify_intent as module
+
+        classify = AsyncMock(return_value=None)
+        monkeypatch.setattr(module, "_llm_classify", classify)
+        state = {
+            "user_query": "分析刚才的数据",
+            "conversation_history": [{"user_query": "生成销售月报"}],
+            "datasource": "demo",
+        }
+
+        # Act
+        result = await module.classify_intent_node(state)
+
+        # Assert
+        assert result["intent"] == "meta"
+        assert result["task_plan"]["capability"] == "restore_previous_result"
+        classify.assert_not_awaited()
+
+
 class TestPreviousTurnRestore:
     """覆盖功能 4.1.15：跨轮结构化结果复用。"""
 
@@ -696,6 +746,37 @@ class TestIntentPrecision:
 
         assert result["intent"] == "metadata"
         logger.info("test_explicit_column_question_remains_metadata 完成")
+
+    # 方法作用：验证指标目录问法进入 metadata 且不要求时间范围。
+    # Args: self - pytest 测试类实例。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    async def test_indicator_catalog_question_is_metadata_without_time_range(self):
+        """“有哪些指标”只读取指标目录，不得进入普通数据查询。"""
+        # Arrange
+        from src.graph.nodes.classify_intent import classify_intent_node
+
+        # Act
+        result = await classify_intent_node({"user_query": "东亚汽车里有哪些数据指标"})
+
+        # Assert
+        assert result["intent"] == "metadata"
+        assert result["task_plan"]["operation"] == "indicator_catalog"
+        assert result["task_plan"]["needs_time_range"] is False
+
+    # 方法作用：验证带数值变化条件的指标问法仍进入数据查询链路。
+    # Args: self - pytest 测试类实例。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    async def test_indicator_value_question_is_not_catalog(self):
+        """“本月哪些指标下降”需要查询指标值，不能按目录直接回答。"""
+        # Arrange
+        from src.graph.nodes.classify_intent import classify_intent_node
+
+        # Act
+        result = await classify_intent_node({"user_query": "本月有哪些指标下降"})
+
+        # Assert
+        assert result["intent"] != "metadata"
+        assert result["task_plan"]["operation"] != "indicator_catalog"
 
     # 方法作用：验证数据质量问法进入查询并激活质量 Skill。
     # Args: self - pytest 测试类实例。

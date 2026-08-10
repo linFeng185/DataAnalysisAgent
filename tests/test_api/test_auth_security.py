@@ -297,6 +297,111 @@ class TestAuthContextIsolation:
         assert auth.get_current_user_id() == 0
         assert auth.get_current_tenant_id() == 1
 
+    # 方法作用：验证已停用用户的旧 JWT 会在请求时被实时吊销。
+    # Args: self - pytest 测试类实例；monkeypatch - pytest 补丁工具。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    async def test_inactive_user_token_is_rejected(self, monkeypatch) -> None:
+        """JWT 签名有效也不能绕过数据库中的账号停用状态。"""
+        # Arrange
+        import src.api.auth as auth
+
+        settings = SimpleNamespace(
+            multi_tenant=True,
+            admin_api_key="",
+            jwt_secret="z" * 32,
+            jwt_access_token_expire_hours=24,
+            env="prod",
+            database_url="postgresql+asyncpg://app:secret@db/app",
+        )
+        connection = MagicMock()
+        connection.fetchrow = AsyncMock(return_value={
+            "id": 9,
+            "tenant_id": 4,
+            "username": "alice",
+            "role": "analyst",
+            "is_active": False,
+            "tenant_code": "acme",
+            "tenant_active": True,
+        })
+        acquire = MagicMock()
+        acquire.__aenter__ = AsyncMock(return_value=connection)
+        acquire.__aexit__ = AsyncMock(return_value=None)
+        pool = MagicMock()
+        pool.acquire.return_value = acquire
+        monkeypatch.setattr(auth, "get_settings", lambda: settings)
+        monkeypatch.setattr(auth, "get_pg_pool", AsyncMock(return_value=pool))
+        monkeypatch.setattr(auth, "_secret_cache", None)
+        token = auth.create_access_token(9, 4, "analyst", "acme", "alice")
+        path = "/api/v1/history"
+        scope = {
+            "type": "http", "http_version": "1.1", "method": "GET",
+            "scheme": "http", "path": path, "raw_path": path.encode("ascii"),
+            "query_string": b"",
+            "headers": [(b"authorization", f"Bearer {token}".encode("ascii"))],
+            "client": ("127.0.0.1", 1234), "server": ("test", 80),
+        }
+        call_next = AsyncMock(return_value=Response("ok"))
+
+        # Act
+        response = await auth.AuthMiddleware(AsyncMock()).dispatch(Request(scope), call_next)
+
+        # Assert
+        assert response.status_code == 401
+        call_next.assert_not_awaited()
+
+    # 方法作用：验证数据库中的角色变化会立即使旧角色 JWT 失效。
+    # Args: self - pytest 测试类实例；monkeypatch - pytest 补丁工具。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    async def test_stale_role_token_is_rejected(self, monkeypatch) -> None:
+        """降权后旧 tenant_admin Token 不得继续保留管理权限。"""
+        # Arrange
+        import src.api.auth as auth
+
+        settings = SimpleNamespace(
+            multi_tenant=True,
+            admin_api_key="",
+            jwt_secret="z" * 32,
+            jwt_access_token_expire_hours=24,
+            env="prod",
+            database_url="postgresql+asyncpg://app:secret@db/app",
+        )
+        connection = MagicMock()
+        connection.fetchrow = AsyncMock(return_value={
+            "id": 9,
+            "tenant_id": 4,
+            "username": "alice",
+            "role": "analyst",
+            "is_active": True,
+            "tenant_code": "acme",
+            "tenant_active": True,
+        })
+        acquire = MagicMock()
+        acquire.__aenter__ = AsyncMock(return_value=connection)
+        acquire.__aexit__ = AsyncMock(return_value=None)
+        pool = MagicMock()
+        pool.acquire.return_value = acquire
+        monkeypatch.setattr(auth, "get_settings", lambda: settings)
+        monkeypatch.setattr(auth, "get_pg_pool", AsyncMock(return_value=pool))
+        monkeypatch.setattr(auth, "_secret_cache", None)
+        token = auth.create_access_token(9, 4, "tenant_admin", "acme", "alice")
+        path = "/api/v1/history"
+        scope = {
+            "type": "http", "http_version": "1.1", "method": "GET",
+            "scheme": "http", "path": path, "raw_path": path.encode("ascii"),
+            "query_string": b"",
+            "headers": [(b"authorization", f"Bearer {token}".encode("ascii"))],
+            "client": ("127.0.0.1", 1234), "server": ("test", 80),
+        }
+
+        # Act
+        response = await auth.AuthMiddleware(AsyncMock()).dispatch(
+            Request(scope),
+            AsyncMock(return_value=Response("ok")),
+        )
+
+        # Assert
+        assert response.status_code == 401
+
     async def test_missing_token_returns_401_in_multi_tenant_mode(self, monkeypatch):
         """多租户模式缺少令牌时应返回 401 响应而非抛出中间件异常。"""
         # Arrange

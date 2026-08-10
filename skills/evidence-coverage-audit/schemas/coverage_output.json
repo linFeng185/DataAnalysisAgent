@@ -1,0 +1,72 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "证据覆盖审计输出",
+  "type": "object",
+  "required": ["gate_passed", "coverage_score", "minimum_coverage", "summary", "claim_results", "uncovered_claim_ids", "invalid_references", "evidence_issues", "orphan_evidence_ids", "raw_claims_returned"],
+  "properties": {
+    "gate_passed": {"type": "boolean"},
+    "coverage_score": {"type": "number", "minimum": 0, "maximum": 1},
+    "minimum_coverage": {"type": "number", "minimum": 0, "maximum": 1},
+    "summary": {
+      "type": "object",
+      "required": ["claim_count", "covered_claims", "uncovered_claims", "evidence_count", "invalid_references", "evidence_issues"],
+      "properties": {
+        "claim_count": {"type": "integer", "minimum": 1},
+        "covered_claims": {"type": "integer", "minimum": 0},
+        "uncovered_claims": {"type": "integer", "minimum": 0},
+        "evidence_count": {"type": "integer", "minimum": 0},
+        "invalid_references": {"type": "integer", "minimum": 0},
+        "evidence_issues": {"type": "integer", "minimum": 0}
+      },
+      "additionalProperties": false
+    },
+    "claim_results": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["claim_id", "critical", "covered", "required_citations", "valid_citations", "independent_sources", "invalid_citations"],
+        "properties": {
+          "claim_id": {"type": "string"},
+          "critical": {"type": "boolean"},
+          "covered": {"type": "boolean"},
+          "required_citations": {"type": "integer", "minimum": 1},
+          "valid_citations": {"type": "integer", "minimum": 0},
+          "independent_sources": {"type": "integer", "minimum": 0},
+          "invalid_citations": {"type": "integer", "minimum": 0}
+        },
+        "additionalProperties": false
+      }
+    },
+    "uncovered_claim_ids": {"type": "array", "items": {"type": "string"}},
+    "invalid_references": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["claim_id", "evidence_id", "message"],
+        "properties": {
+          "claim_id": {"type": "string"},
+          "evidence_id": {"type": "string"},
+          "message": {"type": "string"}
+        },
+        "additionalProperties": false
+      }
+    },
+    "evidence_issues": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["evidence_id", "code", "message"],
+        "properties": {
+          "evidence_id": {"type": "string"},
+          "code": {"type": "string"},
+          "message": {"type": "string"}
+        },
+        "additionalProperties": false
+      }
+    },
+    "orphan_evidence_ids": {"type": "array", "items": {"type": "string"}},
+    "raw_claims_returned": {"const": false}
+  },
+  "additionalProperties": false
+}

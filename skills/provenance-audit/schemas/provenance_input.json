@@ -1,0 +1,56 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "来源链审计输入",
+  "type": "object",
+  "required": ["assets", "transforms"],
+  "properties": {
+    "assets": {
+      "type": "array",
+      "maxItems": 10000,
+      "items": {
+        "type": "object",
+        "required": ["asset_id", "fingerprint"],
+        "properties": {
+          "asset_id": {"type": "string", "minLength": 1},
+          "fingerprint": {"type": "string"},
+          "source_id": {"type": "string", "default": ""},
+          "locator": {"type": ["object", "null"], "default": null},
+          "version": {"type": "string", "default": ""}
+        },
+        "additionalProperties": false
+      }
+    },
+    "transforms": {
+      "type": "array",
+      "maxItems": 10000,
+      "items": {
+        "type": "object",
+        "required": ["step_id", "input_asset_ids", "output_asset_id", "tool", "parameters", "code_version"],
+        "properties": {
+          "step_id": {"type": "string", "minLength": 1},
+          "input_asset_ids": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}},
+          "output_asset_id": {"type": "string", "minLength": 1},
+          "tool": {"type": "string", "minLength": 1},
+          "parameters": {"type": "object"},
+          "code_version": {"type": "string", "minLength": 1},
+          "evidence": {
+            "type": "array",
+            "default": [],
+            "items": {
+              "type": "object",
+              "required": ["source_id", "locator"],
+              "properties": {
+                "source_id": {"type": "string", "minLength": 1},
+                "locator": {"type": "object", "minProperties": 1}
+              },
+              "additionalProperties": false
+            }
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "expected_output_asset_id": {"type": ["string", "null"], "default": null}
+  },
+  "additionalProperties": false
+}

@@ -127,16 +127,18 @@ def _event_stream_id(event: dict) -> str:
 
 
 # 方法作用：执行 LangGraph 并通过 SSE 推送节点进度、模型事件和最终结果。
-# Args: user_query - 用户问题；datasource - 主数据源；session_id - 会话；datasources - 多数据源；tenant_id/user_id/user_role - 认证身份；datasource_access - API 授权快照；enabled_skill_ids - 显式 Skill；request_rate_limit_checked - API 是否已计入配额；llm_selection - 已授权租户 LLM 选择。
+# Args: user_query - 用户问题；datasource - 主数据源；session_id - 会话；datasources - 多数据源；tenant_id/user_id/user_role - 认证身份；datasource_access - API 授权快照；enabled_skill_ids - 显式 Skill；request_rate_limit_checked - API 是否已计入配额；llm_selection - 已授权租户 LLM 选择；file_ids - 已上传附件 ID；action_request - 结构化动作请求。
 # Returns: SSE 事件异步生成器。
 async def stream_analysis(user_query: str, datasource: str, session_id: str = "",
                           datasources: list[str] | None = None,
                           tenant_id: int | None = None, user_id: int | None = None,
                           user_role: str | None = None,
                           datasource_access: dict[str, dict] | None = None,
-                          enabled_skill_ids: list[str] | None = None,
-                          request_rate_limit_checked: bool = False,
-                          llm_selection: TenantLLMSelection | None = None):
+                           enabled_skill_ids: list[str] | None = None,
+                           request_rate_limit_checked: bool = False,
+                           llm_selection: TenantLLMSelection | None = None,
+                           file_ids: list[int] | None = None,
+                           action_request: dict | None = None):
     """SSE: 逐 Node 推送进度 + LLM token + 关键结果。
 
     每个 token 事件均携带 node 和 stream_id 字段，前端可按调用实例分组渲染并行 LLM 输出。
@@ -232,9 +234,11 @@ async def stream_analysis(user_query: str, datasource: str, session_id: str = ""
                        "allowed_columns": list(primary_access.get("allowed_columns", []) or []),
                        "row_filter_sql": str(primary_access.get("row_filter_sql", "") or ""),
                        "tenant_id": tenant_id, "user_id": user_id,
-                       "user_role": user_role,
-                       "enabled_skill_ids": list(enabled_skill_ids or []),
-                       "request_rate_limit_checked": request_rate_limit_checked}
+                        "user_role": user_role,
+                        "enabled_skill_ids": list(enabled_skill_ids or []),
+                        "file_ids": list(file_ids or []),
+                        "action_request": dict(action_request or {}),
+                        "request_rate_limit_checked": request_rate_limit_checked}
         async for event in app.astream_events(input_state, config, version="v2"
         ):
             kind = event["event"]
@@ -372,13 +376,14 @@ async def stream_analysis(user_query: str, datasource: str, session_id: str = ""
 # Returns: 以空行结尾的 SSE data 文本。
 def _sse(event: str, data: dict) -> str:
     logger.debug("SSE 事件序列化入口", event_type=event)
-    result = f"data: {json.dumps(
+    payload = json.dumps(
         {'type': event, **data},
         ensure_ascii=False,
         cls=_PrecisionEncoder,
         default=_json_serialize,
         allow_nan=False,
-    )}\n\n"
+    )
+    result = f"data: {payload}\n\n"
     logger.debug("SSE 事件序列化完成", event_type=event)
     return result
 

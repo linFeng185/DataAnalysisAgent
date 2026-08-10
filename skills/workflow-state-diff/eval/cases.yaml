@@ -1,0 +1,31 @@
+version: 1
+feature_id: 9.8.2
+cases:
+  - id: state_diff_reports_nested_changes
+    description: 嵌套字段新增和修改应按点分路径返回
+    input:
+      before_state: {task: {status: pending}, count: 1}
+      after_state: {task: {status: done, result: ok}, count: 1}
+      expected_changes: [task.status, task.result]
+      required_fields_after: [task.result]
+    assertions:
+      - valid 等于 true
+      - summary.changed 等于 1
+      - summary.added 等于 1
+  - id: state_diff_detects_persistence_mismatch
+    description: 执行后状态与持久化状态不一致时必须失败
+    input:
+      before_state: {status: pending}
+      after_state: {status: done}
+      persisted_state: {status: pending}
+      persistence_fields: [status]
+    assertions:
+      - valid 等于 false
+      - persistence_mismatches 非空
+  - id: state_diff_rejects_missing_persisted_state
+    description: 指定持久化字段但未提供快照时必须拒绝
+    input:
+      before_state: {}
+      after_state: {status: done}
+      persistence_fields: [status]
+    expected_error: 必须提供 persisted_state

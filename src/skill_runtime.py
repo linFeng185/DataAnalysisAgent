@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import importlib.util
 import json
+import os
 import re
 import sys
 from decimal import Decimal
@@ -25,6 +26,32 @@ _SENSITIVE_KEYS = re.compile(r"password|passwd|secret|token|api[_-]?key|authoriz
 _SENSITIVE_TEXT = re.compile(
     r"(?i)(password|passwd|secret|token|api[_-]?key|authorization)\s*[:=]\s*([^\s,;]+)"
 )
+
+
+# 方法作用：构造隔离 Worker 启动所需的最小非敏感环境。
+# Args: 无。
+# Returns: 仅包含操作系统启动必需项和固定 Python 编码项的环境映射。
+def _isolated_environment() -> dict[str, str]:
+    allowed_names = {
+        "COMSPEC",
+        "LANG",
+        "LC_ALL",
+        "PATH",
+        "PATHEXT",
+        "SYSTEMROOT",
+        "TEMP",
+        "TMP",
+        "TMPDIR",
+        "WINDIR",
+    }
+    environment = {
+        name: value
+        for name, value in os.environ.items()
+        if name.upper() in allowed_names
+    }
+    environment["PYTHONIOENCODING"] = "utf-8"
+    environment["PYTHONUTF8"] = "1"
+    return environment
 
 
 class SkillRuntimeLimits(BaseModel):
@@ -161,6 +188,7 @@ class SkillRuntime:
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            env=_isolated_environment(),
         )
         try:
             assert process.stdin is not None
@@ -441,7 +469,16 @@ def _sanitize_output(value: Any) -> Any:
 def _to_json_value(value: Any) -> Any:
     """把 Pydantic 工具参数递归还原为 JSON Schema 可校验的普通值。"""
     if isinstance(value, BaseModel):
-        return _to_json_value(value.model_dump(mode="json"))
+        dumped = value.model_dump(mode="json", exclude_unset=True)
+        provided_fields = set(value.model_fields_set)
+        omitted_default_fields = sorted(set(value.__class__.model_fields) - set(dumped))
+        logger.info(
+            "Skill Runtime Pydantic 参数还原边界",
+            model=value.__class__.__name__,
+            provided_fields=sorted(provided_fields),
+            omitted_default_fields=omitted_default_fields,
+        )
+        return _to_json_value(dumped)
     if isinstance(value, dict):
         return {str(key): _to_json_value(item) for key, item in value.items()}
     if isinstance(value, (list, tuple, set)):

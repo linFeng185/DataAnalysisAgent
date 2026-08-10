@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "分布漂移测量输入",
+  "type": "object",
+  "required": ["baseline_rows", "current_rows"],
+  "properties": {
+    "baseline_rows": {"type": "array", "maxItems": 10000, "items": {"type": "object"}},
+    "current_rows": {"type": "array", "maxItems": 10000, "items": {"type": "object"}},
+    "columns": {"type": ["array", "null"], "items": {"type": "string", "minLength": 1}, "default": null},
+    "numeric_bins": {"type": "integer", "minimum": 2, "maximum": 50, "default": 10},
+    "psi_threshold": {"type": "number", "minimum": 0, "default": 0.2},
+    "categorical_threshold": {"type": "number", "minimum": 0, "maximum": 1, "default": 0.1}
+  },
+  "additionalProperties": false
+}

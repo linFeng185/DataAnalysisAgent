@@ -1,0 +1,60 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "执行轨迹审计输出",
+  "type": "object",
+  "required": ["valid", "summary", "total_duration_ms", "node_results", "missing_nodes", "missing_state_fields", "findings", "findings_truncated", "trace_fingerprint"],
+  "properties": {
+    "valid": {"type": "boolean"},
+    "summary": {
+      "type": "object",
+      "required": ["span_count", "node_count", "errors", "warnings", "total_findings"],
+      "properties": {
+        "span_count": {"type": "integer", "minimum": 0},
+        "node_count": {"type": "integer", "minimum": 0},
+        "errors": {"type": "integer", "minimum": 0},
+        "warnings": {"type": "integer", "minimum": 0},
+        "total_findings": {"type": "integer", "minimum": 0}
+      },
+      "additionalProperties": false
+    },
+    "total_duration_ms": {"type": "number", "minimum": 0},
+    "node_results": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["node", "attempts", "retries", "terminal_status", "duration_ms", "state_fields_written"],
+        "properties": {
+          "node": {"type": "string"},
+          "attempts": {"type": "integer", "minimum": 1},
+          "retries": {"type": "integer", "minimum": 0},
+          "terminal_status": {"type": "string", "enum": ["success", "error", "cancelled"]},
+          "duration_ms": {"type": "number", "minimum": 0},
+          "state_fields_written": {"type": "array", "items": {"type": "string"}}
+        },
+        "additionalProperties": false
+      }
+    },
+    "missing_nodes": {"type": "array", "items": {"type": "string"}},
+    "missing_state_fields": {"type": "array", "items": {"type": "string"}},
+    "findings": {"$ref": "#/$defs/findings"},
+    "findings_truncated": {"type": "boolean"},
+    "trace_fingerprint": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+  },
+  "$defs": {
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["code", "severity", "path", "message"],
+        "properties": {
+          "code": {"type": "string"},
+          "severity": {"type": "string", "enum": ["error", "warning"]},
+          "path": {"type": "string"},
+          "message": {"type": "string"}
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "additionalProperties": false
+}

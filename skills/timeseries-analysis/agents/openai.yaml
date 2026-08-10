@@ -1,0 +1,4 @@
+interface:
+  display_name: "时间序列分析"
+  short_description: "校验时间顺序并执行趋势分析、滚动回测、模型选择和区间预测"
+  default_prompt: "使用 $timeseries-analysis 分析这组时间序列并生成可审计预测。"

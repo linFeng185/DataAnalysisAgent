@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "数据画像输入",
+  "type": "object",
+  "required": ["rows"],
+  "properties": {
+    "rows": {
+      "type": "array",
+      "maxItems": 10000,
+      "items": {"type": "object"},
+      "description": "待画像的行式数据"
+    },
+    "sample_size": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 20,
+      "default": 5,
+      "description": "每列最多保留的样例值数量"
+    }
+  },
+  "additionalProperties": false
+}

@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "时间序列分析输出",
+  "type": "object",
+  "required": ["series_quality", "trend", "forecast", "limitations"],
+  "properties": {
+    "series_quality": {
+      "type": "object",
+      "required": ["row_count", "start", "end", "strictly_increasing", "regular_interval", "last_interval_seconds"],
+      "properties": {
+        "row_count": {"type": "integer", "minimum": 4},
+        "start": {"type": "string", "minLength": 1},
+        "end": {"type": "string", "minLength": 1},
+        "strictly_increasing": {"type": "boolean", "const": true},
+        "regular_interval": {"type": "boolean"},
+        "last_interval_seconds": {"type": "number", "exclusiveMinimum": 0}
+      },
+      "additionalProperties": false
+    },
+    "trend": {"type": "object"},
+    "forecast": {
+      "type": "object",
+      "required": ["model", "predictions", "intervals", "backtest", "model_card", "time_col", "forecast_labels"],
+      "properties": {
+        "model": {"type": "string"},
+        "predictions": {"type": "array", "items": {"type": "number"}},
+        "intervals": {"type": "array", "items": {"type": "object"}},
+        "backtest": {"type": "object"},
+        "model_card": {"type": "object"},
+        "time_col": {"type": "string"},
+        "forecast_labels": {"type": "array", "items": {"type": "string"}}
+      },
+      "additionalProperties": false
+    },
+    "limitations": {"type": "array", "minItems": 2, "items": {"type": "string"}}
+  },
+  "additionalProperties": false
+}

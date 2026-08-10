@@ -79,6 +79,27 @@ async def analyze_result_node(state: AnalysisState) -> dict:
         history_turns=len(state.get("conversation_history", []) or []),
     )
 
+    if contexts.routing.task_plan.get("operation") == "indicator_catalog":
+        from src.graph.indicator_catalog import (
+            build_indicator_catalog_plan,
+            build_indicator_catalog_summary,
+        )
+
+        catalog_plan = build_indicator_catalog_plan(state.get("relevant_tables", []) or [])
+        summary = build_indicator_catalog_summary(catalog_plan, rows)
+        logger.info(
+            "行式指标目录分析完成",
+            table=catalog_plan.selected_table,
+            result_count=len(rows),
+        )
+        return {"analysis_result": {
+            "summary": summary,
+            "insights": [],
+            "recommended_chart_type": "table",
+            "follow_up_questions": [],
+            "statistics": {},
+        }}
+
     if not rows:
         logger.info("节点完成", node="analyze_result", elapsed_ms=round((time.monotonic() - _start) * 1000))
         return {"analysis_result": {"summary": "无数据可供分析", "insights": [], "recommended_chart_type": "table", "follow_up_questions": [], "statistics": compute_statistics([])}}
@@ -328,7 +349,10 @@ async def _execute_post_analysis_skill_tools(
     state: AnalysisState,
 ) -> tuple[dict, int]:
     """按显式参数适配器执行分析后 Skill 工具，并严格遵守请求级预算。"""
-    tools = state.get("skill_tools", []) or []
+    from src.graph.skill_activation import resolve_active_skill_tools
+
+    # 工具对象只在实际消费节点恢复，避免进入 LangGraph checkpoint 序列化边界。
+    tools = resolve_active_skill_tools(state)
     used = int(state.get("skill_tool_calls", 0) or 0)
     budget = int(state.get("skill_tool_budget", 0) or 0)
     limit = max(0, budget)
@@ -369,14 +393,11 @@ async def _execute_post_analysis_skill_tools(
         outputs: list[object] = []
         if name == "render_report":
             from src.graph.context import read_contexts
+            from src.graph.reporting import build_report_metrics
 
             query = read_contexts(state).request.user_query
             template = "monthly_report" if "月报" in query else "weekly_report"
-            metrics = {
-                key: value
-                for key, value in (rows[0] if rows else {}).items()
-                if not isinstance(value, bool) and isinstance(value, (int, float, Decimal))
-            }
+            metrics = build_report_metrics(rows)
             rendered = await invoke(tool, {
                 "template": template,
                 "data": {

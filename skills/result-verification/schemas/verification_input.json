@@ -1,0 +1,36 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "结果核验输入",
+  "type": "object",
+  "required": ["rows", "checks"],
+  "properties": {
+    "rows": {"type": "array", "maxItems": 10000, "items": {"type": "object"}},
+    "checks": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 100,
+      "items": {
+        "type": "object",
+        "required": ["operation"],
+        "properties": {
+          "id": {"type": "string", "default": ""},
+          "operation": {"type": "string", "enum": ["non_empty", "row_count", "required_columns", "unique", "range", "aggregate"]},
+          "columns": {"type": "array", "default": [], "items": {"type": "string", "minLength": 1}},
+          "column": {"type": "string", "default": ""},
+          "expected": {"type": ["integer", "null"], "minimum": 0, "default": null},
+          "minimum": {"type": ["number", "null"], "default": null},
+          "maximum": {"type": ["number", "null"], "default": null},
+          "allow_null": {"type": "boolean", "default": true},
+          "summary_field": {"type": "string", "default": ""},
+          "aggregation": {"type": "string", "enum": ["sum", "count", "average", "minimum", "maximum"], "default": "sum"}
+        },
+        "additionalProperties": false
+      }
+    },
+    "summary": {"type": ["object", "null"], "default": null},
+    "truncated": {"type": "boolean", "default": false},
+    "partial": {"type": "boolean", "default": false},
+    "numeric_tolerance": {"type": "number", "minimum": 0, "default": 0.000001}
+  },
+  "additionalProperties": false
+}

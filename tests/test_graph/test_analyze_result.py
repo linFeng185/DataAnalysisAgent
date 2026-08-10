@@ -49,6 +49,36 @@ class TestAnalyzeResultSkillTools:
         assert payload["template"] == "weekly_report"
         assert payload["data"]["summary"] == "销售上升"
 
+    # 方法作用：验证报告指标覆盖全部结果行而不是只读取第一行。
+    # Args: self - pytest 测试类实例。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    async def test_report_metrics_include_all_result_rows(self) -> None:
+        """分组查询的后续行必须进入报告，否则报告会静默遗漏业务结果。"""
+        # Arrange
+        from src.graph.nodes.analyze_result import _execute_post_analysis_skill_tools
+
+        report_tool = _FakeTool("render_report", "# 周报")
+        rows = [
+            {"region": "华东", "amount": 12},
+            {"region": "华南", "amount": 18},
+        ]
+
+        # Act
+        await _execute_post_analysis_skill_tools(
+            {"summary": "区域销售", "insights": []},
+            rows,
+            {
+                "user_query": "生成周报",
+                "skill_tools": [report_tool],
+                "skill_tool_budget": 1,
+                "skill_tool_calls": 0,
+            },
+        )
+
+        # Assert
+        metrics = report_tool.ainvoke.await_args.args[0]["data"]["metrics"]
+        assert metrics == {"华东 / amount": 12, "华南 / amount": 18}
+
     # 方法作用：验证已用调用数达到预算后不再执行额外工具。
     # Args: self - pytest 测试类实例。
     # Returns: 无返回值，断言失败时由 pytest 报告。

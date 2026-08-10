@@ -1,0 +1,33 @@
+version: 1
+feature_id: 9.6.3
+cases:
+  - id: link_alias_exactly
+    description: 中文别名应映射到真实字段并保留评分原因
+    input:
+      query: 查询客户金额
+      tables:
+        - name: orders
+          aliases: [订单]
+          columns:
+            - {name: customer_id, aliases: [客户], data_type: integer}
+            - {name: amount, aliases: [金额], data_type: number}
+    assertions:
+      - matches 包含 customer_id 和 amount
+      - 每个候选包含 score 和 reasons
+  - id: link_ambiguous_columns
+    description: 多个接近候选应返回歧义而不是静默选择
+    input:
+      query: 用户编号
+      tables:
+        - {name: users, columns: [{name: user_id, aliases: [用户编号]}]}
+        - {name: events, columns: [{name: user_id, aliases: [用户编号]}]}
+    assertions:
+      - ambiguities 非空
+  - id: link_unmapped_term
+    description: 无词法依据时应返回未映射状态
+    input:
+      query: 完全无关概念
+      tables:
+        - {name: orders, columns: [{name: amount}]}
+    assertions:
+      - unmapped 等于 true

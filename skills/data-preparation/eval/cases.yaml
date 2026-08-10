@@ -1,0 +1,28 @@
+version: 1
+feature_id: 9.6.2
+cases:
+  - id: prepare_deduplicate_and_fill
+    description: 顺序执行去重和空值填充并保留两步审计
+    input:
+      rows:
+        - {id: 1, value: null}
+        - {id: 1, value: null}
+      operations:
+        - {op: drop_duplicates, columns: [id]}
+        - {op: fill_null, column: value, value: 0}
+    assertions:
+      - result_row_count 等于 1
+      - audit 长度等于 2
+      - 输入对象保持不变
+  - id: prepare_missing_operations
+    description: 缺少操作时应拒绝执行
+    input: {rows: [], operations: []}
+    assertions:
+      - 返回受控参数错误
+  - id: prepare_rename_collision
+    description: 重命名覆盖已有字段时应拒绝
+    input:
+      rows: [{old: 1, current: 2}]
+      operations: [{op: rename, mapping: {old: current}}]
+    assertions:
+      - 返回字段冲突错误

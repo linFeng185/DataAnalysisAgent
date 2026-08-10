@@ -1,0 +1,43 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "证据覆盖审计输入",
+  "type": "object",
+  "required": ["claims", "evidence"],
+  "properties": {
+    "claims": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 10000,
+      "items": {
+        "type": "object",
+        "required": ["claim_id", "claim_hash"],
+        "properties": {
+          "claim_id": {"type": "string", "minLength": 1},
+          "claim_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+          "critical": {"type": "boolean", "default": false},
+          "citation_ids": {"type": "array", "default": [], "items": {"type": "string", "minLength": 1}}
+        },
+        "additionalProperties": false
+      }
+    },
+    "evidence": {
+      "type": "array",
+      "maxItems": 10000,
+      "items": {
+        "type": "object",
+        "required": ["evidence_id", "source_id", "locator", "content_hash"],
+        "properties": {
+          "evidence_id": {"type": "string", "minLength": 1},
+          "source_id": {"type": "string", "minLength": 1},
+          "locator": {"type": "object"},
+          "content_hash": {"type": "string"}
+        },
+        "additionalProperties": false
+      }
+    },
+    "minimum_citations": {"type": "integer", "minimum": 1, "maximum": 10, "default": 1},
+    "critical_minimum_citations": {"type": "integer", "minimum": 1, "maximum": 10, "default": 2},
+    "minimum_coverage": {"type": "number", "minimum": 0, "maximum": 1, "default": 0.95}
+  },
+  "additionalProperties": false
+}

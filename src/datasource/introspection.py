@@ -6,6 +6,8 @@
 
 from __future__ import annotations
 
+import re
+
 from src.datasource.config import DataSourceConfig
 from src.datasource.schema_snapshot import ColumnInfo, SchemaSnapshot, TableRelation, TableSchema
 from src.logging_config import get_logger
@@ -232,6 +234,17 @@ def _quote_sqlite_identifier(identifier: str) -> str:
     return quoted
 
 
+# 方法作用：校验并引用 ClickHouse 数据库名和表名，阻止标识符注入。
+# Args: identifier - 表名或 database.table 完整名称。
+# Returns: 使用反引号逐段引用的 ClickHouse 标识符。
+def _quote_clickhouse_identifier(identifier: str) -> str:
+    """ClickHouse 行数探针不支持绑定表名，因此只允许保守标识符字符集。"""
+    parts = str(identifier or "").split(".")
+    if not parts or any(not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_$]*", part) for part in parts):
+        raise ValueError("ClickHouse 表名包含非法字符")
+    return ".".join(f"`{part}`" for part in parts)
+
+
 async def introspect_columns(
     ds: DataSourceConfig, table_name: str, executor
 ) -> list[ColumnInfo]:
@@ -303,9 +316,11 @@ async def estimate_row_count(
     sql = ROW_COUNT_QUERY.get(ds.dialect)
     if not sql:
         return 0
+    if ds.dialect == "sqlite":
+        sql = sql.format(table=_quote_sqlite_identifier(table_name))
+    elif ds.dialect == "clickhouse":
+        sql = sql.format(table=_quote_clickhouse_identifier(table_name))
     try:
-        if ds.dialect == "sqlite":
-            sql = sql.format(table=_quote_sqlite_identifier(table_name))
         result = await executor(ds, sql, {
             "table": table_name, "table_name": table_name, "database": ds.database,
         })

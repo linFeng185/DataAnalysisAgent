@@ -4,11 +4,13 @@ import {
   SendOutlined, RobotOutlined, ClearOutlined,
   LoadingOutlined, ThunderboltOutlined, ReadOutlined,
   BulbOutlined, BarChartOutlined, RiseOutlined,
-  HistoryOutlined,
+  HistoryOutlined, UploadOutlined,
 } from '@ant-design/icons';
 import { useChat, ChatTurn } from '../hooks/useChat';
-import { get, fetchSession } from '../api/client';
-import type { DatasourceConfig, SessionInfo, SkillInfo } from '../types';
+import { get, fetchSession, uploadChatFiles } from '../api/client';
+import type {
+  ActionRequestPayload, ChatUploadedFile, DatasourceConfig, SessionInfo, SkillInfo,
+} from '../types';
 import ProgressBar from '../components/ProgressBar';
 import ReasoningPanel from '../components/ReasoningPanel';
 import ResultCard from '../components/ResultCard';
@@ -66,6 +68,8 @@ export default function ChatPage() {
   const [datasources, setDatasources] = useState<DatasourceConfig[]>([]);
   const [skills, setSkills] = useState<SkillInfo[]>([]);
   const [selectedSkillIds, setSelectedSkillIds] = useState<string[]>([]);
+  const [attachments, setAttachments] = useState<ChatUploadedFile[]>([]);
+  const [uploadingFiles, setUploadingFiles] = useState(false);
   const [drawerOpen, setDrawerOpen] = useState(false);
   const {
     turns, loading, sessionId, send, cancel, clearSession,
@@ -73,6 +77,7 @@ export default function ChatPage() {
   } = useChat();
   const bottomRef = useRef<HTMLDivElement>(null);
   const msgAreaRef = useRef<HTMLDivElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const prevTurnsLen = useRef(turns.length);
 
   useEffect(() => {
@@ -133,18 +138,48 @@ export default function ChatPage() {
     }
   }, [sessionId]);
 
-  // 方法作用：校验当前输入并携带数据源、模型和显式 Skill 发起流式分析。
+  // 方法作用：校验当前输入并携带数据源、模型、Skill 和附件发起流式分析。
   // Args: 无。
   // Returns: 无返回值。
   const handleSend = (): void => {
     if (!query.trim() || loading) return;
-    if (ds.length === 0 || !datasources.some(item => item.name === ds[0])) {
+    const fileIds = attachments.map(item => item.file_id);
+    if (fileIds.length === 0 && (
+      ds.length === 0 || !datasources.some(item => item.name === ds[0])
+    )) {
       message.warning('请选择有效的数据源');
       return;
     }
-    send(query, ds[0], ds.length > 1 ? ds : undefined, modelId || undefined,
-      llmConnectionId, selectedSkillIds, reasoningEnabled, reasoningEffort);
+    send(query, ds[0] || '', ds.length > 1 ? ds : undefined, modelId || undefined,
+      llmConnectionId, selectedSkillIds, reasoningEnabled, reasoningEffort, fileIds);
     setQuery('');
+    setAttachments([]);
+  };
+
+  // 方法作用：上传用户选择的聊天附件并保留服务端返回的私有 file_id。
+  // Args: files - 浏览器文件选择器返回的 FileList。
+  // Returns: 无返回值。
+  const handleAttachmentUpload = async (files: FileList | null): Promise<void> => {
+    if (!files || files.length === 0) return;
+    const selected = Array.from(files);
+    if (attachments.length + selected.length > 10) {
+      message.warning('单次消息最多附加 10 个文件');
+      return;
+    }
+    setUploadingFiles(true);
+    try {
+      const uploaded = await uploadChatFiles(selected);
+      setAttachments(current => {
+        const existing = new Set(current.map(item => item.file_id));
+        return [...current, ...uploaded.filter(item => !existing.has(item.file_id))];
+      });
+      message.success(`已上传 ${uploaded.length} 个附件`);
+    } catch (error) {
+      message.error(error instanceof Error ? error.message : '附件上传失败');
+    } finally {
+      setUploadingFiles(false);
+      if (fileInputRef.current) fileInputRef.current.value = '';
+    }
   };
 
   // 滚动到顶部时加载更多历史轮次
@@ -246,7 +281,8 @@ export default function ChatPage() {
         ) : (
           /* 对话列表 */
           turns.map((t) => <TurnBubble key={t.id} turn={t}
-            onSendMessage={(msg: string) => { send(`${t.userQuery} - ${msg}`, ds[0] || 'demo', ds.length > 1 ? ds : undefined, modelId || undefined, llmConnectionId, selectedSkillIds, reasoningEnabled, reasoningEffort); }} />)
+            onSendMessage={(msg: string) => { send(`${t.userQuery} - ${msg}`, ds[0] || '', ds.length > 1 ? ds : undefined, modelId || undefined, llmConnectionId, selectedSkillIds, reasoningEnabled, reasoningEffort); }}
+            onConfirmAction={(actionRequest: ActionRequestPayload) => { send(t.userQuery, ds[0] || '', ds.length > 1 ? ds : undefined, modelId || undefined, llmConnectionId, selectedSkillIds, reasoningEnabled, reasoningEffort, [], actionRequest); }} />)
         )}
         <div ref={bottomRef} />
       </div>
@@ -263,6 +299,22 @@ export default function ChatPage() {
                 onClick={() => send(q, ds[0] || '', undefined, modelId || undefined, llmConnectionId, selectedSkillIds, reasoningEnabled, reasoningEffort)}>{q}</Tag>
             ))}
           </div>
+        )}
+
+        {attachments.length > 0 && (
+          <Space wrap size={[4, 4]} style={{ marginBottom: 8 }}>
+            {attachments.map(file => (
+              <Tag
+                key={file.file_id}
+                closable={!loading}
+                onClose={() => setAttachments(current => (
+                  current.filter(item => item.file_id !== file.file_id)
+                ))}
+              >
+                {file.filename}
+              </Tag>
+            ))}
+          </Space>
         )}
 
         <div className="chat-composer" style={{
@@ -291,6 +343,24 @@ export default function ChatPage() {
             dropdownMatchSelectWidth={false}
           />
           <Space className="chat-composer-actions" size={4} style={{ flexShrink: 0 }}>
+            <input
+              ref={fileInputRef}
+              type="file"
+              multiple
+              hidden
+              accept=".csv,.xlsx,.xls,.parquet,.pdf,.docx,.txt,.md,.markdown"
+              onChange={event => void handleAttachmentUpload(event.target.files)}
+            />
+            <Tooltip title="上传附件">
+              <Button
+                aria-label="上传附件"
+                size="small"
+                icon={<UploadOutlined />}
+                loading={uploadingFiles}
+                disabled={loading}
+                onClick={() => fileInputRef.current?.click()}
+              />
+            </Tooltip>
             {loading ? (
               <Button size="small" onClick={cancel} style={{ borderRadius: 10 }}>取消</Button>
             ) : null}
@@ -407,9 +477,13 @@ export default function ChatPage() {
 }
 
 // 方法作用：渲染一轮用户问题及其流式分析结果。
-// Args: turn - 当前对话轮次；onSendMessage - 追问回调。
+// Args: turn - 当前对话轮次；onSendMessage - 追问回调；onConfirmAction - 动作确认回调。
 // Returns: 单条消息气泡 React 节点。
-function TurnBubble({ turn, onSendMessage }: { turn: ChatTurn; onSendMessage?: (msg: string) => void }) {
+function TurnBubble({ turn, onSendMessage, onConfirmAction }: {
+  turn: ChatTurn;
+  onSendMessage?: (msg: string) => void;
+  onConfirmAction?: (request: ActionRequestPayload) => void;
+}) {
   const { userQuery, assistant, finalResult, status } = turn;
   const hasResult = status === 'done' && !!finalResult;
   const hasError = status === 'error';
@@ -504,7 +578,8 @@ function TurnBubble({ turn, onSendMessage }: { turn: ChatTurn; onSendMessage?: (
             <ResultCard sql={assistant.sql}
               tokens={assistant.tokens} finalResult={finalResult}
               validationErrors={assistant.validationErrors}
-              onSendMessage={onSendMessage} />
+              onSendMessage={onSendMessage}
+              onConfirmAction={onConfirmAction} />
           )}
 
           {/* 恢复的历史会话 — 含 SQL 折叠面板 */}

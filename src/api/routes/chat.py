@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import os
 import time
 from typing import TYPE_CHECKING
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, File, HTTPException, UploadFile
 
 from src.api.schemas import ChatRequest, ChatResponse
 from src.logging_config import get_logger
@@ -13,6 +14,9 @@ from src.logging_config import get_logger
 logger = get_logger(__name__)
 router = APIRouter()
 _started_at = time.time()
+_CHAT_ATTACHMENT_EXTENSIONS = frozenset({
+    ".csv", ".xlsx", ".xls", ".parquet", ".pdf", ".docx", ".txt", ".md", ".markdown",
+})
 
 if TYPE_CHECKING:
     from src.llm.tenant_config import TenantLLMSelection
@@ -170,12 +174,29 @@ def _validated_skill_ids(req: ChatRequest) -> list[str]:
     return result
 
 
+# 方法作用：为文件和结构化动作请求跳过不相关的数据源授权解析。
+# Args: req - 已通过 Pydantic 校验的聊天请求。
+# Returns: 文件/动作专用请求返回空快照，数据查询请求返回真实授权快照。
+async def _resolve_chat_access_for_request(req: ChatRequest) -> dict[str, dict]:
+    """没有显式数据源时，附件和外部动作应先进入各自的独立能力子图。"""
+    requested = _requested_chat_datasources(req)
+    if not requested and (req.file_ids or req.action_request is not None):
+        logger.info(
+            "Chat 跳过数据源解析",
+            file_count=len(req.file_ids),
+            has_action_request=req.action_request is not None,
+        )
+        return {}
+    import src.api.routes as routes_package
+
+    return await routes_package._resolve_chat_access(req)
+
+
 # 方法作用：解析当前租户的显式或默认 LLM 选择，并执行多租户失败关闭策略。
 # Args: req - 包含可选连接和模型的聊天请求。
-# Returns: 已授权选择；仅单租户无默认连接时返回 None 走 Settings 兼容路径。
-async def _resolve_chat_llm_selection(req: ChatRequest) -> TenantLLMSelection | None:
+# Returns: 已授权租户选择；未配置时抛出冲突异常。
+async def _resolve_chat_llm_selection(req: ChatRequest) -> TenantLLMSelection:
     from src.api.auth import get_current_tenant_id
-    from src.app_context import get_tenant_policy
     from src.llm.tenant_config import resolve_tenant_llm_selection
 
     tenant_id = get_current_tenant_id()
@@ -196,20 +217,13 @@ async def _resolve_chat_llm_selection(req: ChatRequest) -> TenantLLMSelection | 
             reasoning_effort=req.reasoning_effort,
         )
     except (LookupError, ValueError) as exc:
-        if not explicit and not get_tenant_policy().multi_tenant:
-            logger.warning(
-                "解析 Chat LLM 选择回退",
-                tenant_id=tenant_id,
-                reason="单租户未配置命名连接",
-            )
-            return None
         logger.warning(
             "解析 Chat LLM 选择拒绝",
             tenant_id=tenant_id,
             explicit=explicit,
             reason=str(exc),
         )
-        raise HTTPException(409, str(exc)) from exc
+        raise HTTPException(409, "当前租户未配置可用的 LLM，请先在管理后台配置并启用模型") from exc
     logger.info(
         "解析 Chat LLM 选择完成",
         tenant_id=tenant_id,
@@ -221,6 +235,89 @@ async def _resolve_chat_llm_selection(req: ChatRequest) -> TenantLLMSelection | 
 
 # ---- Chat (11.1.1-2) ----
 
+
+# 方法作用：读取并校验聊天附件的格式、单文件大小和请求累计大小。
+# Args: files - 当前请求上传的附件；max_bytes - 单文件上限；max_total_bytes - 累计大小上限。
+# Returns: 已通过校验的文件名、内容和字节数列表。
+async def _read_chat_uploads(
+    files: list[UploadFile],
+    *,
+    max_bytes: int,
+    max_total_bytes: int,
+) -> list[tuple[str, bytes, int]]:
+    """在持久化前完成全部可逆校验，避免越限请求产生部分文件。"""
+    logger.debug(
+        "读取聊天附件入口",
+        file_count=len(files),
+        max_bytes=max_bytes,
+        max_total_bytes=max_total_bytes,
+    )
+    prepared: list[tuple[str, bytes, int]] = []
+    total_bytes = 0
+    for uploaded_file in files:
+        filename = os.path.basename(str(uploaded_file.filename or "").strip())
+        if not filename:
+            raise HTTPException(400, "附件文件名不能为空")
+        extension = os.path.splitext(filename)[1].lower()
+        if extension not in _CHAT_ATTACHMENT_EXTENSIONS:
+            logger.warning("聊天附件格式拒绝", filename=filename, extension=extension)
+            raise HTTPException(400, f"不支持的附件格式: {extension or filename}")
+        content = await uploaded_file.read(max_bytes + 1)
+        if len(content) > max_bytes:
+            logger.warning("聊天附件单文件超限", filename=filename, size=len(content), limit=max_bytes)
+            raise HTTPException(413, f"文件 '{filename}' 超过大小限制")
+        total_bytes += len(content)
+        if total_bytes > max_total_bytes:
+            logger.warning("聊天附件累计大小超限", total_bytes=total_bytes, limit=max_total_bytes)
+            raise HTTPException(413, "上传附件累计大小超过限制")
+        prepared.append((filename, content, len(content)))
+    logger.info("读取聊天附件完成", accepted=len(prepared), total_bytes=total_bytes)
+    return prepared
+
+
+@router.post("/chat/files")
+# 方法作用：把聊天附件保存为当前用户私有文件并返回结构化 file_id。
+# Args: files - multipart/form-data 中的附件列表。
+# Returns: 可直接传入 ChatRequest.file_ids 的文件摘要列表。
+async def upload_chat_files(files: list[UploadFile] = File(...)) -> dict:
+    """附件不进入知识库索引，后续读取仍由 FileStore 身份过滤。"""
+    from src.config import get_settings
+    from src.knowledge.file_store import get_file_store
+
+    settings = get_settings()
+    max_upload_bytes = max(1, int(settings.max_upload_bytes))
+    max_upload_files = min(10, max(1, int(getattr(settings, "max_upload_files", 10))))
+    max_upload_total_bytes = max(
+        max_upload_bytes,
+        int(getattr(settings, "max_upload_total_bytes", 100 * 1024 * 1024)),
+    )
+    logger.info(
+        "聊天附件上传入口",
+        file_count=len(files),
+        max_upload_files=max_upload_files,
+    )
+    if not files:
+        raise HTTPException(400, "请至少选择一个附件")
+    if len(files) > max_upload_files:
+        logger.warning("聊天附件数量超限", file_count=len(files), limit=max_upload_files)
+        raise HTTPException(413, f"单次最多上传 {max_upload_files} 个附件")
+
+    prepared = await _read_chat_uploads(
+        files,
+        max_bytes=max_upload_bytes,
+        max_total_bytes=max_upload_total_bytes,
+    )
+    store = get_file_store()
+    saved_files: list[dict[str, int | str]] = []
+    for filename, content, size in prepared:
+        file_id = await store.save(filename, content, knowledge_scope="private")
+        if file_id is None:
+            logger.error("聊天附件持久化失败", filename=filename)
+            raise HTTPException(503, "附件存储暂不可用")
+        saved_files.append({"file_id": int(file_id), "filename": filename, "size": size})
+    logger.info("聊天附件上传完成", saved_count=len(saved_files))
+    return {"files": saved_files, "total": len(saved_files)}
+
 @router.post("/chat")
 async def chat(req: ChatRequest):
     """统一 chat 端点：stream=False 返回 JSON，stream=True 返回 SSE 流式。"""
@@ -229,13 +326,15 @@ async def chat(req: ChatRequest):
     selected_datasources = _requested_chat_datasources(req)
     import src.api.routes as routes_package
 
-    datasource_access = await routes_package._resolve_chat_access(req)
+    datasource_access = await _resolve_chat_access_for_request(req)
     llm_selection = await _resolve_chat_llm_selection(req)
     primary_access = datasource_access.get(req.datasource, {}) if req.datasource else {}
     logger.debug(
         "Chat 请求入口",
         datasource=req.datasource,
         selected_count=len(selected_datasources),
+        file_count=len(req.file_ids),
+        has_action_request=req.action_request is not None,
         stream=req.stream,
     )
     if req.stream:
@@ -258,6 +357,8 @@ async def chat(req: ChatRequest):
                 enabled_skill_ids=enabled_skill_ids,
                 request_rate_limit_checked=True,
                 llm_selection=llm_selection,
+                file_ids=req.file_ids,
+                action_request=req.action_request.model_dump() if req.action_request else None,
             ),
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
@@ -310,6 +411,8 @@ async def chat(req: ChatRequest):
             "user_role": get_current_role(),
             "request_rate_limit_checked": True,
             "enabled_skill_ids": enabled_skill_ids,
+            "file_ids": list(req.file_ids),
+            "action_request": req.action_request.model_dump() if req.action_request else {},
         }, cfg)
     from src.graph.outcome import sanitize_public_output
 
@@ -344,11 +447,10 @@ async def chat_stream(req: ChatRequest):
     )
     from fastapi.responses import StreamingResponse
 
-    import src.api.routes as routes_package
     from src.api.auth import get_current_role, get_current_tenant_id, get_current_user_id
     from src.api.streaming import stream_analysis
 
-    datasource_access = await routes_package._resolve_chat_access(req)
+    datasource_access = await _resolve_chat_access_for_request(req)
     llm_selection = await _resolve_chat_llm_selection(req)
     logger.info("兼容流式 Chat 响应已创建", datasource=req.datasource)
     return StreamingResponse(
@@ -364,6 +466,8 @@ async def chat_stream(req: ChatRequest):
             enabled_skill_ids=enabled_skill_ids,
             request_rate_limit_checked=True,
             llm_selection=llm_selection,
+            file_ids=req.file_ids,
+            action_request=req.action_request.model_dump() if req.action_request else None,
         ),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},

@@ -25,7 +25,7 @@ class TestDecisionSummary:
 
         # Assert
         assert "返回8行结果" in summary
-        assert "自动重试2次" in summary
+        assert "自动重试1次" in summary
         assert "私有推理" not in summary
         assert "secret" not in summary
         assert "private_table" not in summary

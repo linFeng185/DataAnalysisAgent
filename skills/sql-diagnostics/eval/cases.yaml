@@ -1,0 +1,27 @@
+version: 1
+feature_id: 9.6.9
+cases:
+  - id: diagnose_read_only_select
+    description: 合法只读查询应返回表列和未执行标记
+    input:
+      sql: SELECT id, amount FROM orders LIMIT 10
+      dialect: postgres
+    assertions:
+      - valid 等于 true
+      - tables 包含 orders
+      - executed 等于 false
+  - id: diagnose_write_statement
+    description: 写语句必须被只读安全校验拒绝
+    input:
+      sql: DELETE FROM orders
+      dialect: mysql
+    assertions:
+      - valid 等于 false
+      - rewritten_sql 为空
+  - id: diagnose_unknown_dialect
+    description: 未支持方言必须在输入边界拒绝
+    input:
+      sql: SELECT 1
+      dialect: unknown
+    assertions:
+      - 输入 Schema 校验失败

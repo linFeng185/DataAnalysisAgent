@@ -1,0 +1,40 @@
+version: 1
+feature_id: 9.6.6
+cases:
+  - id: timeseries_regular_history
+    description: 规则递增序列应输出回测、模型卡和未来标签
+    input:
+      rows:
+        - {date: "2026-01-01", value: 10}
+        - {date: "2026-01-02", value: 12}
+        - {date: "2026-01-03", value: 14}
+        - {date: "2026-01-04", value: 16}
+        - {date: "2026-01-05", value: 18}
+        - {date: "2026-01-06", value: 20}
+      time_column: date
+      value_column: value
+      horizon: 2
+    assertions:
+      - series_quality.regular_interval 等于 true
+      - forecast.predictions 长度等于 2
+      - forecast.model_card.leakage_check 等于 passed
+  - id: timeseries_unsorted
+    description: 乱序时间必须拒绝而不能静默排序
+    input:
+      rows:
+        - {date: "2026-01-02", value: 2}
+        - {date: "2026-01-01", value: 1}
+        - {date: "2026-01-03", value: 3}
+        - {date: "2026-01-04", value: 4}
+      time_column: date
+      value_column: value
+    assertions:
+      - 返回时间严格递增错误
+  - id: timeseries_too_short
+    description: 样本不足时应在输入边界拒绝
+    input:
+      rows: [{date: "2026-01-01", value: 1}]
+      time_column: date
+      value_column: value
+    assertions:
+      - 输入 Schema 校验失败

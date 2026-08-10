@@ -166,6 +166,7 @@ class TestSQLPromptGrounding:
             grounding_context="GMV 只统计 paid 订单",
             config={},
             conversation_history=None,
+            table_whitelist="合法物理表白名单：\n- orders\n- daily_sales",
         )
 
         system = llm.messages[0].content
@@ -176,6 +177,7 @@ class TestSQLPromptGrounding:
         assert "NULL" in system and "除零" in system
         assert "信息不足" in system
         assert "GMV 只统计 paid 订单" in human
+        assert "daily_sales" in human
         assert "使用订单分析技能" in system
         assert sql == "SELECT COUNT(*) FROM orders"
         assert explanation == "ok"
@@ -220,6 +222,82 @@ class TestSQLPromptGrounding:
         # Assert
         assert heartbeat_elapsed < 0.1
         assert result[0] == "SELECT COUNT(*) FROM orders"
+
+    # 方法作用：验证流式连接在首块前僵死时只回退一次非流式调用。
+    # Args: self - pytest 测试类实例；monkeypatch - pytest 补丁工具。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    async def test_llm_generate_falls_back_to_non_stream_when_first_chunk_times_out(
+        self,
+        monkeypatch,
+    ) -> None:
+        """零块超时属于可恢复传输故障，必须复用原 Prompt 完成 SQL 生成。"""
+        # Arrange
+        from langchain_openai import StreamChunkTimeoutError
+
+        import src.graph.nodes.generate_sql as generate_module
+
+        calls: list[bool] = []
+        captured: dict[str, object] = {}
+
+        class TimedOutStreamingLLM:
+            # 方法作用：模拟连接建立后没有收到任何 SSE 块的超时。
+            # Args: messages - 原始消息；config - Runnable 配置。
+            # Returns: 不返回数据并抛出 StreamChunkTimeoutError。
+            async def astream(self, messages, config):
+                del messages, config
+                if False:
+                    yield None
+                raise StreamChunkTimeoutError(
+                    0.1,
+                    model_name="deepseek-v4-flash",
+                    chunks_received=0,
+                )
+
+        class NonStreamingLLM:
+            # 方法作用：记录回退消息并返回合法 SQL JSON。
+            # Args: messages - 原始消息；config - Runnable 配置。
+            # Returns: 包含合法 SQL 的非流式响应。
+            async def ainvoke(self, messages, config):
+                captured["messages"] = messages
+                captured["config"] = config
+                return SimpleNamespace(
+                    content=json.dumps({
+                        "sql": "SELECT SUM(amount) FROM sales",
+                        "explanation": "stream fallback",
+                    }),
+                    additional_kwargs={},
+                )
+
+        # 方法作用：按调用模式返回流式超时或非流式成功模型。
+        # Args: temperature - 生成温度；stream - 是否创建流式模型。
+        # Returns: 对应调用模式的测试模型。
+        def fake_get_llm(temperature=0, *, stream=True):
+            del temperature
+            calls.append(stream)
+            return TimedOutStreamingLLM() if stream else NonStreamingLLM()
+
+        monkeypatch.setattr(generate_module, "get_llm", fake_get_llm)
+
+        # Act
+        sql, reasoning, explanation = await generate_module._llm_generate(
+            schema_text="### 表: sales",
+            dialect_hint="SQLite 方言",
+            dialect="sqlite",
+            query="统计销售额",
+            error_ctx="",
+            skill_prompt="",
+            grounding_context="",
+            config={"metadata": {"request_id": "fallback-1"}},
+            conversation_history=None,
+        )
+
+        # Assert
+        assert calls == [True, False]
+        assert sql == "SELECT SUM(amount) FROM sales"
+        assert reasoning == ""
+        assert explanation == "stream fallback"
+        assert captured["messages"]
+        assert captured["config"]["metadata"]["request_id"] == "fallback-1"
 
 
 class TestAnalysisPromptGrounding:

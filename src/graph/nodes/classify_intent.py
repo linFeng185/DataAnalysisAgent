@@ -28,13 +28,29 @@ async def classify_intent_node(state: AnalysisState) -> dict:
         "字段类型", "字段含义", "字段说明", "字段是什么",
         "函数怎么用", "语法怎么用", "是什么意思", "什么是 schema",
     )
+    from src.graph.indicator_catalog import is_indicator_catalog_query
+
+    indicator_catalog_phrases = (
+        "有哪些指标", "有哪些数据指标", "有什么指标", "指标有哪些", "指标清单", "指标列表", "支持哪些指标",
+    )
+    indicator_value_phrases = (
+        "下降", "上升", "增长", "减少", "趋势", "同比", "环比", "排名", "最高", "最低",
+    )
+    logger.info(
+        "意图规则判定边界",
+        metadata_matches=[phrase for phrase in metadata_phrases if phrase in q],
+        indicator_catalog_matches=[phrase for phrase in indicator_catalog_phrases if phrase in q],
+        indicator_value_matches=[phrase for phrase in indicator_value_phrases if phrase in q],
+        history_turns=len(ch),
+    )
+    indicator_catalog = is_indicator_catalog_query(q)
     function_help = "怎么用" in q and any(
         marker in q for marker in ("date_", "count(", "sum(", "avg(", "函数", "语法")
     )
     llm_plan = None
-    if any(w in q for w in metadata_phrases) or function_help:
+    if indicator_catalog or any(w in q for w in metadata_phrases) or function_help:
         intent = "metadata"
-    elif any(w in q for w in ("上传", "文件", "csv", "excel")):
+    elif state.get("file_ids") or any(w in q for w in ("上传", "文件", "附件", "csv", "excel")):
         intent = "file_analysis"
     elif any(w in q for w in ("相关性", "相关系数", "相关关系", "异常值", "异常")):
         intent = "attribution"
@@ -48,7 +64,8 @@ async def classify_intent_node(state: AnalysisState) -> dict:
         intent = "aggregation"
     elif any(w in q for w in ("你好", "谢谢", "帮助", "功能", "能做什么", "你是谁")):
         intent = "chat"
-    elif ch and any(w in q for w in ("规律", "趋势", "总结", "发现", "说明了", "能看出",
+    elif ch and any(w in q for w in ("刚才", "上一轮", "上一次", "之前", "刚刚", "这些数据", "这份数据",
+                                      "规律", "趋势", "总结", "发现", "说明了", "能看出",
                                       "有什么规律", "什么规律", "之间存在", "之间有什么",
                                       "分析一下这些", "怎么看", "你怎么", "你觉得")):
         intent = "meta"
@@ -58,7 +75,8 @@ async def classify_intent_node(state: AnalysisState) -> dict:
                                "平均", "最高", "最低", "占比", "对比")):
         intent = "query"
     elif ch:
-        intent = "query"
+        llm_plan = await _llm_classify(q, conversation_history=ch)
+        intent = llm_plan.intent if llm_plan is not None else "meta"
     else:
         llm_plan = await _llm_classify(q)
         intent = llm_plan.intent if llm_plan is not None else "chat"
@@ -214,9 +232,13 @@ async def _select_authorized_datasource(
 
 
 # 方法作用：在规则未命中时使用任务模型识别意图，并在模型故障时安全降级。
-# Args: query - 用户原始问题。
+# Args: query - 用户原始问题；conversation_history - 用于判断追问语义的最近对话历史。
 # Returns: 合法意图名称；模型不可用、输出无效或调用失败时返回 None。
-async def _llm_classify(query: str) -> TaskPlanOutput | None:
+async def _llm_classify(
+    query: str,
+    *,
+    conversation_history: list[dict] | None = None,
+) -> TaskPlanOutput | None:
     """LLM 意图分类——规则未命中时回退。"""
     logger.debug("LLM 意图分类入口", query=query[:80])
     try:
@@ -227,9 +249,24 @@ async def _llm_classify(query: str) -> TaskPlanOutput | None:
         from src.llm.invocation import invoke_structured
         from src.llm.prompt_budget import PromptSection
 
+        history_text = "\n".join(
+            f"Q: {str(item.get('user_query', '') or '')[:200]}\n"
+            f"A: {str(item.get('analysis_summary', '') or '')[:200]}"
+            for item in list(conversation_history or [])[-3:]
+            if isinstance(item, dict) and item.get("user_query")
+        )
+        sections = [PromptSection("query", query, priority=100, min_chars=100, max_chars=650)]
+        if history_text:
+            sections.append(PromptSection(
+                "history",
+                f"## 最近对话\n{history_text}",
+                priority=80,
+                min_chars=100,
+                max_chars=900,
+            ))
         result = await invoke_structured(
             "intent.classify",
-            [PromptSection("query", query, priority=100, min_chars=100, max_chars=650)],
+            sections,
             output_model=TaskPlanOutput,
             task="classify_intent",
         )

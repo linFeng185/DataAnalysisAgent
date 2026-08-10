@@ -4,7 +4,17 @@ from __future__ import annotations
 
 from typing import Any, Literal, Self
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, PositiveInt, model_validator
+
+
+class ActionRequestInput(BaseModel):
+    """Chat API 接收的结构化外部动作请求。"""
+
+    action_name: str = Field(..., min_length=1, max_length=128)
+    payload: dict[str, Any] = Field(default_factory=dict)
+    idempotency_key: str = Field(default="", max_length=128)
+    confirmed: bool = False
+    metadata: dict[str, Any] = Field(default_factory=dict)
 
 
 class ChatRequest(BaseModel):
@@ -21,6 +31,8 @@ class ChatRequest(BaseModel):
         pattern=r"^$|^[A-Za-z0-9][A-Za-z0-9_-]{0,31}$",
     )
     enabled_skill_ids: list[str] = Field(default_factory=list, max_length=20)
+    file_ids: list[PositiveInt] = Field(default_factory=list, max_length=10)
+    action_request: ActionRequestInput | None = None
     stream: bool = False
 
     # 方法作用：校验对话级连接和模型是否成对出现，避免选择语义不完整。
@@ -76,7 +88,7 @@ class ChatResponse(BaseModel):
     user_query: str = ""
     sql: str = ""
     sql_statements: list[dict] = Field(default_factory=list)
-    data: list[dict] = Field(default_factory=list)
+    data: list[dict] | dict[str, Any] = Field(default_factory=list)
     row_count: int = 0
     truncated: bool = False
     analysis: dict = Field(default_factory=dict)
@@ -200,5 +212,4 @@ class KnowledgeTagStatusRequest(BaseModel):
 class HealthResponse(BaseModel):
     status: str = "ok"
     version: str = "0.1.0"
-    llm_available: bool = False
     uptime_seconds: float = 0

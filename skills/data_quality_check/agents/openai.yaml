@@ -1,0 +1,4 @@
+interface:
+  display_name: "数据质量检查"
+  short_description: "检查行式数据的空值率、重复值和数值异常情况"
+  default_prompt: "使用 $data-quality-check 检查这组数据的完整性、重复值和异常值。"

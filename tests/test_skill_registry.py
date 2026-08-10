@@ -5,7 +5,9 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import threading
 import zipfile
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
 
@@ -100,6 +102,78 @@ class TestSkillRegistry:
         # Act / Assert
         with pytest.raises(ValueError, match="SHA-256"):
             await client.download_package(package)
+
+    # 方法作用：验证跨主机重定向在目标请求发出前被白名单阻断。
+    # Args: self - pytest 测试类实例。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    async def test_redirect_to_untrusted_host_is_blocked_before_request(self) -> None:
+        """自动跟随重定向不能先访问 SSRF 目标再检查最终 URL。"""
+        # Arrange
+        from src.skill_registry import SkillRegistryClient
+
+        attacker_hit = threading.Event()
+
+        class AttackerHandler(BaseHTTPRequestHandler):
+            # 方法作用：记录非白名单目标是否收到真实 HTTP 请求。
+            # Args: self - 当前 HTTP 请求处理器。
+            # Returns: 无返回值。
+            def do_GET(self) -> None:  # noqa: N802
+                attacker_hit.set()
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(b"unexpected")
+
+            # 方法作用：关闭测试 HTTP Server 的默认 stderr 访问日志。
+            # Args: self - 当前处理器；format - 日志格式；args - 格式参数。
+            # Returns: 无返回值。
+            def log_message(self, format: str, *args: object) -> None:
+                del format, args
+
+        attacker = ThreadingHTTPServer(("127.0.0.1", 0), AttackerHandler)
+        attacker_thread = threading.Thread(target=attacker.serve_forever, daemon=True)
+        attacker_thread.start()
+
+        class RedirectHandler(BaseHTTPRequestHandler):
+            # 方法作用：把可信 localhost 请求重定向到未授权 127.0.0.1 主机。
+            # Args: self - 当前 HTTP 请求处理器。
+            # Returns: 无返回值。
+            def do_GET(self) -> None:  # noqa: N802
+                self.send_response(302)
+                self.send_header(
+                    "Location",
+                    f"http://127.0.0.1:{attacker.server_address[1]}/payload",
+                )
+                self.end_headers()
+
+            # 方法作用：关闭测试 HTTP Server 的默认 stderr 访问日志。
+            # Args: self - 当前处理器；format - 日志格式；args - 格式参数。
+            # Returns: 无返回值。
+            def log_message(self, format: str, *args: object) -> None:
+                del format, args
+
+        redirector = ThreadingHTTPServer(("127.0.0.1", 0), RedirectHandler)
+        redirect_thread = threading.Thread(target=redirector.serve_forever, daemon=True)
+        redirect_thread.start()
+        client = SkillRegistryClient(
+            f"http://localhost:{redirector.server_address[1]}",
+            trusted_hosts=["localhost"],
+        )
+
+        try:
+            # Act / Assert
+            with pytest.raises(ValueError, match="白名单"):
+                await client._fetch(  # noqa: SLF001
+                    f"http://localhost:{redirector.server_address[1]}/start",
+                    1024,
+                )
+            assert attacker_hit.is_set() is False
+        finally:
+            redirector.shutdown()
+            redirector.server_close()
+            attacker.shutdown()
+            attacker.server_close()
+            redirect_thread.join(timeout=2)
+            attacker_thread.join(timeout=2)
 
     # 方法作用：验证通过审核和校验的包安装到可信 private 目录并注入缓存。
     # Args: self - pytest 测试类实例；tmp_path - pytest 临时目录。

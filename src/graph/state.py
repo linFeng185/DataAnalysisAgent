@@ -69,6 +69,9 @@ class AnalysisState(TypedDict, total=False):
     enabled_skill_ids: Annotated[list[str], UntrackedValue]
     """用户在当前请求显式授权的 Skill 复合资源 ID；空列表保留自动匹配。"""
 
+    file_ids: Annotated[list[int], UntrackedValue]
+    """当前请求显式附带且由 FileStore 继续执行身份校验的文件 ID。"""
+
     activated_skills: Annotated[list[str], UntrackedValue]
     activated_skill_ids: Annotated[list[str], UntrackedValue]
     """最终激活 Skill 的复合资源 ID。"""
@@ -139,6 +142,12 @@ class AnalysisState(TypedDict, total=False):
 
     needs_time_range: Annotated[bool, UntrackedValue]
     """是否需要用户补充时间范围。—— generate_sql 写，build_response 读"""
+
+    needs_input: Annotated[bool, UntrackedValue]
+    """是否需要用户补充非时间类必要输入。—— generate_sql 写，build_response 读"""
+
+    input_explanation: Annotated[str, UntrackedValue]
+    """非时间类参数补充提示。—— generate_sql 写，build_response 读"""
 
     time_range_explanation: Annotated[str, UntrackedValue]
     """时间范围补充提示文本。—— generate_sql 写，build_response 读"""

@@ -7,7 +7,6 @@ import time
 from fastapi import APIRouter, Body, File, HTTPException, Query, UploadFile
 
 from src.api.schemas import HealthResponse, ModelTestRequest
-from src.llm.client import is_llm_available
 from src.logging_config import get_logger
 
 logger = get_logger(__name__)
@@ -20,20 +19,9 @@ _started_at = time.time()
 @router.get("/models")
 async def list_models():
     from src.api.auth import get_current_tenant_id
-    from src.app_context import get_tenant_policy
-    from src.config import get_settings
-    from src.llm.model_registry import get_model_registry
     from src.llm.tenant_config import list_tenant_model_options
 
-    tenant_options = await list_tenant_model_options(tenant_id=get_current_tenant_id())
-    if tenant_options["models"] or get_tenant_policy().multi_tenant:
-        return tenant_options
-    items = []
-    for m in get_model_registry().list_all():
-        items.append({"id": m.model_id, "provider": m.provider, "name": m.display_name,
-                      "context_window": m.capabilities.context_window,
-                      "vision": m.capabilities.vision, "reasoning": m.capabilities.reasoning})
-    return {"models": items, "default": get_settings().llm_model}
+    return await list_tenant_model_options(tenant_id=get_current_tenant_id())
 
 
 @router.post("/models/test")
@@ -154,10 +142,18 @@ async def forecast_asset(payload: dict = Body(...)):
 
 # ---- Health (11.1.10) ----
 
+# 方法作用：返回应用进程存活状态，不在无租户上下文中探测业务 LLM。
+# Args: 无。
+# Returns: 包含状态、版本和运行时长的 HealthResponse。
 @router.get("/health", response_model=HealthResponse)
 async def health():
-    return HealthResponse(status="ok", llm_available=is_llm_available(),
-                          uptime_seconds=round(time.time() - _started_at, 2))
+    """返回应用进程存活状态，不在无租户上下文中探测业务 LLM。"""
+    logger.debug("健康检查入口")
+    response = HealthResponse(
+        status="ok",
+        uptime_seconds=round(time.time() - _started_at, 2),
+    )
+    return response
 
 
 # 方法作用：返回 Prometheus exposition 文本供受信任监控系统抓取。

@@ -676,7 +676,7 @@ class AuthMiddleware:
             return
 
         request = Request(scope, receive=receive)
-        identity, denial = self._authenticate_request(request)
+        identity, denial = await self._authenticate_request(request)
         if denial is not None:
             await denial(scope, receive, send)
             logger.debug("认证 ASGI 调用完成", path=request.url.path, mode="denied")
@@ -714,7 +714,7 @@ class AuthMiddleware:
         Returns: Response
         """
         logger.debug("认证兼容调用入口", path=request.url.path, method=request.method)
-        identity, denial = self._authenticate_request(request)
+        identity, denial = await self._authenticate_request(request)
         if denial is not None:
             logger.debug("认证兼容调用完成", path=request.url.path, mode="denied")
             return denial
@@ -737,11 +737,11 @@ class AuthMiddleware:
     # 方法作用：验证管理 Key 和 JWT，并返回身份或拒绝响应。
     # Args: request - 当前 HTTP 请求。
     # Returns: 公开请求返回空身份；拒绝时返回 401；成功时返回身份元组。
-    def _authenticate_request(
+    async def _authenticate_request(
         self,
         request: Request,
     ) -> tuple[AuthIdentity | None, JSONResponse | None]:
-        """执行不消费请求体的同步认证决策。"""
+        """执行不消费请求体的认证决策并复核数据库当前身份。"""
         from src.security.api_access_policy import AuthMode
 
         logger.debug("认证决策入口", path=request.url.path, method=request.method)
@@ -826,6 +826,28 @@ class AuthMiddleware:
             logger.warning("JWT 身份不满足租户策略", error=str(exc))
             return None, _unauthorized("令牌身份无效")
 
+        if str(getattr(settings, "database_url", "") or "").strip():
+            try:
+                current_identity = await self._load_current_identity(identity[0])
+            except Exception as exc:
+                logger.error(
+                    "JWT 当前身份复核失败",
+                    user_id=identity[0],
+                    error=str(exc),
+                    exc_info=True,
+                )
+                if getattr(settings, "env", "prod") == "prod":
+                    return None, _unauthorized("认证服务暂不可用")
+            else:
+                if current_identity is None or current_identity != identity:
+                    logger.warning(
+                        "JWT 身份已失效",
+                        user_id=identity[0],
+                        tenant_id=identity[1],
+                        role=identity[2],
+                    )
+                    return None, _unauthorized("令牌身份已失效")
+
         if auth_mode is AuthMode.SUPER_ADMIN and not (
             identity[0] == SUPER_ADMIN_USER_ID and identity[2] == "super_admin"
         ):
@@ -845,6 +867,39 @@ class AuthMiddleware:
             role=identity[2],
         )
         return identity, None
+
+    # 方法作用：从数据库读取用户和租户当前状态并组装可比较身份。
+    # Args: user_id - JWT 声明的用户 ID。
+    # Returns: 当前启用身份；用户或租户停用、用户不存在时返回 None。
+    async def _load_current_identity(self, user_id: int) -> AuthIdentity | None:
+        logger.debug("JWT 当前身份查询入口", user_id=user_id)
+        pool = await get_pg_pool()
+        async with pool.acquire() as connection:
+            row = await connection.fetchrow(
+                "SELECT u.id, u.tenant_id, u.username, u.role, u.is_active, "
+                "t.code AS tenant_code, t.is_active AS tenant_active "
+                "FROM users u JOIN tenants t ON t.id=u.tenant_id WHERE u.id=$1",
+                user_id,
+            )
+        if not row or not bool(row.get("is_active", True)) or not bool(
+            row.get("tenant_active", True)
+        ):
+            logger.warning("JWT 当前身份不可用", user_id=user_id)
+            return None
+        result: AuthIdentity = (
+            int(row["id"]),
+            int(row["tenant_id"]),
+            str(row["role"]).strip().lower(),
+            str(row["tenant_code"]).strip().lower(),
+            str(row["username"]),
+        )
+        logger.debug(
+            "JWT 当前身份查询完成",
+            user_id=result[0],
+            tenant_id=result[1],
+            role=result[2],
+        )
+        return result
 
     # 方法作用：把认证身份写入当前协程 ContextVar。
     # Args: identity - user_id、tenant_id、role、tenant_code、username 身份元组。

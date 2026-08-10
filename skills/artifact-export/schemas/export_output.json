@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "分析产物导出输出",
+  "type": "object",
+  "required": ["format", "media_type", "extension", "content", "byte_size", "sha256", "sanitized_formula_cells", "written_to_filesystem"],
+  "properties": {
+    "format": {"type": "string", "enum": ["json", "csv", "markdown"]},
+    "media_type": {"type": "string", "minLength": 1},
+    "extension": {"type": "string", "enum": [".json", ".csv", ".md"]},
+    "content": {"type": "string"},
+    "byte_size": {"type": "integer", "minimum": 0},
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "sanitized_formula_cells": {"type": "integer", "minimum": 0},
+    "written_to_filesystem": {"type": "boolean", "const": false}
+  },
+  "additionalProperties": false
+}

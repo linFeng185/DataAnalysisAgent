@@ -1,0 +1,26 @@
+version: 1
+feature_id: 9.8.9
+cases:
+  - id: numeric_accepts_valid_money_and_unit
+    description: 两位小数金额和匹配单位应通过
+    input:
+      rows: [{amount: 10.25, currency: CNY}]
+      rules: [{column: amount, kind: money, unit_column: currency, expected_unit: CNY}]
+    assertions:
+      - valid 等于 true
+      - input_modified 等于 false
+  - id: numeric_detects_rounding_and_unit_errors
+    description: 超出金额精度和单位不一致应同时报错
+    input:
+      rows: [{amount: 10.255, currency: USD}]
+      rules: [{column: amount, kind: money, rounding_mode: half_up, unit_column: currency, expected_unit: CNY}]
+    assertions:
+      - valid 等于 false
+      - findings 包含代码 ROUNDING_REQUIRED
+      - findings 包含代码 UNIT_MISMATCH
+  - id: numeric_rejects_duplicate_rule
+    description: 同字段重复规则必须拒绝
+    input:
+      rows: [{value: 1}]
+      rules: [{column: value}, {column: value}]
+    expected_error: 同一字段只能声明一条

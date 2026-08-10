@@ -1,0 +1,32 @@
+version: 1
+feature_id: 9.8.8
+cases:
+  - id: coverage_accepts_two_independent_sources
+    description: 关键主张具有两个独立且可定位来源时应通过
+    input:
+      claims:
+        - {claim_id: c1, claim_hash: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa, critical: true, citation_ids: [e1, e2]}
+      evidence:
+        - {evidence_id: e1, source_id: source-a, locator: {page: 1}, content_hash: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb}
+        - {evidence_id: e2, source_id: source-b, locator: {page: 2}, content_hash: cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc}
+    assertions:
+      - gate_passed 等于 true
+      - coverage_score 等于 1
+  - id: coverage_detects_missing_reference
+    description: 引用不存在时主张不得视为已覆盖
+    input:
+      claims:
+        - {claim_id: c1, claim_hash: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa, citation_ids: [missing]}
+      evidence: []
+    assertions:
+      - gate_passed 等于 false
+      - invalid_references 非空
+      - raw_claims_returned 等于 false
+  - id: coverage_rejects_duplicate_claim
+    description: 重复主张标识必须拒绝
+    input:
+      claims:
+        - {claim_id: c1, claim_hash: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa}
+        - {claim_id: c1, claim_hash: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb}
+      evidence: []
+    expected_error: 主张标识重复

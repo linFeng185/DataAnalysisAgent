@@ -1,26 +1,44 @@
 import { useState } from 'react';
 import { Card, Tag, Typography, Button, Collapse, Space } from 'antd';
-import { DownOutlined, RightOutlined, CheckCircleOutlined } from '@ant-design/icons';
+import {
+  CheckCircleOutlined, CheckOutlined, ClockCircleOutlined,
+  CloseCircleOutlined, DownOutlined, RightOutlined,
+} from '@ant-design/icons';
 import SqlPanel from './SqlPanel';
 import DataTable from './DataTable';
 import ChartPanel from './ChartPanel';
-import type { SQLStatement } from '../types';
+import type { ActionRequestPayload, SQLStatement } from '../types';
 
-export default function ResultCard({ sql, tokens, finalResult, validationErrors, onSendMessage }: {
+// 方法作用：展示统一分析结果、待补参数状态和外部动作人工确认入口。
+// Args: sql/tokens/finalResult/validationErrors - 当前轮次输出；onSendMessage - 补参回调；onConfirmAction - 动作确认回调。
+// Returns: 分析结果卡片。
+export default function ResultCard({
+  sql, tokens, finalResult, validationErrors, onSendMessage, onConfirmAction,
+}: {
   sql: string; tokens: string;
   finalResult: Record<string, unknown> | null; validationErrors: string[];
   onSendMessage?: (msg: string) => void;
+  onConfirmAction?: (request: ActionRequestPayload) => void;
 }) {
   const [expanded, setExpanded] = useState(true);
   const analysis = finalResult?.analysis as Record<string, unknown> | undefined;
   const errorMessage = finalResult?.error_message as string || '';
-  const isError = !finalResult?.success && !!errorMessage;
+  const status = String(finalResult?.status || (finalResult?.success ? 'success' : 'failed'));
   const needsTimeRange = finalResult?.needs_time_range as boolean;
+  const needsInput = status === 'needs_input' || status === 'needs_confirmation' || needsTimeRange;
+  const isError = status === 'failed' || (!finalResult?.success && !needsInput);
+  const isSuccessful = !isError && !needsInput;
   const summary = isError ? errorMessage
     : (analysis?.summary as string || tokens?.slice(0, 200) || '分析完成');
   const insights = (analysis?.insights as string[]) || [];
+  const renderedReport = (analysis?.rendered_report as string) || '';
   const chartConfig = finalResult?.chart as { type: string; option?: Record<string, unknown> } | undefined;
-  const data = finalResult?.data as Record<string, unknown>[] | undefined;
+  const rawData = finalResult?.data;
+  const data = Array.isArray(rawData) ? rawData as Record<string, unknown>[] : [];
+  const actionData = rawData && !Array.isArray(rawData)
+    ? rawData as Record<string, unknown> : undefined;
+  const actionRequest = actionData?.action_request as ActionRequestPayload | undefined;
+  const hasData = data.length > 0;
   const sqlStatements = (finalResult?.sql_statements as SQLStatement[]) || [];
   const effectiveSql = (finalResult?.sql as string) || sql;
   const sqlContent = sqlStatements.length > 0 ? (
@@ -51,8 +69,9 @@ export default function ResultCard({ sql, tokens, finalResult, validationErrors,
       label: sqlStatements.length > 1 ? `执行 SQL (${sqlStatements.length})` : '执行 SQL',
       children: sqlContent,
     }] : []),
-    ...(data ? [{ key: 'data', label: `数据 (${data.length} 行)`, children: <DataTable data={data} /> }] : []),
-    ...(chartConfig && chartConfig.type !== 'table' ? [{ key: 'chart', label: `图表 (${chartConfig.type})`, children: <ChartPanel chartConfig={chartConfig} rows={data || []} /> }] : []),
+    ...(hasData ? [{ key: 'data', label: `数据 (${data.length} 行)`, children: <DataTable data={data} /> }] : []),
+    ...(isSuccessful && hasData && chartConfig && chartConfig.type !== 'table' ? [{ key: 'chart', label: `图表 (${chartConfig.type})`, children: <ChartPanel chartConfig={chartConfig} rows={data} /> }] : []),
+    ...(renderedReport ? [{ key: 'report', label: '报告正文', children: <Typography.Paragraph style={{ whiteSpace: 'pre-wrap', marginBottom: 0 }}>{renderedReport}</Typography.Paragraph> }] : []),
     ...(tokens ? [{ key: 'raw', label: '完整响应', children: <div style={{ background: '#f5f5f5', padding: 12, borderRadius: 6, whiteSpace: 'pre-wrap', maxHeight: 300, overflow: 'auto', fontSize: 13 }}>{tokens}</div> }] : []),
   ];
 
@@ -60,7 +79,9 @@ export default function ResultCard({ sql, tokens, finalResult, validationErrors,
     <Card size="small"
       title={<Space>
         {isError ? (
-          <><span>执行出错</span><Tag color="error">失败</Tag></>
+          <><span>执行出错</span><Tag icon={<CloseCircleOutlined />} color="error">失败</Tag></>
+        ) : needsInput ? (
+          <><span>{status === 'needs_confirmation' ? '等待人工确认' : '需要补充信息'}</span><Tag icon={<ClockCircleOutlined />} color="processing">待处理</Tag></>
         ) : (
           <><span>分析完成</span><Tag icon={<CheckCircleOutlined />} color="success">成功</Tag></>
         )}
@@ -83,6 +104,16 @@ export default function ResultCard({ sql, tokens, finalResult, validationErrors,
             ))}
           </Space>
         </div>
+      )}
+      {expanded && status === 'needs_confirmation' && actionRequest && (
+        <Button
+          type="primary"
+          icon={<CheckOutlined />}
+          onClick={() => onConfirmAction?.({ ...actionRequest, confirmed: true })}
+          style={{ marginBottom: 12 }}
+        >
+          确认执行
+        </Button>
       )}
       {expanded && insights.length > 0 && (
         <div style={{ marginBottom: 12 }}>

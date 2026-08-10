@@ -77,3 +77,48 @@ class TestP3Experience:
         assert "/automation/schedules" in page
         assert "/automation/notifications" in page
         assert "/run" in page
+
+    # 方法作用：验证结果卡区分成功、补参、待确认和失败并展示报告正文。
+    # Args: self - pytest 测试类实例。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    def test_result_card_handles_non_success_states_and_reports(self) -> None:
+        """needs_input 不能显示成功或空图表，rendered_report 必须有可见出口。"""
+        # Arrange
+        source = Path("frontend/src/components/ResultCard.tsx").read_text(encoding="utf-8")
+
+        # Act / Assert
+        assert "needs_input" in source
+        assert "needs_confirmation" in source
+        assert "rendered_report" in source
+        assert "data.length > 0" in source
+        assert "确认执行" in source
+        assert "action_request" in source
+
+    # 方法作用：验证聊天页提供附件上传并把 file_ids 传入流式请求。
+    # Args: self - pytest 测试类实例。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    def test_chat_page_supports_private_attachments(self) -> None:
+        """用户应能上传附件、看到附件状态，且附件分析不强制选择数据源。"""
+        # Arrange
+        page = Path("frontend/src/pages/ChatPage.tsx").read_text(encoding="utf-8")
+        client = Path("frontend/src/api/client.ts").read_text(encoding="utf-8")
+        hook = Path("frontend/src/hooks/useChat.ts").read_text(encoding="utf-8")
+
+        # Act / Assert
+        assert "/chat/files" in client
+        assert "UploadOutlined" in page
+        assert "file_ids" in client
+        assert "fileIds" in hook
+        assert "fileIds.length === 0" in page
+
+    # 方法作用：验证知识库标题使用服务端总数而不是当前页长度。
+    # Args: self - pytest 测试类实例。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    def test_knowledge_header_uses_total_count(self) -> None:
+        """分页到第二页时标题仍应展示完整条目总数。"""
+        # Arrange
+        source = Path("frontend/src/pages/KnowledgePage.tsx").read_text(encoding="utf-8")
+
+        # Act / Assert
+        assert "{total} 条" in source
+        assert "{entries.length} 条" not in source

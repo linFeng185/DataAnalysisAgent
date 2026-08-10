@@ -12,7 +12,7 @@
 | [06-knowledge.md](06-knowledge.md) | 6. 知识库管理 | 85 行 |
 | [07-memory.md](07-memory.md) | 7. 记忆系统 | 58 行 |
 | [08-mcp.md](08-mcp.md) | 8. MCP 集成 | 40 行 |
-| [09-skills.md](09-skills.md) | 9. Skills 技能系统 | 45 行 |
+| [09-skills.md](09-skills.md) | 9. Skills 技能系统 | 117 行 |
 | [10-llm.md](10-llm.md) | 10. LLM 管理层 | 24 行 |
 | [11-api.md](11-api.md) | 11. API 层 | 87 行 |
 | [12-security.md](12-security.md) | 12. 安全模块 | 47 行 |

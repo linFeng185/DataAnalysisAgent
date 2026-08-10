@@ -15,7 +15,7 @@
 | 11.1.7 | POST /datasources | `src/api/routes.py` | 注册数据源 | 单测完成 (2.3.7) | P1 |
 | 11.1.8 | DELETE /datasources/{name} | `src/api/routes.py` | 删除数据源 | 单测完成 (2.3.8) | P1 |
 | 11.1.9 | GET /datasources | `src/api/routes.py` | 按当前身份授权过滤后列出数据源 (分页) | 单测完成 (2.3.9) | P1 |
-| 11.1.10 | GET /health | `src/api/routes.py` | 健康检查 | 单测完成 | P0 |
+| 11.1.10 | GET /health | `src/api/routes/management.py` | 仅返回应用存活、版本和运行时长，不执行无租户 LLM 探测 | 单测完成 | P0 |
 | 11.1.11 | PUT /schema/.../comment | `src/api/routes.py` | 手动标注字段 | 单测完成 | P1 |
 | 11.1.12 | POST /mcp/{name}/reset | `src/api/routes.py` | Phase 2: MCP reset (依赖模块 8) | 待开发[^8] | P1 |
 | 11.1.13 | GET /metrics | `src/api/routes.py` | Phase 2: 指标列表 (依赖模块 6) | 待开发 | P2 |
@@ -64,7 +64,7 @@
 | 11.2.1 | ChatRequest | `src/api/schemas.py` | query / session_id / datasource | 单测完成 | P0 |
 | 11.2.2 | ChatResponse | 同上 | success / sql / sql_statements / data / analysis / chart / row_count / truncated | 单测完成 | P0 |
 | 11.2.5 | DataSourceCreateRequest | 同上 | name / dialect / host / ... | 单测完成 | P0 |
-| 11.2.7 | HealthResponse | 同上 | status / llm_available / uptime | 单测完成 | P0 |
+| 11.2.7 | HealthResponse | 同上 | status / version / uptime_seconds | 单测完成 | P0 |
 | 11.2.8 | ModelTestRequest | 同上 | model_id 长度与字符集校验，模型测试固定单 token | 单测完成 | P0 |
 | 11.2.9 | Schema 可变默认工厂 | 同上 | list/dict 字段统一使用 Field(default_factory=...) | 单测完成 | P1 |
 
@@ -89,6 +89,6 @@
 | 功能点 | 不开发原因 | 可开发条件 | 预计开发时机 |
 |--------|------------|------------|--------------|
 | 11.1.12 POST /mcp/{name}/reset | MCPClientManager 已具备连接生命周期，但 reset 的并发请求处理和失败回滚语义尚未定义，且缺少可控 MCP 集成测试服务 | 明确 reset 状态机并完成 StaticMCPTestServer 后，可直接接入现有 Manager | Phase 2，MCP 生命周期集成测试就绪后 |
-| 11.1.13 GET /metrics | 项目尚未接入 Prometheus collector，当前只有业务指标文档，不存在可枚举的运行指标注册表 | 完成 17.3.2 Prometheus metrics 与权限策略 | Phase 3，可观测性模块开发时 |
+| 11.1.13 GET /metrics | 当前同路径用于 Prometheus exposition；业务指标仍缺少独立 MetricDefinition 生命周期与分页 API | 完成指标定义模型、审核状态并为业务指标目录确定独立路由 | Phase 4，指标治理模块 |
 
 ---

@@ -1,0 +1,29 @@
+version: 1
+feature_id: 9.7.3
+cases:
+  - id: diff_reports_added_removed_modified
+    description: 两版数据应分别统计新增、删除和字段修改
+    input:
+      baseline_rows: [{id: 1, amount: 10}, {id: 2, amount: 20}]
+      current_rows: [{id: 1, amount: 11}, {id: 3, amount: 30}]
+      primary_key: [id]
+    assertions:
+      - summary.added 等于 1
+      - summary.removed 等于 1
+      - summary.modified 等于 1
+  - id: diff_applies_numeric_tolerance
+    description: 数值差异不超过容差时应视为相同
+    input:
+      baseline_rows: [{id: 1, amount: 10}]
+      current_rows: [{id: 1, amount: 10.001}]
+      primary_key: [id]
+      numeric_tolerance: 0.01
+    assertions:
+      - identical 等于 true
+  - id: diff_rejects_duplicate_primary_key
+    description: 任一侧存在重复主键时必须拒绝比较
+    input:
+      baseline_rows: [{id: 1}, {id: 1}]
+      current_rows: []
+      primary_key: [id]
+    expected_error: 存在重复主键

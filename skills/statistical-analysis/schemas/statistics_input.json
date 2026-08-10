@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "统计分析输入",
+  "type": "object",
+  "required": ["rows"],
+  "properties": {
+    "rows": {"type": "array", "maxItems": 10000, "items": {"type": "object"}},
+    "modes": {
+      "type": "array",
+      "default": ["descriptive", "trend", "outliers", "correlation", "concentration"],
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {"type": "string", "enum": ["descriptive", "trend", "outliers", "correlation", "concentration"]}
+    },
+    "time_column": {"type": "string", "default": ""},
+    "value_column": {"type": "string", "default": ""},
+    "top_n": {"type": "integer", "minimum": 1, "maximum": 100, "default": 10},
+    "z_threshold": {"type": "number", "minimum": 0.5, "maximum": 10, "default": 3.0}
+  },
+  "additionalProperties": false
+}

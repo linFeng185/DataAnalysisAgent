@@ -168,7 +168,9 @@ def check_column_whitelist(sql: str, allowed_columns: list[str]) -> str | None:
     try:
         import sqlglot
         from sqlglot import exp
-        whitelist = set(c.lower() for c in allowed_columns)
+        whitelist = {str(column).strip().lower() for column in allowed_columns}
+        bare_whitelist = {column for column in whitelist if "." not in column}
+        qualified_whitelist = {column for column in whitelist if "." in column}
         tree = sqlglot.parse_one(sql)
         if not tree:
             logger.warning("列白名单校验失败", reason="SQL 解析结果为空")
@@ -189,8 +191,13 @@ def check_column_whitelist(sql: str, allowed_columns: list[str]) -> str | None:
             col = node.name.lower()
             if col in ("*", "1", "true", "false"):
                 continue
-            if col not in whitelist and col not in violations:
-                violations.append(col)
+            qualifier = node.table.lower()
+            referenced = f"{qualifier}.{col}" if qualifier else col
+            allowed = col in bare_whitelist or (
+                bool(qualifier) and referenced in qualified_whitelist
+            )
+            if not allowed and referenced not in violations:
+                violations.append(referenced)
         if violations:
             message = f"列权限不足: {', '.join(violations[:5])} 不在允许范围内"
             logger.warning("列白名单校验失败", violations=violations[:5])
@@ -220,6 +227,7 @@ def inject_row_filter(sql: str, row_filter: str) -> str:
     try:
         import sqlglot
         from sqlglot import exp
+        from sqlglot.optimizer.scope import traverse_scope
 
         from src.exceptions import SQLSecurityError
 
@@ -229,13 +237,26 @@ def inject_row_filter(sql: str, row_filter: str) -> str:
         filter_expr = sqlglot.parse_one(row_filter)
         if not filter_expr or isinstance(filter_expr, (exp.Query, exp.Command)):
             raise SQLSecurityError("行过滤条件不是布尔表达式", "ROW_FILTER")
-        where = tree.args.get("where")
-        if where:
-            where.this = exp.And(this=where.this, expression=filter_expr)
-        else:
-            tree.set("where", exp.Where(this=filter_expr))
+        targets = [
+            scope.expression
+            for scope in traverse_scope(tree)
+            if isinstance(scope.expression, exp.Select)
+            and any(isinstance(source, exp.Table) for source in scope.sources.values())
+        ]
+        if not targets and isinstance(tree, exp.Select):
+            targets = [tree]
+        for select in targets:
+            where = select.args.get("where")
+            scoped_filter = filter_expr.copy()
+            if where:
+                where.set(
+                    "this",
+                    exp.And(this=where.this.copy(), expression=scoped_filter),
+                )
+            else:
+                select.set("where", exp.Where(this=scoped_filter))
         result = tree.sql()
-        logger.info("行过滤注入完成", filter=row_filter[:80])
+        logger.info("行过滤注入完成", filter=row_filter[:80], select_count=len(targets))
         return result
     except Exception as exc:
         from src.exceptions import SQLSecurityError

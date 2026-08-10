@@ -458,7 +458,7 @@ export default function KnowledgePage() {
   return (
     <div style={{ maxWidth: 1000, margin: '0 auto' }}>
       <Card title={<Space><DatabaseOutlined />知识库</Space>}
-        extra={<Typography.Text type="secondary">{entries.length} 条, {docs.length} 份文档</Typography.Text>}>
+        extra={<Typography.Text type="secondary">{total} 条, {docs.length} 份文档</Typography.Text>}>
         <Tabs items={tabItems} />
       </Card>
 

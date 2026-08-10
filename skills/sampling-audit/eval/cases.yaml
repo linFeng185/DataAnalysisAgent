@@ -1,0 +1,28 @@
+version: 1
+feature_id: 9.7.4
+cases:
+  - id: sampling_is_reproducible
+    description: 相同种子的随机抽样应产生稳定索引
+    input:
+      rows: [{id: 1}, {id: 2}, {id: 3}, {id: 4}]
+      sample_size: 2
+      method: random
+      seed: 7
+    assertions:
+      - actual_sample_size 等于 2
+      - 重复执行的 selected_indices 完全一致
+  - id: sampling_handles_empty_population
+    description: 空总体应返回空样本和明确警告
+    input:
+      rows: []
+      sample_size: 1
+    assertions:
+      - actual_sample_size 等于 0
+      - warnings 非空
+  - id: sampling_rejects_missing_strata
+    description: 分层抽样未指定分层字段时必须拒绝
+    input:
+      rows: [{id: 1}]
+      sample_size: 1
+      method: stratified
+    expected_error: 必须提供 strata_column

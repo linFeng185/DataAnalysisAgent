@@ -62,6 +62,17 @@ sql_prompt = ChatPromptTemplate.from_messages([
 ])
 ```
 
+指标目录操作不调用上述通用 SQL Prompt。`classify_intent` 将纯目录问法写为
+`TaskPlan(operation="indicator_catalog", needs_time_range=False)`，`retrieve_schema` 后由
+`src/graph/indicator_catalog.py` 识别表式、宽表字段式和行式存储。前两种由直接回答节点使用真实
+Schema 确定性输出；唯一行式目录表由 `generate_sql` 生成只枚举编码/名称的受限 `DISTINCT` SQL；
+多个行式候选要求用户指定目标表。
+
+通用 SQL Prompt 必须包含独立的完整物理表白名单 section，其优先级高于详细 Schema 和重试错误。
+详细 Schema 可按字符预算裁剪，物理表白名单不得因失败 SQL 或对话历史被挤出。表名幻觉重试不携带
+完整失败 SQL，且最多纠正一次。时间补参仅接受结构化 `TaskPlan.needs_time_range`，空 SQL 的自然语言
+说明只能产生通用 `needs_input`，不能生成时间范围按钮。
+
 ### 11.3 流式输出 (Streaming)
 
 利用 LangGraph 的 `astream_events` 实现 SSE 流式推送：

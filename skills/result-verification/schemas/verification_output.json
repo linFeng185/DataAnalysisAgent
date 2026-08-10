@@ -1,0 +1,42 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "结果核验输出",
+  "type": "object",
+  "required": ["valid", "complete", "verified", "summary", "check_results", "warnings", "result_fingerprint"],
+  "properties": {
+    "valid": {"type": "boolean"},
+    "complete": {"type": "boolean"},
+    "verified": {"type": "boolean"},
+    "summary": {
+      "type": "object",
+      "required": ["total_checks", "passed_checks", "failed_checks", "row_count"],
+      "properties": {
+        "total_checks": {"type": "integer", "minimum": 1},
+        "passed_checks": {"type": "integer", "minimum": 0},
+        "failed_checks": {"type": "integer", "minimum": 0},
+        "row_count": {"type": "integer", "minimum": 0}
+      },
+      "additionalProperties": false
+    },
+    "check_results": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["id", "operation", "passed", "expected", "actual", "message"],
+        "properties": {
+          "id": {"type": "string", "minLength": 1},
+          "operation": {"type": "string"},
+          "passed": {"type": "boolean"},
+          "expected": {},
+          "actual": {},
+          "message": {"type": "string", "minLength": 1}
+        },
+        "additionalProperties": false
+      }
+    },
+    "warnings": {"type": "array", "items": {"type": "string"}},
+    "result_fingerprint": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+  },
+  "additionalProperties": false
+}

@@ -1,0 +1,52 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "语义规范化输出",
+  "type": "object",
+  "required": ["rows", "summary", "changes", "issues", "fingerprint"],
+  "properties": {
+    "rows": {"type": "array", "items": {"type": "object"}},
+    "summary": {
+      "type": "object",
+      "required": ["input_rows", "output_rows", "changed_values", "issue_count"],
+      "properties": {
+        "input_rows": {"type": "integer", "minimum": 0},
+        "output_rows": {"type": "integer", "minimum": 0},
+        "changed_values": {"type": "integer", "minimum": 0},
+        "issue_count": {"type": "integer", "minimum": 0}
+      },
+      "additionalProperties": false
+    },
+    "changes": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["row_index", "column", "operation", "before", "after"],
+        "properties": {
+          "row_index": {"type": "integer", "minimum": 0},
+          "column": {"type": "string"},
+          "operation": {"type": "string", "enum": ["null", "boolean", "datetime", "scale", "enum"]},
+          "before": {},
+          "after": {}
+        },
+        "additionalProperties": false
+      }
+    },
+    "issues": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["row_index", "column", "operation", "code", "message"],
+        "properties": {
+          "row_index": {"type": "integer", "minimum": 0},
+          "column": {"type": "string"},
+          "operation": {"type": "string"},
+          "code": {"type": "string"},
+          "message": {"type": "string", "minLength": 1}
+        },
+        "additionalProperties": false
+      }
+    },
+    "fingerprint": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+  },
+  "additionalProperties": false
+}

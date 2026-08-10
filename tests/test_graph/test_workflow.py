@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -88,6 +89,77 @@ class TestConditionalRouting:
     def test_intent_normal(self):
         from src.graph.workflow import route_by_intent
         assert route_by_intent({"intent": "query"}) == "retrieve_schema"
+
+    # 方法作用：验证显式结构化动作优先进入确认子图，不被 LLM 意图覆盖。
+    # Args: self - pytest 测试类实例。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    def test_route_explicit_action_request_to_action_subgraph(self):
+        """带 action_request 的请求必须走人工确认和幂等执行边界。"""
+        # Arrange
+        from src.graph.workflow import route_by_intent
+
+        # Act
+        target = route_by_intent({
+            "intent": "chat",
+            "task_plan": {"capability": "direct_answer"},
+            "action_request": {
+                "action_name": "notify",
+                "payload": {},
+                "idempotency_key": "route-test",
+                "confirmed": False,
+            },
+        })
+
+        # Assert
+        assert target == "action_subgraph"
+
+    # 方法作用：验证行式指标目录在 Schema 后进入确定性 SQL 生成。
+    # Args: self - pytest 测试类实例。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    def test_row_indicator_catalog_routes_to_generate_sql(self):
+        """只有行式目录表需要执行 DISTINCT 查询。"""
+        # Arrange
+        from src.graph.workflow import after_retrieve_schema
+
+        state = {
+            "intent": "metadata",
+            "task_plan": {"operation": "indicator_catalog"},
+            "relevant_tables": [{"name": "metrics", "columns": [
+                {"name": "metric_code", "type": "varchar"},
+                {"name": "metric_name", "type": "varchar"},
+                {"name": "metric_value", "type": "decimal"},
+            ]}],
+        }
+
+        # Act / Assert
+        assert after_retrieve_schema(state) == "generate_sql"
+
+    # 方法作用：验证普通空 SQL 只请求必要输入，不伪装成时间范围缺失。
+    # Args: self - pytest 测试类实例；monkeypatch - pytest 运行时替换工具。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    async def test_empty_sql_without_structured_time_need_is_generic_prompt(self, monkeypatch):
+        """LLM 的自然语言 explanation 不能控制时间补参状态。"""
+        # Arrange
+        import src.graph.nodes.generate_sql as generate_module
+
+        monkeypatch.setattr(generate_module, "is_llm_available", lambda: True)
+        monkeypatch.setattr(
+            generate_module,
+            "_llm_generate",
+            AsyncMock(return_value=("", "", "请提供更具体的业务目标和时间范围")),
+        )
+        state = {
+            "user_query": "列出可分析内容",
+            "task_plan": {"operation": "query", "needs_time_range": False},
+            "relevant_tables": [{"name": "orders", "columns": []}],
+        }
+
+        # Act
+        result = await generate_module.generate_sql_node(state, {})
+
+        # Assert
+        assert result["needs_input"] is True
+        assert result["needs_time_range"] is False
 
 
 class TestIntentClassification:

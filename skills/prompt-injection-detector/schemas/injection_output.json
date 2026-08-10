@@ -1,0 +1,47 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "提示注入检测输出",
+  "type": "object",
+  "required": ["injection_detected", "blocked", "risk_score", "summary", "flagged_source_ids", "category_counts", "findings", "findings_truncated", "raw_matches_returned", "action"],
+  "properties": {
+    "injection_detected": {"type": "boolean"},
+    "blocked": {"type": "boolean"},
+    "risk_score": {"type": "integer", "minimum": 0, "maximum": 100},
+    "summary": {
+      "type": "object",
+      "required": ["content_count", "scanned_characters", "total_findings", "untrusted_findings"],
+      "properties": {
+        "content_count": {"type": "integer", "minimum": 0},
+        "scanned_characters": {"type": "integer", "minimum": 0},
+        "total_findings": {"type": "integer", "minimum": 0},
+        "untrusted_findings": {"type": "integer", "minimum": 0}
+      },
+      "additionalProperties": false
+    },
+    "flagged_source_ids": {"type": "array", "items": {"type": "string"}},
+    "category_counts": {"type": "object", "additionalProperties": {"type": "integer", "minimum": 1}},
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["source_id", "locator", "category", "severity", "trusted_source", "start", "end", "matched_text_hash", "reason"],
+        "properties": {
+          "source_id": {"type": "string"},
+          "locator": {"type": "object"},
+          "category": {"type": "string", "enum": ["instruction_override", "role_impersonation", "tool_coercion", "data_exfiltration", "security_bypass", "obfuscated_instruction"]},
+          "severity": {"type": "string", "enum": ["medium", "high", "critical"]},
+          "trusted_source": {"type": "boolean"},
+          "start": {"type": "integer", "minimum": 0},
+          "end": {"type": "integer", "minimum": 0},
+          "matched_text_hash": {"type": "string", "pattern": "^[0-9a-f]{16}$"},
+          "reason": {"type": "string"}
+        },
+        "additionalProperties": false
+      }
+    },
+    "findings_truncated": {"type": "boolean"},
+    "raw_matches_returned": {"const": false},
+    "action": {"type": "string", "minLength": 1}
+  },
+  "additionalProperties": false
+}

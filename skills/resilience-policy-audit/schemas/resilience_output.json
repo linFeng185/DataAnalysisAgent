@@ -1,0 +1,54 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "韧性策略审计输出",
+  "type": "object",
+  "required": ["valid", "score", "summary", "policy_results", "findings", "external_actions_executed"],
+  "properties": {
+    "valid": {"type": "boolean"},
+    "score": {"type": "integer", "minimum": 0, "maximum": 100},
+    "summary": {
+      "type": "object",
+      "required": ["policy_count", "valid_policies", "errors", "warnings"],
+      "properties": {
+        "policy_count": {"type": "integer", "minimum": 1},
+        "valid_policies": {"type": "integer", "minimum": 0},
+        "errors": {"type": "integer", "minimum": 0},
+        "warnings": {"type": "integer", "minimum": 0}
+      },
+      "additionalProperties": false
+    },
+    "policy_results": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["operation", "valid", "worst_case_duration_ms", "total_backoff_ms", "errors", "warnings"],
+        "properties": {
+          "operation": {"type": "string"},
+          "valid": {"type": "boolean"},
+          "worst_case_duration_ms": {"type": "number", "minimum": 0},
+          "total_backoff_ms": {"type": "number", "minimum": 0},
+          "errors": {"type": "integer", "minimum": 0},
+          "warnings": {"type": "integer", "minimum": 0}
+        },
+        "additionalProperties": false
+      }
+    },
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["operation", "code", "severity", "message"],
+        "properties": {
+          "operation": {"type": "string"},
+          "code": {"type": "string"},
+          "severity": {"type": "string", "enum": ["error", "warning"]},
+          "message": {"type": "string"}
+        },
+        "additionalProperties": false
+      }
+    },
+    "external_actions_executed": {"const": false}
+  },
+  "additionalProperties": false
+}

@@ -1,0 +1,39 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "来源链审计输出",
+  "type": "object",
+  "required": ["valid", "completeness_score", "summary", "findings", "terminal_asset_ids", "audit_fingerprint", "filesystem_accessed"],
+  "properties": {
+    "valid": {"type": "boolean"},
+    "completeness_score": {"type": "number", "minimum": 0, "maximum": 1},
+    "summary": {
+      "type": "object",
+      "required": ["checks_total", "checks_passed", "errors", "warnings"],
+      "properties": {
+        "checks_total": {"type": "integer", "minimum": 0},
+        "checks_passed": {"type": "integer", "minimum": 0},
+        "errors": {"type": "integer", "minimum": 0},
+        "warnings": {"type": "integer", "minimum": 0}
+      },
+      "additionalProperties": false
+    },
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["code", "severity", "path", "message"],
+        "properties": {
+          "code": {"type": "string", "minLength": 1},
+          "severity": {"type": "string", "enum": ["error", "warning"]},
+          "path": {"type": "string", "minLength": 1},
+          "message": {"type": "string", "minLength": 1}
+        },
+        "additionalProperties": false
+      }
+    },
+    "terminal_asset_ids": {"type": "array", "items": {"type": "string"}},
+    "audit_fingerprint": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "filesystem_accessed": {"const": false}
+  },
+  "additionalProperties": false
+}

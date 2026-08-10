@@ -1,6 +1,6 @@
 import { useState, useRef, useCallback, useEffect } from 'react';
 import { streamChat, fetchSessionTurns } from '../api/client';
-import type { ChatTurnData } from '../types';
+import type { ActionRequestPayload, ChatTurnData } from '../types';
 
 const SESSION_KEY = 'chat_turns';
 const SESSION_ID_KEY = 'active_session_id';
@@ -117,6 +117,8 @@ export function useChat() {
     enabledSkillIds?: string[],
     reasoningEnabled = false,
     reasoningEffort = '',
+    fileIds: number[] = [],
+    actionRequest?: ActionRequestPayload,
   ) => {
     aborterRef.current?.abort();
     setRetryInfo(null);
@@ -265,6 +267,8 @@ export function useChat() {
       enabledSkillIds,
       reasoningEnabled,
       reasoningEffort,
+      fileIds,
+      actionRequest,
     );
   }, [sessionId]);
 

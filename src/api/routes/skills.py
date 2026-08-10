@@ -234,6 +234,12 @@ def _cache_uploaded_skills(
     for item in imported:
         try:
             manifest_path = os.path.join(skills_dir, item["name"], "SKILL.md")
+            logger.info(
+                "Skill 上传缓存校验边界",
+                name=item["name"],
+                manifest_exists=os.path.isfile(manifest_path),
+                scope=scope,
+            )
             if os.path.isfile(manifest_path):
                 skill = manager.load_skill_manifest(
                     Path(manifest_path),
@@ -242,8 +248,25 @@ def _cache_uploaded_skills(
                     owner_user_id=user_id if scope == "private" else 0,
                 )
                 manager.add_skill(skill)
+                logger.info(
+                    "Skill 上传缓存写回完成",
+                    name=item["name"],
+                    resource_id=skill.resource_id,
+                )
         except Exception as exc:
-            logger.error("Skill 上传缓存注入失败", name=item["name"], exc_info=True)
+            logger.error(
+                "Skill 上传缓存注入失败",
+                name=item["name"],
+                error=str(exc),
+                exc_info=True,
+            )
+            # 校验失败时回滚本次写入，避免磁盘残留在下次扫描中反复报错。
+            skill_dir = os.path.join(skills_dir, item["name"])
+            if os.path.isdir(skill_dir):
+                import shutil
+
+                shutil.rmtree(skill_dir)
+                logger.info("Skill 上传失败目录已回滚", name=item["name"])
             errors.append({"file": item["file"], "error": str(exc)})
     logger.info("缓存上传 Skill 完成", errors=len(errors))
     return errors
@@ -304,12 +327,56 @@ def _write_uploaded_skill(
     if os.path.commonpath([dest_dir, root]) != root:
         logger.warning("Skill 上传路径拒绝", skill_name=skill_name)
         raise HTTPException(403, "禁止访问")
+    if os.path.isdir(dest_dir):
+        logger.warning("Skill 上传目标已存在", skill_name=skill_name, scope=scope)
+        return None, False, {
+            "file": uploaded_file.filename,
+            "error": f"Skill '{skill_name}' 已存在，请先删除旧版本",
+        }
     os.makedirs(dest_dir, exist_ok=True)
-    with open(os.path.join(dest_dir, "SKILL.md"), "w", encoding="utf-8") as file_handle:
-        file_handle.write(content)
+    # 签名摘要按原始字节计算，不能使用 Windows 文本模式改写换行符。
+    with open(os.path.join(dest_dir, "SKILL.md"), "wb") as file_handle:
+        file_handle.write(prepared[id(uploaded_file)])
     result = {"name": skill_name, "file": uploaded_file.filename, "scope": scope}
     logger.info("写入单个 Skill 完成", skipped=False, skill_name=skill_name)
     return result, False, None
+
+
+# 方法作用：把 SKILL.md 之外的包资源写入对应 Skill 目录并阻断路径穿越。
+# Args: uploaded_file - 上传的附属资源；prepared - 已读取的文件内容；skills_dir - 受管目录；skill_name - 目标 Skill 名称。
+# Returns: 失败时返回错误明细，否则返回 None。
+def _write_uploaded_asset(
+    uploaded_file: UploadFile,
+    prepared: dict[int, bytes],
+    skills_dir: str,
+    skill_name: str,
+) -> dict | None:
+    """保留签名、工具、Schema 和模板等 Skill 包资源。"""
+    import posixpath
+    from pathlib import PurePosixPath
+
+    filename = str(uploaded_file.filename or "").replace("\\", "/")
+    parts = [part for part in PurePosixPath(filename).parts if part not in {"", "."}]
+    if not parts or parts[-1].lower() == "skill.md":
+        return None
+    relative_parts = parts[1:] if len(parts) > 1 else parts
+    relative = PurePosixPath(*relative_parts)
+    if relative.is_absolute() or ".." in relative.parts:
+        logger.warning("Skill 附属资源路径拒绝", filename=filename, skill_name=skill_name)
+        return {"file": uploaded_file.filename, "error": "Skill 文件路径非法"}
+    dest_root = os.path.realpath(os.path.join(skills_dir, skill_name))
+    dest_path = os.path.realpath(os.path.join(dest_root, posixpath.normpath(relative.as_posix())))
+    if os.path.commonpath([dest_path, dest_root]) != dest_root:
+        logger.warning("Skill 附属资源路径越界", filename=filename, skill_name=skill_name)
+        return {"file": uploaded_file.filename, "error": "Skill 文件路径非法"}
+    content = prepared.get(id(uploaded_file))
+    if content is None:
+        return {"file": uploaded_file.filename, "error": "Skill 文件内容未读取"}
+    os.makedirs(os.path.dirname(dest_path), exist_ok=True)
+    with open(dest_path, "wb") as file_handle:
+        file_handle.write(content)
+    logger.info("Skill 附属资源写入完成", skill_name=skill_name, filename=filename)
+    return None
 
 
 @router.post("/skills/upload")
@@ -378,7 +445,47 @@ async def upload_skills(
     skipped: list[str] = []
     errors: list[dict] = []
 
+    # 先写入所有清单，建立上传目录到 Manifest 名称的映射，再写入其余资源。
+    manifest_skill_names: dict[str, str] = {}
     for uploaded_file in files:
+        if uploaded_file.filename and os.path.basename(uploaded_file.filename).lower() == "skill.md":
+            imported_item, _was_skipped, error = _write_uploaded_skill(
+                uploaded_file,
+                prepared_contents,
+                skills_dir,
+                normalized_scope,
+            )
+            if imported_item:
+                imported.append(imported_item)
+                path_parts = str(uploaded_file.filename).replace("\\", "/").split("/")
+                manifest_skill_names[path_parts[0] if len(path_parts) > 1 else imported_item["name"]] = imported_item["name"]
+            if error:
+                errors.append(error)
+
+    for uploaded_file in files:
+        if not uploaded_file.filename or os.path.basename(uploaded_file.filename).lower() == "skill.md":
+            continue
+        path_parts = str(uploaded_file.filename).replace("\\", "/").split("/")
+        root_name = path_parts[0] if len(path_parts) > 1 else ""
+        skill_name = manifest_skill_names.get(root_name)
+        if not skill_name:
+            skipped.append(uploaded_file.filename)
+            continue
+        asset_error = _write_uploaded_asset(
+            uploaded_file,
+            prepared_contents,
+            skills_dir,
+            skill_name,
+        )
+        if asset_error:
+            errors.append(asset_error)
+
+    # 兼容单文件直接上传的 SKILL.md。
+    for uploaded_file in files:
+        if uploaded_file.filename and os.path.basename(uploaded_file.filename).lower() != "skill.md":
+            continue
+        if any(item.get("file") == uploaded_file.filename for item in imported):
+            continue
         imported_item, was_skipped, error = _write_uploaded_skill(
             uploaded_file,
             prepared_contents,
@@ -392,15 +499,22 @@ async def upload_skills(
         if error:
             errors.append(error)
 
-    errors.extend(
-        _cache_uploaded_skills(
-            imported,
-            skills_dir,
-            normalized_scope,
-            tenant_id,
-            user_id,
-        ),
+    cache_errors = _cache_uploaded_skills(
+        imported,
+        skills_dir,
+        normalized_scope,
+        tenant_id,
+        user_id,
     )
+    errors.extend(cache_errors)
+    failed_files = {str(item.get("file", "")) for item in cache_errors}
+    if failed_files:
+        imported = [item for item in imported if item.get("file") not in failed_files]
+        logger.info(
+            "Skill 上传成功计数已收敛",
+            successful=len(imported),
+            failed=len(failed_files),
+        )
 
     result = {
         "imported": imported,

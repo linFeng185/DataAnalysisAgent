@@ -40,7 +40,7 @@ LLM 驱动的数据分析智能体。用自然语言提问，自动完成：轮�
 ├── frontend/                 React SPA (Vite + Ant Design + ECharts)
 │   ├── Dockerfile               Node builder + Nginx runtime
 │   └── nginx.conf               SPA、API 代理和 SSE 配置
-├── skills/                   system 内置 Skills
+├── skills/                   三十二个 system 内置 Skills（质量/报告 + 底座与治理能力）
 ├── data/skills/              tenant/private 受管 Skills
 ├── spec/                     技术规格（15 个章节）
 ├── features/                 功能清单（19 个模块）
@@ -99,6 +99,7 @@ POST /api/v1/chat {"query": "本月 GMV 排名？", "stream": true}
 | `state.py` | `AnalysisState` TypedDict（会话持久字段 + `UntrackedValue` 请求字段和四组轻量上下文） |
 | `context.py` | 请求、权限、路由、执行上下文 Pydantic 模型与扁平字段兼容适配 |
 | `contracts.py` | `TaskPlan`、`SourceQueryRequest`、`SourceQueryResult`、`MultiSourceResult` 契约 |
+| `indicator_catalog.py` | 指标目录问法识别、表式/宽表/行式存储规划与确定性 DISTINCT SQL |
 | `workflow.py` | 从节点目录装配 StateGraph，显式保留条件业务路由 + Checkpointer |
 | `node_registry.py` | 节点 handler 与流式进度文案目录 |
 | `nodes/prepare_turn.py` | 固化上一轮轻量索引，压缩旧历史并清空当前轮 SQL/错误/结果/分析状态 |
@@ -113,7 +114,7 @@ POST /api/v1/chat {"query": "本月 GMV 排名？", "stream": true}
 | `subgraphs/report.py` | custom-report 工具执行和 report Artifact 数据准备 |
 | `subgraphs/action.py` | 人工确认、幂等和默认拒绝的外部动作分发 |
 | `nodes/retrieve_schema.py` | Schema 检索 + 知识库上下文 + 按真实表名再次激活 Skill |
-| `nodes/generate_sql.py` | LLM SQL 生成（对话历史注入） |
+| `nodes/generate_sql.py` | LLM SQL 生成（独立表名白名单、分类重试、结构化补参）与行式指标目录确定性 SQL |
 | `nodes/layer3_validate.py` | sqlglot AST 只读白名单与危险语句阻断 |
 | `nodes/execute_sql.py` | SQL 执行（空 SQL 跳过保护） |
 | `nodes/multi_source.py` | 契约化多源 worker、并行执行、维度/指标列对齐和来源失败隔离 |
@@ -122,7 +123,7 @@ POST /api/v1/chat {"query": "本月 GMV 排名？", "stream": true}
 
 ### ③ `src/llm/` — LLM 调用层
 
-`client.py`（兼容工厂 + local/remote/none 任务路由）+ `provider_registry.py`（协议别名与 Provider 注册）+ `tenant_config.py`（租户命名连接、默认值、凭证解密、模型能力和请求级推理 ContextVar）+ `capability_schema.py`（厂商动态能力表单和值校验）+ `invocation.py`（统一调用出口）+ `adapters/` + `prompts.py` + `prompt_budget.py` + `output_contracts.py`。`routes/llm_admin.py` 由 super_admin 维护、启停和物理删除厂商/模型目录，由 tenant_admin 维护当前租户连接和默认值；Chat/SSE 入口解析 `llm_connection_id + model_id + reasoning_enabled + reasoning_effort` 后绑定请求上下文，多租户未配置时失败关闭，单租户保留 Settings 兼容回退。DeepSeek V4 Pro/Flash Adapter 统一映射 thinking、high/max 和 reasoning_content 工具链回传，原始推理不进入公开响应或历史。Prompt 通过稳定 ID/多版本注册，支持激活和回滚；System 与动态上下文共享字符预算，所有业务调用统一附加 Prompt/任务追踪 metadata，节点输出优先由 Pydantic 校验；默认只有 `generate_sql` 可调用远程模型，轻量节点优先 `LOCAL_LLM_*`。
+`client.py`（兼容工厂 + local/remote/none 任务路由）+ `provider_registry.py`（协议别名与 Provider 注册）+ `tenant_config.py`（租户命名连接、默认值、凭证解密、模型能力和请求级推理 ContextVar）+ `capability_schema.py`（厂商动态能力表单和值校验）+ `invocation.py`（统一调用出口）+ `adapters/` + `prompts.py` + `prompt_budget.py` + `output_contracts.py`。`routes/llm_admin.py` 由 super_admin 维护、启停和物理删除厂商/模型目录，由 tenant_admin 维护当前租户连接和默认值；Chat/SSE 入口解析 `llm_connection_id + model_id + reasoning_enabled + reasoning_effort` 后绑定请求上下文，未配置租户连接时失败关闭，不再回退全局凭证。DeepSeek V4 Pro/Flash Adapter 统一映射 thinking、high/max 和 reasoning_content 工具链回传，原始推理不进入公开响应或历史。Prompt 通过稳定 ID/多版本注册，支持激活和回滚；System 与动态上下文共享字符预算，所有业务调用统一附加 Prompt/任务追踪 metadata，节点输出优先由 Pydantic 校验；远程模型凭证和模型选择统一来自租户管理后台，轻量节点优先 `LOCAL_LLM_*`。
 
 ### ④ `src/datasource/` — 数据源管理
 
@@ -210,8 +211,28 @@ POST /api/v1/chat {"query": "本月 GMV 排名？", "stream": true}
 `src/skill_manager.py` — system/tenant/private 受管目录扫描 + 复合标识 + 请求级身份过滤。匹配同名 Skill 时按 private > tenant > system 选择。内置仓库 Skill 可进程内执行；其他 Skill 必须通过 `skill_security.py` 验签，并由 `skill_runtime.py` 交给隔离 Worker，强制超时、资源、网络/文件、输入输出 Schema、脱敏和引用边界：
 - `data-quality-check` — 空值/重复/异常检测
 - `custom-report` — Jinja2 模板报告
+- `data-profile` / `data-preparation` — 数据画像与非破坏式可审计数据准备
+- `schema-linking` / `cross-source-fusion` — 词法模式映射与 JoinContract 跨源连接检查
+- `statistical-analysis` / `timeseries-analysis` — 确定性统计、滚动回测和区间预测
+- `document-evidence` / `artifact-export` — 可追溯文档证据与无文件写入的标准文本导出
+- `sql-diagnostics` / `skill-validator` — SQL 静态诊断与 Manifest v2 离线校验
+- `data-contract` / `schema-drift` — 显式数据契约校验与结构版本兼容性审查
+- `dataset-diff` / `sampling-audit` — 主键数据集差异与可复现抽样代表性审计
+- `distribution-drift` / `semantic-normalization` — 分布变化测量与显式语义规则规范化
+- `provenance-audit` / `result-verification` — 来源变换链完整性与结构化结果质量核验
+- `privacy-classifier` / `skill-evaluator` — 不回显原值的隐私分类与执行记录离线质量门禁
+- `execution-trace-audit` / `workflow-state-diff` — 节点轨迹与执行前后、持久化状态一致性审计
+- `prompt-injection-detector` / `secret-scanner` — 不可信指令检测与不回显原值的工程凭据扫描
+- `reproducibility-audit` / `api-contract-drift` — 重复执行上下文复现与 OpenAPI 协议兼容性审查
+- `file-ingestion-inspector` / `evidence-coverage-audit` — 文件摄取风险与关键结论独立证据覆盖门禁
+- `numeric-integrity-audit` / `resilience-policy-audit` — 数值精度单位与超时重试幂等补偿策略核验
 - `feature-dev` — 开发流程指南
 - `systematic-debugging` — 系统调试协议
+
+仓库内三十二个 Skill 均包含中文 `SKILL.md`、`agents/openai.yaml`、严格输入输出 Schema、确定性
+异步 `tools.py` 和固定 `eval/cases.yaml`；`custom-report` 额外保留只读 Jinja2 周报/月报模板资产。
+默认网络权限为空，除 `data-quality-check` 为支持按列检查保留五十次有界调用预算外，其余单请求
+工具预算为一次；数值、SQL、连接和引用结论必须由工具契约生成，不能由 LLM 自行补写。
 
 ## 前端
 
@@ -232,9 +253,11 @@ POST /api/v1/chat {"query": "本月 GMV 排名？", "stream": true}
 ## 关键设计模式
 
 - **分类重试**：SQL/字段/EXPLAIN 语义错误 → generate_sql；连接瞬态错误 → 原 SQL 重试 execute_sql；配置/权限错误终止
+- **指标目录分流**：纯目录问法不要求时间；表式/宽表字段式只读 Schema，唯一行式目录只查询 DISTINCT code/name，多候选请求目标表
+- **表名幻觉收敛**：完整物理表白名单独立于可裁剪 Schema；幻觉不回注完整失败 SQL，初次生成后最多纠正一次
 - **应用级依赖容器**：每个 FastAPI 应用持有独立 `AppContext`；兼容 `get_*()` 只委托当前 Context，异步资源并发单次初始化并按创建逆序关闭
 - **租户策略集中化**：`TenantPolicy` 统一认证门禁、数据源/知识隔离、身份校验和三级作用域写权限，业务模块不直接读取 `settings.multi_tenant`
-- **租户 LLM 失败关闭**：多租户对话必须解析当前租户启用的命名连接和模型；显式跨租户、停用或缺失选择返回冲突，不回退其他租户凭证；单租户无命名连接时才允许 Settings 兼容路径
+- **租户 LLM 失败关闭**：所有对话必须解析当前租户启用的命名连接和模型；显式跨租户、停用或缺失选择返回冲突，不回退其他租户或平台全局凭证
 - **LLM 协议扩展**：Provider 目录保存协议元数据，`openai_compatible` 映射到统一 OpenAI Adapter；增加同协议厂商或模型只需配置目录，新增协议才实现并注册 Adapter
 - **异常回退可见性**：可恢复回退保留原返回契约但必须记录完整堆栈；Provider 等基础设施故障不得伪装成空数据
 - **覆盖率门禁**：`coverage run -m pytest -q -m "not live_llm"` 后执行 `coverage report`，branch coverage 最低 67%，生产模块禁止 0% 覆盖

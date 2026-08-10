@@ -52,19 +52,29 @@ class TestLLMFactory:
         del monkeypatch
         from src.llm.client import get_openai_llm
         with _llm_context(openai_api_key="sk-placeholder"):
-            assert get_openai_llm(model="gpt-4o-mini", temperature=0) is not None
+            assert get_openai_llm(
+                model="gpt-4o-mini",
+                temperature=0,
+                api_key="tenant-placeholder",
+            ) is not None
 
-    def test_router_default(self, monkeypatch):
-        del monkeypatch
+    def test_router_requires_tenant_selection(self):
+        import pytest
+
         from src.llm.client import get_llm
-        with _llm_context(openai_api_key="sk-placeholder"):
-            assert get_llm() is not None
 
-    def test_cheap_llm(self, monkeypatch):
-        del monkeypatch
-        from src.llm.client import get_cheap_llm
         with _llm_context(openai_api_key="sk-placeholder"):
-            assert get_cheap_llm() is not None
+            with pytest.raises(RuntimeError, match="管理后台"):
+                get_llm()
+
+    def test_cheap_llm_requires_local_or_tenant_model(self):
+        import pytest
+
+        from src.llm.client import get_cheap_llm
+
+        with _llm_context(openai_api_key="sk-placeholder"):
+            with pytest.raises(RuntimeError, match="可用"):
+                get_cheap_llm()
 
     # 方法作用：验证低成本模型沿用已配置 Provider 而非硬编码 OpenAI 工厂。
     # Args: self - pytest 测试类实例；monkeypatch - pytest 补丁工具。
@@ -86,17 +96,18 @@ class TestLLMFactory:
         # 方法作用：捕获低成本模型路由参数。
         # Args: kwargs - get_llm 接收的模型路由参数。
         # Returns: 预设模型对象。
-        def fake_get_llm(**kwargs):
+        def fake_get_task_llm(task, **kwargs):
+            captured["task"] = task
             captured.update(kwargs)
             return expected
 
-        monkeypatch.setattr(client_module, "get_llm", fake_get_llm)
+        monkeypatch.setattr(client_module, "get_task_llm", fake_get_task_llm)
 
         result = client_module.get_cheap_llm()
 
         assert result is expected
-        assert captured["provider"] == "anthropic"
-        assert captured["model"] == "claude-haiku"
+        assert captured["task"] == "context_summary"
+        assert captured["reasoning"] is False
 
     def test_not_available_no_key(self, monkeypatch):
         del monkeypatch
@@ -108,7 +119,27 @@ class TestLLMFactory:
         del monkeypatch
         from src.llm.client import is_llm_available
         with _llm_context(openai_api_key="sk-test"):
-            assert is_llm_available() is True
+            assert is_llm_available() is False
+
+    def test_available_with_tenant_selection_without_global_key(self):
+        """租户管理后台凭证有效时，不应依赖全局 API Key。"""
+        from src.llm.client import is_llm_available
+        from src.llm.tenant_config import TenantLLMSelection, use_tenant_llm_selection
+
+        selection = TenantLLMSelection(
+            tenant_id=7,
+            connection_id=11,
+            connection_name="primary",
+            provider_code="deepseek",
+            protocol="openai_compatible",
+            model_catalog_id=21,
+            model_id="deepseek-v4-flash",
+            base_url="https://api.deepseek.com",
+            api_key="tenant-key",
+        )
+        with _llm_context(openai_api_key=""):
+            with use_tenant_llm_selection(selection):
+                assert is_llm_available() is True
 
 
 class TestGenerateSQLFallback:

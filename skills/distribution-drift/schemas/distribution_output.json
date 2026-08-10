@@ -1,0 +1,70 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "分布漂移测量输出",
+  "type": "object",
+  "required": ["summary", "drift_detected", "drifted_columns", "columns", "warnings"],
+  "properties": {
+    "summary": {
+      "type": "object",
+      "required": ["total_columns", "numeric_columns", "categorical_columns", "drifted_columns"],
+      "properties": {
+        "total_columns": {"type": "integer", "minimum": 0},
+        "numeric_columns": {"type": "integer", "minimum": 0},
+        "categorical_columns": {"type": "integer", "minimum": 0},
+        "drifted_columns": {"type": "integer", "minimum": 0}
+      },
+      "additionalProperties": false
+    },
+    "drift_detected": {"type": "boolean"},
+    "drifted_columns": {"type": "array", "items": {"type": "string"}},
+    "columns": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["column", "data_type", "baseline_count", "current_count", "baseline_null_rate", "current_null_rate", "drift_score", "threshold", "drifted", "metrics", "distribution"],
+        "properties": {
+          "column": {"type": "string"},
+          "data_type": {"type": "string", "enum": ["numeric", "categorical"]},
+          "baseline_count": {"type": "integer", "minimum": 0},
+          "current_count": {"type": "integer", "minimum": 0},
+          "baseline_null_rate": {"type": "number", "minimum": 0, "maximum": 1},
+          "current_null_rate": {"type": "number", "minimum": 0, "maximum": 1},
+          "drift_score": {"type": "number", "minimum": 0},
+          "threshold": {"type": "number", "minimum": 0},
+          "drifted": {"type": "boolean"},
+          "metrics": {
+            "type": "object",
+            "required": ["psi", "ks_statistic", "total_variation", "baseline_mean", "current_mean", "mean_change", "baseline_std", "current_std"],
+            "properties": {
+              "psi": {"type": ["number", "null"]},
+              "ks_statistic": {"type": ["number", "null"], "minimum": 0, "maximum": 1},
+              "total_variation": {"type": ["number", "null"], "minimum": 0, "maximum": 1},
+              "baseline_mean": {"type": ["number", "null"]},
+              "current_mean": {"type": ["number", "null"]},
+              "mean_change": {"type": ["number", "null"]},
+              "baseline_std": {"type": ["number", "null"], "minimum": 0},
+              "current_std": {"type": ["number", "null"], "minimum": 0}
+            },
+            "additionalProperties": false
+          },
+          "distribution": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["bucket", "baseline_share", "current_share"],
+              "properties": {
+                "bucket": {"type": "string"},
+                "baseline_share": {"type": "number", "minimum": 0, "maximum": 1},
+                "current_share": {"type": "number", "minimum": 0, "maximum": 1}
+              },
+              "additionalProperties": false
+            }
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "warnings": {"type": "array", "items": {"type": "string"}}
+  },
+  "additionalProperties": false
+}

@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "数据准备输入",
+  "type": "object",
+  "required": ["rows", "operations"],
+  "properties": {
+    "rows": {
+      "type": "array",
+      "maxItems": 10000,
+      "items": {"type": "object"}
+    },
+    "operations": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 20,
+      "items": {
+        "type": "object",
+        "required": ["op"],
+        "properties": {
+          "op": {"type": "string", "enum": ["drop_duplicates", "fill_null", "cast", "rename", "select", "sort"]},
+          "column": {"type": ["string", "null"], "minLength": 1},
+          "value": {},
+          "data_type": {"enum": ["string", "integer", "number", "boolean", null]},
+          "mapping": {"type": ["object", "null"], "additionalProperties": {"type": "string"}},
+          "columns": {"type": ["array", "null"], "items": {"type": "string", "minLength": 1}},
+          "descending": {"type": "boolean", "default": false}
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "additionalProperties": false
+}

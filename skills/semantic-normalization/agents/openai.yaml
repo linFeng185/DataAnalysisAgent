@@ -1,0 +1,4 @@
+interface:
+  display_name: "语义规范化"
+  short_description: "按规则统一空值、布尔、时区、数值单位和枚举别名"
+  default_prompt: "使用 $semantic-normalization 按这些显式规则规范化数据。"

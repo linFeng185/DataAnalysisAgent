@@ -240,7 +240,7 @@ class TestTenantLLMSelection:
 
         # Act
         with use_tenant_llm_selection(selection):
-            result = client.get_task_llm("direct_answer", reasoning=None)
+            result = client.get_task_llm("direct_answer", reasoning=None, stream=False)
 
         # Assert
         assert result is chat_model
@@ -252,6 +252,7 @@ class TestTenantLLMSelection:
         }
         assert provider.get_chat_model.call_args.kwargs["reasoning"] is True
         assert provider.get_chat_model.call_args.kwargs["reasoning_effort"] == "max"
+        assert provider.get_chat_model.call_args.kwargs["stream"] is False
 
 
 class TestTenantModelOptions:

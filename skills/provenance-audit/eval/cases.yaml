@@ -1,0 +1,33 @@
+version: 1
+feature_id: 9.7.7
+cases:
+  - id: provenance_accepts_complete_chain
+    description: 完整资产、证据和变换记录应通过审计
+    input:
+      assets:
+        - {asset_id: source, fingerprint: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa, source_id: db-orders, locator: {table: orders}}
+        - {asset_id: result, fingerprint: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb}
+      transforms:
+        - {step_id: step-1, input_asset_ids: [source], output_asset_id: result, tool: query, parameters: {limit: 100}, code_version: abc123}
+      expected_output_asset_id: result
+    assertions:
+      - valid 等于 true
+      - terminal_asset_ids 包含 result
+      - filesystem_accessed 等于 false
+  - id: provenance_detects_invalid_fingerprint
+    description: 非法资产指纹应使来源链审计失败
+    input:
+      assets: [{asset_id: source, fingerprint: invalid}]
+      transforms: []
+    assertions:
+      - valid 等于 false
+      - findings 包含代码 FINGERPRINT_INVALID
+  - id: provenance_rejects_missing_expected_output
+    description: 预期输出未在变换链产生时必须报告错误
+    input:
+      assets: [{asset_id: source, fingerprint: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa}]
+      transforms: []
+      expected_output_asset_id: missing
+    assertions:
+      - valid 等于 false
+      - findings 包含代码 EXPECTED_OUTPUT_UNAVAILABLE

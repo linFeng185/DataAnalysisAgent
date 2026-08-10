@@ -1,0 +1,28 @@
+version: 1
+feature_id: 9.7.2
+cases:
+  - id: drift_detects_removed_column
+    description: 删除既有字段应归类为破坏性变化
+    input:
+      baseline:
+        tables: [{name: orders, columns: [{name: id, type: integer}, {name: amount, type: number}], primary_key: [id]}]
+      current:
+        tables: [{name: orders, columns: [{name: id, type: integer}], primary_key: [id]}]
+    assertions:
+      - compatible 等于 false
+      - breaking_changes 包含代码 COLUMN_REMOVED
+  - id: drift_accepts_identical_empty_schema
+    description: 两个空结构快照应兼容且没有变化
+    input:
+      baseline: {tables: []}
+      current: {tables: []}
+    assertions:
+      - compatible 等于 true
+      - summary.total 等于 0
+  - id: drift_rejects_duplicate_table
+    description: 同一快照包含重复表名时必须拒绝
+    input:
+      baseline:
+        tables: [{name: orders, columns: []}, {name: orders, columns: []}]
+      current: {tables: []}
+    expected_error: 表名重复

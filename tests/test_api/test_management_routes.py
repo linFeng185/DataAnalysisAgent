@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import io
+import base64
+import json
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -140,6 +142,112 @@ class TestExtensionScopeAuthorization:
         skill = manager.get_skill("report", scope="private", tenant_id=4, user_id=7)
         assert skill is not None
         assert skill.owner_user_id == 7
+
+    # 方法作用：验证签名校验失败的上传不会被计为成功，也不会残留不可用目录。
+    # Args: self - pytest 测试类实例；monkeypatch - pytest 补丁工具；tmp_path - 临时目录。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    async def test_unsigned_private_skill_upload_fails_closed(self, monkeypatch, tmp_path):
+        """默认签名策略拒绝未签名 Skill 时，API 成功计数必须与缓存状态一致。"""
+        # Arrange
+        import src.api.auth as auth
+        import src.api.routes as routes
+        import src.skill_manager as skill_module
+
+        manager = skill_module.SkillManager(
+            str(tmp_path / "builtin"),
+            managed_dir=str(tmp_path / "managed"),
+            require_signatures=True,
+        )
+        monkeypatch.setattr(skill_module, "get_skill_manager", lambda *args, **kwargs: manager)
+        monkeypatch.setattr(auth, "get_current_role", lambda: "analyst")
+        monkeypatch.setattr(auth, "get_current_tenant_id", lambda: 4)
+        monkeypatch.setattr(auth, "get_current_user_id", lambda: 7)
+        upload = UploadFile(
+            filename="unsigned/SKILL.md",
+            file=io.BytesIO(b"---\nname: unsigned\nversion: 1.0.0\n---\nbody"),
+        )
+
+        # Act
+        result = await routes.upload_skills([upload], skill_scope="private")
+
+        # Assert
+        skill_dir = tmp_path / "managed" / "private" / "4" / "7" / "unsigned"
+        assert result["total"] == 0
+        assert result["imported"] == []
+        assert result["errors"] == [
+            {"file": "unsigned/SKILL.md", "error": "非内置 Skill 缺少 SIGNATURE.json"},
+        ]
+        assert manager.get_skill("unsigned", scope="private", tenant_id=4, user_id=7) is None
+        assert not skill_dir.exists()
+
+    # 方法作用：验证目录上传保留签名、工具和资源文件，并将完整包注入缓存。
+    # Args: self - pytest 测试类实例；monkeypatch - pytest 补丁工具；tmp_path - 临时目录。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    async def test_signed_private_skill_package_upload_preserves_assets(
+        self, monkeypatch, tmp_path,
+    ):
+        """受信任的签名目录包应完整导入，而不是只保存 SKILL.md。"""
+        # Arrange
+        from cryptography.hazmat.primitives import serialization
+        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
+        import src.api.auth as auth
+        import src.api.routes as routes
+        import src.skill_manager as skill_module
+        from src.skill_security import compute_skill_package_digest
+
+        source = tmp_path / "source" / "signed"
+        source.mkdir(parents=True)
+        manifest = b"---\nname: signed\nversion: 1.0.0\n---\nbody"
+        tools_content = b"VALUE = 1\n"
+        (source / "SKILL.md").write_bytes(manifest)
+        (source / "tools.py").write_bytes(tools_content)
+        private_key = Ed25519PrivateKey.generate()
+        public_key = private_key.public_key().public_bytes(
+            serialization.Encoding.Raw,
+            serialization.PublicFormat.Raw,
+        )
+        digest = compute_skill_package_digest(source)
+        signature = json.dumps({
+            "algorithm": "ed25519",
+            "key_id": "test-key",
+            "digest": digest,
+            "signature": base64.b64encode(
+                private_key.sign(bytes.fromhex(digest)),
+            ).decode("ascii"),
+        }).encode("utf-8")
+        manager = skill_module.SkillManager(
+            str(tmp_path / "builtin"),
+            managed_dir=str(tmp_path / "managed"),
+            trusted_public_keys={"test-key": base64.b64encode(public_key).decode("ascii")},
+            require_signatures=True,
+        )
+        monkeypatch.setattr(skill_module, "get_skill_manager", lambda *args, **kwargs: manager)
+        monkeypatch.setattr(auth, "get_current_role", lambda: "analyst")
+        monkeypatch.setattr(auth, "get_current_tenant_id", lambda: 4)
+        monkeypatch.setattr(auth, "get_current_user_id", lambda: 7)
+        uploads = [
+            UploadFile(filename="signed/SKILL.md", file=io.BytesIO(manifest)),
+            UploadFile(filename="signed/tools.py", file=io.BytesIO(tools_content)),
+            UploadFile(filename="signed/SIGNATURE.json", file=io.BytesIO(signature)),
+        ]
+
+        # Act
+        result = await routes.upload_skills(uploads, skill_scope="private")
+
+        # Assert
+        destination = tmp_path / "managed" / "private" / "4" / "7" / "signed"
+        assert result == {
+            "imported": [{"name": "signed", "file": "signed/SKILL.md", "scope": "private"}],
+            "skipped": [],
+            "errors": [],
+            "total": 1,
+        }
+        assert (destination / "tools.py").read_bytes() == tools_content
+        assert (destination / "SIGNATURE.json").read_bytes() == signature
+        skill = manager.get_skill("signed", scope="private", tenant_id=4, user_id=7)
+        assert skill is not None
+        assert skill.signature_verified is True
 
     # 方法作用：验证个人 MCP 创建只写入当前租户和当前用户参数。
     # Args: self - pytest 测试类实例；monkeypatch - pytest 补丁工具。
@@ -320,6 +428,11 @@ class TestDatasourceLifecycle:
         registry = DataSourceRegistry()
         registry.register_provider("external", provider)
         monkeypatch.setattr(routes, "_registry", lambda: registry)
+        monkeypatch.setattr(
+            auth.AuthMiddleware,
+            "_load_current_identity",
+            AsyncMock(return_value=(1, 1, "super_admin", "default", "")),
+        )
         token = auth.create_access_token(1, 1, "super_admin")
         client = AsyncClient(
             transport=ASGITransport(app=create_app()),

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from unittest.mock import AsyncMock
+
 from httpx import ASGITransport, AsyncClient
 from structlog.testing import capture_logs
 
@@ -28,6 +30,11 @@ class TestRequestLoggingNoise:
             managed_dir=str(tmp_path / "managed"),
         )
         monkeypatch.setattr(skill_module, "get_skill_manager", lambda *args, **kwargs: manager)
+        monkeypatch.setattr(
+            auth.AuthMiddleware,
+            "_load_current_identity",
+            AsyncMock(return_value=(1, 1, "super_admin", "default", "")),
+        )
         token = auth.create_access_token(1, 1, "super_admin")
         client = AsyncClient(
             transport=ASGITransport(app=create_app()),

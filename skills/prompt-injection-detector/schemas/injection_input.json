@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "提示注入检测输入",
+  "type": "object",
+  "required": ["contents"],
+  "properties": {
+    "contents": {
+      "type": "array",
+      "maxItems": 100,
+      "items": {
+        "type": "object",
+        "required": ["source_id", "text"],
+        "properties": {
+          "source_id": {"type": "string", "minLength": 1},
+          "text": {"type": "string", "maxLength": 200000},
+          "locator": {"type": "object", "default": {}},
+          "trusted": {"type": "boolean", "default": false}
+        },
+        "additionalProperties": false
+      }
+    },
+    "max_findings": {"type": "integer", "minimum": 1, "maximum": 1000, "default": 100}
+  },
+  "additionalProperties": false
+}

@@ -36,6 +36,7 @@
 | 4.2.6 | 关键词扩展 `[P1]` | 同上 | 新增"找出/消费/客户/平均/占比"等15个 query 关键词 | 开发完成 |
 | 4.2.7 | 精确意图规则 `[P1]` | 同上 | 明确 Schema 问法才归 metadata，包含“字段”的统计问题继续走查询 | 单测完成 |
 | 4.2.8 | 授权候选数据源自动路由 `[P0]` | 同上 + `src/security/permission_check.py` | 未选择数据源时模型仅从当前身份授权候选中选择；模型不可用时按名称/非空描述确定性回退 | 单测完成 |
+| 4.2.9 | 指标目录操作识别 `[P0]` | `classify_intent.py` + `src/graph/indicator_catalog.py` | “有哪些指标”归 metadata/indicator_catalog；升降、趋势、同比等指标值问题继续走查询 | 单测完成 |
 
 ### 4.3 retrieve_schema Node
 
@@ -62,6 +63,7 @@
 | 4.4.14 | 时间过滤拦截 `[P1]` | 同上 `_missing_time_filter()` | SQL 模式匹配：有聚合+日期列+无WHERE过滤→拦截，不依赖具体表名 | 开发完成 |
 | 4.4.15 | SQL Prompt 优化 `[P1]` | `src/llm/prompts.py` | ROUND默认两位小数、时间过滤依据聚合/统计意图 | 开发完成 |
 | 4.4.16 | 证据约束 SQL Prompt `[P1]` | `src/llm/prompts.py` + `generate_sql.py` | 注入业务知识/枚举/示例，增加粒度、JOIN 膨胀、NULL/除零和方言约束 | 单测完成 |
+| 4.4.17 | 指标目录存储形态分流 `[P0]` | `indicator_catalog.py` + `workflow.py` + `generate_sql.py` | 表式/宽表字段式只读 Schema；唯一行式目录确定性生成 DISTINCT code/name SQL；多候选请求目标表 | 单测完成 |
 
 ### 4.5 layer3_validate Node
 
@@ -148,10 +150,11 @@
 | 4.13.4 | 方言与分析契约修复 | `src/datasource/introspection.py`、`src/graph/nodes/analyze_result.py` | SQLite 内省、LLM 样本长度和 statistics 输出契约回归 | 单测完成 |
 | 4.13.5 | 编排与状态契约修复 | `src/graph/workflow.py`、`prepare_turn.py`、`generate_sql.py` | 修复 MCP 死边、metadata 无 Schema、幻觉错误覆盖；表引用解析异常失败关闭 | 单测完成 |
 | 4.13.6 | 跨源列契约与最终 SQL | `src/graph/nodes/multi_source.py`、`src/graph/subgraphs/`、`build_response.py` | 按维度/指标角色序列对齐任意数量列；多源 worker 通过子图复用主图节点和路由语义；返回每个来源重写后的最终 SQL | 单测完成 |
+| 4.13.7 | SQL 幻觉收敛与结构化补参 | `generate_sql.py` + `workflow.py` | 独立完整表名白名单高于 Schema/重试错误；幻觉不回注完整失败 SQL且只纠正一次；时间需求只读 TaskPlan | 单测完成 |
 
 ### 模块收尾
 
-模块功能点共 82 项，已完成 82 项，待开发 0 项。
+模块功能点共 85 项，已完成 85 项，待开发 0 项。
 
 当前模块无待开发项。
 

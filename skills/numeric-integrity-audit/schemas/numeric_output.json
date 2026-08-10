@@ -1,0 +1,59 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "数值完整性审计输出",
+  "type": "object",
+  "required": ["valid", "summary", "column_results", "findings", "findings_truncated", "audit_fingerprint", "input_modified"],
+  "properties": {
+    "valid": {"type": "boolean"},
+    "summary": {
+      "type": "object",
+      "required": ["row_count", "column_count", "errors", "warnings", "total_findings"],
+      "properties": {
+        "row_count": {"type": "integer", "minimum": 0},
+        "column_count": {"type": "integer", "minimum": 1},
+        "errors": {"type": "integer", "minimum": 0},
+        "warnings": {"type": "integer", "minimum": 0},
+        "total_findings": {"type": "integer", "minimum": 0}
+      },
+      "additionalProperties": false
+    },
+    "column_results": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["column", "kind", "checked_rows", "valid_numeric_values", "null_values", "errors", "warnings"],
+        "properties": {
+          "column": {"type": "string"},
+          "kind": {"type": "string", "enum": ["number", "integer", "decimal", "money"]},
+          "checked_rows": {"type": "integer", "minimum": 0},
+          "valid_numeric_values": {"type": "integer", "minimum": 0},
+          "null_values": {"type": "integer", "minimum": 0},
+          "errors": {"type": "integer", "minimum": 0},
+          "warnings": {"type": "integer", "minimum": 0}
+        },
+        "additionalProperties": false
+      }
+    },
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["code", "severity", "row_index", "column", "message", "suggested_value"],
+        "properties": {
+          "code": {"type": "string"},
+          "severity": {"type": "string", "enum": ["error", "warning"]},
+          "row_index": {"type": "integer", "minimum": 0},
+          "column": {"type": "string"},
+          "message": {"type": "string"},
+          "suggested_value": {"type": ["string", "null"]}
+        },
+        "additionalProperties": false
+      }
+    },
+    "findings_truncated": {"type": "boolean"},
+    "audit_fingerprint": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "input_modified": {"const": false}
+  },
+  "additionalProperties": false
+}

@@ -1,0 +1,4 @@
+interface:
+  display_name: "跨源融合检查"
+  short_description: "检查跨资产连接的匹配率、基数、未匹配记录与结果膨胀风险"
+  default_prompt: "使用 $cross-source-fusion 评估两组数据连接是否可靠。"

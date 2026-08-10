@@ -12,7 +12,7 @@ logger = get_logger(__name__)
 
 # 方法作用：按请求身份、意图和真实表名完成两阶段 Skill 激活。
 # Args: state - 当前分析状态；tables - Schema 阶段解析出的表名。
-# Returns: 激活名称、Prompt、工具和请求级预算状态增量。
+# Returns: 激活名称、Prompt、工具标识和请求级预算状态增量。
 def activate_skills(
     state: AnalysisState,
     tables: list[str] | None = None,
@@ -67,7 +67,8 @@ def activate_skills(
             ],
             "skill_activation_stage": activation_stage,
             "skill_prompt_override": manager.build_skill_prompt(skills),
-            "skill_tools": manager.get_active_tools(skills),
+            # LangGraph state 只能保存可序列化描述，工具对象由消费节点即时恢复。
+            "skill_tools": [],
             "skill_tool_budget": manager.get_tool_budget(skills),
         }
         logger.info(
@@ -76,7 +77,7 @@ def activate_skills(
             table_count=len(visible_tables),
             candidate_count=len(candidates),
             skill_count=len(skills),
-            tool_count=len(result["skill_tools"]),
+            tool_count=sum(len(getattr(skill, "tools", []) or []) for skill in skills),
             tool_budget=result["skill_tool_budget"],
             explicit=bool(requested_skill_ids),
         )
@@ -94,6 +95,41 @@ def activate_skills(
             "skill_candidate_ids": list(contexts.routing.skill_candidate_ids),
             "skill_activation_stage": f"{activation_stage}_failed",
             "skill_prompt_override": str(state.get("skill_prompt_override", "") or ""),
-            "skill_tools": list(state.get("skill_tools", []) or []),
+            "skill_tools": [],
             "skill_tool_budget": int(state.get("skill_tool_budget", 0) or 0),
         }
+
+
+# 方法作用：在实际消费边界按当前身份和已激活资源标识恢复 Skill 工具对象。
+# Args: state - 只包含可序列化 Skill 描述的当前分析状态。
+# Returns: 当前身份仍可见且已启用的 Skill 工具列表；测试直接注入时原样返回。
+def resolve_active_skill_tools(state: AnalysisState) -> list[Any]:
+    """避免把不可序列化工具对象写入 LangGraph checkpoint。"""
+    injected = list(state.get("skill_tools", []) or [])
+    if injected:
+        return injected
+    from src.graph.context import read_contexts
+
+    contexts = read_contexts(state)
+    resource_ids = [
+        str(resource_id or "").strip()
+        for resource_id in contexts.routing.activated_skill_ids
+        if str(resource_id or "").strip()
+    ]
+    if not resource_ids:
+        return []
+    from src.skill_manager import get_skill_manager
+
+    manager = get_skill_manager()
+    skills = manager.resolve_requested_skills(
+        resource_ids,
+        tenant_id=contexts.request.tenant_id,
+        user_id=contexts.request.user_id,
+    )
+    tools = manager.get_active_tools(skills)
+    logger.info(
+        "Skill 工具消费边界恢复完成",
+        resource_count=len(resource_ids),
+        tool_count=len(tools),
+    )
+    return tools

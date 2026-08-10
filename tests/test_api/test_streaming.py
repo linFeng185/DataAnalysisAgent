@@ -37,12 +37,22 @@ class TestSSEFormat:
 
 
 class TestStreamingResponseConfig:
-    async def test_stream_endpoint_mounted(self):
+    # 方法作用：验证兼容流式 POST 端点已挂载并执行请求体验证。
+    # Args: self - pytest 测试类实例；monkeypatch - pytest 补丁工具。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    async def test_stream_endpoint_mounted(self, monkeypatch):
+        from unittest.mock import AsyncMock
+
         from httpx import ASGITransport, AsyncClient
 
-        from src.api.auth import create_access_token
+        import src.api.auth as auth
         from src.main import app
-        token = create_access_token(9, 4, "analyst")
+        monkeypatch.setattr(
+            auth.AuthMiddleware,
+            "_load_current_identity",
+            AsyncMock(return_value=(9, 4, "analyst", "default", "")),
+        )
+        token = auth.create_access_token(9, 4, "analyst")
         async with AsyncClient(
             transport=ASGITransport(app=app), base_url="http://test",
             headers={"Authorization": f"Bearer {token}"},
@@ -50,12 +60,22 @@ class TestStreamingResponseConfig:
             response = await client.post("/api/v1/chat/stream", json={})
         assert response.status_code == 422
 
-    async def test_stream_endpoint_post_method(self):
+    # 方法作用：验证兼容流式端点拒绝 GET 方法。
+    # Args: self - pytest 测试类实例；monkeypatch - pytest 补丁工具。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    async def test_stream_endpoint_post_method(self, monkeypatch):
+        from unittest.mock import AsyncMock
+
         from httpx import ASGITransport, AsyncClient
 
-        from src.api.auth import create_access_token
+        import src.api.auth as auth
         from src.main import app
-        token = create_access_token(9, 4, "analyst")
+        monkeypatch.setattr(
+            auth.AuthMiddleware,
+            "_load_current_identity",
+            AsyncMock(return_value=(9, 4, "analyst", "default", "")),
+        )
+        token = auth.create_access_token(9, 4, "analyst")
         async with AsyncClient(
             transport=ASGITransport(app=app), base_url="http://test",
             headers={"Authorization": f"Bearer {token}"},

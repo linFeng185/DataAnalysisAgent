@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "模式映射输出",
+  "type": "object",
+  "required": ["query", "matches", "ambiguities", "join_candidates", "unmapped", "method"],
+  "properties": {
+    "query": {"type": "string"},
+    "matches": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["object_kind", "table", "column", "data_type", "matched_term", "score", "reasons"],
+        "properties": {
+          "object_kind": {"type": "string", "enum": ["table", "column"]},
+          "table": {"type": "string"},
+          "column": {"type": "string"},
+          "data_type": {"type": "string"},
+          "matched_term": {"type": "string"},
+          "score": {"type": "number", "minimum": 0, "maximum": 1},
+          "reasons": {"type": "array", "items": {"type": "string"}}
+        },
+        "additionalProperties": false
+      }
+    },
+    "ambiguities": {"type": "array", "items": {"type": "object"}},
+    "join_candidates": {"type": "array", "items": {"type": "object"}},
+    "unmapped": {"type": "boolean"},
+    "method": {"type": "string", "minLength": 1}
+  },
+  "additionalProperties": false
+}

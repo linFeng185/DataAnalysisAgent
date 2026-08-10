@@ -20,8 +20,8 @@ async def client(monkeypatch) -> AsyncIterator[AsyncClient]:
     logger.debug("client fixture 入口")
     from unittest.mock import AsyncMock
 
+    import src.api.auth as auth
     import src.api.routes as routes
-    from src.api.auth import create_access_token
     from src.datasource.providers.external import ExternalDataSourceProvider
     from src.main import create_app
 
@@ -48,7 +48,12 @@ async def client(monkeypatch) -> AsyncIterator[AsyncClient]:
         AsyncMock(return_value=None),
     )
     monkeypatch.setattr(ExternalDataSourceProvider, "persist", AsyncMock())
-    token = create_access_token(1, 1, "super_admin")
+    monkeypatch.setattr(
+        auth.AuthMiddleware,
+        "_load_current_identity",
+        AsyncMock(return_value=(1, 1, "super_admin", "default", "")),
+    )
+    token = auth.create_access_token(1, 1, "super_admin")
     test_client = AsyncClient(
         transport=ASGITransport(app=create_app()),
         base_url="http://test",
@@ -109,6 +114,34 @@ class TestSchemas:
             ChatRequest(query="x" * 20_001)
         with pytest.raises(Exception):
             ChatRequest(query="q", datasources=[f"source_{index}" for index in range(21)])
+
+    # 方法作用：验证 Chat 协议接收受限文件 ID 和结构化动作请求。
+    # Args: self - pytest 测试类实例。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    def test_chat_request_accepts_file_ids_and_action_request(self) -> None:
+        """文件和人工确认动作必须使用结构化字段，不能依赖自然语言拼接。"""
+        # Arrange / Act
+        from src.api.schemas import ChatRequest
+
+        request = ChatRequest(
+            query="发送通知并分析附件",
+            file_ids=[11, 12],
+            action_request={
+                "action_name": "notify",
+                "payload": {"channel": "email"},
+                "idempotency_key": "notify-1",
+                "confirmed": True,
+            },
+        )
+
+        # Assert
+        assert request.file_ids == [11, 12]
+        assert request.action_request is not None
+        assert request.action_request.action_name == "notify"
+        with pytest.raises(Exception):
+            ChatRequest(query="q", file_ids=[0])
+        with pytest.raises(Exception):
+            ChatRequest(query="q", file_ids=list(range(1, 12)))
 
     def test_datasource_create(self):
         from src.api.schemas import DataSourceCreateRequest
@@ -180,6 +213,31 @@ class TestEndpoints:
         r = await client.get("/api/v1/health")
         assert r.status_code == 200
         assert r.json()["status"] == "ok"
+
+    # 方法作用：验证存活检查不调用缺少租户上下文的全局 LLM 探测。
+    # Args: self - pytest 测试类实例；client - ASGI 测试客户端；monkeypatch - pytest 补丁工具。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    async def test_health_does_not_probe_global_llm(self, client, monkeypatch):
+        """Docker 高频 healthcheck 只能检查服务存活，不能制造无租户 LLM 告警。"""
+        # Arrange
+        import src.api.routes.management as management
+
+        called = False
+
+        def forbidden_probe() -> bool:
+            nonlocal called
+            called = True
+            raise AssertionError("health 不应探测全局 LLM")
+
+        monkeypatch.setattr(management, "is_llm_available", forbidden_probe, raising=False)
+
+        # Act
+        response = await client.get("/api/v1/health")
+
+        # Assert
+        assert response.status_code == 200
+        assert called is False
+        assert "llm_available" not in response.json()
 
     # 方法作用：验证 Prometheus 指标端点返回标准 exposition 文本。
     # Args: self - pytest 测试类实例；client - 携带认证的 ASGI 测试客户端。

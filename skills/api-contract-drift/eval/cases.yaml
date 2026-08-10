@@ -1,0 +1,48 @@
+version: 1
+feature_id: 9.8.6
+cases:
+  - id: api_drift_accepts_optional_parameter
+    description: 新增可选查询参数应保持兼容
+    input:
+      baseline:
+        paths:
+          /items:
+            get: {responses: {"200": {description: 成功}}}
+      current:
+        paths:
+          /items:
+            get:
+              parameters: [{name: limit, in: query, required: false, schema: {type: integer}}]
+              responses: {"200": {description: 成功}}
+    assertions:
+      - compatible 等于 true
+      - compatible_changes 包含代码 PARAMETER_ADDED
+  - id: api_drift_detects_removed_response_field
+    description: 删除响应对象字段应归为破坏性变化
+    input:
+      baseline:
+        paths:
+          /items:
+            get:
+              responses:
+                "200": {content: {application/json: {schema: {type: object, properties: {id: {type: integer}, name: {type: string}}}}}}
+      current:
+        paths:
+          /items:
+            get:
+              responses:
+                "200": {content: {application/json: {schema: {type: object, properties: {id: {type: integer}}}}}}
+    assertions:
+      - compatible 等于 false
+      - breaking_changes 包含代码 RESPONSE_PROPERTY_REMOVED
+  - id: api_drift_rejects_external_reference
+    description: 外部 OpenAPI 引用必须拒绝
+    input:
+      baseline:
+        paths:
+          /items:
+            get:
+              parameters: [{$ref: "https://example.com/parameter.yaml"}]
+              responses: {"200": {description: 成功}}
+      current: {paths: {/items: {get: {responses: {"200": {description: 成功}}}}}}
+    expected_error: 只支持无循环的本地 OpenAPI 引用

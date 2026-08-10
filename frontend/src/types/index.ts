@@ -32,10 +32,12 @@ export interface SQLStatement {
 
 export interface ChatResponse {
   success: boolean;
+  status?: string;
+  source?: string;
   user_query: string;
   sql: string;
   sql_statements: SQLStatement[];
-  data: Record<string, unknown>[];
+  data: Record<string, unknown>[] | Record<string, unknown>;
   row_count: number;
   truncated: boolean;
   analysis: {
@@ -44,6 +46,7 @@ export interface ChatResponse {
     recommended_chart_type: string;
     follow_up_questions: string[];
     statistics?: Record<string, unknown>;
+    rendered_report?: string;
   };
   chart: { type: string; option?: Record<string, unknown> };
   decision_summary?: string;
@@ -108,9 +111,22 @@ export interface ColumnInfo {
 
 export interface HealthResponse {
   status: string;
-  llm_available: boolean;
-  uptime: number;
-  datasources: number;
+  version: string;
+  uptime_seconds: number;
+}
+
+export interface ActionRequestPayload {
+  action_name: string;
+  payload: Record<string, unknown>;
+  idempotency_key: string;
+  confirmed: boolean;
+  metadata?: Record<string, unknown>;
+}
+
+export interface ChatUploadedFile {
+  file_id: number;
+  filename: string;
+  size: number;
 }
 
 export interface HistoryItem {

@@ -163,6 +163,8 @@ async def prepare_turn_node(state: AnalysisState) -> dict:
         "decompose_steps": [],
         "generated_sql": "",
         "needs_time_range": False,
+        "needs_input": False,
+        "input_explanation": "",
         "time_range_explanation": "",
         "sql_reasoning_content": "",
         "retry_count": 0,

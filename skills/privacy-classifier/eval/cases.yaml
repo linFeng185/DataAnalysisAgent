@@ -1,0 +1,24 @@
+version: 1
+feature_id: 9.7.9
+cases:
+  - id: privacy_classifies_common_values
+    description: 邮箱、手机号和凭据字段应分类且不得回显原值
+    input:
+      rows: [{email: user@example.com, mobile: "13800138000", api_key: secret-value}]
+    assertions:
+      - contains_sensitive_data 等于 true
+      - sensitive_columns 包含 email、mobile、api_key
+      - raw_values_returned 等于 false
+      - 输出不包含 user@example.com 和 secret-value
+  - id: privacy_handles_empty_rows
+    description: 空数据应返回零分类且不声称包含敏感信息
+    input: {rows: []}
+    assertions:
+      - contains_sensitive_data 等于 false
+      - classified_columns 等于 0
+  - id: privacy_rejects_duplicate_columns
+    description: 显式字段列表重复时必须拒绝
+    input:
+      rows: [{email: user@example.com}]
+      columns: [email, email]
+    expected_error: columns 不能包含重复字段

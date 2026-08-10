@@ -1,0 +1,11 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "接口契约漂移输入",
+  "type": "object",
+  "required": ["baseline", "current"],
+  "properties": {
+    "baseline": {"type": "object", "required": ["paths"]},
+    "current": {"type": "object", "required": ["paths"]}
+  },
+  "additionalProperties": false
+}

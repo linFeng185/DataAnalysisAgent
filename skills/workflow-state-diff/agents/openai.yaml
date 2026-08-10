@@ -1,0 +1,4 @@
+interface:
+  display_name: "工作流状态差异"
+  short_description: "比较执行前后与持久化状态，定位字段丢失、覆盖和写回偏差"
+  default_prompt: "使用 $workflow-state-diff 核对这次工作流的状态变化和持久化结果。"

@@ -144,6 +144,18 @@ START -> prepare_turn -> classify_intent
 使用原 SQL 重试 `execute_sql`；配置、权限和限流错误直接终止。SQL 重生成次数与执行重试次数分别
 使用 `retry_count`、`execution_retry_count`，均受 `MAX_RETRY_COUNT` 限制。
 
+“有哪些指标/指标清单/支持哪些指标”属于 `metadata + indicator_catalog`，不按普通数据查询处理，
+也不要求时间范围。Schema 检索后按存储形态确定性分流：
+
+1. 一表/视图对应一个指标或指标域：只返回表名、说明和指标字段；
+2. 宽表字段代表指标：只返回字段名、注释和口径；
+3. 唯一 `metric_code/name + metric_value` 行式表：只生成受限的
+   `SELECT DISTINCT metric_code, metric_name ... LIMIT 1000`，不得选择 `metric_value`；
+4. 多个行式候选或 Schema 不足：询问业务域或目标表，不询问时间范围。
+
+指标值、趋势、排名、同比、环比、升降和归因问题继续进入普通 SQL 链路。时间补参只读取
+`TaskPlan.needs_time_range`，禁止根据 LLM `explanation` 中是否出现“时间范围”反推状态。
+
 **条件路由逻辑**：
 
 ```python
@@ -1004,17 +1016,25 @@ Layer 4: EXPLAIN 空跑 Node
     └─ 通过 → 进入 execute_sql Node
 ```
 
-每次校验失败回退到 `generate_sql` Node 时，将上一轮的 SQL + 错误信息附加到 Prompt 中：
+每次普通语法、字段或 EXPLAIN 校验失败回退到 `generate_sql` Node 时，可将受限长度的上一轮 SQL
+和错误信息附加到 Prompt。表名幻觉必须单独处理：完整失败 SQL 不回注，只回注未知表名和不可截断的
+合法物理表白名单，避免错误表名被模型继续强化；同类幻觉最多执行初次生成加一次纠正。
 
 ```python
 # generate_sql Node 的 Prompt 在重试时会追加:
-if state.get("validation_errors"):
+if state.get("validation_errors") and not is_table_hallucination(state):
     prompt += f"""
     ## 上一轮 SQL 失败，请修正
     错误的 SQL: {state["previous_sql"]}
     错误信息: {state["validation_errors"]}
     请分析上述错误并生成修正后的 SQL。
     """
+
+if is_table_hallucination(state):
+    prompt += build_hallucination_retry_context(
+        unknown_tables=state["validation_errors"][0]["unknown_tables"],
+        legal_tables=state["relevant_tables"],
+    )
 
 if state.get("retry_count", 0) >= 2:
     prompt += "\n## 注意: 这是最后一次尝试，请仔细核对字段名和函数名"

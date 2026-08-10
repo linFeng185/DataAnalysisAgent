@@ -1,0 +1,28 @@
+version: 1
+feature_id: 9.6.1
+cases:
+  - id: profile_regular_rows
+    description: 正常数据应识别唯一主键和标准时间列
+    input:
+      rows:
+        - {id: 1, occurred_at: "2026-01-01", value: 10}
+        - {id: 2, occurred_at: "2026-01-02", value: 20}
+    assertions:
+      - candidate_primary_keys 包含 id
+      - time_columns 包含 occurred_at
+      - duplicate_row_count 等于 0
+  - id: profile_empty_rows
+    description: 空数据应返回零行画像和明确警告
+    input: {rows: []}
+    assertions:
+      - row_count 等于 0
+      - warnings 非空
+  - id: profile_mixed_types
+    description: 混合类型字段应保留类型警告
+    input:
+      rows:
+        - {value: 1}
+        - {value: "一"}
+    assertions:
+      - columns 中 value 的 observed_types 至少包含两项
+      - warnings 包含混合类型说明

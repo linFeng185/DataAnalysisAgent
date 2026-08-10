@@ -1,0 +1,44 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "抽样审计输出",
+  "type": "object",
+  "required": ["method", "seed", "population_size", "requested_sample_size", "actual_sample_size", "sampling_fraction", "selected_indices", "sample_rows", "representativeness", "warnings"],
+  "properties": {
+    "method": {"type": "string", "enum": ["random", "systematic", "stratified", "time_window"]},
+    "seed": {"type": "integer"},
+    "population_size": {"type": "integer", "minimum": 0},
+    "requested_sample_size": {"type": "integer", "minimum": 1},
+    "actual_sample_size": {"type": "integer", "minimum": 0},
+    "sampling_fraction": {"type": "number", "minimum": 0, "maximum": 1},
+    "selected_indices": {"type": "array", "items": {"type": "integer", "minimum": 0}},
+    "sample_rows": {"type": "array", "items": {"type": "object"}},
+    "representativeness": {
+      "type": "object",
+      "required": ["strata_column", "representative", "max_absolute_difference", "strata"],
+      "properties": {
+        "strata_column": {"type": ["string", "null"]},
+        "representative": {"type": "boolean"},
+        "max_absolute_difference": {"type": "number", "minimum": 0, "maximum": 1},
+        "strata": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["value", "population_count", "sample_count", "population_share", "sample_share", "absolute_difference"],
+            "properties": {
+              "value": {},
+              "population_count": {"type": "integer", "minimum": 0},
+              "sample_count": {"type": "integer", "minimum": 0},
+              "population_share": {"type": "number", "minimum": 0, "maximum": 1},
+              "sample_share": {"type": "number", "minimum": 0, "maximum": 1},
+              "absolute_difference": {"type": "number", "minimum": 0, "maximum": 1}
+            },
+            "additionalProperties": false
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "warnings": {"type": "array", "items": {"type": "string"}}
+  },
+  "additionalProperties": false
+}

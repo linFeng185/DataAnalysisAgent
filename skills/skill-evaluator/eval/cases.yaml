@@ -1,0 +1,42 @@
+version: 1
+feature_id: 9.7.10
+cases:
+  - id: evaluator_accepts_stable_valid_run
+    description: 输出满足结构与期望、重复一致且耗时合规时应通过门禁
+    input:
+      cases:
+        - case_id: valid-case
+          output: {valid: true, count: 2}
+          output_schema:
+            type: object
+            required: [valid, count]
+            properties: {valid: {type: boolean}, count: {type: integer}}
+            additionalProperties: false
+          expected_subset: {valid: true}
+          repeat_outputs: [{valid: true, count: 2}]
+          duration_ms: 10
+    assertions:
+      - gate_passed 等于 true
+      - average_score 等于 1
+      - untrusted_code_executed 等于 false
+  - id: evaluator_marks_exact_budget_as_passed
+    description: 耗时恰好等于预算时应视为合规边界
+    input:
+      cases:
+        - case_id: budget-edge
+          output: {ok: true}
+          output_schema: {type: object, required: [ok], properties: {ok: {type: boolean}}}
+          expected_subset: {ok: true}
+          duration_ms: 100
+      maximum_duration_ms: 100
+    assertions:
+      - slow_cases 为空
+      - gate_passed 等于 true
+  - id: evaluator_rejects_missing_case_identifier
+    description: 执行记录缺少用例标识时必须拒绝
+    input:
+      cases:
+        - output: {ok: true}
+          output_schema: {type: object}
+          duration_ms: 1
+    expected_error: 缺少 case_id

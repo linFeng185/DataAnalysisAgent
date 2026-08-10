@@ -2,12 +2,12 @@
 name: custom-report
 version: 1.0.0
 api_version: data-agent/v2
-description: 根据查询结果生成周报、月报等自定义数据报告
+description: 将已完成的查询与分析结果确定性渲染为周报或月报，适用于用户明确要求生成周期数据报告的场景。
 author: data-team
-tags: [report, presentation, export]
+tags: [foundation, report, deterministic]
 
 triggers:
-  keywords: [周报, 月报, 报告, 总结, 导出, 报表]
+  keywords: [周报, 月报, 周度报告, 月度报告, 周期数据报告]
   intents: []
   tables: []
 
@@ -37,9 +37,17 @@ resources:
   max_output_bytes: 524288
 entrypoints:
   execute: tools:render_report
+input_schema: schemas/render_report_input.json
+output_schema: schemas/render_report_output.json
+evaluation:
+  dataset: eval/cases.yaml
+  minimum_score: 0.95
 ---
 
-当用户请求生成报告时，你应当:
-1. 先完成数据查询和分析
-2. 根据时间范围选择合适的模板 (周报/月报)
-3. 报告应包含: 关键指标摘要、趋势分析、异常标注、行动建议
+# 自定义周期报告
+
+1. 先完成数据查询和分析，再把已验证的摘要、洞察和指标传给渲染工具。
+2. 明确请求月报时使用 `monthly_report`，其他周期报告请求使用 `weekly_report`。
+3. 只渲染调用方提供的数据，不补造指标、趋势、异常或行动建议。
+4. 输出 Markdown 文本，不写入文件系统；需要落盘或转换格式时交给专用导出能力。
+5. 模板渲染失败时保留明确日志，并使用结构稳定的最小 Markdown 回退结果。

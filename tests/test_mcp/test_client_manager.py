@@ -194,6 +194,10 @@ class TestMCPScopedLifecycle:
             config_module, "get_settings",
             lambda: SimpleNamespace(mcp_remote_host_allowlist="system,tenant,private"),
         )
+        monkeypatch.setattr(
+            "socket.getaddrinfo",
+            lambda *args, **kwargs: [(2, 1, 6, "", ("93.184.216.34", 443))],
+        )
         manager = MCPClientManager()
         connect = AsyncMock(return_value=[])
         monkeypatch.setattr(manager, "_connect_single", connect)
@@ -247,6 +251,10 @@ class TestMCPScopedLifecycle:
                 mcp_remote_host_allowlist="mcp.example.com",
             ),
         )
+        monkeypatch.setattr(
+            "socket.getaddrinfo",
+            lambda *args, **kwargs: [(2, 1, 6, "", ("93.184.216.34", 443))],
+        )
         manager = MCPClientManager()
         connect = AsyncMock(return_value=[])
         monkeypatch.setattr(manager, "_connect_single", connect)
@@ -258,6 +266,38 @@ class TestMCPScopedLifecycle:
         assert count == 1
         assert connect.await_count == 1
         assert connect.await_args.args[0].endswith("approved")
+
+    # 方法作用：验证 allowlist 域名解析到回环地址时仍被 SSRF 策略拒绝。
+    # Args: self - pytest 测试类实例；monkeypatch - pytest 补丁工具。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    async def test_managed_sse_rejects_allowlisted_host_resolving_private_ip(
+        self,
+        monkeypatch,
+    ) -> None:
+        """主机名白名单不能被 DNS 指向 localhost 或云元数据私网地址绕过。"""
+        # Arrange
+        import src.config as config_module
+        from src.mcp_client.client_manager import _is_managed_remote_config_allowed
+
+        monkeypatch.setattr(
+            config_module,
+            "get_settings",
+            lambda: SimpleNamespace(mcp_remote_host_allowlist="mcp.example.com"),
+        )
+        monkeypatch.setattr(
+            "socket.getaddrinfo",
+            lambda *args, **kwargs: [(2, 1, 6, "", ("127.0.0.1", 443))],
+        )
+        config = {
+            "transport": "sse",
+            "url": "https://mcp.example.com/sse",
+        }
+
+        # Act
+        allowed = _is_managed_remote_config_allowed(config)
+
+        # Assert
+        assert allowed is False
 
     # 方法作用：验证同一身份的 MCP 配置只惰性加载一次。
     # Args: self - pytest 测试类实例；monkeypatch - pytest 补丁工具。

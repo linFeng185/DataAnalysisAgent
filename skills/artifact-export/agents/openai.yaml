@@ -1,0 +1,4 @@
+interface:
+  display_name: "分析产物导出"
+  short_description: "将结构化分析产物稳定导出为标准文本格式并保留可复现摘要"
+  default_prompt: "使用 $artifact-export 将分析产物导出为指定格式。"

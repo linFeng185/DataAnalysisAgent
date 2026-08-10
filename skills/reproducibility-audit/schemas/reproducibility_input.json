@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "可复现性审计输入",
+  "type": "object",
+  "required": ["runs"],
+  "properties": {
+    "runs": {
+      "type": "array",
+      "maxItems": 100,
+      "items": {
+        "type": "object",
+        "required": ["run_id", "input_fingerprint", "code_version", "dependencies", "config_fingerprint", "environment", "random_seed", "output_fingerprint"],
+        "properties": {
+          "run_id": {"type": "string", "minLength": 1},
+          "input_fingerprint": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+          "code_version": {"type": "string", "minLength": 1},
+          "dependencies": {"type": "object", "additionalProperties": {"type": "string", "minLength": 1}},
+          "config_fingerprint": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+          "environment": {"type": "object", "minProperties": 1},
+          "random_seed": {"type": ["integer", "null"]},
+          "output_fingerprint": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+        },
+        "additionalProperties": false
+      }
+    },
+    "minimum_runs": {"type": "integer", "minimum": 2, "maximum": 100, "default": 2}
+  },
+  "additionalProperties": false
+}

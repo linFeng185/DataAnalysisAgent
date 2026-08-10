@@ -15,6 +15,7 @@ TaskCapability = Literal[
     "report",
     "external_action",
     "restore_previous_result",
+    "memory_update",
 ]
 
 
@@ -254,8 +255,15 @@ def build_task_plan(
     """把兼容旧意图映射为结构化任务计划。"""
     normalized_intent = str(intent or "query").strip().lower() or "query"
     normalized_query = str(query or "").strip().lower()
-    if normalized_intent == "file_analysis":
-        capability: TaskCapability = "file_analysis"
+    from src.graph.indicator_catalog import is_indicator_catalog_query
+
+    indicator_catalog = is_indicator_catalog_query(normalized_query)
+    if "记住" in normalized_query and any(
+        marker in normalized_query for marker in ("偏好", "喜欢", "习惯", "默认", "以后", "请记住")
+    ):
+        capability: TaskCapability = "memory_update"
+    elif normalized_intent == "file_analysis":
+        capability = "file_analysis"
     elif any(marker in normalized_query for marker in ("市场研究", "行业研究", "竞品研究", "联网调研")):
         capability = "market_research"
     elif any(marker in normalized_query for marker in ("预测", "forecast")):
@@ -300,7 +308,11 @@ def build_task_plan(
     missing_inputs = ["time_range"] if needs_time_range else []
     return TaskPlan(
         capability=capability,
-        operation=operations.get(normalized_intent, normalized_intent),
+        operation=(
+            "indicator_catalog"
+            if indicator_catalog
+            else operations.get(normalized_intent, normalized_intent)
+        ),
         intent=normalized_intent,
         datasources=[str(item) for item in (datasources or []) if str(item).strip()],
         needs_time_range=needs_time_range,

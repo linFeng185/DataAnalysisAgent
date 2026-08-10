@@ -1,0 +1,4 @@
+interface:
+  display_name: "结构漂移检查"
+  short_description: "比较两版结构并识别破坏性、兼容性与信息性变化"
+  default_prompt: "使用 $schema-drift 检查这两版结构快照的兼容性。"

@@ -1,0 +1,4 @@
+interface:
+  display_name: "确定性统计分析"
+  short_description: "统一执行描述统计、趋势、异常、相关性和集中度确定性计算"
+  default_prompt: "使用 $statistical-analysis 对数据执行确定性统计分析。"

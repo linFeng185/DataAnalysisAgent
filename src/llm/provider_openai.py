@@ -158,6 +158,13 @@ class OpenAIProvider(LLMProvider):
         """
         from src.llm.reasoning_chat_openai import ReasoningChatOpenAI
         resolved_timeout = timeout if timeout is not None else get_settings().llm_timeout
+        stream_chunk_timeout = float(max(
+            1,
+            min(
+                int(getattr(get_settings(), "llm_stream_chunk_timeout", 30)),
+                int(resolved_timeout),
+            ),
+        ))
         adapter_kwargs = self._adapter.get_chat_openai_kwargs(
             reasoning=reasoning,
             reasoning_effort=reasoning_effort,
@@ -173,6 +180,7 @@ class OpenAIProvider(LLMProvider):
                 model=self._model_id, temperature=effective_temperature, max_tokens=max_tokens,
                 api_key=self._api_key or None, base_url=self._base_url or None,
                 timeout=resolved_timeout, streaming=True,
+                stream_chunk_timeout=stream_chunk_timeout,
                 **adapter_kwargs)
         if not reasoning:
             return ReasoningChatOpenAI(

@@ -71,6 +71,7 @@ def _load_default_nodes() -> None:
         from src.graph.nodes.prepare_turn import prepare_turn_node
         from src.graph.nodes.restore_previous_result import restore_previous_result_node
         from src.graph.nodes.retrieve_schema import retrieve_schema_node
+        from src.graph.nodes.save_preference import save_preference_node
         from src.graph.subgraphs.action import build_action_subgraph
         from src.graph.subgraphs.file_analysis import build_file_analysis_subgraph
         from src.graph.subgraphs.forecast import build_forecast_subgraph
@@ -80,6 +81,7 @@ def _load_default_nodes() -> None:
         definitions = [
             ("prepare_turn", prepare_turn_node, ""),
             ("restore_previous_result", restore_previous_result_node, ""),
+            ("save_preference", save_preference_node, "正在保存用户偏好..."),
             ("classify_intent", classify_intent_node, "正在分析问题意图..."),
             ("retrieve_schema", retrieve_schema_node, "正在检索数据库表结构..."),
             ("decompose_query", decompose_query_node, "正在规划查询步骤..."),

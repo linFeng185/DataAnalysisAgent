@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "数据准备输出",
+  "type": "object",
+  "required": ["status", "original_row_count", "result_row_count", "rows", "audit", "warnings"],
+  "properties": {
+    "status": {"type": "string", "const": "completed"},
+    "original_row_count": {"type": "integer", "minimum": 0},
+    "result_row_count": {"type": "integer", "minimum": 0},
+    "rows": {"type": "array", "items": {"type": "object"}},
+    "audit": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["step", "operation", "before_rows", "after_rows", "details"],
+        "properties": {
+          "step": {"type": "integer", "minimum": 1},
+          "operation": {"type": "string"},
+          "before_rows": {"type": "integer", "minimum": 0},
+          "after_rows": {"type": "integer", "minimum": 0},
+          "details": {"type": "object"}
+        },
+        "additionalProperties": false
+      }
+    },
+    "warnings": {"type": "array", "items": {"type": "string"}}
+  },
+  "additionalProperties": false
+}

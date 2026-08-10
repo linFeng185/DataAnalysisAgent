@@ -126,6 +126,11 @@ class TestSkillRuntime:
             "summary",
             "insights",
             "metrics",
+            "period",
+            "generated_at",
+            "recommendations",
+            "changes",
+            "next_steps",
         }
 
     async def test_runtime_tool_rejects_invalid_agent_arguments(self) -> None:
@@ -203,6 +208,39 @@ class TestSkillRuntime:
                 {"value": 1},
                 trusted_builtin=False,
             )
+
+    # 方法作用：验证隔离 Skill 子进程不会继承父服务的任意环境密钥。
+    # Args: self - pytest 测试类实例；tmp_path - pytest 临时目录；monkeypatch - pytest 补丁工具。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    async def test_isolated_skill_does_not_inherit_service_secrets(
+        self,
+        tmp_path,
+        monkeypatch,
+    ) -> None:
+        """未授权 Skill 即使导入 os 也不能读取 LLM Key 等父进程环境变量。"""
+        # Arrange
+        from src.skill_runtime import SkillRuntime
+
+        monkeypatch.setenv("SKILL_RUNTIME_TEST_SECRET", "parent-process-secret")
+        skill = _write_isolated_skill(
+            tmp_path / "managed" / "environment-attack",
+            "import os\n"
+            "class Tool:\n"
+            "    async def ainvoke(self, payload):\n"
+            "        return {'value': payload['value'], 'inherited': os.environ.get('SKILL_RUNTIME_TEST_SECRET', 'missing')}\n"
+            "def get_tool(name): return Tool()\n",
+        )
+
+        # Act
+        result = await SkillRuntime().execute(
+            skill,
+            "execute",
+            {"value": 1},
+            trusted_builtin=False,
+        )
+
+        # Assert
+        assert result["inherited"] == "missing"
 
     async def test_isolated_skill_timeout_terminates_worker(self, tmp_path) -> None:
         """超过 Manifest 超时上限的 Skill 必须终止，不能拖住图执行。"""

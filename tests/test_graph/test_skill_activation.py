@@ -107,3 +107,90 @@ class TestSkillActivation:
         assert schema_result["activated_skills"] == ["order-audit"]
         assert schema_result["activated_skill_ids"] == ["system:order-audit"]
         assert schema_result["skill_activation_stage"] == "schema"
+
+    # 方法作用：验证激活结果只包含可序列化描述而不携带运行时工具实例。
+    # Args: self - pytest 测试类实例；monkeypatch - pytest 补丁工具。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    def test_activation_state_is_msgpack_serializable(self, monkeypatch) -> None:
+        """SkillRuntimeTool 不得进入 LangGraph checkpoint 的状态增量。"""
+        # Arrange
+        import src.skill_manager as manager_module
+        from src.graph.skill_activation import activate_skills
+        from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
+
+        runtime_tool = SimpleNamespace(name="render_report")
+
+        class FakeManager:
+            # 方法作用：返回带不可序列化运行时工具的 Skill 替身。
+            # Args: self - 管理器替身；query/intent/tables - 匹配输入；kwargs - 身份参数。
+            # Returns: 包含运行时工具的 Skill 列表。
+            def match_skills(self, query, intent, tables, **kwargs):
+                del query, intent, tables, kwargs
+                return [SimpleNamespace(
+                    name="custom-report",
+                    resource_id="system:custom-report",
+                    tools=[runtime_tool],
+                )]
+
+            # 方法作用：返回空 Prompt，避免测试依赖真实 Skill 文件。
+            # Args: self - 管理器替身；skills - 激活 Skill 列表。
+            # Returns: 空 Prompt 文本。
+            def build_skill_prompt(self, skills):
+                del skills
+                return ""
+
+            # 方法作用：提供固定请求级工具预算。
+            # Args: self - 管理器替身；skills - 激活 Skill 列表。
+            # Returns: 工具调用预算。
+            def get_tool_budget(self, skills):
+                del skills
+                return 1
+
+        monkeypatch.setattr(manager_module, "get_skill_manager", lambda: FakeManager())
+
+        # Act
+        result = activate_skills({"user_query": "生成月报", "intent": "report"})
+
+        # Assert
+        assert result["skill_tools"] == []
+        assert result["activated_skill_ids"] == ["system:custom-report"]
+        JsonPlusSerializer().dumps_typed(result)
+
+    # 方法作用：验证消费节点能按可序列化 Skill ID 恢复运行时工具。
+    # Args: self - pytest 测试类实例；monkeypatch - pytest 补丁工具。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    def test_resolve_active_skill_tools_restores_runtime_tools(self, monkeypatch) -> None:
+        """checkpoint 恢复后消费边界应重新加载当前身份可见的工具。"""
+        # Arrange
+        import src.skill_manager as manager_module
+        from src.graph.skill_activation import resolve_active_skill_tools
+
+        runtime_tool = SimpleNamespace(name="render_report")
+
+        class FakeManager:
+            # 方法作用：记录按资源 ID 的身份校验调用。
+            # Args: self - 管理器替身；resource_ids - Skill 复合资源 ID；tenant_id/user_id - 当前身份。
+            # Returns: 通过校验的 Skill 列表。
+            def resolve_requested_skills(self, resource_ids, *, tenant_id, user_id):
+                assert resource_ids == ["tenant:custom-report"]
+                assert (tenant_id, user_id) == (2, 3)
+                return [SimpleNamespace(name="custom-report")]
+
+            # 方法作用：把校验后的 Skill 转换为运行时工具对象。
+            # Args: self - 管理器替身；skills - 已校验 Skill 列表。
+            # Returns: 工具对象列表。
+            def get_active_tools(self, skills):
+                assert len(skills) == 1
+                return [runtime_tool]
+
+        monkeypatch.setattr(manager_module, "get_skill_manager", lambda: FakeManager())
+
+        # Act
+        tools = resolve_active_skill_tools({
+            "tenant_id": 2,
+            "user_id": 3,
+            "activated_skill_ids": ["tenant:custom-report"],
+        })
+
+        # Assert
+        assert tools == [runtime_tool]

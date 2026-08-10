@@ -6,6 +6,8 @@ import logging
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
+import pytest
+
 logger = logging.getLogger(__name__)
 
 
@@ -118,3 +120,67 @@ class TestMCPAgentNode:
 
         # Assert
         assert limit == 0
+
+    # 方法作用：验证请求级附件工具拒绝读取未在 file_ids 白名单中的文件。
+    # Args: self - pytest 测试类实例；monkeypatch - pytest 补丁工具。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    async def test_attachment_tool_rejects_file_outside_request(self, monkeypatch) -> None:
+        """附件授权必须同时通过请求白名单和 FileStore 身份过滤。"""
+        # Arrange
+        import src.knowledge.file_store as file_store_module
+        from src.graph.nodes.mcp_agent import _build_attachment_tools
+
+        store = SimpleNamespace(get=AsyncMock())
+        monkeypatch.setattr(file_store_module, "get_file_store", lambda: store)
+        tool = _build_attachment_tools({"file_ids": [7]})[0]
+
+        # Act / Assert
+        with pytest.raises(PermissionError, match="当前请求"):
+            await tool.ainvoke({"file_id": 8})
+        store.get.assert_not_awaited()
+
+    # 方法作用：验证 CSV 附件返回真实 profile、预览和文件引用。
+    # Args: self - pytest 测试类实例；monkeypatch - pytest 补丁工具。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    async def test_attachment_tool_returns_csv_profile_preview_and_citation(self, monkeypatch) -> None:
+        """结构化附件不得退化为自由文本，且引用必须来自工具真实输出。"""
+        # Arrange
+        import src.knowledge.file_store as file_store_module
+        from src.graph.nodes.mcp_agent import _build_attachment_tools
+
+        store = SimpleNamespace(get=AsyncMock(return_value={
+            "id": 7,
+            "filename": "orders.csv",
+            "file_data": b"id,amount\n1,12.5\n2,9.0\n",
+        }))
+        monkeypatch.setattr(file_store_module, "get_file_store", lambda: store)
+        tool = _build_attachment_tools({"file_ids": [7]})[0]
+
+        # Act
+        result = await tool.ainvoke({"file_id": 7})
+
+        # Assert
+        assert result["kind"] == "structured"
+        assert result["profile"]["row_count"] == 2
+        assert result["preview"][0] == {"id": 1, "amount": 12.5}
+        assert result["citation"] == {
+            "source_id": "file:7",
+            "locator": {"file_id": 7, "filename": "orders.csv"},
+        }
+
+    # 方法作用：验证不存在或跨用户附件在 FileStore 边界失败关闭。
+    # Args: self - pytest 测试类实例；monkeypatch - pytest 补丁工具。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    async def test_attachment_tool_fails_closed_when_file_is_not_visible(self, monkeypatch) -> None:
+        """FileStore 返回 None 时不得向模型暴露任何附件内容。"""
+        # Arrange
+        import src.knowledge.file_store as file_store_module
+        from src.graph.nodes.mcp_agent import _build_attachment_tools
+
+        store = SimpleNamespace(get=AsyncMock(return_value=None))
+        monkeypatch.setattr(file_store_module, "get_file_store", lambda: store)
+        tool = _build_attachment_tools({"file_ids": [7]})[0]
+
+        # Act / Assert
+        with pytest.raises(FileNotFoundError, match="不存在或无权访问"):
+            await tool.ainvoke({"file_id": 7})

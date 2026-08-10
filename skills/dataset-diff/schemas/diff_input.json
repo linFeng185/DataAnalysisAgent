@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "数据集差异比较输入",
+  "type": "object",
+  "required": ["baseline_rows", "current_rows", "primary_key"],
+  "properties": {
+    "baseline_rows": {"type": "array", "maxItems": 10000, "items": {"type": "object"}},
+    "current_rows": {"type": "array", "maxItems": 10000, "items": {"type": "object"}},
+    "primary_key": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}},
+    "compare_columns": {"type": ["array", "null"], "items": {"type": "string", "minLength": 1}, "default": null},
+    "numeric_tolerance": {"type": "number", "minimum": 0, "default": 0},
+    "max_details": {"type": "integer", "minimum": 1, "maximum": 1000, "default": 100}
+  },
+  "additionalProperties": false
+}

@@ -1,0 +1,41 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "可复现性审计输出",
+  "type": "object",
+  "required": ["reproducible", "context_consistent", "output_consistent", "summary", "baseline_run_id", "findings", "audit_fingerprint", "filesystem_accessed"],
+  "properties": {
+    "reproducible": {"type": "boolean"},
+    "context_consistent": {"type": "boolean"},
+    "output_consistent": {"type": "boolean"},
+    "summary": {
+      "type": "object",
+      "required": ["run_count", "minimum_runs", "comparable_runs", "finding_count"],
+      "properties": {
+        "run_count": {"type": "integer", "minimum": 0},
+        "minimum_runs": {"type": "integer", "minimum": 2},
+        "comparable_runs": {"type": "integer", "minimum": 0},
+        "finding_count": {"type": "integer", "minimum": 0}
+      },
+      "additionalProperties": false
+    },
+    "baseline_run_id": {"type": "string"},
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["code", "severity", "run_id", "field", "message"],
+        "properties": {
+          "code": {"type": "string"},
+          "severity": {"const": "error"},
+          "run_id": {"type": "string"},
+          "field": {"type": "string"},
+          "message": {"type": "string"}
+        },
+        "additionalProperties": false
+      }
+    },
+    "audit_fingerprint": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "filesystem_accessed": {"const": false}
+  },
+  "additionalProperties": false
+}

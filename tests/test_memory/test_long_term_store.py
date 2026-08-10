@@ -216,6 +216,84 @@ class TestLongTermMemoryIsolation:
         assert metadata["visibility"] == "private"
         assert metadata["resource_kind"] == "long_term_memory"
 
+    # 方法作用：验证写入 asyncpg JSONB 参数前会序列化 payload 字典。
+    # Args: self - pytest 测试类实例。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    async def test_save_sql_template_serializes_postgres_jsonb_payload(self) -> None:
+        """asyncpg 默认 JSONB codec 需要字符串，不能直接绑定 dict。"""
+        # Arrange
+        import json
+
+        from src.memory.long_term_store import LongTermMemoryStore
+        from src.security.tenant_policy import RequestIdentity, TenantPolicy
+
+        pg = SimpleNamespace(execute=AsyncMock(return_value="INSERT 0 1"))
+        vector = SimpleNamespace(
+            delete_by_ids=AsyncMock(return_value=0),
+            upsert=AsyncMock(return_value=1),
+        )
+        store = LongTermMemoryStore(pg_pool=pg, vector_store=vector, policy=TenantPolicy(True))
+
+        # Act
+        await store.save_sql_template(
+            "订单数",
+            "SELECT COUNT(*) FROM orders",
+            "postgres",
+            identity=RequestIdentity(tenant_id=4, user_id=7, role="analyst"),
+        )
+
+        # Assert
+        payload_arg = pg.execute.await_args.args[8]
+        assert isinstance(payload_arg, str)
+        assert json.loads(payload_arg) == {
+            "question": "订单数",
+            "sql": "SELECT COUNT(*) FROM orders",
+            "dialect": "postgres",
+        }
+
+    # 方法作用：验证向量偏好过期清理携带当前请求身份。
+    # Args: self - pytest 测试类实例。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    async def test_expired_vector_preference_delete_uses_identity(self) -> None:
+        """删除私有偏好时必须把 RLS 身份传递到双存储删除入口。"""
+        # Arrange
+        from src.memory.long_term_store import LongTermMemoryStore
+        from src.memory.vector_store import VectorEntry
+        from src.security.tenant_policy import RequestIdentity
+
+        identity = RequestIdentity(tenant_id=4, user_id=7, role="analyst")
+        expired = VectorEntry(
+            id="expired-preference",
+            content="用户偏好: language = zh-CN",
+            metadata={
+                "resource_kind": "long_term_memory",
+                "memory_type": "user_preference",
+                "visibility": "private",
+                "tenant_id": 4,
+                "owner_user_id": 7,
+                "scope": "private:4:7",
+                "payload_json": '{"preference":"language","value":"zh-CN"}',
+                "created_at": (datetime.now(timezone.utc) - timedelta(days=2)).isoformat(),
+                "last_accessed_at": datetime.now(timezone.utc).isoformat(),
+                "access_count": 0,
+                "confidence": 1.0,
+                "ttl_days": 1,
+            },
+        )
+        vector = SimpleNamespace(get_by_filter=AsyncMock(return_value=[expired]))
+        store = LongTermMemoryStore(vector_store=vector)
+        store._delete_ids = AsyncMock()  # noqa: SLF001
+
+        # Act
+        result = await store._get_prefs_from_vector(identity)  # noqa: SLF001
+
+        # Assert
+        assert result == {}
+        store._delete_ids.assert_awaited_once_with(  # noqa: SLF001
+            ["expired-preference"],
+            identity=identity,
+        )
+
     # 方法作用：验证过期和低置信度清理同步删除 PostgreSQL 与 VectorStore。
     # Args: self - pytest 测试类实例。
     # Returns: 无返回值，断言失败时由 pytest 报告。

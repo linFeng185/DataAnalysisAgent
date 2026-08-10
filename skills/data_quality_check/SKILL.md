@@ -2,9 +2,9 @@
 name: data-quality-check
 version: 1.0.0
 api_version: data-agent/v2
-description: 对查询结果执行数据质量检查 (空值率、重复值、异常值)
+description: 对已授权的行式查询结果执行空值率、重复值和数值异常检查，适用于用户明确要求核查数据质量、完整性、重复记录或异常值的场景。
 author: data-team
-tags: [quality, validation, production]
+tags: [foundation, quality, deterministic]
 
 triggers:
   keywords: [数据质量, 空值, 重复, 异常检测, 数据校验, 完整性, 脏数据]
@@ -14,7 +14,7 @@ triggers:
 depends_on:
   mcp_servers: []
   skills: []
-  python_packages: [pandas, numpy]
+  python_packages: []
 
 tools:
   - name: check_null_rate
@@ -43,10 +43,21 @@ resources:
   max_tool_calls: 50
   max_input_bytes: 2097152
   max_output_bytes: 524288
+entrypoints:
+  check_null_rate: tools:check_null_rate
+  check_duplicates: tools:check_duplicates
+  detect_outliers: tools:detect_outliers
+input_schema: schemas/quality_input.json
+output_schema: schemas/quality_output.json
+evaluation:
+  dataset: eval/cases.yaml
+  minimum_score: 0.95
 ---
 
-当用户询问数据质量相关问题时，你应当:
-1. 在 SQL 生成后自动附加质量检查
-2. 在分析结论中单独列出数据质量问题
-3. 对于空值率 > 10% 的字段，主动提示用户
-4. 对于检测到的异常值，标注可能的数据录入错误
+# 数据质量检查
+
+1. 只检查当前请求已经授权并显式传入的行式数据，不读取额外文件或数据源。
+2. 将字段缺失和显式空值统一计入空值率，并同时返回样本总数和空值数量。
+3. 重复值检查只统计非空值；异常值检查使用总体标准差和调用方给定的 Z-Score 阈值。
+4. 少于八个有效样本时不输出异常值结论，避免把极小样本误判为稳定分布。
+5. 将质量结果作为分析证据，不自动修改原始数据，也不把统计异常直接断言为数据错误。
