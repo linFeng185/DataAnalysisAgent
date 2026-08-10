@@ -203,7 +203,10 @@ POST /api/v1/chat {"query": "本月 GMV 排名？", "stream": true}
 ### ⑬ `src/db/` — 状态库迁移
 
 `migrations.py` 在应用启动早期按编号扫描 `migrations/*.sql`，使用 PostgreSQL advisory lock
-避免多实例并发，按文件事务执行，并在 `schema_migrations` 记录版本、文件名与 checksum。
+避免多实例并发，按文件事务执行，并在 `schema_migrations` 记录版本、文件名与按 LF 规范化计算的
+checksum。执行器同时兼容历史 LF/CRLF 登记值，避免 Git 跨平台换行转换造成误报；真正的内容变更
+仍然失败关闭。已知历史迁移被改写时只允许走版本、文件名、新旧 checksum 和后续修复文件均精确
+匹配的白名单升级路径，且不覆盖原有审计记录。
 `013_tenant_identity_llm.sql` 为租户增加全局不可变 `code` 和租户内大小写敏感用户名约束，并建立平台 LLM 厂商/模型目录、租户命名连接、模型绑定和默认配置表。
 `014_llm_catalog_reasoning.sql` 增加厂商能力表单定义，初始化 DeepSeek V4 Pro/Flash，并把旧 `deepseek-chat` 的租户绑定和默认值平滑迁移到 Pro 后删除旧目录项。
 `007_api_access_policy.sql` 为动态策略和 CIDR 规则启用强制 RLS。API 策略加载属于必需启动步骤，
@@ -212,6 +215,7 @@ POST /api/v1/chat {"query": "本月 GMV 排名？", "stream": true}
 `010_automation_force_rls.sql` 强制表所有者也执行这些策略。
 `015_knowledge_evolution.sql` 记录租户/用户隔离的已验证 SQL 观察次数，为 LEARNED_PATTERN 晋升提供幂等证据。
 `016_knowledge_evolution_claims.sql` 增加晋升 Claim Token、超时接管、稳定记忆 ID 和错误摘要字段，防止多 Worker 重复晋升及失效 Worker 写回。
+`017_knowledge_evolution_rls_repair.sql` 为曾执行早期 `015` 的数据库幂等补齐观察表索引、强制 RLS 和租户/用户身份 Policy。
 
 ## Skills 系统
 

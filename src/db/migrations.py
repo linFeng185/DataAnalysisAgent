@@ -14,10 +14,67 @@ logger = get_logger(__name__)
 _MIGRATION_PATTERN = re.compile(r"^(\d{3,})_[A-Za-z0-9_-]+\.sql$")
 _MIGRATION_LOCK_ID = 4_918_298_299_645_661_761
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
+_APPROVED_LEGACY_TRANSITIONS: dict[tuple[str, str, str], tuple[str, str]] = {
+    (
+        "015",
+        "015_knowledge_evolution.sql",
+        "6705b6d1b4ee1cf911f2b46abcf612b638098dcf264e6c299b30c47835a3a995",
+    ): (
+        "af1da2048eca9d24565517d4f02ecc3bfe29037ddce12c6c5c714c4c07da7dc5",
+        "017_knowledge_evolution_rls_repair.sql",
+    ),
+}
 
 
 class MigrationError(RuntimeError):
     """数据库迁移无法安全完成。"""
+
+
+# 方法作用：把迁移字节统一为 LF，避免 Git 跨平台换行转换改变 checksum。
+# Args: content - SQL 文件原始字节。
+# Returns: 使用 LF 的规范化字节。
+def _canonical_migration_bytes(content: bytes) -> bytes:
+    return content.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
+
+
+# 方法作用：计算迁移登记使用的跨平台稳定 SHA-256。
+# Args: content - SQL 文件原始字节。
+# Returns: 规范化内容的十六进制 SHA-256。
+def _migration_checksum(content: bytes) -> str:
+    return hashlib.sha256(_canonical_migration_bytes(content)).hexdigest()
+
+
+# 方法作用：生成当前内容在规范化、LF、CRLF 下的合法 checksum 变体。
+# Args: content - SQL 文件原始字节。
+# Returns: 仅换行编码不同的 SHA-256 集合。
+def _migration_checksum_variants(content: bytes) -> set[str]:
+    canonical = _canonical_migration_bytes(content)
+    crlf = canonical.replace(b"\n", b"\r\n")
+    return {
+        hashlib.sha256(content).hexdigest(),
+        hashlib.sha256(canonical).hexdigest(),
+        hashlib.sha256(crlf).hexdigest(),
+    }
+
+
+# 方法作用：严格判断已登记旧迁移是否属于带修复迁移的批准升级路径。
+# Args: version/stored_name/stored_checksum - 数据库记录；path/checksum - 当前文件；available_names - 本次迁移文件集。
+# Returns: 旧版本、新版本和修复文件均精确匹配时返回修复文件名，否则返回空字符串。
+def _approved_legacy_repair(
+    version: str,
+    stored_name: str,
+    stored_checksum: str,
+    path: Path,
+    checksum: str,
+    available_names: set[str],
+) -> str:
+    transition = _APPROVED_LEGACY_TRANSITIONS.get((version, stored_name, stored_checksum))
+    if transition is None or stored_name != path.name:
+        return ""
+    expected_checksum, repair_name = transition
+    if checksum != expected_checksum or repair_name not in available_names:
+        return ""
+    return repair_name
 
 
 # 方法作用：发现并校验编号唯一的 SQL 迁移文件。
@@ -41,7 +98,7 @@ def _discover_migrations(migrations_dir: Path) -> list[tuple[str, Path, str]]:
             raise MigrationError(f"迁移版本重复: {version}")
         versions.add(version)
         content = path.read_bytes()
-        discovered.append((version, path, hashlib.sha256(content).hexdigest()))
+        discovered.append((version, path, _migration_checksum(content)))
     result = sorted(discovered, key=lambda item: int(item[0]))
     logger.info("发现数据库迁移完成", migration_count=len(result))
     return result
@@ -89,6 +146,7 @@ async def run_migrations(
 
     directory = Path(migrations_dir) if migrations_dir is not None else _PROJECT_ROOT / "migrations"
     migrations = _discover_migrations(directory)
+    available_names = {path.name for _, path, _ in migrations}
     pg_url = to_asyncpg_url(database_url)
     if not pg_url.startswith(("postgresql://", "postgres://")):
         logger.error("数据库迁移 URL 方言不受支持")
@@ -113,9 +171,42 @@ async def run_migrations(
         for version, path, checksum in migrations:
             previous = applied.get(version)
             if previous is not None:
-                if str(previous["checksum"]) != checksum or str(previous["name"]) != path.name:
+                stored_name = str(previous["name"])
+                stored_checksum = str(previous["checksum"])
+                checksum_matches = stored_checksum in _migration_checksum_variants(path.read_bytes())
+                if not checksum_matches or stored_name != path.name:
+                    logger.info(
+                        "数据库迁移校验快照",
+                        version=version,
+                        stored_name=stored_name,
+                        discovered_name=path.name,
+                        stored_checksum=stored_checksum,
+                        discovered_checksum=checksum,
+                    )
+                    repair_name = _approved_legacy_repair(
+                        version,
+                        stored_name,
+                        stored_checksum,
+                        path,
+                        checksum,
+                        available_names,
+                    )
+                    if repair_name:
+                        logger.warning(
+                            "数据库迁移使用批准的旧版本升级路径",
+                            version=version,
+                            migration=path.name,
+                            repair_migration=repair_name,
+                        )
+                        continue
                     logger.error("数据库迁移 checksum 不一致", version=version, migration=path.name)
                     raise MigrationError(f"迁移 checksum 不一致: {path.name}")
+                if stored_checksum != checksum:
+                    logger.info(
+                        "数据库迁移 checksum 换行兼容",
+                        version=version,
+                        migration=path.name,
+                    )
                 logger.info("数据库迁移已应用", version=version, migration=path.name)
                 continue
             script = _normalize_migration_sql(path.read_text(encoding="utf-8"), path.name)

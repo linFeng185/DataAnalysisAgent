@@ -18,7 +18,7 @@
 | # | 功能 | 文件 | 描述 | 状态 |
 |---|------|------|------|------|
 | 17.2.1 | 安全与租户迁移 | `migrations/001_batch1.sql` | 创建租户、用户、权限、审计、会话、历史和知识文件表，并启用身份 RLS | 单测完成 |
-| 17.2.2 | 迁移工具 | `src/db/migrations.py` | 编号顺序、schema_migrations/checksum、advisory lock、单文件事务回滚和生产启动门禁 | 单测完成 |
+| 17.2.2 | 迁移工具 | `src/db/migrations.py`、`migrations/017_knowledge_evolution_rls_repair.sql` | 编号顺序、跨平台稳定 checksum、受控历史修复、advisory lock、单文件事务回滚和生产启动门禁 | 单测完成 |
 
 ### 17.3 监控与可观测性
 
