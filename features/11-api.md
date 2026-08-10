@@ -45,6 +45,8 @@
 | 11.1.37 | POST /auth/register 注册保护 | `src/api/auth.py` | 公开注册按客户端地址限流，bcrypt 在线程池执行，多租户创建在事务内完成 | 单测完成 | P0 |
 | 11.1.38 | 授权数据源发现 `[P0]` | `src/api/routes.py` | 显式选择先鉴权；未选择时把当前身份授权候选交给工作流 | 单测完成 | P0 |
 | 11.1.39 | 会话完整删除 `[P0]` | `src/api/routes.py`、`src/memory/history_store.py` | 返回完整 session_id；删除同步清理历史和新旧 Checkpointer 线程 | 单测完成 | P0 |
+| 11.1.40 | Grafana SimpleJSON 查询协议 | `src/api/routes/grafana.py` | `/grafana/search`、`/grafana/query`、`/grafana/annotations` 复用 JWT、租户、数据源 ACL 和只读有界执行 | 单测完成 | P2 |
+| 11.1.41 | SQL 自动优化建议 | `src/api/routes/optimization.py` | `/optimization/advice` 返回确定性问题、候选索引和重写证据，明确不执行 DDL | 单测完成 | P3 |
 
 ### 11.2 分页增强
 
@@ -67,6 +69,7 @@
 | 11.2.7 | HealthResponse | 同上 | status / version / uptime_seconds | 单测完成 | P0 |
 | 11.2.8 | ModelTestRequest | 同上 | model_id 长度与字符集校验，模型测试固定单 token | 单测完成 | P0 |
 | 11.2.9 | Schema 可变默认工厂 | 同上 | list/dict 字段统一使用 Field(default_factory=...) | 单测完成 | P1 |
+| 11.2.10 | OptimizationRequest | 同上 | SQL、方言、可选 Schema/索引/统计信息和耗时证据校验 | 单测完成 | P3 |
 
 ### 11.3 流式输出
 
@@ -84,7 +87,7 @@
 
 ### 模块收尾
 
-模块功能点共 56 项，已完成 54 项，待开发 2 项。
+模块功能点共 59 项，已完成 57 项，待开发 2 项。
 
 | 功能点 | 不开发原因 | 可开发条件 | 预计开发时机 |
 |--------|------------|------------|--------------|

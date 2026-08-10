@@ -158,3 +158,25 @@ class TestContainerDeployment:
         assert settings.env == "prod"
         assert settings.chroma_persist_dir == "/app/data/chroma"
         assert settings.api_access.trusted_proxy_cidrs == ["172.30.0.0/24"]
+
+
+class TestInstallScript:
+    """覆盖功能 19.9 一键部署脚本。"""
+
+    # 方法作用：验证部署脚本具备依赖检查、幂等环境初始化和健康检查。
+    # Args: self - pytest 测试类实例。
+    # Returns: 无返回值。
+    def test_install_script_is_idempotent_and_safe(self) -> None:
+        """脚本不得覆盖已有 .env 或写入固定凭证。"""
+        # Arrange
+        script = Path("scripts/install.sh").read_text(encoding="utf-8")
+
+        # Act
+        normalized = script.lower()
+
+        # Assert
+        assert "docker" in normalized
+        assert "docker compose config" in normalized
+        assert "health" in normalized
+        assert "if [[ ! -f \"${ENV_FILE}\" ]]" in script
+        assert "openssl rand" in normalized

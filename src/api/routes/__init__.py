@@ -37,6 +37,8 @@ from src.api.routes.datasource import (
 from src.api.routes.datasource import (
     router as datasource_router,
 )
+from src.api.routes.grafana import annotations, query, search, tag_keys, tag_values
+from src.api.routes.grafana import router as grafana_router
 from src.api.routes.knowledge import (
     _docx_to_html,
     _knowledge_where,
@@ -82,6 +84,8 @@ from src.api.routes.mcp import (
 from src.api.routes.mcp import (
     router as mcp_router,
 )
+from src.api.routes.optimization import advice
+from src.api.routes.optimization import router as optimization_router
 from src.api.routes.schema import (
     _schema_manager,
     get_table,
@@ -138,6 +142,8 @@ for domain_router in (
     visualization_router,
     knowledge_router,
     llm_admin_router,
+    grafana_router,
+    optimization_router,
 ):
     # 各领域路由已经包含自身 prefix，直接展开可让 FastAPI 新版和路由审计看到完整 APIRoute。
     router.routes.extend(domain_router.routes)
@@ -199,4 +205,10 @@ __all__ = [
     "delete_knowledge_entry",
     "delete_knowledge_doc",
     "health",
+    "search",
+    "query",
+    "annotations",
+    "tag_keys",
+    "tag_values",
+    "advice",
 ]

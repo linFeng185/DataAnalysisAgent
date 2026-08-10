@@ -226,6 +226,7 @@ class Settings(BaseSettings):
     # ---- 记忆维护 ----
     memory_maintenance_enabled: bool = True
     memory_maintenance_interval_seconds: int = 24 * 60 * 60
+    knowledge_evolution_promotion_threshold: int = Field(default=3, ge=2, le=100)
 
     # ---- 向量存储 ----
     vector_store_type: str = "chroma"

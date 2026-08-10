@@ -105,10 +105,11 @@
 | 9.8.8 | evidence-coverage-audit | `skills/evidence-coverage-audit/` | 审核结论与引用的映射、证据定位和关键主张覆盖率 | 单测完成 | P1 |
 | 9.8.9 | numeric-integrity-audit | `skills/numeric-integrity-audit/` | 检查数值精度、溢出、舍入、非有限值和单位维度一致性 | 单测完成 | P1 |
 | 9.8.10 | resilience-policy-audit | `skills/resilience-policy-audit/` | 审核超时、重试、退避、熔断、幂等和失败补偿策略 | 单测完成 | P1 |
+| 9.8.11 | sql-optimization | `skills/sql-optimization/` | 基于静态 AST、Schema、索引和统计信息生成性能优化建议，不执行 SQL | 单测完成 | P3 |
 
 ### 模块收尾
 
-模块功能点共 64 项，已完成 63 项，待开发 1 项。
+模块功能点共 65 项，已完成 64 项，待开发 1 项。
 
 | 功能点 | 不开发原因 | 可开发条件 | 预计开发时机 |
 |--------|------------|------------|--------------|

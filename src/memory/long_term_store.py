@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -135,6 +136,54 @@ class LongTermMemoryStore:
             ttl_days=ttl_days,
         )
         await self._upsert(entry, identity=current_identity)
+        return entry
+
+    # 方法作用：把达到自进化阈值的成功 SQL 写成稳定 ID 的学习模式。
+    # Args: user_query/sql/dialect/fingerprint/observation_count - 学习证据；identity - 当前身份；visibility/ttl_days - 作用域和生命周期。
+    # Returns: 已持久化的 LEARNED_PATTERN 记忆。
+    async def save_learned_pattern(
+        self,
+        user_query: str,
+        sql: str,
+        dialect: str,
+        fingerprint: str,
+        observation_count: int,
+        *,
+        identity: RequestIdentity | None = None,
+        visibility: str = "private",
+        ttl_days: int | None = 365,
+    ) -> LongTermMemory:
+        current_identity = self._resolve_identity(identity)
+        entry = self._new_entry(
+            memory_type=MemoryType.LEARNED_PATTERN,
+            content=(
+                f"已验证 SQL 模式\n问题: {user_query}\n方言: {dialect}\n"
+                f"SQL: {sql}\n观察次数: {observation_count}"
+            ),
+            payload={
+                "question": user_query,
+                "sql": sql,
+                "dialect": dialect,
+                "fingerprint": fingerprint,
+                "observation_count": int(observation_count),
+                "verified": True,
+            },
+            confidence=min(0.99, 0.8 + min(int(observation_count), 20) * 0.01),
+            identity=current_identity,
+            visibility=visibility,
+            ttl_days=ttl_days,
+        )
+        entry.id = "learned-pattern:" + hashlib.sha256(
+            f"{entry.tenant_id}:{entry.owner_user_id}:{fingerprint}".encode("utf-8"),
+        ).hexdigest()[:48]
+        await self._upsert(entry, identity=current_identity)
+        logger.info(
+            "SQL 学习模式写入完成",
+            tenant_id=entry.tenant_id,
+            owner_user_id=entry.owner_user_id,
+            fingerprint=fingerprint,
+            observation_count=observation_count,
+        )
         return entry
 
     # 方法作用：保存当前用户的 SQL 纠正记录。

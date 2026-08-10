@@ -10,7 +10,7 @@ LLM 驱动的数据分析智能体。用自然语言提问，自动完成：轮�
 
 ```
 ├── src/
-│   ├── api/              ① Web 接口层 — 访问策略/领域路由/纯 ASGI 认证/安全头 + SSE 流式
+│   ├── api/              ① Web 接口层 — 访问策略/领域路由/纯 ASGI 认证/安全头 + SSE 流式；含 Grafana SimpleJSON 与优化建议
 │   ├── graph/            ② 核心流水线 — LangGraph 主图 + 可复用 SQL 子图
 │   │   ├── context.py       请求/权限/路由/执行四组轻量上下文适配
 │   │   ├── contracts.py     任务计划与多数据源请求/结果 Pydantic 契约
@@ -22,9 +22,10 @@ LLM 驱动的数据分析智能体。用自然语言提问，自动完成：轮�
 │   │   └── providers/        数据源提供者
 │   ├── connectors/       ⑤ 数据库连接器 — 自注册方言与统一运行时策略
 │   ├── knowledge/        ⑥ 知识库 — 三范围治理 + 标签 + 连接级缓存 + 文档摄取
-│   ├── memory/           ⑦ 记忆系统 — 会话持久化 + 上下文裁剪 + 历史
+│   ├── memory/           ⑦ 记忆系统 — 会话持久化 + 上下文裁剪 + 历史 + 成功 SQL 自进化
 │   ├── automation/       ⑧ 主动洞察与定时报告 — PG 调度 + 重授权执行 + 通知分发
 │   ├── tools/            ⑨ 分析工具 — 统计、预测与跨资产分析
+│   ├── optimization/     ⑨.1 确定性 SQL 优化建议核心，不执行 DDL
 │   ├── market/           ⑩ 行情 Provider 与 PostgreSQL 持久化（当前 Tushare/A 股）
 │   ├── actions/          ⑪ 受控外部动作（人工确认、幂等、审计）
 │   ├── security/         ⑫ 安全模块 — API/IP 策略 + SQL 统一执行 + 脱敏 + 限流 + 审计 + 出站策略
@@ -40,7 +41,7 @@ LLM 驱动的数据分析智能体。用自然语言提问，自动完成：轮�
 ├── frontend/                 React SPA (Vite + Ant Design + ECharts)
 │   ├── Dockerfile               Node builder + Nginx runtime
 │   └── nginx.conf               SPA、API 代理和 SSE 配置
-├── skills/                   三十二个 system 内置 Skills（质量/报告 + 底座与治理能力）
+├── skills/                   三十三个 system 内置 Skills（质量/报告 + 底座、治理与 SQL 优化）
 ├── data/skills/              tenant/private 受管 Skills
 ├── spec/                     技术规格（15 个章节）
 ├── features/                 功能清单（19 个模块）
@@ -72,7 +73,7 @@ POST /api/v1/chat {"query": "本月 GMV 排名？", "stream": true}
   │    ├─ 预测 → forecast_subgraph（回测/区间/模型卡）
   │    └─ 报告 → report_subgraph（custom-report 真实执行）
   ├─ generate_chart      默认 SQL 分析的 ECharts 配置生成
-  └─ build_response      响应组装 + 轻量会话历史 + HistoryStore 富结果
+  └─ build_response      响应组装 + 轻量会话历史 + HistoryStore 富结果 + 成功 SQL 自进化观察
 ```
 
 ## 各模块说明
@@ -82,8 +83,10 @@ POST /api/v1/chat {"query": "本月 GMV 排名？", "stream": true}
 | 文件 | 职责 |
 |------|------|
 | `routes/__init__.py` | 组合各领域 APIRouter，并保留旧模块导出兼容 |
-| `routes/*.py` | chat、datasource、schema、session、mcp、knowledge、skills、management、admin、llm_admin、access_policy 领域端点 |
+| `routes/*.py` | chat、datasource、schema、session、mcp、knowledge、skills、management、admin、llm_admin、access_policy、Grafana、optimization 领域端点 |
 | `routes/automation.py` | 自动化任务 CRUD、立即运行和用户私有站内通知 |
+| `routes/grafana.py` | SimpleJSON search/query/annotations，复用 JWT、租户和数据源行列权限 |
+| `routes/optimization.py` | 确定性 SQL 优化建议 API，只读分析不执行 DDL |
 | `schemas.py` | Pydantic 请求/响应模型 |
 | `streaming.py` | SSE 流式（13 种事件类型，LLM 调用按 stream_id 隔离） |
 | `middleware.py` | 异常 → HTTP 状态码映射 |
@@ -166,6 +169,7 @@ POST /api/v1/chat {"query": "本月 GMV 排名？", "stream": true}
 | `context_builder.py` | 上下文裁剪（热/温/冷三层） |
 | `history_store.py` | PostgreSQL 查询历史 + 内存环形缓冲回退；工作流 await 写入，final_result JSONB 持久化逐轮 SQL、数据、分析和图表，不保存原始推理 |
 | `long_term_store.py` | 长期记忆（ChromaDB + PG 双写） |
+| `knowledge_evolution.py` | 只接受成功、只读、已验证 SQL，按租户/用户/指纹聚合并在阈值后晋升 |
 | `session_archive.py` | 会话归档 |
 
 ### ⑧ `src/automation/` — 主动洞察与定时报告
@@ -205,6 +209,7 @@ POST /api/v1/chat {"query": "本月 GMV 排名？", "stream": true}
 任一环境加载失败均阻断启动，防止数据库规则静默失效。
 `009_automation.sql` 为自动化任务、运行记录和站内通知建表并启用租户/用户 RLS，
 `010_automation_force_rls.sql` 强制表所有者也执行这些策略。
+`015_knowledge_evolution.sql` 记录租户/用户隔离的已验证 SQL 观察次数，为 LEARNED_PATTERN 晋升提供幂等证据。
 
 ## Skills 系统
 
@@ -226,10 +231,11 @@ POST /api/v1/chat {"query": "本月 GMV 排名？", "stream": true}
 - `reproducibility-audit` / `api-contract-drift` — 重复执行上下文复现与 OpenAPI 协议兼容性审查
 - `file-ingestion-inspector` / `evidence-coverage-audit` — 文件摄取风险与关键结论独立证据覆盖门禁
 - `numeric-integrity-audit` / `resilience-policy-audit` — 数值精度单位与超时重试幂等补偿策略核验
+- `sql-optimization` — 基于 AST、Schema、索引和统计信息生成性能优化建议，明确不执行 SQL
 - `feature-dev` — 开发流程指南
 - `systematic-debugging` — 系统调试协议
 
-仓库内三十二个 Skill 均包含中文 `SKILL.md`、`agents/openai.yaml`、严格输入输出 Schema、确定性
+仓库内三十三个 Skill 均包含中文 `SKILL.md`、`agents/openai.yaml`、严格输入输出 Schema、确定性
 异步 `tools.py` 和固定 `eval/cases.yaml`；`custom-report` 额外保留只读 Jinja2 周报/月报模板资产。
 默认网络权限为空，除 `data-quality-check` 为支持按列检查保留五十次有界调用预算外，其余单请求
 工具预算为一次；数值、SQL、连接和引用结论必须由工具契约生成，不能由 LLM 自行补写。

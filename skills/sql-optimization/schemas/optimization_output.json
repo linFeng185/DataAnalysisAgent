@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["valid", "dialect", "issues", "candidate_indexes", "executed"],
+  "properties": {
+    "valid": {"type": "boolean"},
+    "dialect": {"type": "string"},
+    "normalized_sql": {"type": "string"},
+    "candidate_sql": {"type": "string"},
+    "issues": {"type": "array"},
+    "candidate_indexes": {"type": "array"},
+    "tables": {"type": "array"},
+    "limitations": {"type": "array"},
+    "executed": {"const": false}
+  },
+  "additionalProperties": true
+}

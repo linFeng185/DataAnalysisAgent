@@ -80,6 +80,20 @@ class AutomationScheduleCreateRequest(BaseModel):
     recipient_email: str = Field(default="", max_length=320)
 
 
+class OptimizationRequest(BaseModel):
+    """SQL 自动优化建议请求。"""
+
+    sql: str = Field(..., min_length=1, max_length=20_000)
+    dialect: str = Field(..., min_length=1, max_length=32)
+    datasource: str = Field(default="", max_length=64)
+    schema_data: dict[str, Any] = Field(default_factory=dict, alias="schema")
+    indexes: dict[str, Any] = Field(default_factory=dict)
+    statistics: dict[str, Any] = Field(default_factory=dict)
+    execution_ms: float | None = Field(default=None, ge=0, le=86_400_000)
+
+    model_config = {"populate_by_name": True}
+
+
 class ChatResponse(BaseModel):
     success: bool
     status: str = "success"

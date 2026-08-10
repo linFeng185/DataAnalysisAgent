@@ -23,6 +23,7 @@ database_url: ""
 run_migrations_on_startup: true
 memory_maintenance_enabled: true
 memory_maintenance_interval_seconds: 86400
+knowledge_evolution_promotion_threshold: 3
 
 vector_store_type: chroma
 vector_store_abstract_enabled: true

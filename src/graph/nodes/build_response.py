@@ -364,6 +364,30 @@ async def build_response_node(state: AnalysisState) -> dict:
                 user_id=user_id,
                 dialect=contexts.execution.dialect or "unknown",
             )
+            try:
+                from src.memory.knowledge_evolution import get_knowledge_evolution_service
+
+                evolution = await get_knowledge_evolution_service()
+                await evolution.observe_successful_sql(
+                    query,
+                    gen_sql,
+                    contexts.execution.dialect or "unknown",
+                    execution_success=True,
+                    validated=bool(
+                        contexts.execution.sql_valid
+                        or contexts.execution.sql_explain_checked
+                    ),
+                    identity=identity,
+                    datasource=contexts.routing.datasource,
+                )
+            except Exception as exc:
+                logger.error(
+                    "成功 SQL 自进化观察失败",
+                    tenant_id=tenant_id,
+                    user_id=user_id,
+                    error=str(exc),
+                    exc_info=True,
+                )
         except Exception as exc:
             logger.error(
                 "成功 SQL 长期记忆写入失败",

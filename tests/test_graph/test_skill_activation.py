@@ -114,9 +114,10 @@ class TestSkillActivation:
     def test_activation_state_is_msgpack_serializable(self, monkeypatch) -> None:
         """SkillRuntimeTool 不得进入 LangGraph checkpoint 的状态增量。"""
         # Arrange
+        from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
+
         import src.skill_manager as manager_module
         from src.graph.skill_activation import activate_skills
-        from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
 
         runtime_tool = SimpleNamespace(name="render_report")
 

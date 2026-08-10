@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-import io
 import base64
+import io
 import json
 from contextlib import asynccontextmanager
 from types import SimpleNamespace

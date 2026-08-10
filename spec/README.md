@@ -26,3 +26,4 @@
 | [26-api-access-policy.md](26-api-access-policy.md) | API 访问策略、日志与 IP 控制设计 | 动态 |
 | [27-container-deployment.md](27-container-deployment.md) | Linux 前后端分离容器部署 | 动态 |
 | [28-tenant-identity-and-llm-governance.md](28-tenant-identity-and-llm-governance.md) | 租户身份、用户自治与 LLM 治理 | 动态 |
+| [29-selected-phase4-features.md](29-selected-phase4-features.md) | Phase 4 选定能力设计 | 动态 |

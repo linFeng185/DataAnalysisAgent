@@ -1,0 +1,15 @@
+- id: missing-index
+  input:
+    sql: SELECT * FROM orders WHERE customer_id = 1
+    dialect: postgres
+  assertions:
+    valid: true
+    executed: false
+    issue_codes: [SELECT_STAR, MISSING_INDEX]
+- id: reject-ddl
+  input:
+    sql: DROP TABLE orders
+    dialect: postgres
+  assertions:
+    valid: false
+    executed: false

@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["sql", "dialect"],
+  "properties": {
+    "sql": {"type": "string", "minLength": 1, "maxLength": 20000},
+    "dialect": {"type": "string", "enum": ["clickhouse", "mysql", "postgres", "oracle", "mssql", "sqlite"]},
+    "schema": {"type": "object"},
+    "indexes": {"type": "object"},
+    "statistics": {"type": "object"},
+    "execution_ms": {"type": ["number", "null"], "minimum": 0}
+  },
+  "additionalProperties": false
+}
