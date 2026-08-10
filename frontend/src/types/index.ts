@@ -70,6 +70,7 @@ export interface DatasourceConfig {
   service_name?: string;
   instance?: string;
   file_path?: string;
+  extra_params?: Record<string, unknown>;
 }
 
 export interface DatasourceCreatePayload {
@@ -183,6 +184,15 @@ export interface AutomationSchedule {
   enabled: boolean;
   next_run_at: string;
   last_run_at: string | null;
+}
+
+export interface AutomationRun {
+  id: string;
+  status: 'success' | 'failed';
+  error_message: string;
+  result_payload: Record<string, unknown>;
+  started_at: string;
+  finished_at: string | null;
 }
 
 export interface AutomationNotification {

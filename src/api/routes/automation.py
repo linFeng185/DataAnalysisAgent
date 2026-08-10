@@ -7,7 +7,7 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Query
 
 from src.api.auth import get_current_identity
-from src.api.schemas import AutomationScheduleCreateRequest
+from src.api.schemas import AutomationScheduleCreateRequest, AutomationScheduleUpdateRequest
 from src.app_context import get_tenant_policy
 from src.automation.models import ScheduleDefinition
 from src.automation.runner import get_scheduled_analysis_runner
@@ -173,6 +173,41 @@ async def delete_automation_schedule(schedule_id: str) -> dict[str, str]:
         user_id=identity.user_id,
     )
     return {"status": "deleted"}
+
+
+@router.patch("/automation/schedules/{schedule_id}")
+# 方法作用：启用或暂停指定自动化任务并保留可追溯的运行历史。
+# Args: schedule_id - 任务 UUID；request - enabled 目标状态。
+# Returns: 更新后的任务摘要。
+async def update_automation_schedule(
+    schedule_id: str,
+    request: AutomationScheduleUpdateRequest,
+) -> dict[str, Any]:
+    identity = get_current_identity()
+    updated = await get_automation_store().set_enabled(schedule_id, identity, request.enabled)
+    if not updated:
+        raise HTTPException(404, "自动化任务不存在")
+    schedule = await get_automation_store().get_for_identity(schedule_id, identity)
+    if schedule is None:
+        raise HTTPException(404, "自动化任务不存在")
+    return _schedule_response(schedule)
+
+
+@router.get("/automation/schedules/{schedule_id}/runs")
+# 方法作用：返回任务最近运行状态和失败原因，支持运维排障与用户确认。
+# Args: schedule_id - 任务 UUID；limit - 最大运行记录数。
+# Returns: 运行摘要数组。
+async def list_automation_runs(
+    schedule_id: str,
+    limit: int = Query(default=10, ge=1, le=50),
+) -> dict[str, Any]:
+    identity = get_current_identity()
+    runs = await get_automation_store().list_runs(schedule_id, identity, limit)
+    if not runs:
+        schedule = await get_automation_store().get_for_identity(schedule_id, identity)
+        if schedule is None:
+            raise HTTPException(404, "自动化任务不存在")
+    return {"runs": runs, "total": len(runs)}
 
 
 @router.post("/automation/schedules/{schedule_id}/run")

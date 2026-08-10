@@ -2,6 +2,13 @@
   input:
     sql: SELECT * FROM orders WHERE customer_id = 1
     dialect: postgres
+    schema:
+      orders:
+        columns: [id, customer_id]
+    indexes:
+      orders:
+        - name: orders_pk
+          columns: [id]
   assertions:
     valid: true
     executed: false
@@ -13,3 +20,41 @@
   assertions:
     valid: false
     executed: false
+- id: mysql-non-sargable
+  input:
+    sql: SELECT id FROM users WHERE LOWER(email) = 'a@example.com'
+    dialect: mysql
+  assertions:
+    valid: true
+    executed: false
+    issue_codes: [NON_SARGABLE, INDEX_EVIDENCE_INCOMPLETE]
+- id: postgres-known-index
+  input:
+    sql: SELECT id FROM orders WHERE customer_id = 1
+    dialect: postgres
+    schema:
+      orders:
+        columns: [id, customer_id]
+    indexes:
+      orders:
+        - name: idx_orders_customer
+          columns: [customer_id]
+  assertions:
+    valid: true
+    executed: false
+    candidate_index_count: 0
+- id: clickhouse-known-order-key
+  input:
+    sql: SELECT event_id FROM events WHERE tenant_id = 1 LIMIT 100
+    dialect: clickhouse
+    schema:
+      events:
+        columns: [event_id, tenant_id, event_time]
+    indexes:
+      events:
+        - name: events_order_key
+          columns: [tenant_id, event_time]
+  assertions:
+    valid: true
+    executed: false
+    candidate_index_count: 0

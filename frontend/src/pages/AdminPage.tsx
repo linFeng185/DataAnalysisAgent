@@ -257,6 +257,7 @@ export default function AdminPage() {
   const [accessIpRules, setAccessIpRules] = useState<AccessIpRule[]>([]);
   const [loading, setLoading] = useState(false);
   const [tenantModal, setTenantModal] = useState(false);
+  const [deleteTenantTarget, setDeleteTenantTarget] = useState<Tenant | null>(null);
   const [userModal, setUserModal] = useState(false);
   const [passwordUser, setPasswordUser] = useState<ManagedUser | null>(null);
   const [policyModal, setPolicyModal] = useState(false);
@@ -275,6 +276,7 @@ export default function AdminPage() {
   const [connectionModal, setConnectionModal] = useState(false);
   const [editingConnection, setEditingConnection] = useState<TenantLLMConnection | null>(null);
   const [tenantForm] = Form.useForm();
+  const [deleteTenantForm] = Form.useForm();
   const [userForm] = Form.useForm();
   const [passwordForm] = Form.useForm();
   const [policyForm] = Form.useForm();
@@ -547,6 +549,26 @@ export default function AdminPage() {
     } catch (error) { console.error('AdminPage.toggleTenant 异常', error); message.error('租户状态更新失败'); }
   };
 
+  // 方法作用：在二次确认后物理删除租户及全部关联资源。
+  // Args: 无，读取 deleteTenantTarget 和确认表单。
+  // Returns: 删除完成后无返回值。
+  const deleteTenant = async () => {
+    if (!deleteTenantTarget) return;
+    try {
+      const values = await deleteTenantForm.validateFields();
+      await del(`/admin/tenants/${deleteTenantTarget.id}`, {
+        confirmation: values.confirmation,
+      });
+      message.success('租户及关联数据已删除');
+      setDeleteTenantTarget(null);
+      deleteTenantForm.resetFields();
+      await load();
+    } catch (error) {
+      console.error('AdminPage.deleteTenant 异常', error);
+      if (error instanceof Error && !('errorFields' in error)) message.error('租户删除失败');
+    }
+  };
+
   // 方法作用：切换用户启用状态并刷新工作台。
   // Args: user - 目标用户；isActive - 新状态。
   // Returns: 更新完成后无返回值。
@@ -788,8 +810,15 @@ export default function AdminPage() {
         { title: '租户名称', dataIndex: 'name' },
         { title: '用户数', dataIndex: 'user_count', width: 100 },
         { title: '状态', dataIndex: 'is_active', width: 100, render: value => <Tag color={value ? 'green' : 'default'}>{value ? '启用' : '停用'}</Tag> },
-        { title: '操作', width: 120, render: (_, tenant) => <Switch checked={tenant.is_active} disabled={tenant.id === 1}
-          onChange={value => void toggleTenant(tenant, value)} /> },
+        { title: '操作', width: 150, render: (_, tenant) => <Space size={8}>
+          <Switch checked={tenant.is_active} disabled={tenant.id === 1}
+            onChange={value => void toggleTenant(tenant, value)} />
+          <Tooltip title={tenant.id === 1 ? '默认租户不可删除' : '物理删除租户'}>
+            <Button danger size="small" icon={<DeleteOutlined />} disabled={tenant.id === 1}
+              aria-label={`删除租户 ${tenant.code}`}
+              onClick={() => { deleteTenantForm.resetFields(); setDeleteTenantTarget(tenant); }} />
+          </Tooltip>
+        </Space> },
       ]} />
   );
 
@@ -958,6 +987,23 @@ export default function AdminPage() {
         <Form.Item name="name" label="租户名称" rules={[{ required: true, max: 128 }]}><Input /></Form.Item>
         <Form.Item name="admin_username" label="管理员用户名" rules={[{ required: true, max: 64 }]}><Input /></Form.Item>
         <Form.Item name="admin_password" label="管理员密码" rules={[{ required: true, min: 8, max: 72 }]}><Input.Password /></Form.Item>
+      </Form>
+    </Modal>
+
+    <Modal title="物理删除租户" open={Boolean(deleteTenantTarget)}
+      okText="永久删除" okButtonProps={{ danger: true }} onOk={() => void deleteTenant()}
+      onCancel={() => { setDeleteTenantTarget(null); deleteTenantForm.resetFields(); }} destroyOnClose>
+      <Alert type="error" showIcon message="此操作不可恢复"
+        description="将删除该租户的用户、会话、历史、数据源、知识库、缓存、自动化任务、LLM 配置、MCP 和 Skills。" />
+      <Form form={deleteTenantForm} layout="vertical" style={{ marginTop: 16 }}>
+        <Form.Item name="confirmation" label={<>请输入 <Typography.Text code>{`DELETE ${deleteTenantTarget?.code || ''}`}</Typography.Text></>}
+          dependencies={[]} rules={[
+            { required: true, message: '请输入确认文本' },
+            { validator: (_, value) => value === `DELETE ${deleteTenantTarget?.code || ''}`
+              ? Promise.resolve() : Promise.reject(new Error('确认文本不匹配')) },
+          ]}>
+          <Input autoComplete="off" />
+        </Form.Item>
       </Form>
     </Modal>
 

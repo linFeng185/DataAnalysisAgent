@@ -10,6 +10,61 @@ from src.logging_config import get_logger
 
 logger = get_logger(__name__)
 router = APIRouter()
+
+
+# 方法作用：在未显式传入数据源时选择当前身份可访问的第一个数据源。
+# Args: datasource - 请求中的可选数据源名称。
+# Returns: 规范化数据源名称；无可用数据源时返回空字符串。
+async def _resolve_datasource_name(datasource: str) -> str:
+    normalized = str(datasource or "").strip()
+    import src.api.routes as routes_package
+    from src.api.auth import get_current_identity
+    from src.security.permission_check import resolve_datasource_access
+
+    identity = get_current_identity()
+    registry = routes_package._registry()
+    if not hasattr(registry, "list_all"):
+        logger.warning("Schema Registry 缺少列表能力，保留显式数据源兼容路径")
+        return normalized
+    try:
+        items = await registry.list_all(tenant_id=identity.tenant_id)
+    except TypeError:
+        items = await registry.list_all()
+    if not items:
+        logger.info("Schema 默认数据源为空", reason="当前身份没有可访问数据源")
+        if normalized:
+            raise HTTPException(404, f"数据源 '{normalized}' 未找到")
+        return ""
+    available_names = {
+        str(item.get("name", "") or "").strip()
+        for item in items
+    }
+    if normalized and normalized not in available_names:
+        logger.warning(
+            "Schema 数据源不可见",
+            datasource=normalized,
+            tenant_id=identity.tenant_id,
+        )
+        raise HTTPException(404, f"数据源 '{normalized}' 未找到")
+    try:
+        access = await resolve_datasource_access(
+            items,
+            [normalized] if normalized else [],
+            tenant_id=identity.tenant_id,
+            user_id=identity.user_id,
+            role=identity.role,
+        )
+    except PermissionError as exc:
+        if normalized:
+            logger.warning("Schema 数据源权限拒绝", datasource=normalized, tenant_id=identity.tenant_id)
+            raise HTTPException(403, "无权访问该数据源") from exc
+        logger.info("Schema 默认数据源为空", reason="当前身份没有授权数据源")
+        return ""
+    selected = normalized or next(iter(access), "")
+    logger.info("Schema 默认数据源选择完成", datasource=selected, candidate_count=len(access))
+    return selected
+
+
 def _schema_manager():
     """获取全局 SchemaManager 实例。
 
@@ -24,10 +79,13 @@ def _schema_manager():
 
 @router.get("/schema/tables")
 async def list_tables(
-    datasource: str = Query(default="demo"),
+    datasource: str = Query(default=""),
     page: int = Query(default=1, ge=1), page_size: int = Query(default=20, ge=1, le=100),
     search: str = Query(default=""),
 ) -> dict:
+    datasource = await _resolve_datasource_name(datasource)
+    if not datasource:
+        return {"tables": [], "datasource": "", "total": 0, "page": page, "page_size": page_size}
     try:
         import src.api.routes as routes_package
 
@@ -53,7 +111,10 @@ async def list_tables(
 
 
 @router.get("/schema/tables/{table_name}")
-async def get_table(table_name: str, datasource: str = Query(default="demo")):
+async def get_table(table_name: str, datasource: str = Query(default="")):
+    datasource = await _resolve_datasource_name(datasource)
+    if not datasource:
+        raise HTTPException(404, "当前身份没有可用数据源")
     try:
         import src.api.routes as routes_package
 
@@ -74,7 +135,7 @@ async def get_table(table_name: str, datasource: str = Query(default="demo")):
 
 
 @router.post("/schema/refresh")
-async def refresh_schema(datasource: str = Query(default="demo")):
+async def refresh_schema(datasource: str = Query(default="")):
     """验证数据源后真实刷新 Schema 缓存。
 
     Args:
@@ -83,7 +144,10 @@ async def refresh_schema(datasource: str = Query(default="demo")):
     Returns:
         刷新状态和表数量。
     """
+    datasource = await _resolve_datasource_name(datasource)
     logger.debug("Schema 刷新路由入口", datasource=datasource)
+    if not datasource:
+        raise HTTPException(404, "当前身份没有可用数据源")
     from src.api.auth import require_tenant_admin
 
     require_tenant_admin()
@@ -108,7 +172,7 @@ async def refresh_schema(datasource: str = Query(default="demo")):
 @router.put("/schema/tables/{table_name}/columns/{column_name}/comment")
 async def update_column_comment(
     table_name: str, column_name: str, req: ColumnCommentRequest,
-    datasource: str = Query(default="demo"),
+    datasource: str = Query(default=""),
 ):
     """更新指定数据源中的字段备注。
 
@@ -121,7 +185,10 @@ async def update_column_comment(
     Returns:
         更新后的字段备注摘要。
     """
+    datasource = await _resolve_datasource_name(datasource)
     logger.debug("字段备注路由入口", datasource=datasource, table=table_name, column=column_name)
+    if not datasource:
+        raise HTTPException(404, "当前身份没有可用数据源")
     from src.api.auth import require_tenant_admin
 
     require_tenant_admin()

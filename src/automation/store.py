@@ -161,6 +161,53 @@ class AutomationStore:
             )
         return str(result).endswith(" 1")
 
+    # 方法作用：按当前身份启用或暂停自动化任务，暂停任务不会删除历史运行结果。
+    # Args: schedule_id - UUID；identity - 当前请求身份；enabled - 是否继续调度。
+    # Returns: 目标任务存在且可管理时返回 True。
+    async def set_enabled(self, schedule_id: str, identity: Any, enabled: bool) -> bool:
+        pool = await self._pool()
+        from src.memory.pg_pool import pg_pool_connection
+
+        async with pg_pool_connection(
+            pool, identity.tenant_id, identity.user_id, identity.role,
+        ) as connection:
+            status = await connection.execute(
+                "UPDATE analysis_schedules SET enabled=$1, updated_at=NOW() "
+                "WHERE id=$2::uuid AND tenant_id=$3 "
+                "AND ($4 IN ('super_admin','tenant_admin') OR user_id=$5)",
+                bool(enabled), schedule_id, identity.tenant_id, identity.role, identity.user_id,
+            )
+        changed = str(status).endswith(" 1")
+        logger.info(
+            "自动化任务状态更新完成",
+            schedule_id=schedule_id,
+            tenant_id=identity.tenant_id,
+            enabled=enabled,
+            changed=changed,
+        )
+        return changed
+
+    # 方法作用：读取任务最近运行记录，帮助用户判断调度是否真正生效。
+    # Args: schedule_id - UUID；identity - 当前请求身份；limit - 最大记录数。
+    # Returns: 最新运行摘要列表。
+    async def list_runs(self, schedule_id: str, identity: Any, limit: int = 10) -> list[dict[str, Any]]:
+        schedule = await self.get_for_identity(schedule_id, identity)
+        if schedule is None:
+            return []
+        pool = await self._pool()
+        from src.memory.pg_pool import pg_pool_connection
+
+        async with pg_pool_connection(
+            pool, identity.tenant_id, identity.user_id, identity.role,
+        ) as connection:
+            rows = await connection.fetch(
+                "SELECT id::text,status,error_message,result_payload,started_at,finished_at "
+                "FROM analysis_schedule_runs WHERE schedule_id=$1::uuid AND tenant_id=$2 "
+                "ORDER BY started_at DESC LIMIT $3",
+                schedule_id, identity.tenant_id, max(1, min(int(limit), 50)),
+            )
+        return [dict(row) for row in rows]
+
     # 方法作用：用 SKIP LOCKED 原子认领到期任务并提前推进下一运行时间。
     # Args: self - Store；limit - 单轮最大任务数。
     # Returns: 本实例独占认领的任务列表。

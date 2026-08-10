@@ -24,6 +24,9 @@ _started_at = time.time()
 # Args: datasource - 内部数据源配置。
 # Returns: 可安全返回前端的数据源摘要。
 def _datasource_info(datasource: object) -> DataSourceInfo:
+    extra_params = getattr(datasource, "extra_params", {}) or {}
+    if not isinstance(extra_params, dict):
+        extra_params = {}
     return DataSourceInfo(
         name=str(getattr(datasource, "name", "")),
         dialect=str(getattr(datasource, "dialect", "")),
@@ -34,6 +37,12 @@ def _datasource_info(datasource: object) -> DataSourceInfo:
         database=str(getattr(datasource, "database", "") or ""),
         username=str(getattr(datasource, "username", "") or ""),
         description=str(getattr(datasource, "description", "") or ""),
+        schema=str(extra_params.get("schema", "") or ""),
+        tablespace=str(extra_params.get("tablespace", "") or ""),
+        service_name=str(extra_params.get("service_name", "") or ""),
+        instance=str(extra_params.get("instance", "") or ""),
+        file_path=(str(getattr(datasource, "database", "") or "")
+                   if str(getattr(datasource, "dialect", "")).lower() == "sqlite" else ""),
         connected=False,
     )
 
@@ -144,7 +153,7 @@ async def update_datasource(name: str, req: DataSourceUpdateRequest):
     except Exception as exc:
         logger.error("数据源更新失败", datasource=name, exc_info=True)
         raise HTTPException(500, "数据源配置更新失败") from exc
-    registry.invalidate(name)
+    registry.invalidate(name, tenant_id=tenant_id)
     logger.info("数据源更新路由完成", datasource=name, tenant_id=tenant_id)
     return _datasource_info(updated)
 

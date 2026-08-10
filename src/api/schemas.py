@@ -80,6 +80,12 @@ class AutomationScheduleCreateRequest(BaseModel):
     recipient_email: str = Field(default="", max_length=320)
 
 
+class AutomationScheduleUpdateRequest(BaseModel):
+    """启用或暂停已有自动化任务的请求。"""
+
+    enabled: bool
+
+
 class OptimizationRequest(BaseModel):
     """SQL 自动优化建议请求。"""
 
@@ -184,7 +190,14 @@ class DataSourceInfo(BaseModel):
     database: str = ""
     username: str = ""
     description: str = ""
+    schema_name: str = Field(default="", alias="schema", serialization_alias="schema")
+    tablespace: str = ""
+    service_name: str = ""
+    instance: str = ""
+    file_path: str = ""
     connected: bool = False
+
+    model_config = {"populate_by_name": True}
 
 
 class TableInfo(BaseModel):

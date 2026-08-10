@@ -180,3 +180,6 @@ class TestInstallScript:
         assert "health" in normalized
         assert "if [[ ! -f \"${ENV_FILE}\" ]]" in script
         assert "openssl rand" in normalized
+        assert "rollback_services" in script
+        assert "down --remove-orphans --timeout 30" in script
+        assert "logs --tail 200" in script

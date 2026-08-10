@@ -14,13 +14,32 @@ SKIP_HEALTH="false"
 APP_PORT="8080"
 FRONTEND_PORT="8080"
 ENV_CREATED="false"
+ROLLBACK_NEEDED="false"
+ROLLBACK_IN_PROGRESS="false"
 
 # 方法作用：输出失败原因并终止部署，避免半配置状态被误认为成功。
 # Args: message - 面向部署操作者的错误信息。
 # Returns: 不返回。
 fail() {
-  printf '%s\n' "[ERROR] $1" >&2
+  local message="$1"
+  if [[ "${ROLLBACK_NEEDED}" == "true" && "${ROLLBACK_IN_PROGRESS}" == "false" ]]; then
+    rollback_services
+  fi
+  printf '%s\n' "[ERROR] ${message}" >&2
   exit 1
+}
+
+# 方法作用：清理本次部署创建或替换的 Compose 容器，保留持久化卷和用户配置。
+# Args: 无，使用当前 Compose 项目与 ENV_FILE。
+# Returns: 尽力回滚且不覆盖原始失败退出码。
+rollback_services() {
+  ROLLBACK_IN_PROGRESS="true"
+  ROLLBACK_NEEDED="false"
+  printf '%s\n' '[WARN] 部署未通过健康检查，正在回滚本次 Compose 服务。' >&2
+  docker compose --env-file "${ENV_FILE}" -f "${PROJECT_DIR}/docker-compose.yml" \
+    down --remove-orphans --timeout 30 >/dev/null 2>&1 || \
+    printf '%s\n' '[WARN] 自动回滚未完全成功，请执行 docker compose ps 检查。' >&2
+  ROLLBACK_IN_PROGRESS="false"
 }
 
 # 方法作用：解析有限且显式的部署参数。
@@ -139,18 +158,24 @@ validate_compose() {
 # Args: 无。
 # Returns: 服务启动并健康时返回 0，否则终止。
 start_services() {
+  ROLLBACK_NEEDED="true"
   docker compose --env-file "${ENV_FILE}" -f "${PROJECT_DIR}/docker-compose.yml" up -d --build || fail "容器启动失败"
-  [[ "${SKIP_HEALTH}" == "true" ]] && return 0
+  if [[ "${SKIP_HEALTH}" == "true" ]]; then
+    ROLLBACK_NEEDED="false"
+    return 0
+  fi
   local health_url="http://127.0.0.1:${FRONTEND_PORT}/api/v1/health"
   local attempt
   for attempt in $(seq 1 30); do
     if curl --fail --silent --show-error --max-time 5 "${health_url}" >/dev/null 2>&1; then
       printf '%s\n' "[OK] 服务已就绪: ${health_url}"
+      ROLLBACK_NEEDED="false"
       return 0
     fi
     sleep 2
   done
   docker compose --env-file "${ENV_FILE}" -f "${PROJECT_DIR}/docker-compose.yml" ps
+  docker compose --env-file "${ENV_FILE}" -f "${PROJECT_DIR}/docker-compose.yml" logs --tail 200 >&2 || true
   fail "健康检查超时: ${health_url}"
 }
 

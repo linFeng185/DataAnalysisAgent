@@ -54,7 +54,10 @@
 | GET | `/api/v1/admin/tenants` | 分页列出租户及用户数 |
 | POST | `/api/v1/admin/tenants` | 原子创建租户和首个 `tenant_admin` |
 | PATCH | `/api/v1/admin/tenants/{tenant_id}` | 启停租户，默认租户不可停用 |
+| DELETE | `/api/v1/admin/tenants/{tenant_id}` | 二次确认后物理删除非默认租户及全部作用域资源 |
 | GET | `/api/v1/admin/config` | 返回脱敏后的运行配置摘要 |
+
+租户物理删除先取得按租户编号分区的 PostgreSQL advisory lock，防止多 Worker 重复清理；再原子停用租户，清理数据源连接、向量知识、Schema 缓存、tenant/private Skill、MCP 会话、上传任务、会话历史、Checkpointer 和自进化进程缓存，最后在事务内按外键顺序删除关系表与租户记录。读取清理清单和最终删除的两个事务都显式设置本地 `super_admin` RLS 身份，确保 `FORCE ROW LEVEL SECURITY` 表完整清理且连接归还后不残留身份。外部资源清理失败时保留停用状态并允许重试；默认租户和固定超级管理员永远不可删除，确认文本必须精确匹配 `DELETE <tenant_code>`。
 
 用户管理端点仅允许 `tenant_admin` 调用，并强制作用于当前租户：
 
@@ -91,5 +94,6 @@ system 级 Skill、知识文件/条目和 MCP 配置属于平台内部资源：
 - 超级管理员首次初始化、幂等、冲突失败和固定身份保护；
 - 未登录 401、登录失败锁定、成功清零、注册开关；
 - 租户编码登录、大小写敏感用户名与租户用户管理正常/边界/越权路径；
+- 租户物理删除的默认租户保护、确认文本、运行时资源清理、关系表清理顺序和失败重试；
 - 普通用户无法列出或读取 system Skill、知识和 MCP；
 - 前端登录跳转、角色菜单和平台管理页面生产构建。

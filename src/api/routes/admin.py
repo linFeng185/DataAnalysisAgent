@@ -12,6 +12,7 @@ from src.logging_config import get_logger
 logger = get_logger(__name__)
 router = APIRouter(prefix="/admin", tags=["platform-admin"])
 _MANAGED_ROLES = {"tenant_admin", "analyst", "viewer"}
+_TENANT_DELETE_LOCK_NAMESPACE = 1_414_283_348
 
 
 class TenantCreateRequest(BaseModel):
@@ -32,6 +33,12 @@ class TenantStatusRequest(BaseModel):
     """启用或停用租户的请求。"""
 
     is_active: bool
+
+
+class TenantDeleteRequest(BaseModel):
+    """物理删除租户的二次确认请求。"""
+
+    confirmation: str = Field(..., min_length=8, max_length=128)
 
 
 class UserCreateRequest(BaseModel):
@@ -115,6 +122,18 @@ async def _ensure_tenant_admin_continuity(
             )
             raise HTTPException(409, "租户必须至少保留一个启用的管理员")
     return dict(current)
+
+
+# 方法作用：在当前事务设置租户删除所需的 super_admin RLS 身份。
+# Args: connection - 当前 PostgreSQL 连接；tenant_id - 待清理租户 ID。
+# Returns: 无返回值。
+async def _set_tenant_delete_rls_context(connection, tenant_id: int) -> None:
+    await connection.execute(
+        "SELECT set_config('app.current_tenant_id', $1, true), "
+        "set_config('app.current_user_id', '1', true), "
+        "set_config('app.current_role', 'super_admin', true)",
+        str(int(tenant_id)),
+    )
 
 
 @router.get("/tenants")
@@ -250,6 +269,116 @@ async def update_tenant_status(tenant_id: int, request: TenantStatusRequest) -> 
         raise
     except Exception as exc:
         _raise_write_error(exc, "租户状态更新冲突")
+
+
+@router.delete("/tenants/{tenant_id}")
+# 方法作用：停用并物理删除租户及其全部关系型、向量和运行时资源。
+# Args: tenant_id - 待删除租户 ID；request - 必须匹配 DELETE <tenant_code> 的确认文本。
+# Returns: 删除摘要；外部资源失败时抛出 503 且租户保持停用以便重试。
+async def delete_tenant(tenant_id: int, request: TenantDeleteRequest) -> dict:
+    """固定超级管理员执行可重试的租户级清理。"""
+    from src.api.auth import require_super_admin
+    from src.memory.pg_pool import get_pg_pool
+    from src.tenant_purge import purge_tenant_rows, purge_tenant_runtime
+
+    require_super_admin()
+    if tenant_id == 1:
+        raise HTTPException(403, "默认租户和固定超级管理员不能删除")
+    logger.info("租户物理删除入口", tenant_id=tenant_id)
+    pool = await get_pg_pool()
+    async with pool.acquire() as connection:
+        lock_acquired = bool(await connection.fetchval(
+            "SELECT pg_try_advisory_lock($1, $2)",
+            _TENANT_DELETE_LOCK_NAMESPACE,
+            int(tenant_id),
+        ))
+        logger.info(
+            "租户物理删除锁获取",
+            tenant_id=tenant_id,
+            acquired=lock_acquired,
+        )
+        if not lock_acquired:
+            raise HTTPException(409, "该租户正在删除，请稍后查看结果")
+        try:
+            async with connection.transaction():
+                await _set_tenant_delete_rls_context(connection, tenant_id)
+                row = await connection.fetchrow(
+                    "SELECT id, code, name, is_active FROM tenants WHERE id=$1 FOR UPDATE",
+                    tenant_id,
+                )
+                if row is None:
+                    raise HTTPException(404, "租户不存在")
+                tenant_code = str(row["code"] or "").strip().lower()
+                expected = f"DELETE {tenant_code}"
+                if request.confirmation.strip() != expected:
+                    logger.warning("租户物理删除确认失败", tenant_id=tenant_id)
+                    raise HTTPException(400, f"请输入确认文本: {expected}")
+                datasource_rows = await connection.fetch(
+                    "SELECT name, dialect, host, port, database_name, username, extra_params "
+                    "FROM datasource_configs WHERE tenant_id=$1",
+                    tenant_id,
+                )
+                session_rows = await connection.fetch(
+                    "SELECT DISTINCT session_id, user_id FROM ("
+                    "SELECT session_id, user_id FROM sessions WHERE tenant_id=$1 "
+                    "UNION SELECT session_id, user_id FROM query_history WHERE tenant_id=$1 "
+                    "UNION SELECT session_id, user_id FROM sessions_archive WHERE tenant_id=$1"
+                    ") tenant_sessions",
+                    tenant_id,
+                )
+                await connection.execute(
+                    "UPDATE tenants SET is_active=FALSE WHERE id=$1",
+                    tenant_id,
+                )
+
+            try:
+                runtime = await purge_tenant_runtime(tenant_id, datasource_rows, session_rows)
+            except Exception as exc:
+                logger.error(
+                    "租户外部资源清理失败，租户保持停用",
+                    tenant_id=tenant_id,
+                    error=str(exc),
+                    exc_info=True,
+                )
+                raise HTTPException(503, "租户外部资源清理失败，请稍后重试") from exc
+
+            try:
+                async with connection.transaction():
+                    await _set_tenant_delete_rls_context(connection, tenant_id)
+                    current = await connection.fetchrow(
+                        "SELECT id FROM tenants WHERE id=$1 FOR UPDATE",
+                        tenant_id,
+                    )
+                    if current is None:
+                        logger.info("租户物理删除幂等完成", tenant_id=tenant_id, already_deleted=True)
+                        return {"status": "deleted", "tenant_id": tenant_id, "runtime": runtime, "rows": {}}
+                    rows = await purge_tenant_rows(connection, tenant_id)
+                    status = await connection.execute(
+                        "DELETE FROM tenants WHERE id=$1 AND id<>1",
+                        tenant_id,
+                    )
+                    if str(status).endswith(" 0"):
+                        raise HTTPException(409, "租户删除未生效")
+            except HTTPException:
+                raise
+            except Exception as exc:
+                logger.error("租户关系数据删除失败", tenant_id=tenant_id, error=str(exc), exc_info=True)
+                raise HTTPException(500, "租户关系数据删除失败，事务已回滚") from exc
+            logger.info("租户物理删除完成", tenant_id=tenant_id, runtime=runtime, rows=rows)
+            return {"status": "deleted", "tenant_id": tenant_id, "runtime": runtime, "rows": rows}
+        finally:
+            try:
+                await connection.execute(
+                    "SELECT pg_advisory_unlock($1, $2)",
+                    _TENANT_DELETE_LOCK_NAMESPACE,
+                    int(tenant_id),
+                )
+                logger.info("租户物理删除锁释放", tenant_id=tenant_id)
+            except Exception:
+                logger.error("租户物理删除锁释放失败", tenant_id=tenant_id, exc_info=True)
+                terminate = getattr(connection, "terminate", None)
+                if callable(terminate):
+                    terminate()
 
 
 @router.get("/users")

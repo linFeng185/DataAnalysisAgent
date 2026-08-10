@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime
 from typing import Any
 
@@ -19,6 +20,8 @@ from src.security.sql_execution import SQLExecutionResult, validate_and_execute_
 
 logger = get_logger(__name__)
 router = APIRouter()
+_MAX_TARGET_CONCURRENCY = 8
+_TARGET_TIMEOUT_SECONDS = 30.0
 
 
 @router.get("/grafana/search")
@@ -28,7 +31,7 @@ router = APIRouter()
 async def search() -> list[str]:
     identity = get_current_identity()
     try:
-        available = await get_registry().list_all()
+        available = await _available_datasources(identity)
         access = await resolve_datasource_access(
             available,
             [],
@@ -57,7 +60,7 @@ async def query(payload: dict[str, Any] = Body(...)) -> list[dict[str, Any]]:
     if not isinstance(targets, list) or not targets or len(targets) > 20:
         raise HTTPException(422, "targets 必须包含 1 到 20 个查询")
     available = await _available_datasources(identity)
-    results: list[dict[str, Any]] = []
+    prepared: list[tuple[dict[str, Any], str]] = []
     for target in targets:
         if not isinstance(target, dict):
             raise HTTPException(422, "target 格式无效")
@@ -67,28 +70,88 @@ async def query(payload: dict[str, Any] = Body(...)) -> list[dict[str, Any]]:
             raise HTTPException(422, "每个 target 必须提供 datasource 和 rawSql")
         if len(raw_sql) > 20_000:
             raise HTTPException(413, "Grafana SQL 超过长度限制")
-        try:
-            access = await resolve_datasource_access(
-                available,
-                [datasource_name],
-                tenant_id=identity.tenant_id,
-                user_id=identity.user_id,
-                role=identity.role,
-            )
-        except PermissionError as exc:
-            logger.warning(
-                "Grafana 查询数据源权限拒绝",
-                datasource=datasource_name,
-                tenant_id=identity.tenant_id,
-                user_id=identity.user_id,
-            )
-            raise HTTPException(403, "无权使用该数据源") from exc
-        permission = access[datasource_name]
+        prepared.append((target, datasource_name))
+    try:
+        # 一个请求只解析一次 ACL，避免并发目标之间读取到不同权限版本。
+        access = await resolve_datasource_access(
+            available,
+            list(dict.fromkeys(name for _, name in prepared)),
+            tenant_id=identity.tenant_id,
+            user_id=identity.user_id,
+            role=identity.role,
+        )
+    except PermissionError as exc:
+        logger.warning(
+            "Grafana 查询数据源权限拒绝",
+            tenant_id=identity.tenant_id,
+            user_id=identity.user_id,
+        )
+        raise HTTPException(403, "无权使用请求中的数据源") from exc
+    acl_snapshot = {name: dict(permission) for name, permission in access.items()}
+    semaphore = asyncio.Semaphore(min(_MAX_TARGET_CONCURRENCY, len(prepared)))
+    executions = await asyncio.gather(*(
+        _execute_target(
+            target,
+            datasource_name,
+            payload,
+            available,
+            acl_snapshot[datasource_name],
+            semaphore,
+        )
+        for target, datasource_name in prepared
+    ), return_exceptions=True)
+    results: list[dict[str, Any]] = []
+    for index, execution in enumerate(executions):
+        if not isinstance(execution, BaseException):
+            results.append(execution)
+            continue
+        if isinstance(execution, asyncio.CancelledError):
+            raise execution
+        if not isinstance(execution, Exception):
+            raise execution
+        target = prepared[index][0]
+        ref_id = str(target.get("refId", f"T{index + 1}") or f"T{index + 1}")
+        if isinstance(execution, HTTPException) and execution.status_code == 403:
+            raise execution
+        if len(prepared) == 1:
+            if isinstance(execution, HTTPException):
+                raise execution
+            raise HTTPException(502, "Grafana 查询执行失败") from execution
+        detail = execution.detail if isinstance(execution, HTTPException) else "查询执行失败"
+        logger.warning(
+            "Grafana 多目标查询局部失败",
+            target=ref_id,
+            error_type=type(execution).__name__,
+        )
+        results.append(_grafana_error_result(ref_id, str(detail)))
+    logger.info(
+        "Grafana 查询完成",
+        tenant_id=identity.tenant_id,
+        user_id=identity.user_id,
+        target_count=len(results),
+        failed_count=sum(1 for item in results if item.get("error")),
+    )
+    return results
+
+
+# 方法作用：在并发和超时边界内执行单个已授权 Grafana target。
+# Args: target/datasource_name/payload - 目标上下文；available - 数据源摘要；permission - ACL 快照；semaphore - 并发门限。
+# Returns: Grafana table 或 time series 结果。
+async def _execute_target(
+    target: dict[str, Any],
+    datasource_name: str,
+    payload: dict[str, Any],
+    available: list[dict[str, Any]],
+    permission: dict[str, Any],
+    semaphore: asyncio.Semaphore,
+) -> dict[str, Any]:
+    async with semaphore:
         datasource_meta = next(
             (item for item in available if str(item.get("name")) == datasource_name),
             {},
         )
         dialect = str(datasource_meta.get("dialect", "") or "")
+        raw_sql = str(target.get("rawSql", "") or "").strip()
         raw_sql = _expand_macros(raw_sql, payload.get("range") or {})
         validation = validate_sql(raw_sql, dialect)
         if not validation.valid:
@@ -105,23 +168,21 @@ async def query(payload: dict[str, Any] = Body(...)) -> list[dict[str, Any]]:
         except Exception as exc:
             logger.error("Grafana 行权限注入失败", datasource=datasource_name, error=str(exc), exc_info=True)
             raise HTTPException(403, "数据源行权限无法安全注入") from exc
-        execution = await validate_and_execute_sql(
-            scoped_sql,
-            datasource_name,
-            dialect,
-            explain=False,
-        )
+        try:
+            async with asyncio.timeout(_TARGET_TIMEOUT_SECONDS):
+                execution = await validate_and_execute_sql(
+                    scoped_sql,
+                    datasource_name,
+                    dialect,
+                    explain=False,
+                )
+        except TimeoutError as exc:
+            logger.warning("Grafana 目标查询超时", datasource=datasource_name)
+            raise HTTPException(504, "Grafana 查询超时") from exc
         if not execution.success:
             status = 422 if execution.error_type in {"security", "sql_semantic"} else 502
             raise HTTPException(status, execution.error or "Grafana 查询执行失败")
-        results.append(_grafana_result(str(target.get("refId", "A") or "A"), execution))
-    logger.info(
-        "Grafana 查询完成",
-        tenant_id=identity.tenant_id,
-        user_id=identity.user_id,
-        target_count=len(results),
-    )
-    return results
+        return _grafana_result(str(target.get("refId", "A") or "A"), execution)
 
 
 @router.get("/grafana/annotations")
@@ -225,6 +286,20 @@ def _grafana_result(ref_id: str, execution: SQLExecutionResult) -> dict[str, Any
         "type": "table",
         "columns": columns,
         "rows": [[row.get(column["text"]) for column in columns] for row in rows],
+    }
+
+
+# 方法作用：把多目标请求中的单目标故障转换为 Grafana 可展示的错误表。
+# Args: ref_id - target 引用；detail - 已脱敏错误摘要。
+# Returns: 不影响同请求其他目标的错误结果。
+def _grafana_error_result(ref_id: str, detail: str) -> dict[str, Any]:
+    message = str(detail or "查询失败")[:500]
+    return {
+        "target": ref_id,
+        "type": "table",
+        "columns": [{"text": "error"}],
+        "rows": [[message]],
+        "error": message,
     }
 
 

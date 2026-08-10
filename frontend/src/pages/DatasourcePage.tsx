@@ -111,6 +111,18 @@ export default function DatasourcePage() {
 
   useEffect(() => { void load(); }, []);
 
+  // 方法作用：在编辑弹窗完成挂载后回填配置，避免 destroyOnClose 丢弃未挂载字段值。
+  // Args: 无，读取 open/editing/datasource 状态。
+  // Returns: 无返回值。
+  useEffect(() => {
+    if (!open || !editing) return;
+    form.setFieldsValue({
+      ...editing,
+      version: editing.version ? [editing.version] : undefined,
+      password: '',
+    });
+  }, [open, editing, form]);
+
   // 方法作用：打开新增数据源表单并清理上一轮状态。
   // Args: 无。
   // Returns: 无返回值。
@@ -127,11 +139,6 @@ export default function DatasourcePage() {
   const openEdit = (datasource: DatasourceConfig): void => {
     setEditing(datasource);
     setDialect(datasource.dialect);
-    form.setFieldsValue({
-      ...datasource,
-      version: datasource.version ? [datasource.version] : undefined,
-      password: '',
-    });
     setOpen(true);
   };
 
@@ -268,7 +275,7 @@ export default function DatasourcePage() {
           </Button>,
         ]}
       >
-        <Form form={form} layout="vertical" preserve={false}>
+        <Form form={form} layout="vertical">
           {!editing && (
             <Form.Item name="name" label="名称" rules={[{ required: true }]}>
               <Input placeholder="如 mysql_prod" />

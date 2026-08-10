@@ -212,6 +212,7 @@ class TestPlatformAdminRoutes:
         assert admin_included is True
         assert ("GET", "/admin/tenants") in routes
         assert ("POST", "/admin/tenants") in routes
+        assert ("DELETE", "/admin/tenants/{tenant_id}") in routes
         assert ("GET", "/admin/users") in routes
         assert ("POST", "/admin/users") in routes
         assert ("GET", "/admin/config") in routes
@@ -285,6 +286,109 @@ class TestPlatformAdminRoutes:
 
         assert exc_info.value.status_code == 403
         logger.info("test_update_user_protects_reserved_admin 完成")
+
+    # 方法作用：验证默认租户在任何数据库或外部资源调用前被阻断。
+    # Args: self - pytest 测试类实例；monkeypatch - 权限补丁。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    async def test_delete_tenant_protects_default_tenant(self, monkeypatch) -> None:
+        """固定超级管理员所在默认租户不能被物理删除。"""
+        # Arrange
+        import src.api.auth as auth
+        from src.api.routes.admin import TenantDeleteRequest, delete_tenant
+
+        monkeypatch.setattr(auth, "require_super_admin", lambda: None)
+
+        # Act / Assert
+        with pytest.raises(HTTPException) as caught:
+            await delete_tenant(1, TenantDeleteRequest(confirmation="DELETE default"))
+        assert caught.value.status_code == 403
+
+    # 方法作用：验证租户删除先停用、清理外部资源，再在事务中删除所有租户表。
+    # Args: self - pytest 测试类实例；monkeypatch - 权限、数据库和运行时清理补丁。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    async def test_delete_tenant_purges_all_scoped_resources(self, monkeypatch) -> None:
+        """删除成功响应只能在外部资源和关系型数据都完成后返回。"""
+        # Arrange
+        import src.api.auth as auth
+        import src.memory.pg_pool as pg_pool
+        import src.tenant_purge as tenant_purge
+        from src.api.routes.admin import TenantDeleteRequest, delete_tenant
+
+        connection = MagicMock()
+        connection.fetchrow = AsyncMock(side_effect=[
+            {"id": 9, "code": "acme", "name": "Acme", "is_active": True},
+            {"id": 9},
+        ])
+        connection.fetch = AsyncMock(return_value=[{
+            "name": "warehouse", "dialect": "postgres", "host": "db", "port": 5432,
+            "database_name": "app", "username": "reader", "extra_params": {},
+        }])
+        connection.fetchval = AsyncMock(return_value=True)
+        connection.execute = AsyncMock(return_value="DELETE 1")
+        transaction = MagicMock()
+        transaction.__aenter__ = AsyncMock(return_value=None)
+        transaction.__aexit__ = AsyncMock(return_value=False)
+        connection.transaction = MagicMock(return_value=transaction)
+        acquire = MagicMock()
+        acquire.__aenter__ = AsyncMock(return_value=connection)
+        acquire.__aexit__ = AsyncMock(return_value=False)
+        pool = MagicMock()
+        pool.acquire.return_value = acquire
+        runtime_cleanup = AsyncMock(return_value={"vector_entries": 4, "skills": 2})
+        monkeypatch.setattr(auth, "require_super_admin", lambda: None)
+        monkeypatch.setattr(pg_pool, "get_pg_pool", AsyncMock(return_value=pool))
+        monkeypatch.setattr(tenant_purge, "purge_tenant_runtime", runtime_cleanup)
+
+        # Act
+        result = await delete_tenant(9, TenantDeleteRequest(confirmation="DELETE acme"))
+
+        # Assert
+        assert result["status"] == "deleted"
+        assert result["runtime"]["vector_entries"] == 4
+        runtime_cleanup.assert_awaited_once()
+        statements = [str(call.args[0]) for call in connection.execute.await_args_list]
+        assert any("UPDATE tenants SET is_active=FALSE" in sql for sql in statements)
+        assert any("DELETE FROM knowledge_files" in sql for sql in statements)
+        assert any("DELETE FROM long_term_memories" in sql for sql in statements)
+        assert any("DELETE FROM tenant_llm_connections" in sql for sql in statements)
+        assert any("DELETE FROM users" in sql for sql in statements)
+        assert any("DELETE FROM tenants" in sql for sql in statements)
+        assert any("set_config('app.current_role'" in sql for sql in statements)
+        assert any("pg_advisory_unlock" in sql for sql in statements)
+        connection.fetchval.assert_awaited_once()
+        assert "pg_try_advisory_lock" in str(connection.fetchval.await_args.args[0])
+
+    # 方法作用：验证另一个 Worker 正在删除同一租户时立即拒绝重复清理。
+    # Args: self - pytest 测试类实例；monkeypatch - 权限、数据库和运行时清理补丁。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    async def test_delete_tenant_rejects_concurrent_worker(self, monkeypatch) -> None:
+        """跨 Worker 锁未取得时不得停用租户或删除任何外部资源。"""
+        # Arrange
+        import src.api.auth as auth
+        import src.memory.pg_pool as pg_pool
+        import src.tenant_purge as tenant_purge
+        from src.api.routes.admin import TenantDeleteRequest, delete_tenant
+
+        connection = MagicMock()
+        connection.fetchval = AsyncMock(return_value=False)
+        connection.execute = AsyncMock(return_value="SELECT 1")
+        acquire = MagicMock()
+        acquire.__aenter__ = AsyncMock(return_value=connection)
+        acquire.__aexit__ = AsyncMock(return_value=False)
+        pool = MagicMock()
+        pool.acquire.return_value = acquire
+        runtime_cleanup = AsyncMock()
+        monkeypatch.setattr(auth, "require_super_admin", lambda: None)
+        monkeypatch.setattr(pg_pool, "get_pg_pool", AsyncMock(return_value=pool))
+        monkeypatch.setattr(tenant_purge, "purge_tenant_runtime", runtime_cleanup)
+
+        # Act / Assert
+        with pytest.raises(HTTPException) as caught:
+            await delete_tenant(9, TenantDeleteRequest(confirmation="DELETE acme"))
+
+        assert caught.value.status_code == 409
+        runtime_cleanup.assert_not_awaited()
+        assert "pg_try_advisory_lock" in str(connection.fetchval.await_args.args[0])
 
 
 class TestSuperAdminBootstrap:

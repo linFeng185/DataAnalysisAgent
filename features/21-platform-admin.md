@@ -28,6 +28,7 @@
 | 21.3.4 | 数据源配置持久化 | `datasource_configs`、数据源 Provider | 页面创建的数据源加密持久化并在启动时恢复 | 单测完成 | P1 |
 | 21.3.5 | system 资源不可见 | Skills/Knowledge/MCP 路由 | 普通用户不能列出或读取 system 管理内容 | 单测完成 | P0 |
 | 21.3.6 | 租户管理员用户自治 | `src/api/routes/admin.py` | tenant_admin 仅管理当前租户用户，可创建同租户 tenant_admin 并保护最后管理员 | 单测完成 | P0 |
+| 21.3.7 | 租户物理删除 | `src/tenant_purge.py`、`src/api/routes/admin.py` | 二次确认后清理关系库、向量库、缓存、Skill、MCP、上传、会话和 Checkpointer，默认租户不可删除 | 集成测试完成 | P0 |
 
 ## 21.4 管理前端
 
@@ -39,6 +40,6 @@
 
 ### 模块收尾
 
-模块功能点共 17 项，已完成 17 项，待开发 0 项。
+模块功能点共 18 项，已完成 18 项，待开发 0 项。
 
 本模块本轮没有待开发功能点。

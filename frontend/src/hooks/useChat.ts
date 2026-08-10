@@ -1,9 +1,10 @@
 import { useState, useRef, useCallback, useEffect } from 'react';
 import { streamChat, fetchSessionTurns } from '../api/client';
 import type { ActionRequestPayload, ChatTurnData } from '../types';
-
-const SESSION_KEY = 'chat_turns';
-const SESSION_ID_KEY = 'active_session_id';
+import { useAuth } from './AuthContext';
+import {
+  chatStorageNamespace, clearChatStorage, loadChatStorage, saveChatStorage,
+} from './chatStorage';
 
 interface ProgressNode {
   status: 'pending' | 'running' | 'done' | 'error';
@@ -33,6 +34,9 @@ export interface ChatTurn {
   errorMessage: string;
 }
 
+// 方法作用：构造不共享引用的空助手流式状态。
+// Args: 无。
+// Returns: 新的 AssistantContent。
 function emptyAssistant(): AssistantContent {
   return {
     decisionSummary: '', tokens: '', sql: '',
@@ -41,7 +45,9 @@ function emptyAssistant(): AssistantContent {
   };
 }
 
-/** 从 ChatTurnData 还原为 ChatTurn（历史会话恢复用） */
+// 方法作用：从持久化轮次恢复前端聊天轮次。
+// Args: d - 后端轮次数据；datasource - 会话数据源名称。
+// Returns: 可直接渲染的 ChatTurn。
 function turnFromData(d: ChatTurnData, datasource: string): ChatTurn {
   const finalResult = d.final_result && Object.keys(d.final_result).length > 0
     ? d.final_result : null;
@@ -61,52 +67,52 @@ function turnFromData(d: ChatTurnData, datasource: string): ChatTurn {
   };
 }
 
-function loadFromStorage(): { turns: ChatTurn[]; sessionId: string } | null {
-  try {
-    const raw = sessionStorage.getItem(SESSION_KEY);
-    const sid = sessionStorage.getItem(SESSION_ID_KEY);
-    if (raw && sid) {
-      const turns = JSON.parse(raw) as ChatTurn[];
-      return { turns, sessionId: sid };
-    }
-  } catch { /* ignore */ }
-  return null;
-}
-
-function saveToStorage(turns: ChatTurn[], sessionId: string) {
-  try {
-    sessionStorage.setItem(SESSION_KEY, JSON.stringify(turns));
-    sessionStorage.setItem(SESSION_ID_KEY, sessionId);
-  } catch { /* ignore */ }
-}
-
-function clearStorage() {
-  try {
-    sessionStorage.removeItem(SESSION_KEY);
-    sessionStorage.removeItem(SESSION_ID_KEY);
-  } catch { /* ignore */ }
-}
-
 // 方法作用：管理对话轮次、SSE 事件、会话恢复以及模型和推理偏好透传。
 // Args: 无。
 // Returns: 对话状态、发送/取消/恢复操作及加载状态。
 export function useChat() {
-  const saved = useRef(loadFromStorage());
+  const { user } = useAuth();
+  const namespace = chatStorageNamespace(user?.tenant_id, user?.user_id);
+  const saved = useRef<{ turns: ChatTurn[]; sessionId: string } | null>(null);
+  if (saved.current === null && user) {
+    const stored = loadChatStorage(namespace);
+    saved.current = stored as { turns: ChatTurn[]; sessionId: string } | null;
+  }
   const [turns, setTurns] = useState<ChatTurn[]>(saved.current?.turns || []);
   const [loading, setLoading] = useState(false);
   const [retryInfo, setRetryInfo] = useState<{current:number;max:number;reason:string}|null>(null);
   const [sessionId, setSessionId] = useState(saved.current?.sessionId || '');
+  const [stateNamespace, setStateNamespace] = useState(namespace);
   const [hasMore, setHasMore] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
   const nextId = useRef(turns.length > 0 ? Math.max(...turns.map(t => t.id)) + 1 : 1);
   const aborterRef = useRef<AbortController | null>(null);
 
+  // 方法作用：认证身份变化时丢弃旧用户的内存状态并恢复新用户专属缓存。
+  // Args: namespace - 新身份的聊天缓存命名空间；user - 新认证身份。
+  // Returns: 无返回值。
+  useEffect(() => {
+    aborterRef.current?.abort();
+    aborterRef.current = null;
+    const stored = user ? loadChatStorage(namespace) : null;
+    const restored = (stored?.turns || []) as ChatTurn[];
+    setTurns(restored);
+    setSessionId(stored?.sessionId || '');
+    setHasMore(false);
+    setLoading(false);
+    setRetryInfo(null);
+    setStateNamespace(namespace);
+    nextId.current = restored.length > 0
+      ? Math.max(...restored.map(turn => turn.id)) + 1 : 1;
+    if (!user) clearChatStorage();
+  }, [namespace, user]);
+
   // 每次变更持久化到 sessionStorage
   useEffect(() => {
-    if (turns.length > 0 && sessionId) {
-      saveToStorage(turns, sessionId);
+    if (stateNamespace === namespace && turns.length > 0 && sessionId) {
+      saveChatStorage(namespace, turns, sessionId);
     }
-  }, [turns, sessionId]);
+  }, [turns, sessionId, namespace, stateNamespace]);
 
   const send = useCallback((
     query: string,
@@ -270,7 +276,7 @@ export function useChat() {
       fileIds,
       actionRequest,
     );
-  }, [sessionId]);
+  }, [sessionId, namespace]);
 
   const sendMulti = useCallback((query: string, datasourcesList: string[], modelId: string, connectionId?: number) => {
     if (datasourcesList.length > 0) {
@@ -287,8 +293,8 @@ export function useChat() {
   const clearSession = useCallback(() => {
     setTurns([]); setSessionId(''); nextId.current = 1;
     setHasMore(false);
-    clearStorage();
-  }, []);
+    clearChatStorage(namespace);
+  }, [namespace]);
 
   /** 恢复历史会话的逐轮结构化记录。 */
   const restoreTurns = useCallback((
@@ -300,8 +306,8 @@ export function useChat() {
     setHasMore(hasOlder);
     nextId.current = restored.length > 0
       ? Math.max(...restored.map(t => t.id)) + 1 : 1;
-    saveToStorage(restored, sid);
-  }, []);
+    saveChatStorage(namespace, restored, sid);
+  }, [namespace]);
 
   /** 瀑布流加载更早的对话轮次 */
   const loadMoreTurns = useCallback(async (sid: string, datasource: string) => {

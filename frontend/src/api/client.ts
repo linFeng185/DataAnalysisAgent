@@ -44,8 +44,8 @@ export function patch<T>(path: string, body: Record<string, unknown>): Promise<T
   return request<T>('PATCH', path, body);
 }
 
-export function del(path: string): Promise<void> {
-  return request<void>('DELETE', path);
+export function del<T = void>(path: string, body?: Record<string, unknown>): Promise<T> {
+  return request<T>('DELETE', path, body);
 }
 
 // 会话列表 API

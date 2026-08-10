@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -97,3 +98,84 @@ class TestGrafanaRoutes:
 
         # Assert
         assert exc_info.value.status_code == 403
+
+    # 方法作用：验证多目标查询并发执行且单目标故障不会丢失成功结果。
+    # Args: self - pytest 测试类实例；monkeypatch - pytest 补丁工具。
+    # Returns: 无返回值。
+    async def test_multi_target_query_is_concurrent_and_failure_isolated(self, monkeypatch) -> None:
+        """一个目标失败时应返回错误表，其余目标仍正常完成。"""
+        # Arrange
+        import src.api.routes.grafana as route
+        from src.security.sql_execution import SQLExecutionResult
+        from src.security.tenant_policy import RequestIdentity
+
+        active = 0
+        max_active = 0
+
+        # 方法作用：模拟可观察并发的数据库执行，并让指定 SQL 返回后端失败。
+        # Args: sql - 已校验 SQL；args/kwargs - 兼容统一执行器参数。
+        # Returns: 成功或失败的统一执行结果。
+        async def _execute(sql, *args, **kwargs):
+            nonlocal active, max_active
+            del args, kwargs
+            active += 1
+            max_active = max(max_active, active)
+            await asyncio.sleep(0.01)
+            active -= 1
+            if "broken" in sql:
+                return SQLExecutionResult(success=False, sql=sql, dialect="postgres", error="backend unavailable", error_type="database")
+            return SQLExecutionResult(success=True, sql=sql, dialect="postgres", data=[{"value": 1}], row_count=1)
+
+        identity = RequestIdentity(4, 7, "analyst")
+        available = [{"name": "sales", "dialect": "postgres"}]
+        permission = {"name": "sales", "dialect": "postgres", "allowed_columns": [], "row_filter_sql": ""}
+        monkeypatch.setattr(route, "get_current_identity", lambda: identity)
+        monkeypatch.setattr(route, "_available_datasources", AsyncMock(return_value=available))
+        monkeypatch.setattr(route, "resolve_datasource_access", AsyncMock(return_value={"sales": permission}))
+        monkeypatch.setattr(route, "validate_and_execute_sql", _execute)
+
+        # Act
+        result = await route.query({"targets": [
+            {"refId": "A", "datasource": "sales", "rawSql": "SELECT 1 AS value"},
+            {"refId": "B", "datasource": "sales", "rawSql": "SELECT broken FROM metrics"},
+        ]})
+
+        # Assert
+        assert max_active == 2
+        assert result[0]["rows"] == [[1]]
+        assert result[1]["error"] == "backend unavailable"
+
+    # 方法作用：验证单目标超过执行时间预算时返回 HTTP 504。
+    # Args: self - pytest 测试类实例；monkeypatch - pytest 补丁工具。
+    # Returns: 无返回值。
+    async def test_single_target_timeout_returns_504(self, monkeypatch) -> None:
+        """超时任务必须被取消并暴露明确网关超时状态。"""
+        # Arrange
+        import pytest
+        from fastapi import HTTPException
+
+        import src.api.routes.grafana as route
+        from src.security.tenant_policy import RequestIdentity
+
+        # 方法作用：模拟超过请求时间预算的数据库调用。
+        # Args: args/kwargs - 兼容统一执行器参数。
+        # Returns: 不返回，等待期间由 timeout 取消。
+        async def _slow_execute(*args, **kwargs):
+            del args, kwargs
+            await asyncio.sleep(1)
+
+        identity = RequestIdentity(4, 7, "analyst")
+        available = [{"name": "sales", "dialect": "postgres"}]
+        permission = {"name": "sales", "dialect": "postgres", "allowed_columns": [], "row_filter_sql": ""}
+        monkeypatch.setattr(route, "get_current_identity", lambda: identity)
+        monkeypatch.setattr(route, "_available_datasources", AsyncMock(return_value=available))
+        monkeypatch.setattr(route, "resolve_datasource_access", AsyncMock(return_value={"sales": permission}))
+        monkeypatch.setattr(route, "validate_and_execute_sql", _slow_execute)
+        monkeypatch.setattr(route, "_TARGET_TIMEOUT_SECONDS", 0.001)
+
+        # Act / Assert
+        with pytest.raises(HTTPException) as exc_info:
+            await route.query({"targets": [
+                {"refId": "A", "datasource": "sales", "rawSql": "SELECT 1"},
+            ]})
+        assert exc_info.value.status_code == 504

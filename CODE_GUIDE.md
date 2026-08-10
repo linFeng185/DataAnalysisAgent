@@ -34,6 +34,7 @@ LLM 驱动的数据分析智能体。用自然语言提问，自动完成：轮�
 │   ├── app_context.py        应用级依赖容器 + ASGI 请求绑定 + 资源关闭
 │   ├── config.py             配置管理 (pydantic-settings)
 │   ├── bootstrap.py          分阶段启动/关闭编排
+│   ├── tenant_purge.py       租户关系型、向量和运行时资源的可重试物理清理
 │   ├── skill_manager.py      技能发现、作用域与激活
 │   ├── skill_security.py     Skill 包摘要与 Ed25519 验签
 │   ├── skill_runtime.py      Skill 契约、资源和隔离执行入口
@@ -84,9 +85,10 @@ POST /api/v1/chat {"query": "本月 GMV 排名？", "stream": true}
 |------|------|
 | `routes/__init__.py` | 组合各领域 APIRouter，并保留旧模块导出兼容 |
 | `routes/*.py` | chat、datasource、schema、session、mcp、knowledge、skills、management、admin、llm_admin、access_policy、Grafana、optimization 领域端点 |
-| `routes/automation.py` | 自动化任务 CRUD、立即运行和用户私有站内通知 |
-| `routes/grafana.py` | SimpleJSON search/query/annotations，复用 JWT、租户和数据源行列权限 |
-| `routes/optimization.py` | 确定性 SQL 优化建议 API，只读分析不执行 DDL |
+| `routes/admin.py` | 平台租户/用户治理；租户删除以 PostgreSQL advisory lock 跨 Worker 互斥，以两阶段 RLS 事务委托 `tenant_purge.py` 清理全部作用域资源 |
+| `routes/automation.py` | 自动化任务 CRUD、暂停/恢复、立即运行、身份隔离运行记录和用户私有站内通知 |
+| `routes/grafana.py` | SimpleJSON search/query/annotations，ACL 快照、有界并发、超时和多目标故障隔离 |
+| `routes/optimization.py` | 确定性 SQL 优化建议 API，自动获取 Schema/索引/统计证据，只读分析不执行 DDL |
 | `schemas.py` | Pydantic 请求/响应模型 |
 | `streaming.py` | SSE 流式（13 种事件类型，LLM 调用按 stream_id 隔离） |
 | `middleware.py` | 异常 → HTTP 状态码映射 |
@@ -169,13 +171,12 @@ POST /api/v1/chat {"query": "本月 GMV 排名？", "stream": true}
 | `context_builder.py` | 上下文裁剪（热/温/冷三层） |
 | `history_store.py` | PostgreSQL 查询历史 + 内存环形缓冲回退；工作流 await 写入，final_result JSONB 持久化逐轮 SQL、数据、分析和图表，不保存原始推理 |
 | `long_term_store.py` | 长期记忆（ChromaDB + PG 双写） |
-| `knowledge_evolution.py` | 只接受成功、只读、已验证 SQL，按租户/用户/指纹聚合并在阈值后晋升 |
+| `knowledge_evolution.py` | 成功 SQL 观察聚合、数据库 Claim Token、多 Worker 超时接管和稳定 ID 幂等晋升 |
 | `session_archive.py` | 会话归档 |
 
 ### ⑧ `src/automation/` — 主动洞察与定时报告
 
-`AutomationStore` 使用 PostgreSQL `SKIP LOCKED` 认领到期任务；`ScheduledAnalysisRunner` 每次运行重新检查
-数据源、行列权限和只读 SQL；`NotificationDispatcher` 的 SMTP/飞书/Slack 只读取服务端配置，站内通知持久化到 PostgreSQL。
+`AutomationStore` 使用 PostgreSQL `SKIP LOCKED` 认领到期任务，并提供身份隔离的暂停/恢复和最近运行记录；`ScheduledAnalysisRunner` 每次运行重新检查数据源、行列权限和只读 SQL；`NotificationDispatcher` 的 SMTP/飞书/Slack 只读取服务端配置，站内通知持久化到 PostgreSQL。前端工作台明确区分主动洞察与定时报告，展示调度状态、运行结果和失败摘要。
 
 ### ⑨~⑫、⑭ — 工具/行情/动作/安全/MCP
 
@@ -210,6 +211,7 @@ POST /api/v1/chat {"query": "本月 GMV 排名？", "stream": true}
 `009_automation.sql` 为自动化任务、运行记录和站内通知建表并启用租户/用户 RLS，
 `010_automation_force_rls.sql` 强制表所有者也执行这些策略。
 `015_knowledge_evolution.sql` 记录租户/用户隔离的已验证 SQL 观察次数，为 LEARNED_PATTERN 晋升提供幂等证据。
+`016_knowledge_evolution_claims.sql` 增加晋升 Claim Token、超时接管、稳定记忆 ID 和错误摘要字段，防止多 Worker 重复晋升及失效 Worker 写回。
 
 ## Skills 系统
 
@@ -242,7 +244,7 @@ POST /api/v1/chat {"query": "本月 GMV 排名？", "stream": true}
 
 ## 前端
 
-`frontend/` — React 18 + TypeScript 5 + Ant Design 5 + ECharts。登录固定输入 `tenant_code + username + password`，不展示公开注册；登录后按角色展示业务菜单。`AdminPage` 对 super_admin 展示租户、厂商能力字段编辑器和可物理删除的平台模型目录，对 tenant_admin 展示当前租户用户、命名连接和默认模型；`ChatPage` 只提交当前租户可见的连接与模型，并按模型能力展示推理开关和深度。`AutomationPage` 提供任务创建、立即运行、删除和站内通知视图。
+`frontend/` — React 18 + TypeScript 5 + Ant Design 5 + ECharts。登录固定输入 `tenant_code + username + password`，不展示公开注册；登录后按角色展示业务菜单。`AdminPage` 对 super_admin 展示租户、厂商能力字段编辑器和可物理删除的平台模型目录，并以精确确认文本物理删除非默认租户；对 tenant_admin 展示当前租户用户、命名连接和默认模型。`ChatPage` 只提交当前租户可见的连接与模型，并按模型能力展示推理开关和深度。`AutomationPage` 提供任务说明、创建、暂停/恢复、立即运行、运行记录、删除和站内通知视图。
 
 ## 快速上手
 

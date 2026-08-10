@@ -202,3 +202,52 @@ class TestAutomationApi:
         # Assert
         assert result == {"notifications": notifications, "total": 1}
         store.list_notifications.assert_awaited_once_with(identity, 25)
+
+    # 方法作用：验证暂停或恢复任务只更新当前身份可管理的任务。
+    # Args: self - pytest 测试类实例；monkeypatch - pytest 补丁工具。
+    # Returns: 无返回值。
+    async def test_update_schedule_toggles_enabled_state(self, monkeypatch) -> None:
+        """状态更新成功后应返回最新任务摘要。"""
+        # Arrange
+        import src.api.routes.automation as route
+        from src.api.schemas import AutomationScheduleUpdateRequest
+
+        identity = SimpleNamespace(tenant_id=3, user_id=7, role="analyst")
+        schedule = self._schedule()
+        store = SimpleNamespace(
+            set_enabled=AsyncMock(return_value=True),
+            get_for_identity=AsyncMock(return_value=schedule),
+        )
+        monkeypatch.setattr(route, "get_current_identity", lambda: identity)
+        monkeypatch.setattr(route, "get_automation_store", lambda: store)
+
+        # Act
+        result = await route.update_automation_schedule(
+            schedule.id, AutomationScheduleUpdateRequest(enabled=False),
+        )
+
+        # Assert
+        assert result["enabled"] is True
+        store.set_enabled.assert_awaited_once_with(schedule.id, identity, False)
+        store.get_for_identity.assert_awaited_once_with(schedule.id, identity)
+
+    # 方法作用：验证不存在或越权的任务不会暴露运行记录。
+    # Args: self - pytest 测试类实例；monkeypatch - pytest 补丁工具。
+    # Returns: 无返回值。
+    async def test_list_schedule_runs_is_identity_scoped(self, monkeypatch) -> None:
+        """运行记录查询必须把当前身份传给 Store。"""
+        # Arrange
+        import src.api.routes.automation as route
+
+        identity = SimpleNamespace(tenant_id=3, user_id=7, role="analyst")
+        runs = [{"id": "run-1", "status": "success"}]
+        store = SimpleNamespace(list_runs=AsyncMock(return_value=runs))
+        monkeypatch.setattr(route, "get_current_identity", lambda: identity)
+        monkeypatch.setattr(route, "get_automation_store", lambda: store)
+
+        # Act
+        result = await route.list_automation_runs("schedule-1", limit=20)
+
+        # Assert
+        assert result == {"runs": runs, "total": 1}
+        store.list_runs.assert_awaited_once_with("schedule-1", identity, 20)

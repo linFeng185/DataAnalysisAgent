@@ -94,4 +94,30 @@ class TestDatasourceLifecycleApi:
             tenant_id=3,
             owner_user_id=7,
         )
-        registry.invalidate.assert_called_once_with("sales")
+        registry.invalidate.assert_called_once_with("sales", tenant_id=3)
+
+    # 方法作用：验证 Schema 显式名称必须属于当前租户的可见数据源快照。
+    # Args: self - pytest 测试类实例；monkeypatch - 身份与 Registry 补丁。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    async def test_schema_rejects_datasource_outside_visible_snapshot(self, monkeypatch) -> None:
+        """不可见或不存在的数据源名称不得绕过 Schema ACL 边界。"""
+        # Arrange
+        from fastapi import HTTPException
+
+        import src.api.auth as auth
+        import src.api.routes as routes
+        from src.api.routes.schema import _resolve_datasource_name
+
+        identity = SimpleNamespace(tenant_id=3, user_id=7, role="analyst")
+        registry = SimpleNamespace(list_all=AsyncMock(return_value=[{
+            "name": "sales", "dialect": "postgres",
+        }]))
+        monkeypatch.setattr(auth, "get_current_identity", lambda: identity)
+        monkeypatch.setattr(routes, "_registry", lambda: registry)
+
+        # Act / Assert
+        with pytest.raises(HTTPException) as caught:
+            await _resolve_datasource_name("hidden")
+
+        assert caught.value.status_code == 404
+        registry.list_all.assert_awaited_once_with(tenant_id=3)

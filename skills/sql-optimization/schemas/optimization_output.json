@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "type": "object",
-  "required": ["valid", "dialect", "issues", "candidate_indexes", "executed"],
+  "required": ["valid", "dialect", "issues", "candidate_indexes", "evidence_sources", "evidence_quality", "executed"],
   "properties": {
     "valid": {"type": "boolean"},
     "dialect": {"type": "string"},
@@ -10,6 +10,8 @@
     "issues": {"type": "array"},
     "candidate_indexes": {"type": "array"},
     "tables": {"type": "array"},
+    "evidence_sources": {"type": "array", "items": {"type": "string"}},
+    "evidence_quality": {"enum": ["low", "medium", "high"]},
     "limitations": {"type": "array"},
     "executed": {"const": false}
   },

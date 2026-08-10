@@ -1,6 +1,7 @@
 import { createContext, useContext, useState, useCallback, useEffect, type ReactNode } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { message } from 'antd';
+import { clearChatStorage } from './chatStorage';
 
 interface User { user_id: number; tenant_id: number; tenant_code: string; role: string; username: string; }
 
@@ -83,6 +84,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         credentials: 'include',
       });
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      clearChatStorage();
       setUser(null);
       navigate('/login');
     } catch (error) {

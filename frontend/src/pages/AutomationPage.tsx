@@ -1,18 +1,18 @@
 import { useEffect, useState } from 'react';
 import {
-  Button, Card, Checkbox, Empty, Form, Input, InputNumber, List, message,
-  Modal, Popconfirm, Segmented, Select, Space, Table, Tabs, Tag, Tooltip,
+  Alert, Button, Card, Checkbox, Empty, Form, Input, InputNumber, List, message,
+  Modal, Popconfirm, Segmented, Select, Space, Switch, Table, Tabs, Tag, Tooltip,
   Typography,
 } from 'antd';
 import {
-  BellOutlined, DeleteOutlined, PlayCircleOutlined, PlusOutlined,
+  BellOutlined, DeleteOutlined, HistoryOutlined, PlayCircleOutlined, PlusOutlined,
   ReloadOutlined,
 } from '@ant-design/icons';
 import dayjs from 'dayjs';
-import { del, get, post } from '../api/client';
+import { del, get, patch, post } from '../api/client';
 import type {
   AutomationChannel, AutomationNotification, AutomationSchedule,
-  DatasourceConfig,
+  AutomationRun, DatasourceConfig,
 } from '../types';
 
 const FREQUENCY_OPTIONS = [
@@ -44,6 +44,10 @@ export default function AutomationPage() {
   const [notificationLoading, setNotificationLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [runningId, setRunningId] = useState('');
+  const [runs, setRuns] = useState<AutomationRun[]>([]);
+  const [runsOpen, setRunsOpen] = useState(false);
+  const [runsLoading, setRunsLoading] = useState(false);
+  const [runsSchedule, setRunsSchedule] = useState<AutomationSchedule | null>(null);
   const [open, setOpen] = useState(false);
   const [form] = Form.useForm();
   const channels = Form.useWatch<AutomationChannel[]>('channels', form) || ['in_app'];
@@ -151,6 +155,39 @@ export default function AutomationPage() {
     }
   };
 
+  // 方法作用：暂停或恢复任务调度，明确反馈调度状态变化。
+  // Args: scheduleId - 任务 UUID；enabled - 目标启用状态。
+  // Returns: 请求完成后无返回值。
+  const toggleSchedule = async (scheduleId: string, enabled: boolean): Promise<void> => {
+    try {
+      await patch(`/automation/schedules/${scheduleId}`, { enabled });
+      message.success(enabled ? '任务已恢复' : '任务已暂停');
+      await loadSchedules();
+    } catch (error) {
+      message.error(error instanceof Error ? error.message : '任务状态更新失败');
+    }
+  };
+
+  // 方法作用：读取指定任务的最近运行记录并打开可追溯详情窗口。
+  // Args: schedule - 当前用户可见的自动化任务。
+  // Returns: 请求完成后无返回值。
+  const showRuns = async (schedule: AutomationSchedule): Promise<void> => {
+    setRunsSchedule(schedule);
+    setRunsOpen(true);
+    setRunsLoading(true);
+    try {
+      const data = await get<{ runs: AutomationRun[] }>(
+        `/automation/schedules/${schedule.id}/runs?limit=20`,
+      );
+      setRuns(data.runs || []);
+    } catch (error) {
+      message.error(error instanceof Error ? error.message : '运行记录加载失败');
+      setRuns([]);
+    } finally {
+      setRunsLoading(false);
+    }
+  };
+
   return (
     <div className="automation-page" style={{ maxWidth: 1180, margin: '0 auto' }}>
       <Card
@@ -167,6 +204,13 @@ export default function AutomationPage() {
           </Space>
         )}
       >
+        <Alert
+          type="info"
+          showIcon
+          message="自动化 = 按计划执行只读 SQL，并在数据变化或报告生成后通知你"
+          description="主动洞察会比较本次与上次成功结果，只有变化超过阈值才通知；定时报告会按频率生成 Markdown 摘要。任务会在执行时重新校验数据源权限，可随时暂停。"
+          style={{ marginBottom: 16 }}
+        />
         <Tabs
           items={[
             {
@@ -197,9 +241,20 @@ export default function AutomationPage() {
                       render: value => value ? dayjs(value).format('YYYY-MM-DD HH:mm') : '-' },
                     { title: '上次运行', dataIndex: 'last_run_at', width: 156,
                       render: value => value ? dayjs(value).format('YYYY-MM-DD HH:mm') : '-' },
-                    { title: '操作', key: 'actions', width: 92, fixed: 'right',
+                    { title: '调度', dataIndex: 'enabled', width: 80,
+                      render: (value: boolean, schedule: AutomationSchedule) => (
+                        <Tooltip title={value ? '点击暂停任务' : '点击恢复任务'}>
+                          <Switch checked={value} size="small"
+                            onChange={next => void toggleSchedule(schedule.id, next)} />
+                        </Tooltip>
+                      ) },
+                    { title: '操作', key: 'actions', width: 132, fixed: 'right',
                       render: (_, schedule) => (
                         <Space size={4}>
+                          <Tooltip title="运行记录">
+                            <Button aria-label={`查看运行记录 ${schedule.name}`} size="small"
+                              icon={<HistoryOutlined />} onClick={() => void showRuns(schedule)} />
+                          </Tooltip>
                           <Tooltip title="立即运行">
                             <Button aria-label={`立即运行 ${schedule.name}`} size="small"
                               icon={<PlayCircleOutlined />} loading={runningId === schedule.id}
@@ -253,6 +308,35 @@ export default function AutomationPage() {
       </Card>
 
       <Modal
+        title={runsSchedule ? `运行记录: ${runsSchedule.name}` : '运行记录'}
+        open={runsOpen}
+        onCancel={() => { setRunsOpen(false); setRunsSchedule(null); }}
+        footer={null}
+        width={820}
+      >
+        <Table<AutomationRun>
+          rowKey="id"
+          loading={runsLoading}
+          dataSource={runs}
+          size="small"
+          locale={{ emptyText: <Empty description="暂无运行记录" /> }}
+          columns={[
+            { title: '开始时间', dataIndex: 'started_at', width: 170,
+              render: value => value ? dayjs(value).format('YYYY-MM-DD HH:mm:ss') : '-' },
+            { title: '结束时间', dataIndex: 'finished_at', width: 170,
+              render: value => value ? dayjs(value).format('YYYY-MM-DD HH:mm:ss') : '-' },
+            { title: '状态', dataIndex: 'status', width: 90,
+              render: value => <Tag color={value === 'success' ? 'green' : 'red'}>
+                {value === 'success' ? '成功' : '失败'}
+              </Tag> },
+            { title: '错误或摘要', key: 'summary', ellipsis: true,
+              render: (_: unknown, run: AutomationRun) => run.error_message
+                || String(run.result_payload?.summary || run.result_payload?.message || '-') },
+          ]}
+        />
+      </Modal>
+
+      <Modal
         title="创建自动化任务"
         open={open}
         onCancel={() => setOpen(false)}
@@ -286,6 +370,7 @@ export default function AutomationPage() {
               placeholder="SELECT day, SUM(amount) AS sales FROM orders GROUP BY day" />
           </Form.Item>
           <Form.Item name="threshold_pct" label="洞察变化阈值（%）"
+            tooltip="仅主动洞察使用；定时报告会忽略此项"
             rules={[{ required: true, type: 'number', min: 0, max: 10000 }]}>
             <InputNumber min={0} max={10000} precision={2} style={{ width: 180 }} />
           </Form.Item>

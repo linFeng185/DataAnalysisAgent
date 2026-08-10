@@ -7,7 +7,7 @@ import type { TableInfo, ColumnInfo, DatasourceConfig } from '../types';
 export default function SchemaPage() {
   const [tables, setTables] = useState<TableInfo[]>([]);
   const [datasources, setDatasources] = useState<DatasourceConfig[]>([]);
-  const [ds, setDs] = useState('demo');
+  const [ds, setDs] = useState('');
   const [search, setSearch] = useState('');
   const [loading, setLoading] = useState(false);
   const [drawerOpen, setDrawerOpen] = useState(false);
@@ -17,13 +17,22 @@ export default function SchemaPage() {
 
   useEffect(() => {
     get<{ datasources: DatasourceConfig[] }>('/datasources')
-      .then(data => setDatasources(data.datasources || []))
+      .then(data => {
+        const items = data.datasources || [];
+        setDatasources(items);
+        setDs(current => current && items.some(item => item.name === current)
+          ? current : (items[0]?.name || ''));
+      })
       .catch(() => message.warning('无法加载数据源列表'));
   }, []);
 
   const load = async () => {
     setLoading(true);
     try {
+      if (!ds) {
+        setTables([]);
+        return;
+      }
       const params = new URLSearchParams({ datasource: ds });
       if (search) params.set('search', search);
       const data = await get<{ tables: TableInfo[] }>(`/schema/tables?${params.toString()}`);
@@ -32,7 +41,7 @@ export default function SchemaPage() {
     setLoading(false);
   };
 
-  useEffect(() => { load(); }, [ds]);
+  useEffect(() => { void load(); }, [ds]);
 
   const handleRefresh = async () => {
     try {
@@ -71,7 +80,7 @@ export default function SchemaPage() {
             placeholder="选择数据源" />
           <Input.Search placeholder="搜索表名" value={search}
             onChange={e => setSearch(e.target.value)} onSearch={load} style={{ width: 200 }} />
-          <Button onClick={handleRefresh}>刷新 Schema</Button>
+          <Button onClick={handleRefresh} disabled={!ds}>刷新 Schema</Button>
         </Space>
       }>
         <Table<TableInfo> dataSource={tables} rowKey="name" loading={loading}
