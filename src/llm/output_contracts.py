@@ -86,11 +86,44 @@ class AnalysisOutput(StrictOutputModel):
     data_quality: list[str] = Field(default_factory=list)
     limitations: list[str] = Field(default_factory=list)
     confidence: Literal["high", "medium", "low"] = "low"
+    related_metrics: list[str] = Field(default_factory=list)
+    business_impacts: list[str] = Field(default_factory=list)
+    possible_causes: list[str] = Field(default_factory=list)
     recommended_actions: list[str] = Field(default_factory=list)
+    evidence_status: Literal[
+        "sufficient", "supplementable", "needs_user_input",
+    ] = "sufficient"
+    evidence_gaps: list[str] = Field(default_factory=list, max_length=5)
+    supplemental_questions: list[str] = Field(default_factory=list, max_length=3)
     recommended_chart_type: Literal[
         "bar", "line", "pie", "scatter", "table", "heatmap",
     ] = "table"
     follow_up_questions: list[str] = Field(default_factory=list)
+
+
+class AttributionModelRecommendationOutput(StrictOutputModel):
+    """大模型对未指定触点归因模型的受约束推荐。"""
+
+    model: Literal[
+        "first_touch", "last_touch", "linear", "time_decay", "position_based",
+    ]
+    reason: str = Field(min_length=1, max_length=300)
+
+
+class IndicatorReviewItem(StrictOutputModel):
+    """模型对一个真实数值字段的指标属性复检结果。"""
+
+    table: str = Field(min_length=1)
+    column: str = Field(min_length=1)
+    include: bool = False
+    display_name: str = ""
+    theme: str = "其他"
+
+
+class IndicatorCatalogReviewOutput(StrictOutputModel):
+    """指标目录模型复检输出。"""
+
+    indicators: list[IndicatorReviewItem] = Field(default_factory=list)
 
 
 class PolishOutput(StrictOutputModel):

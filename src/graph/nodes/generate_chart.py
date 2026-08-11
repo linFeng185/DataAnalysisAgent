@@ -38,21 +38,62 @@ async def generate_chart_node(state: AnalysisState) -> dict:
         intent=contexts.routing.intent,
     )
 
-    data = state.get("query_result_sample", []) or []
     analysis = state.get("analysis_result", {}) or {}
-    chart_type = _pick_type(analysis, data)
-
-    if not data or len(data) == 0:
+    data = state.get("query_result_sample", []) or []
+    attribution = analysis.get("attribution", {}) or {}
+    if contexts.routing.intent in {"metadata", "chat"}:
+        return {"chart_config": _no_chart("元数据或直接问答不生成图表")}
+    if attribution.get("status") == "insufficient":
+        return {"chart_config": _no_chart("触点归因资格不足，不生成归因图表")}
+    if attribution.get("status") == "applied":
+        attribution_rows = list(attribution.get("results", []) or [])
+        if not attribution_rows:
+            return {"chart_config": _failed_chart("bar", "触点归因结果为空")}
+        try:
+            option = _build_attribution_option(attribution_rows)
+        except Exception as exc:
+            logger.error("触点归因图表配置生成失败", error=str(exc), exc_info=True)
+            return {"chart_config": _failed_chart("bar", f"触点归因图表生成失败：{exc}")}
+        return {"chart_config": {
+            "type": "bar",
+            "option": option,
+            "status": "success",
+            "reason": "",
+        }}
+    if not data:
         logger.info("节点完成（无数据）", node="generate_chart",
                     elapsed_ms=round((time.monotonic() - _start) * 1000))
-        return {"chart_config": {"type": chart_type, "option": {}}}
+        return {"chart_config": _no_chart("查询没有返回数据，无法生成图表")}
+    core_value = _extract_core_value(data)
+    if len(data) == 1 and core_value:
+        logger.info("节点完成（核心数值）", node="generate_chart", column=core_value["column"])
+        return {"chart_config": {
+            **_no_chart("单行单值结果使用核心数值展示"),
+            "core_value": core_value,
+        }}
 
-    option = _build_echarts_option(data, chart_type)
+    chart_type = _pick_type(analysis, data)
+    if chart_type == "table":
+        return {"chart_config": _no_chart("当前结果缺少可形成图表的维度与数值组合")}
+
+    try:
+        option = _build_echarts_option(data, chart_type)
+    except Exception as exc:
+        logger.error("图表配置生成失败", chart_type=chart_type, error=str(exc), exc_info=True)
+        return {"chart_config": _failed_chart(chart_type, f"图表配置生成失败：{exc}")}
+    if not option:
+        logger.warning("图表配置生成失败", chart_type=chart_type, reason="配置为空")
+        return {"chart_config": _failed_chart(chart_type, "图表配置为空，请检查维度与数值字段")}
 
     elapsed = round((time.monotonic() - _start) * 1000)
     logger.info("节点完成", node="generate_chart", elapsed_ms=elapsed,
                 chart_type=chart_type, data_rows=len(data))
-    return {"chart_config": {"type": chart_type, "option": option}}
+    return {"chart_config": {
+        "type": chart_type,
+        "option": option,
+        "status": "success",
+        "reason": "",
+    }}
 
 
 _SUPPORTED_TYPES = ("bar", "line", "pie", "scatter", "table")
@@ -63,10 +104,26 @@ _SUPPORTED_TYPES = ("bar", "line", "pie", "scatter", "table")
 # Returns: 受支持的 ECharts 图表类型。
 def _pick_type(analysis: dict, data: list[dict]) -> str:
     rec = analysis.get("recommended_chart_type", "")
-    logger.debug("图表类型选择入口", recommended=rec, data_rows=len(data))
-    if rec in _SUPPORTED_TYPES:
+    deterministic = _deterministic_chart_type(data)
+    logger.debug(
+        "图表类型选择入口",
+        recommended=rec,
+        deterministic=deterministic,
+        data_rows=len(data),
+    )
+    if rec == "table" and deterministic:
+        logger.info(
+            "图表类型选择完成",
+            chart_type=deterministic,
+            source="deterministic_override_table",
+        )
+        return deterministic
+    if rec in _SUPPORTED_TYPES and rec != "table":
         logger.info("图表类型选择完成", chart_type=rec, source="analysis")
         return rec
+    if deterministic:
+        logger.info("图表类型选择完成", chart_type=deterministic, source="data_semantics")
+        return deterministic
     if not data:
         logger.info("图表类型选择完成", chart_type="table", source="empty_data")
         return "table"
@@ -89,6 +146,90 @@ def _pick_type(analysis: dict, data: list[dict]) -> str:
     return "table"
 
 
+# 方法作用：生成明确表示不适用的图表契约。
+# Args: reason - 不生成图表的业务原因。
+# Returns: 可直接进入公开响应的图表配置。
+def _no_chart(reason: str) -> dict:
+    return {"type": "none", "option": {}, "status": "not_applicable", "reason": reason}
+
+
+# 方法作用：生成不会中断主查询的图表失败契约。
+# Args: chart_type - 原计划图表类型；reason - 失败原因。
+# Returns: 带失败状态和原因的图表配置。
+def _failed_chart(chart_type: str, reason: str) -> dict:
+    return {"type": chart_type, "option": {}, "status": "failed", "reason": reason[:300]}
+
+
+# 方法作用：识别结果中所有真实数值列。
+# Args: rows - 查询结果行。
+# Returns: 至少存在一个非空数值的列名列表。
+def _numeric_columns(rows: list[dict]) -> list[str]:
+    if not rows:
+        return []
+    return [
+        str(column)
+        for column in rows[0]
+        if _first_numeric_value(rows, str(column)) is not None
+        and not _is_identifier_column(str(column))
+    ]
+
+
+# 方法作用：判断数值列是否更可能是标识符而不是可视化指标。
+# Args: column - 字段名。
+# Returns: 主键、编码和序号类字段返回 True。
+def _is_identifier_column(column: str) -> bool:
+    normalized = column.lower().removeprefix("f_")
+    if normalized in {"id", "sort", "sequence", "seq"}:
+        return True
+    return any(marker in normalized for marker in ("_id", "_code", "编号", "序号"))
+
+
+# 方法作用：按数据列语义确定最小可用图表类型。
+# Args: rows - 至少两行查询结果。
+# Returns: line/bar，缺少维度数值组合时返回空字符串。
+def _deterministic_chart_type(rows: list[dict]) -> str:
+    if len(rows) < 2:
+        return ""
+    numeric = _numeric_columns(rows)
+    if not numeric:
+        return ""
+    dimensions = [column for column in rows[0] if column not in numeric]
+    time_column = next(
+        (
+            column for column in dimensions
+            if any(marker in str(column).lower() for marker in (
+                "date", "time", "day", "month", "year", "dt", "日期", "时间", "月份",
+            ))
+        ),
+        "",
+    )
+    if time_column:
+        return "line"
+    if any(
+        any(isinstance(row.get(column), str) for row in rows)
+        for column in dimensions
+    ):
+        return "bar"
+    return ""
+
+
+# 方法作用：从单行结果提取唯一业务数值供核心数值组件展示。
+# Args: rows - 查询结果行。
+# Returns: label/value/column；不满足单值条件时返回空字典。
+def _extract_core_value(rows: list[dict]) -> dict:
+    if len(rows) != 1:
+        return {}
+    numeric = _numeric_columns(rows)
+    if len(numeric) != 1:
+        return {}
+    column = numeric[0]
+    return {
+        "label": column,
+        "value": rows[0].get(column),
+        "column": column,
+    }
+
+
 def _build_echarts_option(rows: list[dict], chart_type: str) -> dict:
     if not rows:
         return {}
@@ -98,6 +239,27 @@ def _build_echarts_option(rows: list[dict], chart_type: str) -> dict:
     if chart_type in ("line", "bar", "scatter"):
         return _axis_option(rows, keys, chart_type)
     return {}
+
+
+# 方法作用：根据确定性触点归因结果生成固定柱状图配置。
+# Args: rows - touchpoint/attributed_value/attribution_pct 结果行。
+# Returns: 不重新计算归因数值的 ECharts 配置。
+def _build_attribution_option(rows: list[dict]) -> dict:
+    """图表只消费规则引擎结果，避免从原始路径行重新猜测字段。"""
+    categories = [str(row.get("touchpoint", "") or "") for row in rows]
+    values = [_to_num(row.get("attributed_value")) for row in rows]
+    percentages = [_to_num(row.get("attribution_pct")) for row in rows]
+    return {
+        "tooltip": {"trigger": "axis"},
+        "xAxis": {"type": "category", "data": categories},
+        "yAxis": {"type": "value", "name": "归因价值"},
+        "series": [{
+            "name": "归因价值",
+            "type": "bar",
+            "data": values,
+            "attribution_pct": percentages,
+        }],
+    }
 
 
 def _pie_option(rows: list[dict], keys: list[str]) -> dict:
@@ -118,16 +280,24 @@ def _pie_option(rows: list[dict], keys: list[str]) -> dict:
 # Returns: 可直接传给 ECharts 的 option；无数值列时返回空字典。
 def _axis_option(rows: list[dict], keys: list[str], chart_type: str) -> dict:
     logger.debug("坐标轴配置构建入口", chart_type=chart_type, row_count=len(rows), columns=keys)
-    # 找数值列
-    numeric_col = None
-    for col in keys[1:]:
-        if _first_numeric_value(rows, col) is not None:
-            numeric_col = col
-            break
+    numeric_columns = _numeric_columns(rows)
+    numeric_col = numeric_columns[0] if numeric_columns else None
     if not numeric_col:
         logger.warning("坐标轴配置回退", reason="无数值列", columns=keys)
         return {}
-    x_col = keys[0]
+    dimension_columns = [column for column in keys if column not in numeric_columns]
+    if not dimension_columns:
+        logger.warning("坐标轴配置回退", reason="无维度列", columns=keys)
+        return {}
+    x_col = next(
+        (
+            column for column in dimension_columns
+            if any(marker in column.lower() for marker in (
+                "date", "time", "day", "month", "year", "dt", "日期", "时间", "月份",
+            ))
+        ),
+        dimension_columns[0],
+    )
 
     # 检测交叉透视：X 列值大量重复 → 应按第三列分组
     x_vals = [str(r.get(x_col, "")) for r in rows]
@@ -135,12 +305,19 @@ def _axis_option(rows: list[dict], keys: list[str], chart_type: str) -> dict:
     is_cross = uniq_x < len(rows) * 0.6 and uniq_x > 1 and len(keys) >= 3
     group_col = None
     if is_cross:
-        for col in keys[1:]:
-            if col == numeric_col:
+        logger.info(
+            "交叉图分组选择边界",
+            x_column=x_col,
+            numeric_column=numeric_col,
+            dimension_candidates=dimension_columns,
+        )
+        for col in dimension_columns:
+            if col in {x_col, numeric_col}:
                 continue
             if any(isinstance(row.get(col), str) for row in rows):
                 group_col = col
                 break
+        logger.info("交叉图分组选择完成", group_column=group_col or "")
 
     if is_cross and group_col:
         # 交叉透视：按分组列拆多系列

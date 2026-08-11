@@ -7,6 +7,9 @@ import { post } from '../api/client';
 export interface ChartConfig {
   type: string;
   option?: Record<string, unknown>;
+  status?: 'success' | 'failed' | 'not_applicable';
+  reason?: string;
+  core_value?: { label: string; value: unknown; column: string };
 }
 
 const CHART_TYPES = [
@@ -90,7 +93,7 @@ export default function ChartPanel({ chartConfig, rows = [], height = 360 }: {
           <div style={{ textAlign: 'center' }}>
             <BarChartOutlined style={{ fontSize: 40, color: '#d9d9d9', marginBottom: 12 }} />
             <Typography.Text type="secondary">
-              图表类型: {current.type}（配置数据未生成）
+              {current.reason || `图表类型: ${current.type}（配置数据未生成）`}
             </Typography.Text>
           </div>
         </div>

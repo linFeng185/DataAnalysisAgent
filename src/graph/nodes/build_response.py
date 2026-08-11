@@ -57,7 +57,22 @@ def _build_sql_statements(state: AnalysisState) -> list[dict]:
                     "datasource": contexts.routing.datasource,
                     "dialect": contexts.execution.dialect,
                     "sql": sql,
+                    "purpose": "primary",
+                    "question": contexts.request.user_query,
                 }]
+        statements.extend(
+            {
+                "datasource": contexts.routing.datasource,
+                "dialect": str(item.get("dialect", "") or contexts.execution.dialect),
+                "sql": str(item.get("sql", "") or "").strip(),
+                "purpose": "supplemental",
+                "question": str(item.get("question", "") or ""),
+            }
+            for item in (state.get("supplemental_evidence", []) or [])
+            if isinstance(item, dict)
+            and item.get("success")
+            and str(item.get("sql", "") or "").strip()
+        )
         logger.info("最终 SQL 列表构建完成", statement_count=len(statements))
         return statements
     except Exception as exc:
@@ -164,7 +179,18 @@ async def build_response_node(state: AnalysisState) -> dict:
             final_result["status"] = "needs_confirmation"
         else:
             final_result.setdefault("status", "success")
-        logger.info("保留直接响应", source=final_result.get("source", ""))
+        direct_analysis = final_result.get("analysis", {}) or {}
+        direct_groups = (
+            direct_analysis.get("indicator_groups", []) or []
+            if isinstance(direct_analysis, dict)
+            else []
+        )
+        logger.info(
+            "保留直接响应",
+            source=final_result.get("source", ""),
+            analysis_keys=sorted(direct_analysis) if isinstance(direct_analysis, dict) else [],
+            indicator_group_count=len(direct_groups),
+        )
     elif is_time_prompt:
         explanation = state.get("time_range_explanation") or "请指定查询的时间范围（最近一周/一月/一年/两年/三年/五年）"
         logger.info("提示用户指定时间范围", explanation=explanation[:100])
@@ -173,7 +199,8 @@ async def build_response_node(state: AnalysisState) -> dict:
             "user_query": contexts.request.user_query, "sql": "", "data": [],
             "sql_statements": [],
             "analysis": {"summary": explanation, "insights": [], "recommended_chart_type": "table"},
-            "chart": {"type": "table", "option": {}},
+            "chart": {"type": "none", "option": {}, "status": "not_applicable",
+                      "reason": "等待补充参数时不生成图表"},
         }
     elif is_generic_prompt:
         explanation = state.get("input_explanation") or "请补充具体业务目标或目标表后重试。"
@@ -193,7 +220,8 @@ async def build_response_node(state: AnalysisState) -> dict:
                 "insights": [],
                 "recommended_chart_type": "table",
             },
-            "chart": {"type": "table", "option": {}},
+            "chart": {"type": "none", "option": {}, "status": "not_applicable",
+                      "reason": "等待补充参数时不生成图表"},
         }
     elif multi_source_results and not successful_sources:
         final_result = {
@@ -207,7 +235,8 @@ async def build_response_node(state: AnalysisState) -> dict:
             "sql_statements": [],
             "data": [],
             "analysis": state.get("analysis_result", {}) or {},
-            "chart": {"type": "table", "option": {}},
+            "chart": {"type": "none", "option": {}, "status": "not_applicable",
+                      "reason": "查询没有可展示的数据"},
         }
     elif state.get("validation_errors"):
         final_result = {
@@ -261,8 +290,21 @@ async def build_response_node(state: AnalysisState) -> dict:
 
     # 附加技能与知识库
     final_result["activated_skills"] = state.get("activated_skills", []) or []
-    final_result["activated_knowledge"] = _bounded_text(
-        state.get("long_term_memories_text", "") or "",
+    logger.info(
+        "响应知识展示写回边界",
+        source=final_result.get("source", ""),
+        has_explicit_knowledge="activated_knowledge" in final_result,
+        explicit_knowledge_chars=len(str(final_result.get("activated_knowledge", "") or "")),
+        state_knowledge_chars=len(str(state.get("long_term_memories_text", "") or "")),
+    )
+    if "activated_knowledge" not in final_result:
+        final_result["activated_knowledge"] = _bounded_text(
+            state.get("long_term_memories_text", "") or "",
+        )
+    logger.info(
+        "响应知识展示写回完成",
+        source=final_result.get("source", ""),
+        knowledge_chars=len(str(final_result.get("activated_knowledge", "") or "")),
     )
     final_result = sanitize_public_output(final_result)
 

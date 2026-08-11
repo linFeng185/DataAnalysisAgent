@@ -28,6 +28,39 @@ export interface SQLStatement {
   datasource: string;
   dialect: string;
   sql: string;
+  purpose?: 'primary' | 'supplemental';
+  question?: string;
+}
+
+export interface TouchpointAttributionItem {
+  touchpoint: string;
+  attributed_value: number | string;
+  attribution_pct: number | string;
+  conversion_credit: number | string;
+}
+
+export interface TouchpointAttributionAnalysis {
+  status: 'applied' | 'insufficient';
+  selected_model: 'first_touch' | 'last_touch' | 'linear' | 'time_decay' | 'position_based';
+  model_display_name: string;
+  selection_source: 'user_explicit' | 'llm_recommended' | 'rule_default';
+  selection_reason: string;
+  dataset_source: 'primary' | 'supplemental';
+  total_attributed_value?: number | string;
+  total_paths?: number;
+  converted_paths?: number;
+  unconverted_paths?: number;
+  half_life_days?: number | string | null;
+  eligibility: {
+    eligible: boolean;
+    row_count: number;
+    total_paths: number;
+    converted_paths: number;
+    unconverted_paths: number;
+    missing_requirements: string[];
+    warnings: string[];
+  };
+  results: TouchpointAttributionItem[];
 }
 
 export interface ChatResponse {
@@ -47,8 +80,29 @@ export interface ChatResponse {
     follow_up_questions: string[];
     statistics?: Record<string, unknown>;
     rendered_report?: string;
+    related_metrics?: string[];
+    business_impacts?: string[];
+    possible_causes?: string[];
+    recommended_actions?: string[];
+    limitations?: string[];
+    indicator_groups?: Array<{
+      theme: string;
+      indicators: Array<{
+        name: string;
+        description: string;
+        table: string;
+        column: string;
+      }>;
+    }>;
+    attribution?: TouchpointAttributionAnalysis;
   };
-  chart: { type: string; option?: Record<string, unknown> };
+  chart: {
+    type: string;
+    option?: Record<string, unknown>;
+    status?: 'success' | 'failed' | 'not_applicable';
+    reason?: string;
+    core_value?: { label: string; value: unknown; column: string };
+  };
   decision_summary?: string;
   artifact?: Record<string, unknown>;
   session_id?: string;

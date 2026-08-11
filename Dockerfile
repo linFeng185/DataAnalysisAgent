@@ -3,11 +3,11 @@
 FROM python:3.14.0-slim AS builder
 
 ARG INSTALL_EXTRAS="connectors,documents,structured"
+ARG PIP_INDEX_URL=https://pypi.org/simple
 
 ENV PIP_DISABLE_PIP_VERSION_CHECK=1 \
     PIP_NO_CACHE_DIR=1 \
-    PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple \
-    PIP_TRUSTED_HOST=pypi.tuna.tsinghua.edu.cn
+    PIP_INDEX_URL=${PIP_INDEX_URL}
 
 WORKDIR /build
 

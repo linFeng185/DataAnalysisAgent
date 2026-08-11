@@ -186,6 +186,94 @@ class TestMigrationRunner:
         assert applied == []
         assert connection.closed is True
 
+    # 方法作用：验证已登记迁移只输出聚合摘要，不逐文件打印误导性 INFO。
+    # Args: self - pytest 测试类实例；tmp_path - 临时目录；monkeypatch - pytest 补丁工具。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    async def test_run_migrations_aggregates_existing_migration_logs(
+        self, tmp_path, monkeypatch,
+    ) -> None:
+        """没有新迁移时日志必须明确 applied_count=0，不能声称逐文件已应用。"""
+        # Arrange
+        from structlog.testing import capture_logs
+
+        from src.db.migrations import _discover_migrations, run_migrations
+
+        (tmp_path / "001_first.sql").write_text("SELECT 1;", encoding="utf-8")
+        checksum = _discover_migrations(tmp_path)[0][2]
+        connection = _Connection(applied=[{
+            "version": "001", "name": "001_first.sql", "checksum": checksum,
+        }])
+        import asyncpg
+
+        monkeypatch.setattr(asyncpg, "connect", AsyncMock(return_value=connection))
+
+        # Act
+        with capture_logs() as logs:
+            applied = await run_migrations(
+                "postgresql://user:secret@db/app", migrations_dir=tmp_path,
+            )
+
+        # Assert
+        assert applied == []
+        info_events = [
+            entry["event"] for entry in logs if entry.get("log_level") == "info"
+        ]
+        assert "数据库迁移已应用" not in info_events
+        summaries = [entry for entry in logs if entry["event"] == "数据库迁移执行完成"]
+        assert len(summaries) == 1
+        assert summaries[0]["applied_count"] == 0
+        assert summaries[0]["verified_count"] == 1
+
+    # 方法作用：验证已登记修复迁移的旧版本兼容路径不再每次产生 WARNING。
+    # Args: self - pytest 测试类实例；tmp_path - 临时目录；monkeypatch - pytest 补丁工具。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    async def test_run_migrations_verified_legacy_repair_is_not_warning(
+        self, tmp_path, monkeypatch,
+    ) -> None:
+        """修复文件已经登记后，历史 checksum 只属于已验证审计状态。"""
+        # Arrange
+        from structlog.testing import capture_logs
+
+        from src.db.migrations import _discover_migrations, run_migrations
+
+        project_root = Path(__file__).resolve().parents[2]
+        for name in (
+            "015_knowledge_evolution.sql",
+            "017_knowledge_evolution_rls_repair.sql",
+        ):
+            (tmp_path / name).write_bytes((project_root / "migrations" / name).read_bytes())
+        discovered = {
+            version: (path.name, checksum)
+            for version, path, checksum in _discover_migrations(tmp_path)
+        }
+        connection = _Connection(applied=[
+            {
+                "version": "015",
+                "name": "015_knowledge_evolution.sql",
+                "checksum": "6705b6d1b4ee1cf911f2b46abcf612b638098dcf264e6c299b30c47835a3a995",
+            },
+            {
+                "version": "017",
+                "name": discovered["017"][0],
+                "checksum": discovered["017"][1],
+            },
+        ])
+        import asyncpg
+
+        monkeypatch.setattr(asyncpg, "connect", AsyncMock(return_value=connection))
+
+        # Act
+        with capture_logs() as logs:
+            applied = await run_migrations(
+                "postgresql://user:secret@db/app", migrations_dir=tmp_path,
+            )
+
+        # Assert
+        assert applied == []
+        assert not [entry for entry in logs if entry.get("log_level") == "warning"]
+        summary = next(entry for entry in logs if entry["event"] == "数据库迁移执行完成")
+        assert summary["legacy_repair_count"] == 1
+
     # 方法作用：验证已登记迁移内容被修改时启动失败。
     # Args: self - pytest 测试类实例；tmp_path - 临时目录；monkeypatch - pytest 补丁工具。
     # Returns: 无返回值，断言失败时由 pytest 报告。

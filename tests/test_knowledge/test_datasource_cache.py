@@ -314,7 +314,7 @@ class TestDatasourceCacheFactory:
 class TestSchemaManagerSharedCache:
     """覆盖功能 6.1.15：SchemaManager 优先复用连接级共享缓存。"""
 
-    # 验证共享缓存命中时不访问旧的用户/别名向量缓存，也不重复内省。
+    # 验证共享缓存命中时不访问或重写向量缓存，也不重复内省。
     # Args: self - pytest 测试类实例；monkeypatch - pytest 补丁工具。
     # Returns: 无返回值，断言失败时由 pytest 报告。
     async def test_shared_cache_hit_skips_database_introspection(self, monkeypatch):
@@ -342,7 +342,5 @@ class TestSchemaManagerSharedCache:
 
         assert [table.name for table in snapshot.tables] == ["orders"]
         manager._introspect_from_db.assert_not_awaited()
-        manager._upsert_to_cache.assert_awaited_once()
-        rebound = manager._upsert_to_cache.await_args.args[0]
-        assert all(entry.metadata["datasource"] == "second-alias" for entry in rebound)
+        manager._upsert_to_cache.assert_not_awaited()
         logger.info("test_shared_cache_hit_skips_database_introspection 完成")

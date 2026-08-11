@@ -301,7 +301,7 @@ class TestSQLPromptGrounding:
 
 
 class TestAnalysisPromptGrounding:
-    """覆盖功能 4.8.10：分析 Prompt 完整性和证据化输出。"""
+    """覆盖功能 4.8.10、4.8.11：分析提示完整性、证据化输出和补查回注。"""
 
     # 验证分析模型收到原问题、截断信息，并保留增强输出字段。
     # Args: self - pytest 测试类实例；monkeypatch - pytest 补丁工具。
@@ -355,3 +355,64 @@ class TestAnalysisPromptGrounding:
         assert result["confidence"] == "medium"
         assert result["recommended_actions"] == ["按渠道核查退款原因"]
         logger.info("test_llm_analysis_receives_question_and_completeness 完成")
+
+    async def test_reanalysis_receives_authorized_schema_and_supplemental_evidence(
+        self,
+        monkeypatch,
+    ) -> None:
+        """补查后的重新分析必须同时看到授权字段和已执行证据。"""
+        # Arrange
+        logger.debug("test_reanalysis_receives_authorized_schema_and_supplemental_evidence 入口")
+        import src.graph.nodes.analyze_result as analyze_module
+        import src.llm.adapters.registry as adapter_module
+
+        response = SimpleNamespace(content=json.dumps({
+            "summary": "需求与交付差额为二",
+            "insights": ["需求工单数为五十，交付工单数为四十八"],
+            "evidence_status": "sufficient",
+            "evidence_gaps": [],
+            "supplemental_questions": [],
+            "recommended_chart_type": "line",
+        }, ensure_ascii=False))
+        llm = SimpleNamespace(ainvoke=AsyncMock(return_value=response))
+        monkeypatch.setattr(analyze_module, "get_llm", lambda temperature=0.3: llm)
+        monkeypatch.setattr(
+            adapter_module,
+            "get_adapter",
+            lambda model: SimpleNamespace(
+                parse_response=lambda resp: SimpleNamespace(
+                    content=resp.content,
+                    reasoning_content="",
+                ),
+            ),
+        )
+        schema_context = (
+            '[{"table":"daily_orders","columns":['
+            '{"name":"f_daily_delivered_orders","comment":"当日交付工单数"}]}]'
+        )
+        supplemental_evidence = (
+            '[{"question":"联查每日交付工单数","success":true,'
+            '"data":[{"delivered_orders":48}]}]'
+        )
+
+        # Act
+        result = await analyze_module._llm_analyze(
+            [{"demand_orders": 50}],
+            "SELECT demand_orders FROM daily_orders",
+            {"columns": {"demand_orders": {"mean": 50}}},
+            "需求工单数持平",
+            "",
+            "",
+            user_query="分析每日需求工单数",
+            schema_context=schema_context,
+            supplemental_evidence=supplemental_evidence,
+        )
+
+        # Assert
+        prompt = llm.ainvoke.await_args.args[0][1].content
+        assert "当前授权 Schema" in prompt
+        assert "f_daily_delivered_orders" in prompt
+        assert "已执行的补查证据" in prompt
+        assert "delivered_orders" in prompt
+        assert result["evidence_status"] == "sufficient"
+        logger.info("test_reanalysis_receives_authorized_schema_and_supplemental_evidence 完成")

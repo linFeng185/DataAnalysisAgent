@@ -24,7 +24,7 @@ def to_asyncpg_url(database_url: str) -> str:
         result = urlunsplit(
             ("postgresql", parsed.netloc, parsed.path, parsed.query, parsed.fragment),
         )
-        logger.info("to_asyncpg_url 完成", scheme=parsed.scheme)
+        logger.debug("to_asyncpg_url 完成", scheme=parsed.scheme)
         return result
     except Exception:
         logger.error("to_asyncpg_url 失败", exc_info=True)

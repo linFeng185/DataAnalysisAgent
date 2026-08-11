@@ -19,9 +19,10 @@
 | 13.13 | TushareMarketDataProvider | `src/market/providers/tushare.py` | A 股日线、分钟线、实时快照 Provider，统一 MarketBar 契约；保留 market/provider 扩展字段 | 单测完成 | P2 |
 | 13.14 | MarketDataStore | `src/market/storage.py`、`migrations/002_market_data.sql` | PostgreSQL 批量 upsert、唯一去重、时间索引和查询；请求成功后先持久化 | 单测完成 | P2 |
 | 13.15 | ForecastEngine / ForecastModel | `src/tools/forecast_engine.py` | 可注册预测模型、统一 ForecastRequest/Result、滚动回测和模型卡接口 | 单测完成 | P2 |
+| 13.16 | TouchpointAttributionEngine | `src/tools/touchpoint_attribution.py` | 首次、末次、线性、时间衰减和 U 型归因；字段映射、资格复核、Decimal 权重与路径级价值去重 | 单测完成 | P1 |
 
 ### 模块收尾
 
-本模块共 15 项，已完成 15 项，待开发 0 项。本批次新增的行情与预测接口已完成单元测试；真实 Tushare 账号、PostgreSQL 压测和交易日历/复权因子属于后续集成环境工作，不阻塞当前契约完成。
+本模块共 16 项，已完成 16 项，待开发 0 项。本批次新增的触点归因、行情与预测接口已完成单元测试；真实 Tushare 账号、PostgreSQL 压测和交易日历/复权因子属于后续集成环境工作，不阻塞当前契约完成。
 
 ---

@@ -57,6 +57,34 @@ class TestAdminFrontend:
         assert "安全配置" in source
         logger.info("test_admin_page_has_required_workspaces 完成")
 
+    # 方法作用：验证超级管理员租户表展示编码并按需展开管理员治理区。
+    # Args: self - pytest 测试类实例。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    def test_tenant_rows_expand_admins_and_reset_password(self) -> None:
+        """功能 21.4.4 必须包含懒加载、失败重试和租户边界密码重置。"""
+        # Arrange
+        source = Path("frontend/src/pages/AdminPage.tsx").read_text(encoding="utf-8")
+
+        # Act
+        tenant_code_column = "{ title: '租户编码', dataIndex: 'code'"
+        list_endpoint = "`/admin/tenants/${tenantId}/admins?page_size=100`"
+        reset_endpoint = (
+            "`/admin/tenants/${targetTenantId}/admins/"
+            "${passwordUser.id}/reset-password`"
+        )
+
+        # Assert
+        assert tenant_code_column in source
+        assert "expandedRowRender" in source
+        assert "onExpand" in source
+        assert "loadTenantAdmins" in source
+        assert list_endpoint in source
+        assert reset_endpoint in source
+        assert "租户管理员列表加载失败" in source
+        assert ">重试</Button>" in source
+        assert "暂无租户管理员" in source
+        logger.info("test_tenant_rows_expand_admins_and_reset_password 完成")
+
     # 方法作用：验证平台管理页包含访问策略和接口 IP 黑白名单维护入口。
     # Args: self - pytest 测试类实例。
     # Returns: 无返回值，断言失败时由 pytest 报告。

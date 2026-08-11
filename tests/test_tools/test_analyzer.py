@@ -209,6 +209,92 @@ class TestAnalyzeResultNode:
         r = asyncio.run(analyze_result_node({"query_result_sample": []}))
         assert "无数据" in r["analysis_result"]["summary"]
 
+    # 方法作用：验证通用聚合处理器不会截断后续业务分析。
+    # Args: self - pytest 测试类实例；monkeypatch - pytest 运行时替换工具。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    def test_order_query_without_llm_contains_business_analysis(self, monkeypatch):
+        """固定工单结果仍需给出关联指标、影响、假设和条件化建议。"""
+        # Arrange
+        import src.graph.nodes.analyze_result as analyze_module
+
+        monkeypatch.setattr(analyze_module, "is_llm_available", lambda: False)
+        rows = [
+            {"f_date": "2025-12-29", "total_daily_demand_orders": 50},
+            {"f_date": "2025-12-30", "total_daily_demand_orders": 50},
+            {"f_date": "2025-12-31", "total_daily_demand_orders": 50},
+        ]
+        state = {
+            "user_query": "分析一下所有的单日需求工单数",
+            "intent": "query",
+            "query_result_sample": rows,
+            "query_result_full_count": 3,
+            "generated_sql": "SELECT f_date, SUM(demand_orders) FROM daily_orders GROUP BY f_date",
+        }
+
+        # Act
+        analysis = asyncio.run(analyze_module.analyze_result_node(state))["analysis_result"]
+
+        # Assert
+        assert "均为 50" in analysis["summary"]
+        assert analysis["insights"] == [
+            "3 条记录的最小值、最大值和均值均为 50，极差和标准差均为 0。"
+        ]
+        assert analysis["recommended_chart_type"] == "line"
+        assert analysis["related_metrics"]
+        assert any("交付工单" in item for item in analysis["related_metrics"])
+        assert analysis["business_impacts"]
+        assert all("待验证" in item for item in analysis["possible_causes"])
+        assert any("若" in item for item in analysis["recommended_actions"])
+        assert analysis["confidence"] == "medium"
+
+    # 方法作用：验证处理器精确计算后会继续调用完整分析模型。
+    # Args: self - pytest 测试类实例；monkeypatch - pytest 运行时替换工具。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    def test_processor_result_continues_to_llm_business_analysis(self, monkeypatch):
+        """模型可用时不得只执行摘要润色，必须返回完整业务解读契约。"""
+        # Arrange
+        from unittest.mock import AsyncMock
+
+        import src.graph.nodes.analyze_result as analyze_module
+
+        llm_result = {
+            "summary": "三天需求工单数持平",
+            "insights": ["三天均为50"],
+            "data_quality": [],
+            "limitations": ["不能证明原因"],
+            "confidence": "medium",
+            "related_metrics": ["交付工单数"],
+            "business_impacts": ["可能影响排产"],
+            "possible_causes": ["待验证：批量下单"],
+            "recommended_actions": ["联查交付工单"],
+            "recommended_chart_type": "line",
+            "follow_up_questions": ["是否按车间拆分"],
+        }
+        llm_analyze = AsyncMock(return_value=llm_result)
+        monkeypatch.setattr(analyze_module, "is_llm_available", lambda: True)
+        monkeypatch.setattr(analyze_module, "_llm_analyze", llm_analyze)
+        state = {
+            "user_query": "分析单日需求工单数",
+            "intent": "query",
+            "query_result_sample": [
+                {"f_date": "2025-12-29", "total_daily_demand_orders": 50},
+                {"f_date": "2025-12-30", "total_daily_demand_orders": 50},
+            ],
+            "query_result_full_count": 2,
+            "generated_sql": "SELECT f_date, SUM(demand_orders) FROM daily_orders GROUP BY f_date",
+        }
+
+        # Act
+        analysis = asyncio.run(analyze_module.analyze_result_node(state))["analysis_result"]
+
+        # Assert
+        llm_analyze.assert_awaited_once()
+        assert "处理器摘要" in llm_analyze.await_args.args[3]
+        assert analysis["related_metrics"] == ["交付工单数"]
+        assert analysis["recommended_actions"] == ["联查交付工单"]
+        assert analysis["processor_name"] == "aggregation"
+        assert "statistics" in analysis
+
     # 验证 Decimal 聚合结果仍会推荐可视化图表。
     # Args: self - pytest 测试类实例；monkeypatch - pytest 运行时替换工具。
     # Returns: 无返回值，断言聚合分析推荐柱状图。

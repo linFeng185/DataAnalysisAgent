@@ -2,10 +2,15 @@
 
 from __future__ import annotations
 
+import json
 import re
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
+
+from src.logging_config import get_logger
+
+logger = get_logger(__name__)
 
 IndicatorCatalogMode = Literal[
     "schema_catalog",
@@ -97,6 +102,42 @@ _DIMENSION_NAMES = {
     "type",
     "status",
 }
+_NON_METRIC_NAMES = {
+    "id",
+    "sort",
+    "sequence",
+    "seq",
+    "latitude",
+    "longitude",
+    "lat",
+    "lon",
+    "lng",
+    "coordinate",
+}
+_NON_METRIC_COMMENT_MARKERS = (
+    "主键",
+    "外键",
+    "编号",
+    "编码",
+    "排序",
+    "序号",
+    "经度",
+    "纬度",
+    "坐标",
+    "状态",
+    "记录创建时间",
+    "记录更新时间",
+)
+_THEME_RULES = (
+    ("销售与订单", ("sale", "sales", "order", "contract", "ship", "销售", "订单", "合同", "出货")),
+    ("生产与工单", ("production", "output", "workorder", "work_order", "workshop", "生产", "产量", "工单", "车间")),
+    ("库存与供应链", ("stock", "inventory", "warehouse", "purchase", "supplier", "库存", "仓库", "采购", "供应商")),
+    ("设备运维", ("device", "alarm", "shutdown", "operation", "设备", "报警", "停机", "运行")),
+    ("人员与组织", ("attendance", "personnel", "staff", "talent", "人员", "出勤", "人才")),
+    ("质量与客户", ("quality", "pass", "satisfaction", "customer", "质量", "合格", "满意度", "客户")),
+    ("能源与环境", ("electricity", "temperature", "humidity", "energy", "用电", "温度", "湿度", "能耗")),
+    ("经营与目标", ("income", "target", "progress", "收入", "目标", "进度")),
+)
 
 
 class IndicatorTablePlan(BaseModel):
@@ -108,6 +149,7 @@ class IndicatorTablePlan(BaseModel):
     description: str = ""
     storage_mode: IndicatorStorageMode
     columns: list[str] = Field(default_factory=list)
+    numeric_columns: list[str] = Field(default_factory=list)
     metric_columns: list[str] = Field(default_factory=list)
     column_comments: dict[str, str] = Field(default_factory=dict)
     code_column: str = ""
@@ -127,6 +169,26 @@ class IndicatorCatalogPlan(BaseModel):
     name_column: str = ""
     requires_data_query: bool = False
     needs_input: bool = False
+
+
+class IndicatorDisplayItem(BaseModel):
+    """前端展示的一项已复检业务指标。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str
+    description: str = ""
+    table: str
+    column: str
+
+
+class IndicatorDisplayGroup(BaseModel):
+    """按业务主题组织的一组指标。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    theme: str
+    indicators: list[IndicatorDisplayItem] = Field(default_factory=list)
 
 
 # 方法作用：识别纯指标目录问法，并排除趋势、排名等指标值分析请求。
@@ -168,7 +230,22 @@ def _is_numeric_type(column_type: object) -> bool:
 def _is_dimension_name(column_name: str) -> bool:
     """使用保守名称规则，避免把时间键和编码键列入指标字段。"""
     normalized = column_name.strip().lower()
-    return normalized in _DIMENSION_NAMES or normalized.endswith(_DIMENSION_SUFFIXES)
+    semantic_name = normalized.removeprefix("f_")
+    return (
+        semantic_name in _DIMENSION_NAMES
+        or semantic_name in _NON_METRIC_NAMES
+        or semantic_name.endswith(_DIMENSION_SUFFIXES)
+    )
+
+
+# 方法作用：结合字段名和注释判断数值列是否明显属于维度或技术字段。
+# Args: column_name - 字段名；comment - Schema 字段注释。
+# Returns: 明显不能作为业务指标时返回 True。
+def _is_dimension_column(column_name: str, comment: str) -> bool:
+    """字段注释用于补足带业务前缀的主键、坐标和排序字段识别。"""
+    return _is_dimension_name(column_name) or any(
+        marker in comment for marker in _NON_METRIC_COMMENT_MARKERS
+    )
 
 
 # 方法作用：把一张 Schema 表分类为行式、宽表字段式或表指标域。
@@ -188,13 +265,32 @@ def _classify_table(table: dict) -> IndicatorTablePlan | None:
     code_column = _find_role_column(column_names, _CODE_COLUMNS)
     name_column = _find_role_column(column_names, _NAME_COLUMNS)
     value_column = _find_role_column(column_names, _VALUE_COLUMNS)
+    numeric_columns = [
+        str(column.get("name", "") or "").strip()
+        for column in columns
+        if str(column.get("name", "") or "").strip()
+        and _is_numeric_type(column.get("type"))
+    ]
     metric_columns = [
         str(column.get("name", "") or "").strip()
         for column in columns
         if str(column.get("name", "") or "").strip()
         and _is_numeric_type(column.get("type"))
-        and not _is_dimension_name(str(column.get("name", "") or ""))
+        and not _is_dimension_column(
+            str(column.get("name", "") or ""),
+            str(column.get("comment", "") or ""),
+        )
     ]
+    logger.info(
+        "指标目录表分类边界",
+        table=name,
+        column_count=len(columns),
+        numeric_candidates=numeric_columns,
+        accepted_metrics=metric_columns,
+        code_column=code_column,
+        name_column=name_column,
+        value_column=value_column,
+    )
     if value_column and (code_column or name_column):
         storage_mode: IndicatorStorageMode = "row_values"
     elif len(metric_columns) >= 2:
@@ -206,6 +302,7 @@ def _classify_table(table: dict) -> IndicatorTablePlan | None:
         description=str(table.get("description", "") or "").strip(),
         storage_mode=storage_mode,
         columns=list(column_names.values()),
+        numeric_columns=numeric_columns,
         metric_columns=metric_columns,
         column_comments={
             str(column.get("name", "") or "").strip(): str(column.get("comment", "") or "").strip()
@@ -285,40 +382,187 @@ def build_indicator_catalog_sql(plan: IndicatorCatalogPlan, dialect: str) -> str
     )
 
 
+# 方法作用：根据真实表名、字段名和注释确定默认业务主题。
+# Args: table - 表名；column - 字段名；description - 字段注释。
+# Returns: 命中的业务主题，无法识别时返回“其他”。
+def _infer_theme(table: str, column: str, description: str) -> str:
+    """主题规则只影响展示，不改变指标口径和查询行为。"""
+    evidence = f"{table} {column} {description}".lower()
+    for theme, markers in _THEME_RULES:
+        if any(marker in evidence for marker in markers):
+            return theme
+    return "其他"
+
+
+# 方法作用：把 Schema 注释或字段名整理成可读指标名称。
+# Args: column - 真实字段名；comment - 字段注释；reviewed_name - 模型复检名称。
+# Returns: 用于前端展示的指标名称。
+def _display_name(column: str, comment: str, reviewed_name: str = "") -> str:
+    """优先采用模型在证据内整理的名称，其次使用 Schema 注释。"""
+    candidate = reviewed_name.strip() or comment.strip()
+    if candidate:
+        return re.sub(r"[（(](?:保留|单位[:：]?).*?[）)]", "", candidate).strip()
+    return column
+
+
+# 方法作用：从确定性候选生成可展示的主题分组。
+# Args: plan - 指标目录规划；reviewed - 可选模型复检条目。
+# Returns: 仅包含真实白名单字段的主题分组。
+def build_indicator_display_groups(
+    plan: IndicatorCatalogPlan,
+    reviewed: list[dict] | None = None,
+) -> list[IndicatorDisplayGroup]:
+    """模型只能筛选和命名真实数值字段，未知表字段会被丢弃。"""
+    table_map = {table.name: table for table in plan.tables}
+    selected: list[tuple[str, str, str, str]] = []
+    if reviewed is None:
+        for table in plan.tables:
+            for column in table.metric_columns:
+                comment = table.column_comments.get(column, "")
+                selected.append((table.name, column, _display_name(column, comment), ""))
+    else:
+        seen: set[tuple[str, str]] = set()
+        for item in reviewed:
+            table_name = str(item.get("table", "") or "").strip()
+            column = str(item.get("column", "") or "").strip()
+            table = table_map.get(table_name)
+            key = (table_name, column)
+            if (
+                not item.get("include")
+                or table is None
+                or column not in table.numeric_columns
+                or key in seen
+            ):
+                continue
+            seen.add(key)
+            comment = table.column_comments.get(column, "")
+            selected.append((
+                table_name,
+                column,
+                _display_name(column, comment, str(item.get("display_name", "") or "")),
+                str(item.get("theme", "") or "").strip(),
+            ))
+
+    grouped: dict[str, list[IndicatorDisplayItem]] = {}
+    for table_name, column, name, reviewed_theme in selected:
+        table = table_map[table_name]
+        description = table.column_comments.get(column, "")
+        theme = reviewed_theme or _infer_theme(table_name, column, description)
+        grouped.setdefault(theme, []).append(IndicatorDisplayItem(
+            name=name,
+            description=description,
+            table=table_name,
+            column=column,
+        ))
+    return [
+        IndicatorDisplayGroup(theme=theme, indicators=indicators)
+        for theme, indicators in grouped.items()
+        if indicators
+    ]
+
+
+# 方法作用：调用模型复检真实数值字段的指标属性，并在失败时回退确定性过滤。
+# Args: plan - 基于 Schema 生成的指标目录规划。
+# Returns: 已完成白名单校验的主题化指标分组。
+async def review_indicator_catalog(
+    plan: IndicatorCatalogPlan,
+) -> list[IndicatorDisplayGroup]:
+    """模型不读取业务数据，也不能越过 Schema 字段白名单。"""
+    fallback = build_indicator_display_groups(plan)
+    candidates = [
+        {
+            "table": table.name,
+            "table_description": table.description,
+            "column": column,
+            "comment": table.column_comments.get(column, ""),
+            "deterministic_include": column in table.metric_columns,
+        }
+        for table in plan.tables
+        for column in table.numeric_columns
+    ]
+    if not candidates:
+        logger.info("指标目录模型复检跳过", reason="无数值候选")
+        return fallback
+    try:
+        from src.llm.client import is_task_llm_available
+
+        if not is_task_llm_available("direct_answer"):
+            logger.info("指标目录模型复检跳过", reason="模型不可用", candidate_count=len(candidates))
+            return fallback
+        from src.llm.invocation import invoke_structured
+        from src.llm.output_contracts import IndicatorCatalogReviewOutput
+        from src.llm.prompt_budget import PromptSection
+
+        result = await invoke_structured(
+            "indicator_catalog.review",
+            [PromptSection(
+                "candidates",
+                "## 待复检数值字段\n" + json.dumps(candidates, ensure_ascii=False),
+                priority=100,
+                min_chars=1000,
+                max_chars=6000,
+            )],
+            output_model=IndicatorCatalogReviewOutput,
+            task="direct_answer",
+            temperature=0.0,
+            reasoning=False,
+        )
+        reviewed = [item.model_dump() for item in result.indicators]
+        groups = build_indicator_display_groups(plan, reviewed)
+        logger.info(
+            "指标目录模型复检完成",
+            candidate_count=len(candidates),
+            returned_count=len(reviewed),
+            accepted_count=sum(len(group.indicators) for group in groups),
+            theme_count=len(groups),
+        )
+        return groups
+    except Exception as exc:
+        logger.error("指标目录模型复检失败，回退确定性过滤", error=str(exc), exc_info=True)
+        return fallback
+
+
 # 方法作用：把 Schema 目录和可选行式查询结果整理为确定性中文摘要。
 # Args: plan - 指标目录规划；rows - 行式目录查询返回的编码/名称行。
 # Returns: 不编造指标、不要求时间范围的可展示摘要。
 def build_indicator_catalog_summary(
     plan: IndicatorCatalogPlan,
     rows: list[dict] | None = None,
+    groups: list[IndicatorDisplayGroup] | None = None,
 ) -> str:
     """摘要明确标注信息来自 Schema 或受限目录枚举。"""
     if plan.mode == "unavailable":
         return "当前 Schema 中没有可用于识别指标目录的表结构，请指定业务域或目标表。"
-    lines = ["当前数据源可确认的指标目录如下："]
-    for table in plan.tables:
-        if table.storage_mode == "row_values":
-            continue
-        description = f"（{table.description}）" if table.description else ""
-        if table.storage_mode == "wide_columns":
-            metrics = "、".join(
-                f"{name}（{table.column_comments[name]}）"
-                if table.column_comments.get(name)
-                else name
-                for name in table.metric_columns
-            )
-            lines.append(f"- {table.name}{description}：宽表字段式指标，{metrics}")
-        else:
-            metrics = table.metric_columns or table.columns
-            metric_text = "、".join(
-                f"{name}（{table.column_comments[name]}）"
-                if table.column_comments.get(name)
-                else name
-                for name in metrics
-            )
-            suffix = f"；字段：{metric_text}" if metric_text else ""
-            lines.append(f"- {table.name}{description}：表/视图指标域{suffix}")
-    if plan.mode == "ambiguous":
+    logger.info(
+        "指标目录展示组装边界",
+        mode=plan.mode,
+        table_count=len(plan.tables),
+        metric_count=sum(len(table.metric_columns) for table in plan.tables),
+        rows_count=len(rows or []),
+    )
+    display_groups = groups if groups is not None else build_indicator_display_groups(plan)
+    metric_count = sum(len(group.indicators) for group in display_groups)
+    logger.info(
+        "指标目录摘要输入边界",
+        metric_count=metric_count,
+        group_count=len(display_groups),
+        themes=[group.theme for group in display_groups],
+        indicator_names=[
+            item.name
+            for group in display_groups
+            for item in group.indicators
+        ][:50],
+    )
+    lines = [
+        f"当前数据源确认 {metric_count} 项业务指标，"
+        f"已按 {len(display_groups)} 个业务主题整理。"
+    ]
+    if plan.mode == "schema_catalog":
+        for group in display_groups:
+            names = "、".join(item.name for item in group.indicators if item.name)
+            if names:
+                lines.append(f"- {group.theme}（{len(group.indicators)} 项）：{names}")
+    elif plan.mode == "ambiguous":
         candidates = "、".join(
             table.name for table in plan.tables if table.storage_mode == "row_values"
         )

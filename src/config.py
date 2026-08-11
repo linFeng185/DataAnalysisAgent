@@ -202,6 +202,8 @@ class Settings(BaseSettings):
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = "INFO"
     log_format: Literal["console", "json"] = "console"
     log_file: str = "logs/app.log"
+    server_reload_enabled: bool = True
+    demo_datasource_enabled: bool = False
 
     # ---- LLM ----
     llm_provider: Literal["openai", "anthropic"] = "openai"
@@ -294,9 +296,13 @@ class Settings(BaseSettings):
 
     # ---- 分析器 ----
     analysis_data_max_chars: int = 50000  # 分析数据最多投喂 LLM 的字符数，超限按比例均匀抽取
+    attribution_min_converted_paths: int = Field(default=2, ge=1, le=10_000)
+    attribution_time_decay_half_life_days: float = Field(default=7.0, gt=0, le=3_650)
+    attribution_max_touchpoint_rows: int = Field(default=10_000, ge=200, le=100_000)
 
     # ---- 重试 ----
     max_retry_count: int = 3
+    max_supplemental_query_rounds: int = Field(default=2, ge=0, le=3)
 
     # ---- 限流 ----
     max_queries_per_hour: int = 100
@@ -352,16 +358,21 @@ class Settings(BaseSettings):
     """系统知识只读目录，多个路径使用分号分隔。"""
 
 
-# 方法作用：从环境变量和项目配置文件构造当前应用设置。
+# 未绑定应用 Context 的 CLI 与应用工厂复用同一份配置，且不隐式创建 Context。
+_standalone_settings: Settings | None = None
+
+
+# 方法作用：优先读取当前 Context 配置，否则从环境和项目配置构造独立设置。
 # Args: 无。
 # Returns: 当前应用 Settings 实例。
 def get_settings() -> Settings:
-    """返回当前 AppContext 持有的唯一配置实例。"""
+    """返回当前 Context 配置，未绑定时复用无副作用的独立配置实例。"""
     logger.debug("获取应用配置入口")
-    try:
-        from src.app_context import get_app_context
+    from src.app_context import get_bound_app_context
 
-        result = cast(Settings, get_app_context().settings)
+    context = get_bound_app_context()
+    if context is not None:
+        result = cast(Settings, context.settings)
         logger.debug(
             "获取应用配置完成",
             extra={
@@ -371,9 +382,19 @@ def get_settings() -> Settings:
             },
         )
         return result
-    except Exception:
-        logger.error("获取应用配置失败", exc_info=True)
-        raise
+
+    global _standalone_settings
+    if _standalone_settings is None:
+        _standalone_settings = Settings()
+    logger.debug(
+        "获取应用配置完成",
+        extra={
+            "env": _standalone_settings.env,
+            "source": "standalone",
+            "settings_id": id(_standalone_settings),
+        },
+    )
+    return _standalone_settings
 
 
 # 方法作用：校验生产环境必须具备的认证、密钥和数据库安全配置。

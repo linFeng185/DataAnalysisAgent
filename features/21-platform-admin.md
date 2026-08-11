@@ -29,6 +29,7 @@
 | 21.3.5 | system 资源不可见 | Skills/Knowledge/MCP 路由 | 普通用户不能列出或读取 system 管理内容 | 单测完成 | P0 |
 | 21.3.6 | 租户管理员用户自治 | `src/api/routes/admin.py` | tenant_admin 仅管理当前租户用户，可创建同租户 tenant_admin 并保护最后管理员 | 单测完成 | P0 |
 | 21.3.7 | 租户物理删除 | `src/tenant_purge.py`、`src/api/routes/admin.py` | 二次确认后清理关系库、向量库、缓存、Skill、MCP、上传、会话和 Checkpointer，默认租户不可删除 | 集成测试完成 | P0 |
+| 21.3.8 | 平台租户管理员治理 API | `src/api/routes/admin.py` | super_admin 按租户查看 tenant_admin，并按租户、用户和角色三重约束重置密码 | 单测完成 | P0 |
 
 ## 21.4 管理前端
 
@@ -37,9 +38,10 @@
 | 21.4.1 | 租户编码登录入口 | `LoginPage.tsx`、`AuthContext.tsx` | 强制跳转登录，输入 tenant_code+username+password 且不展示注册 | 单测完成 | P0 |
 | 21.4.2 | 角色菜单 | `App.tsx` | 按角色显示菜单、账号信息和退出入口 | 单测完成 | P0 |
 | 21.4.3 | 平台管理页面 | `AdminPage.tsx` | 租户、用户、安全配置和 system 资源治理入口 | 单测完成 | P0 |
+| 21.4.4 | 租户管理员展开治理 | `AdminPage.tsx` | 租户列表展示编码，展开行按需查看管理员并可重置密码 | 单测完成 | P0 |
 
 ### 模块收尾
 
-模块功能点共 18 项，已完成 18 项，待开发 0 项。
+模块功能点共 20 项，已完成 20 项，待开发 0 项。
 
 本模块本轮没有待开发功能点。

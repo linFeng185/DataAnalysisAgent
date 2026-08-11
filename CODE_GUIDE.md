@@ -12,6 +12,7 @@ LLM 驱动的数据分析智能体。用自然语言提问，自动完成：轮�
 ├── src/
 │   ├── api/              ① Web 接口层 — 访问策略/领域路由/纯 ASGI 认证/安全头 + SSE 流式；含 Grafana SimpleJSON 与优化建议
 │   ├── graph/            ② 核心流水线 — LangGraph 主图 + 可复用 SQL 子图
+│   │   ├── attribution.py   触点归因模型选择、路径数据资格和补查数据集编排
 │   │   ├── context.py       请求/权限/路由/执行四组轻量上下文适配
 │   │   ├── contracts.py     任务计划与多数据源请求/结果 Pydantic 契约
 │   │   └── nodes/           状态准备、SQL 主链、直接回答与多源节点
@@ -70,7 +71,10 @@ POST /api/v1/chat {"query": "本月 GMV 排名？", "stream": true}
   ├─ layer3_validate     委托统一 SQL 服务做 AST 只读安全校验
   ├─ layer4_explain      统一 SQL 服务按 Registry 权威方言执行 EXPLAIN
   ├─ execute_sql         统一有界执行（权限 / 限流 / 脱敏 / 审计）
-  ├─ analyze_result      统计计算 + LLM 洞察 + Skill 输出扩展
+  ├─ analyze_result      确定性统计 + 业务关联/影响/原因/建议 + 证据充分性判断
+  │    ├─ 触点归因 → 用户显式模型/受约束模型推荐 → 规则资格复核 → 五种确定性算法
+  │    ├─ 路径证据不足且 Schema 可补齐 → supplemental_query → 固定原模型重新计算
+  │    ├─ 证据可由当前 Schema 补齐 → supplemental_query → analyze_result（最多两轮）
   │    ├─ 预测 → forecast_subgraph（回测/区间/模型卡）
   │    └─ 报告 → report_subgraph（custom-report 真实执行）
   ├─ generate_chart      默认 SQL 分析的 ECharts 配置生成
@@ -104,7 +108,8 @@ POST /api/v1/chat {"query": "本月 GMV 排名？", "stream": true}
 | `state.py` | `AnalysisState` TypedDict（会话持久字段 + `UntrackedValue` 请求字段和四组轻量上下文） |
 | `context.py` | 请求、权限、路由、执行上下文 Pydantic 模型与扁平字段兼容适配 |
 | `contracts.py` | `TaskPlan`、`SourceQueryRequest`、`SourceQueryResult`、`MultiSourceResult` 契约 |
-| `indicator_catalog.py` | 指标目录问法识别、表式/宽表/行式存储规划与确定性 DISTINCT SQL |
+| `indicator_catalog.py` | 指标目录问法识别、非指标字段过滤、白名单内 LLM 复检、主题化展示与确定性 DISTINCT SQL |
+| `attribution.py` | 用户显式归因模型优先、未指定时受约束推荐；固定选择跨补查轮次复用，并确定路径证据是否可补齐 |
 | `workflow.py` | 从节点目录装配 StateGraph，显式保留条件业务路由 + Checkpointer |
 | `node_registry.py` | 节点 handler 与流式进度文案目录 |
 | `nodes/prepare_turn.py` | 固化上一轮轻量索引，压缩旧历史并清空当前轮 SQL/错误/结果/分析状态 |
@@ -123,7 +128,9 @@ POST /api/v1/chat {"query": "本月 GMV 排名？", "stream": true}
 | `nodes/layer3_validate.py` | sqlglot AST 只读白名单与危险语句阻断 |
 | `nodes/execute_sql.py` | SQL 执行（空 SQL 跳过保护） |
 | `nodes/multi_source.py` | 契约化多源 worker、并行执行、维度/指标列对齐和来源失败隔离 |
-| `nodes/analyze_result.py` | 统计 + LLM 分析 |
+| `nodes/analyze_result.py` | 确定性统计处理器 + 证据化业务关联、影响、原因假设和行动建议分析 |
+| `nodes/supplemental_query.py` | 证据不足时在当前权限内复用完整 SQL 安全链补查，并把脱敏证据回注分析节点 |
+| `nodes/generate_chart.py` | 按行数与列语义确定图表资格，输出成功、不适用、失败或核心数值契约 |
 | `nodes/build_response.py` | 响应组装、最终 SQL 列表 + 轻量 checkpoint 历史 + 富结果持久化 |
 
 ### ③ `src/llm/` — LLM 调用层
@@ -143,7 +150,7 @@ POST /api/v1/chat {"query": "本月 GMV 排名？", "stream": true}
 | 文件 | 职责 |
 |------|------|
 | `datasource_cache.py` | 按连接指纹共享数据库元数据，支持本地 JSON / Redis 配置切换 |
-| `schema_manager.py` | 连接级精确缓存 + VectorStore 语义索引 + 文档/DB 内省回退 |
+| `schema_manager.py` | 连接级精确缓存 + VectorStore 语义索引 + 文档/DB 内省回退；精确命中不重复向量化 |
 | `asset_models.py` | `DataAsset` / `Evidence` / `AnalysisPlan` / `AnalysisArtifact` 统一数据契约 |
 | `retrieval.py` | 知识租户/可见性/数据源过滤、VectorStore 检索和 Citation 转换 |
 | `content_safety.py` | 外部文档注入检测、证据分隔渲染和工具指令隔离 |
@@ -183,6 +190,7 @@ POST /api/v1/chat {"query": "本月 GMV 排名？", "stream": true}
 | 模块 | 职责 |
 |------|------|
 | `tools/analyzer.py` | 描述性统计/趋势/Z-score 异常/集中度/Pearson 相关 |
+| `tools/touchpoint_attribution.py` | 路径字段映射与资格复核；首次、末次、线性、时间衰减和 U 型归因的 Decimal 守恒计算 |
 | `tools/forecasting.py` | naive/线性预测、rolling backtest、预测区间和模型卡 |
 | `tools/forecast_engine.py` | ForecastRequest、可注册 ForecastModel、滚动回测和统一 ForecastResult |
 | `tools/market_analysis.py` | MarketDataProvider 契约和行情收益/波动/回撤指标 |
@@ -206,7 +214,8 @@ POST /api/v1/chat {"query": "本月 GMV 排名？", "stream": true}
 避免多实例并发，按文件事务执行，并在 `schema_migrations` 记录版本、文件名与按 LF 规范化计算的
 checksum。执行器同时兼容历史 LF/CRLF 登记值，避免 Git 跨平台换行转换造成误报；真正的内容变更
 仍然失败关闭。已知历史迁移被改写时只允许走版本、文件名、新旧 checksum 和后续修复文件均精确
-匹配的白名单升级路径，且不覆盖原有审计记录。
+匹配的白名单升级路径，且不覆盖原有审计记录。已登记迁移只在 DEBUG 输出逐项结果，INFO 使用
+`applied_count / verified_count / legacy_repair_count` 聚合审计，已完成修复不重复产生 WARNING。
 `013_tenant_identity_llm.sql` 为租户增加全局不可变 `code` 和租户内大小写敏感用户名约束，并建立平台 LLM 厂商/模型目录、租户命名连接、模型绑定和默认配置表。
 `014_llm_catalog_reasoning.sql` 增加厂商能力表单定义，初始化 DeepSeek V4 Pro/Flash，并把旧 `deepseek-chat` 的租户绑定和默认值平滑迁移到 Pro 后删除旧目录项。
 `007_api_access_policy.sql` 为动态策略和 CIDR 规则启用强制 RLS。API 策略加载属于必需启动步骤，
@@ -265,9 +274,12 @@ checksum。执行器同时兼容历史 LF/CRLF 登记值，避免 Git 跨平台�
 ## 关键设计模式
 
 - **分类重试**：SQL/字段/EXPLAIN 语义错误 → generate_sql；连接瞬态错误 → 原 SQL 重试 execute_sql；配置/权限错误终止
-- **指标目录分流**：纯目录问法不要求时间；表式/宽表字段式只读 Schema，唯一行式目录只查询 DISTINCT code/name，多候选请求目标表
+- **指标目录分流**：纯目录问法不要求时间；表式/宽表字段式先排除主键、编码、排序和坐标，再让 LLM 仅在真实数值字段白名单内复检和主题化；唯一行式目录只查询 DISTINCT code/name，多候选请求目标表
+- **计算与解读分层**：数据处理器负责确定性数值计算但不得提前终止分析；LLM 负责关联指标、业务影响、待验证原因和条件化建议，模型不可用时用显式“待验证”规则回退
+- **有限证据补查**：分析模型只声明证据状态和自然语言补查问题；单源普通分析最多补查两轮，每轮一个问题，完整复用 SQL 安全链，失败保留主查询结果
+- **确定性图表资格**：元数据、直接问答和无数据不画图；单行单值展示核心值；两行以上时间/分类加数值默认绘图；模型推荐 `table` 仍需列语义复核，失败原因进入公开响应
 - **表名幻觉收敛**：完整物理表白名单独立于可裁剪 Schema；幻觉不回注完整失败 SQL，初次生成后最多纠正一次
-- **应用级依赖容器**：每个 FastAPI 应用持有独立 `AppContext`；兼容 `get_*()` 只委托当前 Context，异步资源并发单次初始化并按创建逆序关闭
+- **应用级依赖容器**：每个 FastAPI 应用持有独立 `AppContext`；`get_settings()` 无绑定时不隐式创建 Context，兼容 `get_*()` 委托当前 Context，异步资源并发单次初始化并按创建逆序关闭
 - **租户策略集中化**：`TenantPolicy` 统一认证门禁、数据源/知识隔离、身份校验和三级作用域写权限，业务模块不直接读取 `settings.multi_tenant`
 - **租户 LLM 失败关闭**：所有对话必须解析当前租户启用的命名连接和模型；显式跨租户、停用或缺失选择返回冲突，不回退其他租户或平台全局凭证
 - **LLM 协议扩展**：Provider 目录保存协议元数据，`openai_compatible` 映射到统一 OpenAI Adapter；增加同协议厂商或模型只需配置目录，新增协议才实现并注册 Adapter
@@ -286,7 +298,7 @@ checksum。执行器同时兼容历史 LF/CRLF 登记值，避免 Git 跨平台�
 - **出站地址失败关闭**：数据库目标解析为私网、回环或特殊地址时默认阻断；ClickHouse 探针与客户端固定复用已校验 IP
 - **授权候选发现**：未选择数据源时仅把当前用户有权访问的候选交给模型，显式越权与权限服务异常均失败关闭
 - **版本化迁移**：启动时用 advisory lock + checksum + 单文件事务应用 SQL，生产失败停止启动
-- **容器部署边界**：`docker-compose.example.yml` 只发布前端端口，Nginx 同源代理后端；实际 Compose/配置文件忽略，PG/Redis/Chroma/Skills/日志使用宿主机持久化目录
+- **容器部署边界**：`docker-compose.example.yml` 只发布前端端口，Nginx 同源代理后端；PyPI/npm 默认官方源并允许构建参数覆盖；实际 Compose/配置文件忽略，PG/Redis/Chroma/Skills/日志使用宿主机持久化目录
 - **状态持久化分层**：checkpoint 只保存轻量 `conversation_history/messages/previous_turn_snapshot`；权限、Schema、结果、分析、图表和响应使用 `UntrackedValue`
 - **状态上下文分组**：请求、权限、路由、执行上下文只保存轻量元数据；兼容期保留扁平字段，每轮由 `prepare_turn` 重建，禁止真值回退复活旧状态
 - **Windows 异步兼容**：`src.main` 为 Uvicorn 显式创建 SelectorEventLoop，保证 psycopg `AsyncPostgresSaver` 可持久化

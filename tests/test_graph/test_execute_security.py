@@ -36,6 +36,7 @@ class TestExecuteSQLSecurity:
 
         settings = SimpleNamespace(
             max_result_rows=2,
+            attribution_max_touchpoint_rows=200,
             max_execution_time=30,
             max_queries_per_hour=100,
             multi_tenant=False,
@@ -67,6 +68,24 @@ class TestExecuteSQLSecurity:
         assert result["query_result_truncated"] is True
         assert result["query_result_sample"][0]["email"] == "a***@example.com"
         assert result["query_result_sample"][0]["phone"] == "138****5678"
+
+        # Arrange：放宽数据库读取上限，但把归因私有候选行限制为两条。
+        settings.max_result_rows = 10
+        settings.attribution_max_touchpoint_rows = 2
+
+        # Act：归因意图应保留独立候选行，不改变公开样本契约。
+        with use_app_context(context):
+            attribution_result = await execute_module.execute_sql_node({
+                "datasource": "pii",
+                "dialect": "sqlite",
+                "intent": "attribution",
+                "generated_sql": "SELECT id, email FROM pii ORDER BY id",
+            })
+
+        # Assert：完整行数用于资格判断，私有候选按专用上限截取。
+        assert attribution_result["query_result_full_count"] == 3
+        assert len(attribution_result["query_result_sample"]) == 3
+        assert len(attribution_result["attribution_candidate_rows"]) == 2
 
         await engine.dispose()
 

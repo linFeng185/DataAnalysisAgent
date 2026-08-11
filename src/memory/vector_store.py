@@ -206,7 +206,7 @@ async def get_vector_store() -> VectorStore:
     if store is not None:
         try:
             if await store.health_check():
-                logger.info("获取 VectorStore 完成", reused=True)
+                logger.debug("获取 VectorStore 完成", reused=True)
                 return store
         except Exception:
             logger.warning("VectorStore 健康检查失败，重建", exc_info=True)
@@ -217,7 +217,7 @@ async def get_vector_store() -> VectorStore:
         partial(_create_configured_vector_store, context.settings),
         closer=_close_vector_store_resource,
     )
-    logger.info("获取 VectorStore 完成", reused=False, backend=type(result).__name__)
+    logger.debug("获取 VectorStore 完成", reused=False, backend=type(result).__name__)
     return result
 
 

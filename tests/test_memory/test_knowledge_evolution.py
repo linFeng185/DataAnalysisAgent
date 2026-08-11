@@ -130,6 +130,7 @@ class TestKnowledgeEvolution:
         """两个并发观察者只能有一个取得同一指纹的晋升声明。"""
         # Arrange
         import asyncio
+
         from src.memory.knowledge_evolution import KnowledgeEvolutionService
         from src.security.tenant_policy import RequestIdentity
 
@@ -154,6 +155,7 @@ class TestKnowledgeEvolution:
         """声明被接管后，旧 Worker 必须在写回阶段被 fencing 阻断。"""
         # Arrange
         import pytest
+
         from src.memory.knowledge_evolution import KnowledgeEvolutionService
         from src.security.tenant_policy import RequestIdentity
 

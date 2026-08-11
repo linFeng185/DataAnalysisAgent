@@ -45,6 +45,11 @@
 页面创建的数据源写入 `datasource_configs`，密码使用 `CredentialManager` 密文保存；启动时先加载
 数据库配置，再补充可选 YAML 配置。同租户数据源名称唯一。
 
+`get_settings()` 优先返回当前请求已绑定 `AppContext` 的配置；无绑定时复用独立 `Settings`，不得
+为了读取配置隐式创建默认 Context。`SERVER_RELOAD_ENABLED` 只在开发环境生效，检测到调试器时
+必须关闭 reload，避免调试器多进程与 Uvicorn reloader 叠加。`DEMO_DATASOURCE_ENABLED` 仅允许在
+开发环境显式开启，测试和生产环境始终跳过。
+
 ## 平台管理 API
 
 租户生命周期端点仅允许固定超级管理员调用：
@@ -55,6 +60,8 @@
 | POST | `/api/v1/admin/tenants` | 原子创建租户和首个 `tenant_admin` |
 | PATCH | `/api/v1/admin/tenants/{tenant_id}` | 启停租户，默认租户不可停用 |
 | DELETE | `/api/v1/admin/tenants/{tenant_id}` | 二次确认后物理删除非默认租户及全部作用域资源 |
+| GET | `/api/v1/admin/tenants/{tenant_id}/admins` | 分页列出指定租户的 `tenant_admin` |
+| POST | `/api/v1/admin/tenants/{tenant_id}/admins/{user_id}/reset-password` | 重置指定租户管理员密码并清除锁定 |
 | GET | `/api/v1/admin/config` | 返回脱敏后的运行配置摘要 |
 
 租户物理删除先取得按租户编号分区的 PostgreSQL advisory lock，防止多 Worker 重复清理；再原子停用租户，清理数据源连接、向量知识、Schema 缓存、tenant/private Skill、MCP 会话、上传任务、会话历史、Checkpointer 和自进化进程缓存，最后在事务内按外键顺序删除关系表与租户记录。读取清理清单和最终删除的两个事务都显式设置本地 `super_admin` RLS 身份，确保 `FORCE ROW LEVEL SECURITY` 表完整清理且连接归还后不残留身份。外部资源清理失败时保留停用状态并允许重试；默认租户和固定超级管理员永远不可删除，确认文本必须精确匹配 `DELETE <tenant_code>`。
@@ -69,6 +76,10 @@
 | POST | `/api/v1/admin/users/{user_id}/reset-password` | 重置当前租户用户密码并清除锁定 |
 
 接口不返回密码、哈希、JWT、API Key、数据库密码或凭证主密钥。
+
+超级管理员查看和重置租户管理员必须使用租户生命周期下的专用端点。查询和更新同时按
+`tenant_id`、`user_id` 与 `role='tenant_admin'` 过滤，不能借此查看或修改分析员、只读用户，
+也不能操作固定超级管理员。通用 `/api/v1/admin/users` 端点继续只允许当前租户管理员调用。
 
 ## system 资源隔离
 
@@ -86,6 +97,8 @@ system 级 Skill、知识文件/条目和 MCP 配置属于平台内部资源：
 - 登录页固定输入租户编码、用户名和密码，不展示公开注册表单。
 - 侧栏按角色渲染。`super_admin` 增加“平台管理”，包含租户、用户、安全配置三个页签，并提供
   system Skill、知识库和 MCP 的治理入口。
+- 超级管理员租户列表展示不可变的租户编码；展开租户行时按需加载该租户管理员，可从展开区
+  发起密码重置。加载失败必须在展开区明确显示并允许重试。
 - Header 展示当前账号、角色和退出按钮。普通角色不渲染平台管理路由，直接访问也跳回首页。
 
 ## 测试
@@ -94,6 +107,7 @@ system 级 Skill、知识文件/条目和 MCP 配置属于平台内部资源：
 - 超级管理员首次初始化、幂等、冲突失败和固定身份保护；
 - 未登录 401、登录失败锁定、成功清零、注册开关；
 - 租户编码登录、大小写敏感用户名与租户用户管理正常/边界/越权路径；
+- 超级管理员按租户查看管理员、跨租户与非管理员目标阻断、密码重置清锁和前端展开加载；
 - 租户物理删除的默认租户保护、确认文本、运行时资源清理、关系表清理顺序和失败重试；
 - 普通用户无法列出或读取 system Skill、知识和 MCP；
 - 前端登录跳转、角色菜单和平台管理页面生产构建。

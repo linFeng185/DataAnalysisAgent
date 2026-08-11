@@ -213,6 +213,11 @@ class TestPlatformAdminRoutes:
         assert ("GET", "/admin/tenants") in routes
         assert ("POST", "/admin/tenants") in routes
         assert ("DELETE", "/admin/tenants/{tenant_id}") in routes
+        assert ("GET", "/admin/tenants/{tenant_id}/admins") in routes
+        assert (
+            "POST",
+            "/admin/tenants/{tenant_id}/admins/{user_id}/reset-password",
+        ) in routes
         assert ("GET", "/admin/users") in routes
         assert ("POST", "/admin/users") in routes
         assert ("GET", "/admin/config") in routes
@@ -269,6 +274,163 @@ class TestPlatformAdminRoutes:
         assert result["admin"]["role"] == "tenant_admin"
         assert transaction.__aenter__.await_count == 1
         logger.info("test_create_tenant_creates_tenant_admin_atomically 完成")
+
+    # 方法作用：验证超级管理员只能按指定租户读取 tenant_admin 账号。
+    # Args: self - pytest 测试类实例；monkeypatch - 身份和数据库补丁。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    async def test_list_tenant_admins_filters_tenant_and_role(self, monkeypatch) -> None:
+        """展开租户时不能返回同租户的分析员或其他租户管理员。"""
+        # Arrange
+        import src.api.auth as auth
+        import src.memory.pg_pool as pg_pool
+        from src.api.routes.admin import list_tenant_admins
+
+        connection = MagicMock()
+        connection.fetchrow = AsyncMock(return_value={
+            "id": 7,
+            "code": "acme",
+            "name": "Acme",
+            "is_active": True,
+        })
+        connection.fetchval = AsyncMock(return_value=1)
+        connection.fetch = AsyncMock(return_value=[{
+            "id": 12,
+            "username": "TenantOwner",
+            "tenant_id": 7,
+            "role": "tenant_admin",
+            "is_active": True,
+            "failed_login_attempts": 0,
+            "locked_until": None,
+            "last_login_at": None,
+            "created_at": None,
+        }])
+        acquire = MagicMock()
+        acquire.__aenter__ = AsyncMock(return_value=connection)
+        acquire.__aexit__ = AsyncMock(return_value=False)
+        pool = MagicMock()
+        pool.acquire.return_value = acquire
+        monkeypatch.setattr(auth, "require_super_admin", lambda: None)
+        monkeypatch.setattr(pg_pool, "get_pg_pool", AsyncMock(return_value=pool))
+
+        # Act
+        result = await list_tenant_admins(tenant_id=7, page=1, page_size=20)
+
+        # Assert
+        assert result["tenant"]["code"] == "acme"
+        assert result["admins"][0]["username"] == "TenantOwner"
+        assert result["admins"][0]["role"] == "tenant_admin"
+        count_args = connection.fetchval.await_args.args
+        list_args = connection.fetch.await_args.args
+        assert "tenant_id=$1" in count_args[0]
+        assert "role='tenant_admin'" in count_args[0]
+        assert count_args[1] == 7
+        assert "tenant_id=$1" in list_args[0]
+        assert "role='tenant_admin'" in list_args[0]
+        assert list_args[1:] == (7, 20, 0)
+
+    # 方法作用：验证平台密码重置同时约束租户、用户和管理员角色并清除锁定。
+    # Args: self - pytest 测试类实例；monkeypatch - 身份、密码和数据库补丁。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    async def test_reset_tenant_admin_password_has_three_boundaries(self, monkeypatch) -> None:
+        """成功重置不得依赖前端传来的角色声明，也不得返回密码哈希。"""
+        # Arrange
+        import src.api.auth as auth
+        import src.memory.pg_pool as pg_pool
+        from src.api.routes.admin import PasswordResetRequest, reset_tenant_admin_password
+
+        connection = MagicMock()
+        connection.fetchrow = AsyncMock(return_value={
+            "id": 12,
+            "username": "TenantOwner",
+            "tenant_id": 7,
+            "role": "tenant_admin",
+            "is_active": True,
+            "failed_login_attempts": 0,
+            "locked_until": None,
+            "last_login_at": None,
+            "created_at": None,
+        })
+        acquire = MagicMock()
+        acquire.__aenter__ = AsyncMock(return_value=connection)
+        acquire.__aexit__ = AsyncMock(return_value=False)
+        pool = MagicMock()
+        pool.acquire.return_value = acquire
+        monkeypatch.setattr(auth, "require_super_admin", lambda: None)
+        monkeypatch.setattr(auth, "_hash_password", lambda password: "bcrypt-hash")
+        monkeypatch.setattr(pg_pool, "get_pg_pool", AsyncMock(return_value=pool))
+
+        # Act
+        result = await reset_tenant_admin_password(
+            tenant_id=7,
+            user_id=12,
+            request=PasswordResetRequest(password="StrongPass123!"),
+        )
+
+        # Assert
+        query_args = connection.fetchrow.await_args.args
+        assert "failed_login_attempts=0" in query_args[0]
+        assert "locked_until=NULL" in query_args[0]
+        assert "id=$2 AND tenant_id=$3 AND role='tenant_admin'" in query_args[0]
+        assert query_args[1:] == ("bcrypt-hash", 12, 7)
+        assert result["status"] == "ok"
+        assert result["admin"]["tenant_id"] == 7
+        assert "password" not in result["admin"]
+        assert "password_hash" not in result["admin"]
+
+    # 方法作用：验证非管理员或跨租户目标不会被平台重置端点更新。
+    # Args: self - pytest 测试类实例；monkeypatch - 身份、密码和数据库补丁。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    async def test_reset_tenant_admin_password_rejects_unmatched_target(self, monkeypatch) -> None:
+        """三重过滤没有命中时必须稳定返回 404，不能降级为通用用户重置。"""
+        # Arrange
+        import src.api.auth as auth
+        import src.memory.pg_pool as pg_pool
+        from src.api.routes.admin import PasswordResetRequest, reset_tenant_admin_password
+
+        connection = MagicMock()
+        connection.fetchrow = AsyncMock(return_value=None)
+        acquire = MagicMock()
+        acquire.__aenter__ = AsyncMock(return_value=connection)
+        acquire.__aexit__ = AsyncMock(return_value=False)
+        pool = MagicMock()
+        pool.acquire.return_value = acquire
+        monkeypatch.setattr(auth, "require_super_admin", lambda: None)
+        monkeypatch.setattr(auth, "_hash_password", lambda password: "bcrypt-hash")
+        monkeypatch.setattr(pg_pool, "get_pg_pool", AsyncMock(return_value=pool))
+
+        # Act / Assert
+        with pytest.raises(HTTPException) as caught:
+            await reset_tenant_admin_password(
+                tenant_id=7,
+                user_id=99,
+                request=PasswordResetRequest(password="StrongPass123!"),
+            )
+        assert caught.value.status_code == 404
+        assert "租户管理员不存在" in str(caught.value.detail)
+
+    # 方法作用：验证固定超级管理员在密码哈希和数据库访问前被专用端点拒绝。
+    # Args: self - pytest 测试类实例；monkeypatch - 身份和数据库补丁。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    async def test_reset_tenant_admin_password_protects_super_admin(self, monkeypatch) -> None:
+        """默认租户展开区不能成为固定平台账号的密码重置入口。"""
+        # Arrange
+        import src.api.auth as auth
+        import src.memory.pg_pool as pg_pool
+        from src.api.routes.admin import PasswordResetRequest, reset_tenant_admin_password
+
+        get_pool = AsyncMock()
+        monkeypatch.setattr(auth, "require_super_admin", lambda: None)
+        monkeypatch.setattr(pg_pool, "get_pg_pool", get_pool)
+
+        # Act / Assert
+        with pytest.raises(HTTPException) as caught:
+            await reset_tenant_admin_password(
+                tenant_id=1,
+                user_id=1,
+                request=PasswordResetRequest(password="StrongPass123!"),
+            )
+        assert caught.value.status_code == 403
+        get_pool.assert_not_awaited()
 
     # 方法作用：验证后台不能修改固定超级管理员的角色或状态。
     # Args: self - pytest 测试类实例；monkeypatch - 平台身份补丁。

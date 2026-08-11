@@ -28,6 +28,9 @@ class TestContainerDeployment:
         assert "healthcheck" in normalized
         assert '"src.main:app"' in source
         assert "--reload" not in source
+        assert "ARG PIP_INDEX_URL=" in source
+        assert "PIP_TRUSTED_HOST" not in source
+        assert source.index("RUN python -m pip wheel") < source.index("COPY src ./src")
 
     # 方法作用：验证前端镜像独立构建并通过 Nginx 代理 API 和 SSE。
     # Args: self - pytest 测试类实例。
@@ -42,6 +45,7 @@ class TestContainerDeployment:
         assert "FROM node:22-alpine AS builder" in dockerfile
         assert "FROM nginxinc/nginx-unprivileged:1.27-alpine AS runtime" in dockerfile
         assert "npm ci" in dockerfile
+        assert "ARG NPM_REGISTRY=" in dockerfile
         assert "COPY public ./public" not in dockerfile
         assert "location /api/" in nginx
         assert "proxy_pass http://backend;" in nginx

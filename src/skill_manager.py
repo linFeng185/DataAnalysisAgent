@@ -646,7 +646,7 @@ class SkillManager:
         skill.package_digest = verification.package_digest
         skill.signature_verified = verification.signature_verified
         skill.signer_key_id = verification.signer_key_id
-        logger.info(
+        logger.debug(
             "Skill 完整性校验完成",
             skill=skill.name,
             builtin=trusted_builtin,

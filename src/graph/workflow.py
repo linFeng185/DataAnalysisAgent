@@ -235,8 +235,39 @@ def after_restore_previous_result(state: AnalysisState) -> str:
 
 
 def after_analyze_result(state: AnalysisState) -> str:
-    """按任务能力进入预测、报告或默认图表展示子图。"""
-    capability = str(read_contexts(state).routing.task_plan.get("capability", "") or "")
+    """证据不足时进入有限补查，否则按任务能力进入后续展示。"""
+    contexts = read_contexts(state)
+    capability = str(contexts.routing.task_plan.get("capability", "") or "")
+    analysis = state.get("analysis_result", {}) or {}
+    from src.config import get_settings
+    from src.graph.nodes.supplemental_query import select_supplemental_question
+
+    max_rounds = int(
+        getattr(get_settings(), "max_supplemental_query_rounds", 2) or 0,
+    )
+    current_round = int(state.get("supplemental_query_round", 0) or 0)
+    new_question = select_supplemental_question(
+        analysis,
+        state.get("supplemental_evidence", []) or [],
+    )
+    can_supplement = (
+        analysis.get("evidence_status") == "supplementable"
+        and bool(new_question)
+        and current_round < max_rounds
+        and len(contexts.routing.selected_datasources) <= 1
+        and contexts.routing.intent in {"query", "aggregation", "trend", "attribution"}
+        and capability not in {"forecast", "report"}
+        and not state.get("previous_result_restored")
+        and not state.get("execution_error")
+    )
+    if can_supplement:
+        logger.info(
+            "分析完成后进入自主补查",
+            current_round=current_round,
+            max_rounds=max_rounds,
+            question=new_question[:120],
+        )
+        return "supplemental_query"
     target = {
         "forecast": "forecast_subgraph",
         "report": "report_subgraph",
@@ -308,11 +339,13 @@ async def build_workflow() -> StateGraph:
         "analyze_result",
         after_analyze_result,
         {
+            "supplemental_query": "supplemental_query",
             "generate_chart": "generate_chart",
             "forecast_subgraph": "forecast_subgraph",
             "report_subgraph": "report_subgraph",
         },
     )
+    workflow.add_edge("supplemental_query", "analyze_result")
     workflow.add_edge("generate_chart", "build_response")
     workflow.add_edge("forecast_subgraph", "build_response")
     workflow.add_edge("report_subgraph", "build_response")

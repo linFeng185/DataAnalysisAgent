@@ -1,8 +1,8 @@
 import { useEffect, useMemo, useState } from 'react';
 import type { ReactNode } from 'react';
 import {
-  Alert, Button, Descriptions, Divider, Form, Input, InputNumber, Modal, Select,
-  Space, Switch, Table, Tabs, Tag, Tooltip, Typography, message,
+  Alert, Button, Descriptions, Divider, Empty, Form, Input, InputNumber, Modal, Select,
+  Space, Spin, Switch, Table, Tabs, Tag, Tooltip, Typography, message,
 } from 'antd';
 import {
   DeleteOutlined, EditOutlined, KeyOutlined, MinusCircleOutlined, PlusOutlined, ReloadOutlined,
@@ -84,6 +84,13 @@ interface ManagedUser {
   failed_login_attempts: number;
   locked_until?: string | null;
   last_login_at?: string | null;
+}
+
+interface TenantAdminLoadState {
+  admins: ManagedUser[];
+  loading: boolean;
+  loaded: boolean;
+  error: string;
 }
 
 interface ConfigSummary {
@@ -260,6 +267,8 @@ export default function AdminPage() {
   const [deleteTenantTarget, setDeleteTenantTarget] = useState<Tenant | null>(null);
   const [userModal, setUserModal] = useState(false);
   const [passwordUser, setPasswordUser] = useState<ManagedUser | null>(null);
+  const [passwordTenantId, setPasswordTenantId] = useState<number | null>(null);
+  const [tenantAdminStates, setTenantAdminStates] = useState<Record<number, TenantAdminLoadState>>({});
   const [policyModal, setPolicyModal] = useState(false);
   const [editingPolicy, setEditingPolicy] = useState<AccessPolicy | null>(null);
   const [rulePolicy, setRulePolicy] = useState<AccessPolicy | null>(null);
@@ -336,6 +345,61 @@ export default function AdminPage() {
   };
 
   useEffect(() => { void load(); }, [tenantFilter, isTenantAdmin]);
+
+  // 方法作用：按需加载指定租户的管理员列表，并为展开行保留加载和失败状态。
+  // Args: tenantId - 目标租户编号；force - 是否忽略已有缓存重新加载。
+  // Returns: 加载完成后无返回值。
+  const loadTenantAdmins = async (tenantId: number, force = false) => {
+    if (!force && tenantAdminStates[tenantId]?.loaded) return;
+    console.info('租户管理员展开加载入口', { tenantId, force });
+    setTenantAdminStates(previous => ({
+      ...previous,
+      [tenantId]: {
+        admins: previous[tenantId]?.admins || [],
+        loading: true,
+        loaded: previous[tenantId]?.loaded || false,
+        error: '',
+      },
+    }));
+    try {
+      const data = await get<{ admins: ManagedUser[] }>(
+        `/admin/tenants/${tenantId}/admins?page_size=100`,
+      );
+      setTenantAdminStates(previous => ({
+        ...previous,
+        [tenantId]: {
+          admins: data.admins || [],
+          loading: false,
+          loaded: true,
+          error: '',
+        },
+      }));
+      console.info('租户管理员展开加载完成', {
+        tenantId,
+        adminCount: data.admins?.length || 0,
+      });
+    } catch (error) {
+      console.error('租户管理员展开加载异常', { tenantId, error });
+      setTenantAdminStates(previous => ({
+        ...previous,
+        [tenantId]: {
+          admins: previous[tenantId]?.admins || [],
+          loading: false,
+          loaded: false,
+          error: '租户管理员列表加载失败',
+        },
+      }));
+    }
+  };
+
+  // 方法作用：打开密码重置弹窗并记录目标所属的平台租户边界。
+  // Args: target - 待重置账号；tenantId - 超级管理员操作时的目标租户编号。
+  // Returns: 无返回值。
+  const openPasswordReset = (target: ManagedUser, tenantId: number | null = null) => {
+    passwordForm.resetFields();
+    setPasswordTenantId(tenantId);
+    setPasswordUser(target);
+  };
 
   // 方法作用：提交租户及首个租户管理员。
   // Args: 无，读取 tenantForm 当前值。
@@ -597,17 +661,29 @@ export default function AdminPage() {
   // Args: 无，读取 passwordUser 和 passwordForm。
   // Returns: 重置完成后无返回值。
   const resetPassword = async () => {
-    console.debug('AdminPage.resetPassword 入口', { userId: passwordUser?.id });
+    console.debug('AdminPage.resetPassword 入口', {
+      userId: passwordUser?.id,
+      tenantId: passwordTenantId,
+    });
     if (!passwordUser) return;
     try {
       const values = await passwordForm.validateFields();
-      await post(`/admin/users/${passwordUser.id}/reset-password`, { password: values.password });
+      const targetTenantId = passwordTenantId;
+      const path = targetTenantId === null
+        ? `/admin/users/${passwordUser.id}/reset-password`
+        : `/admin/tenants/${targetTenantId}/admins/${passwordUser.id}/reset-password`;
+      await post(path, { password: values.password });
       message.success('密码已重置');
       setPasswordUser(null);
+      setPasswordTenantId(null);
       passwordForm.resetFields();
-      await load();
+      if (targetTenantId === null) await load();
+      else await loadTenantAdmins(targetTenantId, true);
       console.info('AdminPage.resetPassword 完成', { userId: passwordUser.id });
-    } catch (error) { console.error('AdminPage.resetPassword 异常', error); }
+    } catch (error) {
+      console.error('AdminPage.resetPassword 异常', error);
+      if (error instanceof Error && !('errorFields' in error)) message.error('密码重置失败');
+    }
   };
 
   // 方法作用：打开动态访问策略创建或编辑表单。
@@ -805,8 +881,41 @@ export default function AdminPage() {
     <Table<Tenant> rowKey="id" dataSource={tenants} loading={loading} pagination={{ pageSize: 20 }}
       title={() => <Space><Button type="primary" icon={<PlusOutlined />} onClick={() => setTenantModal(true)}>创建租户</Button>
         <Button icon={<ReloadOutlined />} onClick={() => void load()} aria-label="刷新租户" /></Space>}
+      expandable={{
+        onExpand: (expanded, tenant) => {
+          if (expanded) void loadTenantAdmins(tenant.id);
+        },
+        expandedRowRender: tenant => {
+          const state = tenantAdminStates[tenant.id];
+          if (!state || state.loading) {
+            return <div style={{ padding: 20, textAlign: 'center' }}><Spin size="small" /></div>;
+          }
+          if (state.error) {
+            return <Alert type="error" showIcon message={state.error}
+              action={<Button size="small" icon={<ReloadOutlined />}
+                onClick={() => void loadTenantAdmins(tenant.id, true)}>重试</Button>} />;
+          }
+          return <Table<ManagedUser> rowKey="id" size="small" pagination={false}
+            dataSource={state.admins} locale={{ emptyText: <Empty description="暂无租户管理员" /> }}
+            columns={[
+              { title: '管理员 ID', dataIndex: 'id', width: 110 },
+              { title: '用户名', dataIndex: 'username' },
+              { title: '状态', dataIndex: 'is_active', width: 100, render: value =>
+                <Tag color={value ? 'green' : 'default'}>{value ? '启用' : '停用'}</Tag> },
+              { title: '登录失败次数', dataIndex: 'failed_login_attempts', width: 130 },
+              { title: '锁定状态', dataIndex: 'locked_until', width: 120, render: value =>
+                value ? <Tag color="red">已锁定</Tag> : <Tag>未锁定</Tag> },
+              { title: '操作', width: 130, render: (_, admin) =>
+                <Button icon={<KeyOutlined />} onClick={() => openPasswordReset(admin, tenant.id)}>
+                  重置密码
+                </Button> },
+            ]} />;
+        },
+      }}
       columns={[
         { title: 'ID', dataIndex: 'id', width: 72 },
+        { title: '租户编码', dataIndex: 'code', width: 180, render: code =>
+          <Typography.Text code>{code}</Typography.Text> },
         { title: '租户名称', dataIndex: 'name' },
         { title: '用户数', dataIndex: 'user_count', width: 100 },
         { title: '状态', dataIndex: 'is_active', width: 100, render: value => <Tag color={value ? 'green' : 'default'}>{value ? '启用' : '停用'}</Tag> },
@@ -839,7 +948,7 @@ export default function AdminPage() {
         { title: '状态', width: 90, render: (_, user) => <Switch checked={user.is_active} disabled={user.id === 1}
           onChange={value => void toggleUser(user, value)} /> },
         { title: '操作', width: 110, render: (_, user) => <Button icon={<KeyOutlined />}
-          onClick={() => setPasswordUser(user)}>重置密码</Button> },
+          onClick={() => openPasswordReset(user)}>重置密码</Button> },
       ]} />
   );
 
@@ -1088,7 +1197,11 @@ export default function AdminPage() {
     </Modal>
 
     <Modal title={`重置 ${passwordUser?.username || ''} 的密码`} open={Boolean(passwordUser)} onOk={() => void resetPassword()}
-      onCancel={() => setPasswordUser(null)} destroyOnClose>
+      onCancel={() => {
+        setPasswordUser(null);
+        setPasswordTenantId(null);
+        passwordForm.resetFields();
+      }} destroyOnClose>
       <Form form={passwordForm} layout="vertical">
         <Form.Item name="password" label="新密码" rules={[{ required: true, min: 8, max: 72 }]}><Input.Password /></Form.Item>
       </Form>

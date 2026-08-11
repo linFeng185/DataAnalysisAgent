@@ -46,7 +46,7 @@ def get_registry() -> "DataSourceRegistry":
         "datasource_registry",
         DataSourceRegistry,
     )
-    logger.info("获取数据源 Registry 完成")
+    logger.debug("获取数据源 Registry 完成")
     return result
 
 

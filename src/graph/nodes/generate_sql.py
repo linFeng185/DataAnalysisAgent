@@ -25,18 +25,35 @@ import asyncio
 import json
 import re
 import time
+from typing import Any
 
 from langchain_core.runnables import RunnableConfig
 
 from src.graph.state import AnalysisState
-from src.llm.client import get_task_llm as _get_task_llm
-from src.llm.client import is_task_llm_available as _is_task_llm_available
 from src.llm.prompt_budget import PromptSection
 from src.llm.prompts import get_dialect_cheatsheet
 from src.logging_config import get_logger
 from src.security.sql_execution import normalize_sql_dialect
 
 logger = get_logger(__name__)
+
+
+# 方法作用：延迟检查指定 LLM 任务是否可用，避免工作流装配时加载模型依赖。
+# Args: task - LLM 任务标识。
+# Returns: 指定任务存在可用模型时返回 True。
+def _is_task_llm_available(task: str) -> bool:
+    from src.llm.client import is_task_llm_available
+
+    return is_task_llm_available(task)
+
+
+# 方法作用：延迟创建指定任务模型并保留测试可替换的模块级边界。
+# Args: task - LLM 任务标识；kwargs - 模型创建参数。
+# Returns: 任务对应的 ChatModel。
+def _get_task_llm(task: str, **kwargs: Any) -> Any:
+    from src.llm.client import get_task_llm
+
+    return get_task_llm(task, **kwargs)
 
 
 # 方法作用：兼容旧测试和扩展点，同时按 generate_sql 任务检查模型可用性。

@@ -84,7 +84,7 @@ class TestCredentialManager:
     def test_encrypt_decrypt(self):
         from src.datasource.credential_manager import CredentialManager
 
-        cm = CredentialManager(key="test_key_32_bytes_long_phrase!")
+        cm = CredentialManager(key="0123456789abcdef0123456789abcdef")
         encrypted = cm.encrypt("my_secret_password")
         assert encrypted != "my_secret_password"
         assert cm.decrypt(encrypted) == "my_secret_password"

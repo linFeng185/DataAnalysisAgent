@@ -253,7 +253,7 @@ def get_bound_app_context() -> AppContext | None:
     """返回当前协程显式绑定的应用 Context。"""
     logger.debug("读取已绑定 AppContext 入口")
     result = _current_app_context.get()
-    logger.info("读取已绑定 AppContext 完成", found=result is not None)
+    logger.debug("读取已绑定 AppContext 完成", found=result is not None)
     return result
 
 

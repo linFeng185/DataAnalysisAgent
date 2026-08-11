@@ -65,7 +65,7 @@ def compute_skill_package_digest(source_path: str | Path) -> str:
         digest.update(len(content).to_bytes(8, "big"))
         digest.update(content)
     result = digest.hexdigest()
-    logger.info("Skill 包摘要计算完成", path=str(root), file_count=len(files), digest=result[:12])
+    logger.debug("Skill 包摘要计算完成", path=str(root), file_count=len(files), digest=result[:12])
     return result
 
 

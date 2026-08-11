@@ -516,7 +516,7 @@ def get_datasource_cache() -> LocalDatasourceCache | RedisDatasourceCache:
         partial(create_datasource_cache, context.settings),
         closer=_close_datasource_cache,
     )
-    logger.info("获取数据库内容缓存完成", backend=type(result).__name__)
+    logger.debug("获取数据库内容缓存完成", backend=type(result).__name__)
     return result
 
 

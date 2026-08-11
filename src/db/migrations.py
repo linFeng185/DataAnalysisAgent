@@ -155,6 +155,9 @@ async def run_migrations(
     connection = None
     locked = False
     applied_names: list[str] = []
+    verified_count = 0
+    legacy_repair_count = 0
+    line_ending_compatibility_count = 0
     try:
         connection = await asyncpg.connect(pg_url)
         await connection.execute("SELECT pg_advisory_lock($1)", _MIGRATION_LOCK_ID)
@@ -168,6 +171,7 @@ async def run_migrations(
             "SELECT version, name, checksum FROM schema_migrations ORDER BY version"
         )
         applied = {str(row["version"]): row for row in rows}
+        applied_migration_names = {str(row["name"]) for row in rows}
         for version, path, checksum in migrations:
             previous = applied.get(version)
             if previous is not None:
@@ -175,7 +179,7 @@ async def run_migrations(
                 stored_checksum = str(previous["checksum"])
                 checksum_matches = stored_checksum in _migration_checksum_variants(path.read_bytes())
                 if not checksum_matches or stored_name != path.name:
-                    logger.info(
+                    logger.debug(
                         "数据库迁移校验快照",
                         version=version,
                         stored_name=stored_name,
@@ -192,22 +196,34 @@ async def run_migrations(
                         available_names,
                     )
                     if repair_name:
-                        logger.warning(
-                            "数据库迁移使用批准的旧版本升级路径",
-                            version=version,
-                            migration=path.name,
-                            repair_migration=repair_name,
-                        )
+                        verified_count += 1
+                        legacy_repair_count += 1
+                        if repair_name in applied_migration_names:
+                            logger.debug(
+                                "数据库迁移旧版本修复已验证",
+                                version=version,
+                                migration=path.name,
+                                repair_migration=repair_name,
+                            )
+                        else:
+                            logger.warning(
+                                "数据库迁移使用批准的旧版本升级路径",
+                                version=version,
+                                migration=path.name,
+                                repair_migration=repair_name,
+                            )
                         continue
                     logger.error("数据库迁移 checksum 不一致", version=version, migration=path.name)
                     raise MigrationError(f"迁移 checksum 不一致: {path.name}")
                 if stored_checksum != checksum:
-                    logger.info(
+                    line_ending_compatibility_count += 1
+                    logger.debug(
                         "数据库迁移 checksum 换行兼容",
                         version=version,
                         migration=path.name,
                     )
-                logger.info("数据库迁移已应用", version=version, migration=path.name)
+                verified_count += 1
+                logger.debug("数据库迁移校验通过", version=version, migration=path.name)
                 continue
             script = _normalize_migration_sql(path.read_text(encoding="utf-8"), path.name)
             try:
@@ -231,7 +247,13 @@ async def run_migrations(
                 raise MigrationError(f"迁移执行失败: {path.name}") from exc
             applied_names.append(path.name)
             logger.info("数据库迁移应用完成", version=version, migration=path.name)
-        logger.info("数据库迁移执行完成", applied_count=len(applied_names))
+        logger.info(
+            "数据库迁移执行完成",
+            applied_count=len(applied_names),
+            verified_count=verified_count,
+            legacy_repair_count=legacy_repair_count,
+            line_ending_compatibility_count=line_ending_compatibility_count,
+        )
         return applied_names
     except MigrationError:
         raise

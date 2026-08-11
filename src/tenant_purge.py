@@ -113,10 +113,10 @@ async def purge_tenant_runtime(
 
     # 删除连接级 Schema 缓存，兼容本地和 Redis 两种后端。
     try:
-        from src.datasource.config import DataSourceConfig
-        from src.knowledge.datasource_cache import build_connection_fingerprint
-
-        from src.knowledge.datasource_cache import get_datasource_cache
+        from src.knowledge.datasource_cache import (
+            build_connection_fingerprint,
+            get_datasource_cache,
+        )
 
         cache = context.get_resource("datasource_cache") or get_datasource_cache()
         for row in datasource_rows:

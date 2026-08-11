@@ -1,9 +1,20 @@
 import { createContext, useContext, useState, useCallback, useEffect, type ReactNode } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { message } from 'antd';
+import { get } from '../api/client';
 import { clearChatStorage } from './chatStorage';
 
 interface User { user_id: number; tenant_id: number; tenant_code: string; role: string; username: string; }
+
+interface AuthProbe {
+  auth_required?: boolean;
+  authenticated?: boolean;
+  user_id?: number;
+  tenant_id?: number;
+  tenant_code?: string;
+  role?: string;
+  username?: string;
+}
 
 interface AuthState {
   user: User | null;
@@ -27,16 +38,15 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     let active = true;
-    fetch('/api/v1/auth/me', { credentials: 'include' })
-      .then(async response => {
-        const data = await response.json().catch(() => ({}));
+    get<AuthProbe>('/auth/me')
+      .then(data => {
         if (!active) return;
         setAuthRequired(Boolean(data.auth_required));
         setUser(data.authenticated ? {
-          user_id: data.user_id,
-          tenant_id: data.tenant_id,
+          user_id: data.user_id || 0,
+          tenant_id: data.tenant_id || 0,
           tenant_code: data.tenant_code || '',
-          role: data.role,
+          role: data.role || '',
           username: data.username || '',
         } : null);
       })

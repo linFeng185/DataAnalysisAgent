@@ -70,6 +70,7 @@ class CredentialManager:
                 explicit_key_configured=bool(key),
                 environment_key_configured=bool(environment_key),
                 selected_source=key_source,
+                selected_key_length=len(raw),
             )
             if not raw:
                 if environment == "prod":

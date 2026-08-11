@@ -195,6 +195,12 @@ class AnalysisState(TypedDict, total=False):
     query_result_sample: Annotated[list[dict], UntrackedValue]
     """查询结果前 200 行（list[dict]）。—— execute_sql 写，analyze_result / build_response 读"""
 
+    attribution_candidate_rows: Annotated[list[dict[str, Any]], UntrackedValue]
+    """触点归因请求保留的已脱敏路径行，仅供确定性资格复核和计算，不进入公开数据字段。"""
+
+    collect_attribution_rows: Annotated[bool, UntrackedValue]
+    """自主补查保留父归因意图的请求级标记。"""
+
     query_result_full_count: Annotated[int, UntrackedValue]
     """实际返回的结果行数。—— execute_sql 写"""
 
@@ -208,6 +214,15 @@ class AnalysisState(TypedDict, total=False):
     analysis_result: Annotated[dict, UntrackedValue]
     """分析结果（summary/insights/recommended_chart_type/follow_up_questions/statistics）。
     —— analyze_result 写，build_response 读"""
+
+    supplemental_query_round: Annotated[int, UntrackedValue]
+    """当前请求已经执行的自主补查轮数。"""
+
+    supplemental_evidence: Annotated[list[dict[str, Any]], UntrackedValue]
+    """补查问题、最终 SQL、脱敏结果和失败信息，仅在当前请求内流转。"""
+
+    attribution_selection: Annotated[dict[str, str], UntrackedValue]
+    """当前请求首次确定的触点归因模型、来源和理由，补查重分析期间保持不变。"""
 
     # ── 图表层 ─────────────────────────────────────
     chart_config: Annotated[dict, UntrackedValue]

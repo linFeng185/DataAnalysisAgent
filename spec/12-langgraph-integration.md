@@ -181,6 +181,21 @@ API 每轮必须重新注入当前身份与 `datasource_access/allowed_columns/r
    原始 `reasoning_content` 只允许在服务端做长度计数和受控诊断，不得生成 `thinking` SSE 事件。
 6. `chart.type=table` 表示数据表本身就是展示结果，前端不得再渲染“图表配置未生成”的空图表面板。
 
+#### 11.5.1 证据补查与图表呈现闭环
+
+`analyze_result` 必须返回结构化证据状态。`sufficient` 直接进入展示；`needs_user_input` 保留限制并进入展示；
+只有 `supplementable` 且补查问题能由当前授权 Schema 直接回答时，才允许进入 `supplemental_query`。
+
+1. 自动补查仅适用于单数据源的 `query/aggregation/trend/attribution` 路径；多数据源、历史结果恢复、预测和报告路径不得自动进入补查回环。
+2. 每轮只选择一个尚未执行的问题，问题按去空白和大小写归一化去重；默认最多两轮，每个问题最多两次 SQL 尝试，禁止无界循环或批量扩张查询。
+3. 每次补查必须从主状态白名单复制可信身份、权限和数据源，重新执行 `retrieve_schema/generate_sql/layer3_validate/layer4_explain/execute_sql`，不得绕过只读、安全、权限、限流、脱敏和审计边界。
+4. 补查证据以问题、最终 SQL、方言、行数、脱敏数据和失败原因记录在当前请求的 `UntrackedValue` 中，再回到 `analyze_result` 重新分析；失败不得覆盖主查询结果。
+5. 最终 `sql_statements` 使用 `purpose=primary|supplemental` 区分主查询与成功补查，并携带补查问题；失败补查不公开不可用 SQL。
+6. 触点归因资格不足时可提出路径级补查问题；重新进入 `analyze_result` 后，规则引擎应优先检查成功补查的
+   路径数据并重新执行资格复核和确定性算法，不能只把补查结果交给模型解释。
+6. 图表资格由结果行数和列语义确定：元数据、直接问答、无数据为 `none`；单行单值为 `none+core_value`；两行以上的时间/分类维度加数值默认生成折线图/柱状图，即使模型推荐 `table` 也需覆盖。
+7. 图表配置构建失败返回 `status=failed` 和明确 `reason`，不得静默隐藏；前端继续展示查询数据和失败提示。
+
 Skill 激活分为两个明确阶段：`classify_intent` 根据关键词、意图和可见表触发声明形成候选集，记录
 `skill_candidate_ids`；`retrieve_schema` 获取真实表名后重新匹配，记录最终 `activated_skill_ids` 和
 `skill_activation_stage=schema`。仅声明表触发器的 Skill 在 Schema 到达前只能进入候选集，不能提前激活。

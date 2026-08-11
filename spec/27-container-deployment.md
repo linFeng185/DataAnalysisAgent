@@ -25,6 +25,7 @@ postgres:5432           redis:6379
 
 - `Dockerfile` 使用 `python:3.14.0-slim` 的 builder/runtime 多阶段构建，后端运行时固定为 Python 3.14.0。
 - builder 将项目及可选依赖构造成 wheel，runtime 不保留编译工具链。
+- PyPI 默认使用官方源，可通过构建参数 `PIP_INDEX_URL` 覆盖；不得硬编码 trusted host 绕过 TLS 校验。
 - 默认安装 `connectors,documents,structured`，Milvus 本地嵌入模型通过
   `INSTALL_EXTRAS=connectors,documents,structured,embeddings` 显式启用。
 - runtime 使用固定 UID/GID `10001` 的 `app` 用户，Uvicorn 固定单 worker 且禁止 reload。
@@ -36,6 +37,7 @@ postgres:5432           redis:6379
 ### 2.2 前端
 
 - `frontend/Dockerfile` 使用 Node 22 构建 React，再由非 root Nginx 1.27 提供静态文件。
+- npm 默认使用官方 registry，可通过构建参数 `NPM_REGISTRY` 覆盖。
 - `/api/` 转发到内部 `backend:8000`，保持 Cookie 同源，不依赖生产 CORS 放行。
 - SSE 路径关闭 `proxy_buffering` 和缓存，读取超时为 600 秒。
 - SPA 非静态资源路径回退到 `index.html`。

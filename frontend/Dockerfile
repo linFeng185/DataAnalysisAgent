@@ -2,10 +2,12 @@
 
 FROM node:22-alpine AS builder
 
+ARG NPM_REGISTRY=https://registry.npmjs.org
+
 WORKDIR /build
 
 COPY package.json package-lock.json ./
-RUN npm config set registry https://registry.npmmirror.com \
+RUN npm config set registry "${NPM_REGISTRY}" \
     && npm ci
 
 COPY index.html tsconfig.json vite.config.ts ./

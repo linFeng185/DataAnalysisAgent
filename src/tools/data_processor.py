@@ -106,7 +106,7 @@ def register(p: DataProcessor) -> DataProcessor:
     logger.debug("注册数据处理器入口", processor=getattr(p, "name", ""))
     instance = p()
     _registry[instance.name] = instance
-    logger.info("注册数据处理器完成", processor=instance.name, total=len(_registry))
+    logger.debug("注册数据处理器完成", processor=instance.name, total=len(_registry))
     return p
 
 

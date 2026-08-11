@@ -56,3 +56,31 @@ class TestRequestLoggingNoise:
         ]
         assert response.status_code == 200
         assert info_events == ["Skill 列表完成", "API 访问完成"]
+
+    # 方法作用：验证处理器注册阶段只保留 DEBUG 明细，避免启动 INFO 被逐项淹没。
+    # Args: self - pytest 测试类实例。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    def test_processor_registration_does_not_emit_info_per_item(self) -> None:
+        """处理器清单应由工作流聚合日志报告，而不是逐个输出 INFO。"""
+        # Arrange
+        from src.tools.data_processor import DataProcessor, ProcessorResult, register
+
+        class LoggingNoiseProcessor(DataProcessor):
+            """用于日志级别断言的最小处理器。"""
+
+            name = "logging-noise-test"
+            intents = ["test"]
+
+            # 方法作用：返回固定测试处理结果。
+            # Args: self - 测试处理器；rows - 输入行；params - 调用参数。
+            # Returns: 固定 ProcessorResult。
+            def process(self, rows: list[dict], params: dict) -> ProcessorResult:
+                del params
+                return ProcessorResult("ok", [], "table", rows)
+
+        # Act
+        with capture_logs() as logs:
+            register(LoggingNoiseProcessor)
+
+        # Assert
+        assert not [entry for entry in logs if entry.get("log_level") == "info"]

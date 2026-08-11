@@ -103,7 +103,7 @@ class HistoryStore:
                 role=role,
             ) as conn:
                 yield conn
-            logger.info("历史 PG 连接完成", user_id=user_id, tenant_id=tenant_id)
+            logger.debug("历史 PG 连接完成", user_id=user_id, tenant_id=tenant_id)
         except Exception as exc:
             logger.error("历史 PG 连接失败", error=str(exc), exc_info=True)
             raise
@@ -430,5 +430,5 @@ def get_history_store() -> HistoryStore:
 
     logger.debug("获取 HistoryStore 入口")
     result = get_app_context().get_or_create("history_store", HistoryStore)
-    logger.info("获取 HistoryStore 完成")
+    logger.debug("获取 HistoryStore 完成")
     return result

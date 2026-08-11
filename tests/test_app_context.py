@@ -119,6 +119,28 @@ class TestAppContextResources:
 class TestAppContextIntegration:
     """覆盖 FastAPI Depends 和兼容 getter 的 Context 委托。"""
 
+    # 方法作用：验证读取无绑定配置不会隐式创建第二个默认 AppContext。
+    # Args: self - pytest 测试类实例；monkeypatch - pytest 补丁工具。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    def test_get_settings_without_binding_does_not_create_default_context(
+        self,
+        monkeypatch,
+    ) -> None:
+        """应用工厂读取配置时只能创建显式归属当前 FastAPI 的 Context。"""
+        # Arrange
+        import src.app_context as app_context_module
+        from src.config import Settings, get_settings
+
+        monkeypatch.setattr(app_context_module, "_default_app_context", None)
+        assert app_context_module.get_bound_app_context() is None
+
+        # Act
+        settings = get_settings()
+
+        # Assert
+        assert isinstance(settings, Settings)
+        assert app_context_module._default_app_context is None
+
     # 方法作用：验证请求通过中间件和 Depends 获取应用所属 Context。
     # Args: self - pytest 测试类实例。
     # Returns: 无返回值，断言失败时由 pytest 报告。

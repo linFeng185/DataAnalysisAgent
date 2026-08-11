@@ -7,10 +7,9 @@ import json
 import time
 from datetime import date, datetime
 from decimal import Decimal
+from typing import Any
 
 from src.graph.state import AnalysisState
-from src.llm.client import get_task_llm as _get_task_llm
-from src.llm.client import is_task_llm_available as _is_task_llm_available
 from src.llm.prompt_budget import PromptSection
 from src.logging_config import get_logger
 from src.tools import processors as _processors  # noqa: F401
@@ -37,6 +36,24 @@ def _json_default(obj):
     raise TypeError(f"Type {type(obj)} not serializable")
 
 logger = get_logger(__name__)
+
+
+# 方法作用：延迟检查指定 LLM 任务是否可用，避免工作流装配时加载模型依赖。
+# Args: task - LLM 任务标识。
+# Returns: 指定任务存在可用模型时返回 True。
+def _is_task_llm_available(task: str) -> bool:
+    from src.llm.client import is_task_llm_available
+
+    return is_task_llm_available(task)
+
+
+# 方法作用：延迟创建指定任务模型并保留测试可替换的模块级边界。
+# Args: task - LLM 任务标识；kwargs - 模型创建参数。
+# Returns: 任务对应的 ChatModel。
+def _get_task_llm(task: str, **kwargs: Any) -> Any:
+    from src.llm.client import get_task_llm
+
+    return get_task_llm(task, **kwargs)
 
 
 # 方法作用：兼容旧测试和扩展点，同时检查分析任务的模型可用性。
@@ -97,14 +114,155 @@ async def analyze_result_node(state: AnalysisState) -> dict:
             "insights": [],
             "recommended_chart_type": "table",
             "follow_up_questions": [],
+            "evidence_status": "sufficient",
+            "evidence_gaps": [],
+            "supplemental_questions": [],
             "statistics": {},
         }}
 
-    if not rows:
-        logger.info("节点完成", node="analyze_result", elapsed_ms=round((time.monotonic() - _start) * 1000))
-        return {"analysis_result": {"summary": "无数据可供分析", "insights": [], "recommended_chart_type": "table", "follow_up_questions": [], "statistics": compute_statistics([])}}
-
     stats = compute_statistics(rows)
+    schema_context = _format_analysis_schema(state.get("relevant_tables", []) or [])
+    supplemental_evidence_text = _format_supplemental_evidence(
+        state.get("supplemental_evidence", []) or [],
+    )
+    if intent == "attribution":
+        from src.graph.attribution import resolve_touchpoint_attribution
+
+        attribution_resolution = await resolve_touchpoint_attribution(
+            state,
+            user_query=contexts.request.user_query,
+            relevant_tables=state.get("relevant_tables", []) or [],
+        )
+        if attribution_resolution is not None:
+            attribution_rows = attribution_resolution.analysis_rows
+            attribution_stats = compute_statistics(attribution_rows) if attribution_rows else stats
+            result = dict(attribution_resolution.analysis)
+            business_context = "\n\n".join(
+                part for part in (
+                    state.get("business_rules_text", "") or "",
+                    state.get("long_term_memories_text", "") or "",
+                ) if part
+            )
+            logger.info(
+                "触点归因分析分支入口",
+                applied=attribution_resolution.applied,
+                model=(result.get("attribution", {}) or {}).get("selected_model", ""),
+                evidence_status=result.get("evidence_status", ""),
+                attribution_rows=len(attribution_rows),
+            )
+            if attribution_resolution.applied and is_llm_available():
+                interpreted = await _llm_analyze(
+                    attribution_rows,
+                    sql,
+                    attribution_stats,
+                    attribution_resolution.deterministic_findings,
+                    "",
+                    "",
+                    state.get("conversation_history", []),
+                    user_query=contexts.request.user_query,
+                    result_full_count=len(attribution_rows),
+                    result_truncated=False,
+                    business_context=business_context,
+                    schema_context=schema_context,
+                    supplemental_evidence=supplemental_evidence_text,
+                    chart_type="bar",
+                    intent=intent,
+                )
+                for field in (
+                    "related_metrics",
+                    "business_impacts",
+                    "possible_causes",
+                    "recommended_actions",
+                    "follow_up_questions",
+                ):
+                    result[field] = list(interpreted.get(field, []) or [])
+                result["data_quality"] = _merge_text_lists(
+                    result.get("data_quality", []),
+                    interpreted.get("data_quality", []),
+                )
+                result["limitations"] = _merge_text_lists(
+                    result.get("limitations", []),
+                    interpreted.get("limitations", []),
+                )
+            elif attribution_resolution.applied:
+                rule_context = _build_rule_business_analysis(
+                    attribution_rows,
+                    attribution_stats,
+                    contexts.request.user_query,
+                )
+                for field in (
+                    "related_metrics",
+                    "business_impacts",
+                    "possible_causes",
+                    "recommended_actions",
+                ):
+                    result[field] = list(rule_context.get(field, []) or [])
+            result["statistics"] = attribution_stats
+            result = _attach_supplemental_trace(result, state)
+            result = _attach_skill_outputs(
+                result,
+                attribution_rows,
+                state.get("activated_skills", []) or [],
+            )
+            result, skill_calls = await _execute_post_analysis_skill_tools(
+                result,
+                attribution_rows,
+                state,
+            )
+            logger.info(
+                "触点归因分析分支完成",
+                applied=attribution_resolution.applied,
+                evidence_status=result.get("evidence_status", ""),
+                result_count=len((result.get("attribution", {}) or {}).get("results", []) or []),
+            )
+            return {
+                "analysis_result": result,
+                "skill_tool_calls": skill_calls,
+                "attribution_selection": attribution_resolution.selection,
+            }
+    if not rows:
+        if is_llm_available():
+            result = await _llm_analyze(
+                [],
+                sql,
+                stats,
+                "当前查询未返回数据",
+                "",
+                "",
+                state.get("conversation_history", []),
+                user_query=contexts.request.user_query,
+                result_full_count=0,
+                result_truncated=False,
+                business_context="\n\n".join(
+                    part for part in (
+                        state.get("business_rules_text", "") or "",
+                        state.get("long_term_memories_text", "") or "",
+                    ) if part
+                ),
+                schema_context=schema_context,
+                supplemental_evidence=supplemental_evidence_text,
+                chart_type="table",
+                intent=intent,
+            )
+            result["statistics"] = stats
+            result = _attach_supplemental_trace(result, state)
+            logger.info(
+                "无数据证据评估完成",
+                evidence_status=result.get("evidence_status", ""),
+                gap_count=len(result.get("evidence_gaps", []) or []),
+            )
+            return {"analysis_result": result}
+        logger.info("节点完成", node="analyze_result", elapsed_ms=round((time.monotonic() - _start) * 1000))
+        return {"analysis_result": {
+            "summary": "无数据可供分析",
+            "insights": [],
+            "recommended_chart_type": "table",
+            "follow_up_questions": [],
+            "evidence_status": "needs_user_input",
+            "evidence_gaps": ["当前查询没有返回可分析记录"],
+            "supplemental_questions": [],
+            "statistics": stats,
+        }}
 
     # 数据处理器（脚本精确计算，LLM 仅润色）
     processor_result = None
@@ -125,8 +283,23 @@ async def analyze_result_node(state: AnalysisState) -> dict:
             raise
         logger.error("处理器失败，回退 LLM", error=str(exc), exc_info=True)
 
-    # 处理器结果有效 — 直接用脚本结果，LLM 仅做自然语言润色
+    # 处理器负责确定性计算，完整分析模型负责业务关联、影响和行动建议。
     if processor_result and processor_result.data:
+        analysis_available = is_llm_available()
+        business_context = "\n\n".join(
+            part for part in (
+                state.get("business_rules_text", "") or "",
+                state.get("long_term_memories_text", "") or "",
+            ) if part
+        )
+        logger.info(
+            "分析分支选择边界",
+            branch="processor_then_business_analysis",
+            processor=getattr(proc, "name", "unknown"),
+            processor_insight_count=len(processor_result.insights),
+            analysis_available=analysis_available,
+            business_context_chars=len(business_context),
+        )
         result = {
             "summary": processor_result.summary,
             "insights": processor_result.insights,
@@ -136,20 +309,54 @@ async def analyze_result_node(state: AnalysisState) -> dict:
             "statistics": stats,
         }
         result = _attach_skill_outputs(result, rows, state.get("activated_skills", []) or [])
-        # LLM 润色总结（不参与数值计算）
-        if _is_task_llm_available("polish_result"):
-            try:
-                data_sample = _to_compact(processor_result.data)
-                llm_polish = await _llm_polish(processor_result.summary, processor_result.insights, data_sample)
-                if llm_polish:
-                    result["summary"] = llm_polish.get("summary", result["summary"])
-            except Exception as exc:
-                from src.failure_policy import FailureDomain, fallback_allowed
-
-                if not fallback_allowed(FailureDomain.LLM):
-                    raise
-                logger.error("LLM 润色失败", error=str(exc), exc_info=True)
+        deterministic_findings = "\n".join((
+            f"处理器摘要：{processor_result.summary}",
+            *(f"处理器洞察：{item}" for item in processor_result.insights),
+        ))
+        if analysis_available:
+            result = await _llm_analyze(
+                rows,
+                sql,
+                stats,
+                deterministic_findings,
+                "",
+                "",
+                state.get("conversation_history", []),
+                user_query=contexts.request.user_query,
+                result_full_count=contexts.execution.row_count or len(rows),
+                result_truncated=contexts.execution.truncated,
+                business_context=business_context,
+                schema_context=schema_context,
+                supplemental_evidence=supplemental_evidence_text,
+                chart_type=processor_result.chart_type,
+                intent=intent,
+            )
+            result["processor_name"] = getattr(proc, "name", "unknown")
+            result["statistics"] = stats
+        else:
+            rule_context = _build_rule_business_analysis(
+                rows,
+                stats,
+                contexts.request.user_query,
+            )
+            logger.info(
+                "处理器与规则输出合并边界",
+                processor_chart_type=processor_result.chart_type,
+                rule_chart_type=rule_context.get("recommended_chart_type", ""),
+                is_rule_chart_override="recommended_chart_type" in rule_context,
+            )
+            result.update(rule_context)
+        result = _attach_supplemental_trace(result, state)
         result, skill_calls = await _execute_post_analysis_skill_tools(result, rows, state)
+        logger.info(
+            "处理器分析输出边界",
+            summary_chars=len(str(result.get("summary", "") or "")),
+            insight_count=len(result.get("insights", []) or []),
+            impact_count=len(result.get("business_impacts", []) or []),
+            cause_count=len(result.get("possible_causes", []) or []),
+            action_count=len(result.get("recommended_actions", []) or []),
+            related_metric_count=len(result.get("related_metrics", []) or []),
+        )
         logger.info("节点完成", node="analyze_result", processor=result.get("processor_name"),
                     elapsed_ms=round((time.monotonic() - _start) * 1000))
         return {"analysis_result": result, "skill_tool_calls": skill_calls}
@@ -202,13 +409,25 @@ async def analyze_result_node(state: AnalysisState) -> dict:
             result_full_count=contexts.execution.row_count or len(rows),
             result_truncated=contexts.execution.truncated,
             business_context=business_context,
+            schema_context=schema_context,
+            supplemental_evidence=supplemental_evidence_text,
             chart_type=chart_type,
             intent=intent,
         )
     else:
-        result = _rule_analyze(rows, stats, trend_info, outlier_info, conc_info, chart_type, intent)
+        result = _rule_analyze(
+            rows,
+            stats,
+            trend_info,
+            outlier_info,
+            conc_info,
+            chart_type,
+            intent,
+            contexts.request.user_query,
+        )
 
     result["statistics"] = stats
+    result = _attach_supplemental_trace(result, state)
     result = _attach_skill_outputs(result, rows, state.get("activated_skills", []) or [])
     result, skill_calls = await _execute_post_analysis_skill_tools(result, rows, state)
     logger.info("节点完成", node="analyze_result", elapsed_ms=round((time.monotonic() - _start) * 1000))
@@ -276,6 +495,93 @@ def _to_compact(rows: list[dict]) -> str:
         sampled.append(rows[-1])
     return json.dumps(sampled, ensure_ascii=False, default=_json_default,
                       separators=(",", ":"))
+
+
+# 方法作用：把当前授权 Schema 压缩成证据充分性评估可用的字段摘要。
+# Args: tables - retrieve_schema 返回的真实表结构。
+# Returns: 不超过 6000 字符的紧凑 JSON。
+def _format_analysis_schema(tables: list[dict]) -> str:
+    """只保留表名、说明和字段名注释，避免把完整 Schema 重复投喂。"""
+    compact = [
+        {
+            "table": str(table.get("name", "") or ""),
+            "description": str(table.get("description", "") or ""),
+            "columns": [
+                {
+                    "name": str(column.get("name", "") or ""),
+                    "comment": str(column.get("comment", "") or ""),
+                }
+                for column in (table.get("columns", []) or [])[:40]
+                if isinstance(column, dict) and column.get("name")
+            ],
+        }
+        for table in tables[:30]
+        if isinstance(table, dict) and table.get("name")
+    ]
+    return json.dumps(compact, ensure_ascii=False, separators=(",", ":"))[:6000]
+
+
+# 方法作用：把补查结果转换成重新分析可引用的脱敏证据文本。
+# Args: evidence - supplemental_query 节点累计的补查记录。
+# Returns: 包含问题、SQL、行数、数据或失败原因的紧凑 JSON。
+def _format_supplemental_evidence(evidence: list[dict]) -> str:
+    """补查数据已经过执行节点脱敏，此处仍限制每项最多 50 行和总字符数。"""
+    compact = [
+        {
+            "question": str(item.get("question", "") or ""),
+            "success": bool(item.get("success")),
+            "sql": str(item.get("sql", "") or ""),
+            "row_count": int(item.get("row_count", 0) or 0),
+            "complete": bool(item.get("complete", False)),
+            "data": list(item.get("data", []) or [])[:50] if item.get("success") else [],
+            "error": str(item.get("error", "") or "")[:300],
+        }
+        for item in evidence[-3:]
+        if isinstance(item, dict)
+    ]
+    return json.dumps(
+        compact,
+        ensure_ascii=False,
+        default=_json_default,
+        separators=(",", ":"),
+    )[:8000]
+
+
+# 方法作用：给公开分析结果附加不含数据明细的自主补查轨迹。
+# Args: result - 当前分析结果；state - 当前图状态。
+# Returns: 包含轮次和补查摘要的新字典。
+def _attach_supplemental_trace(result: dict, state: AnalysisState) -> dict:
+    """公开轨迹说明系统为什么补查以及补查是否成功，不重复泄露结果行。"""
+    evidence = state.get("supplemental_evidence", []) or []
+    if not evidence:
+        return result
+    enriched = dict(result)
+    enriched["supplemental_query_round"] = int(
+        state.get("supplemental_query_round", 0) or 0,
+    )
+    enriched["supplemental_evidence"] = [
+        {
+            "question": str(item.get("question", "") or ""),
+            "success": bool(item.get("success")),
+            "row_count": int(item.get("row_count", 0) or 0),
+            "error": str(item.get("error", "") or "")[:300],
+        }
+        for item in evidence
+        if isinstance(item, dict)
+    ]
+    return enriched
+
+
+# 方法作用：稳定合并规则与模型的文本列表并去重。
+# Args: first - 高优先级规则列表；second - 补充解释列表。
+# Returns: 保持首次出现顺序的非空字符串列表。
+def _merge_text_lists(first: list[Any], second: list[Any]) -> list[str]:
+    """确定性限制和质量说明始终排在模型补充内容之前。"""
+    return list(dict.fromkeys(
+        str(item).strip()
+        for item in (*list(first or []), *list(second or []))
+        if str(item).strip()
+    ))
 
 
 # 方法作用：为已激活且有确定性实现的 Skill 写入真实分析产物。
@@ -458,6 +764,8 @@ async def _llm_analyze(
     result_full_count: int | None = None,
     result_truncated: bool = False,
     business_context: str = "",
+    schema_context: str = "",
+    supplemental_evidence: str = "",
     chart_type: str = "table",
     intent: str = "query",
 ) -> dict:
@@ -475,6 +783,8 @@ async def _llm_analyze(
         result_full_count: 查询返回的总行数。
         result_truncated: 查询结果是否被安全上限截断。
         business_context: 业务规则和知识库证据。
+        schema_context: 当前授权数据源的真实表字段摘要。
+        supplemental_evidence: 当前请求此前自主补查得到的证据。
         chart_type: 规则引擎根据真实列类型推荐的图表类型。
         intent: 当前用户问题的真实意图。
 
@@ -488,6 +798,8 @@ async def _llm_analyze(
         result_full_count=result_full_count,
         result_truncated=result_truncated,
         business_chars=len(business_context),
+        schema_chars=len(schema_context),
+        supplemental_chars=len(supplemental_evidence),
     )
     total_rows = len(rows)
     sample = _to_compact(rows)
@@ -553,11 +865,27 @@ async def _llm_analyze(
                 max_chars=2200,
             ),
             PromptSection(
+                "supplemental_evidence",
+                f"## 已执行的补查证据\n{supplemental_evidence}"
+                if supplemental_evidence else "",
+                priority=88,
+                min_chars=300,
+                max_chars=2400,
+            ),
+            PromptSection(
                 "deterministic_findings",
                 f"## 确定性分析器发现\n{trend} | {outlier} | {conc}",
                 priority=80,
                 min_chars=200,
                 max_chars=800,
+            ),
+            PromptSection(
+                "authorized_schema",
+                f"## 当前授权 Schema（仅可从这些真实字段规划补查）\n{schema_context}"
+                if schema_context else "",
+                priority=75,
+                min_chars=800,
+                max_chars=3200,
             ),
             PromptSection(
                 "business_context",
@@ -607,14 +935,41 @@ async def _llm_analyze(
             confidence=result["confidence"],
             insight_count=len(result["insights"]),
             limitation_count=len(result["limitations"]),
+            evidence_status=result["evidence_status"],
+            supplemental_question_count=len(result["supplemental_questions"]),
         )
         return result
     except Exception as e:
         logger.error("LLM 分析失败", error=str(e), exc_info=True)
-        return _rule_analyze(rows, stats, trend, outlier, conc, chart_type, intent)
+        logger.info(
+            "LLM 分析失败回退边界",
+            fallback="_rule_analyze",
+            positional_argument_count=7,
+            has_user_query=bool(user_query),
+            chart_type=chart_type,
+            intent=intent,
+        )
+        return _rule_analyze(
+            rows,
+            stats,
+            trend,
+            outlier,
+            conc,
+            chart_type,
+            intent,
+        )
 
 
-def _rule_analyze(rows, stats, trend, outlier, conc, chart_type, intent) -> dict:
+def _rule_analyze(
+    rows,
+    stats,
+    trend,
+    outlier,
+    conc,
+    chart_type,
+    intent,
+    user_query: str = "",
+) -> dict:
     """规则生成分析摘要。"""
     insights = []
     if trend:
@@ -628,7 +983,141 @@ def _rule_analyze(rows, stats, trend, outlier, conc, chart_type, intent) -> dict
     if trend:
         summary += f" | {trend}"
     fups = [f"查看 {nc} 的分布" for nc in stats.get("numeric_columns", [])[:2]]
-    return {"summary": summary, "insights": insights, "recommended_chart_type": chart_type, "follow_up_questions": fups}
+    result = {
+        "summary": summary,
+        "insights": insights,
+        "recommended_chart_type": chart_type,
+        "follow_up_questions": fups,
+    }
+    result.update(_build_rule_business_analysis(rows, stats, user_query))
+    return result
+
+
+# 方法作用：模型不可用时按指标语义补齐关联指标、影响、待验证原因和条件化建议。
+# Args: rows - 查询结果；stats - 确定性统计；user_query - 用户原问题。
+# Returns: 不包含编造数值的业务解读字段。
+def _build_rule_business_analysis(
+    rows: list[dict],
+    stats: dict,
+    user_query: str,
+) -> dict:
+    """规则回退只给分析框架，未查询的业务关系全部标记为待验证。"""
+    numeric_columns = list(stats.get("numeric_columns", []) or [])
+    evidence = " ".join((user_query, *numeric_columns)).lower()
+    related_metrics: list[str]
+    possible_causes: list[str]
+    business_impacts: list[str]
+    recommended_actions: list[str]
+
+    if any(marker in evidence for marker in ("order", "workorder", "工单", "需求单")):
+        related_metrics = [
+            "建议联查交付工单数与需求工单数的差额，判断积压是否扩大",
+            "建议联查完工率、平均工单时长和在制工单数，判断交付能力",
+            "建议联查车间产能、在岗人数和物料可用库存，定位供给侧约束",
+        ]
+        business_impacts = [
+            "需求持续高于交付时可能形成工单积压，并进一步影响交期和客户满意度",
+            "需求持续低于产能时可能造成设备与人员利用不足，需要结合计划负荷判断",
+        ]
+        possible_causes = [
+            "待验证：固定值可能来自真实稳定需求，也可能与批量下单、统计口径或上游同步规则有关；需核对工单明细和导入日志",
+            "待验证：车间、产品或客户结构可能相互抵消形成总量稳定；需按这些维度拆分",
+        ]
+        recommended_actions = [
+            "立即核查需求工单明细数、去重口径和同步日志，确认汇总值与源记录一致",
+            "持续监控需求与交付差额、完工率和平均时长，建立积压预警",
+            "若需求连续高于交付能力，再评估排产、人员和物料调整；若连续低于产能，再复核销售需求与生产计划",
+        ]
+    elif any(marker in evidence for marker in ("sale", "sales", "销售", "收入")):
+        related_metrics = [
+            "建议联查订单数、客单价和合同生效数，拆分销售变化来源",
+            "建议联查出货量、库存和毛利，判断增长是否可交付且有收益",
+        ]
+        business_impacts = [
+            "销售变化可能传导至库存周转、排产负荷、现金流和客户交付",
+        ]
+        possible_causes = [
+            "待验证：渠道、区域、产品结构或价格变化可能共同驱动结果；需分维度对比",
+        ]
+        recommended_actions = [
+            "先拆分订单量与客单价贡献，再按渠道、区域和产品核查变化来源",
+            "若增长伴随库存下降或交付延迟，优先校验供给能力；若下降持续，再检查客户流失和渠道转化",
+        ]
+    elif any(marker in evidence for marker in ("stock", "inventory", "库存", "仓库")):
+        related_metrics = [
+            "建议联查入库量、出库量、计划出库量和库存周转天数",
+            "建议联查生产计划、订单需求和缺货次数，判断库存是否匹配业务节奏",
+        ]
+        business_impacts = [
+            "库存过高可能增加资金占用，库存不足可能影响生产连续性和订单交付",
+        ]
+        possible_causes = [
+            "待验证：采购到货、生产节拍或需求预测偏差可能导致库存变化；需联查对应计划与实绩",
+        ]
+        recommended_actions = [
+            "按物料和仓库拆分库存变化，并对照计划出入库识别偏差",
+            "对连续低于安全库存或长期高库存项目分别设置补货和消化条件",
+        ]
+    else:
+        related_metrics = [
+            "建议联查该指标的上游投入、同期计划值和下游结果指标，形成完整业务链路",
+        ]
+        business_impacts = [
+            "当前指标变化可能向相邻业务环节传导，影响程度需结合关联指标验证",
+        ]
+        possible_causes = [
+            "待验证：业务量、结构、口径或数据同步变化都可能造成当前现象，现有结果不能单独证明原因",
+        ]
+        recommended_actions = [
+            "先核对口径和原始明细，再按时间与核心业务维度拆分",
+            "补充计划值、历史基线和下游结果指标后，再决定是否采取业务动作",
+        ]
+
+    flat_columns = [stats.get("columns", {}).get(column, {}) for column in numeric_columns]
+    is_flat = bool(flat_columns) and all(column.get("std") == 0 for column in flat_columns)
+    summary = ""
+    flat_insights: list[str] = []
+    if is_flat and numeric_columns:
+        value = flat_columns[0].get("mean")
+        metric_name = numeric_columns[0]
+        if any(marker in evidence for marker in ("demand_order", "需求工单", "需求单")):
+            metric_name = "单日需求工单数"
+        elif any(marker in evidence for marker in ("sales_amount", "销售额")):
+            metric_name = "销售额"
+        elif any(marker in evidence for marker in ("inventory", "stock", "库存")):
+            metric_name = "库存指标"
+        summary = (
+            f"查询返回 {len(rows)} 条记录，{metric_name}均为 {value:g}，"
+            "当前数据范围内没有波动。"
+        ) if isinstance(value, (int, float)) else "当前数据范围内指标保持不变。"
+        flat_insights = [
+            f"{len(rows)} 条记录的最小值、最大值和均值均为 {value:g}，极差和标准差均为 0。"
+        ] if isinstance(value, (int, float)) else ["当前数据范围内各记录数值一致。"]
+        business_impacts.insert(
+            0,
+            "指标持平有利于短期资源安排，但也需要排除固定值、统计上限或同步未更新等数据问题",
+        )
+
+    return {
+        **({"summary": summary} if summary else {}),
+        **({"insights": flat_insights} if flat_insights else {}),
+        **({
+            "recommended_chart_type": "line" if _find_time_col(rows) else "table",
+        } if is_flat else {}),
+        "related_metrics": related_metrics,
+        "business_impacts": business_impacts,
+        "possible_causes": possible_causes,
+        "recommended_actions": recommended_actions,
+        "limitations": ["未查询到的关联指标和原因仅作为待验证分析方向，不能视为已发生事实"],
+        "confidence": "medium" if rows else "low",
+        "evidence_status": "sufficient" if rows else "needs_user_input",
+        "evidence_gaps": [] if rows else ["当前查询没有返回可分析记录"],
+        "supplemental_questions": [],
+        "follow_up_questions": [
+            "是否继续联查关联指标并按核心业务维度拆分？",
+            "是否需要与计划值或上一周期做对比？",
+        ],
+    }
 
 
 # helpers

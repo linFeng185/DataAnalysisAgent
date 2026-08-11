@@ -39,14 +39,55 @@ class TestResultRendering:
         try:
             # Arrange
             source = Path("frontend/src/components/ResultCard.tsx").read_text(encoding="utf-8")
+            logger.info(
+                "结果卡图表可见性边界 legacy=%s visible_set=%s table_visible=%s render_uses_result=%s",
+                "chartConfig.type !== 'table'" in source,
+                "visibleChartTypes" in source,
+                "['line', 'bar', 'pie', 'scatter', 'heatmap', 'table']" in source,
+                "shouldShowChart && chartConfig" in source,
+            )
 
             # Act / Assert
             assert "sql_statements" in source
-            assert "chartConfig.type !== 'table'" in source
+            assert (
+                "const visibleChartTypes = new Set(['line', 'bar', 'pie', 'scatter', 'heatmap']);"
+                in source
+            )
+            assert (
+                "visibleChartTypes.has(chartConfig.type) || chartConfig.status === 'failed'"
+                in source
+            )
             logger.info("test_result_card_uses_sql_statements_and_hides_table_chart 完成")
         except Exception as exc:
             logger.error(
                 "test_result_card_uses_sql_statements_and_hides_table_chart 异常: %s",
+                exc,
+                exc_info=True,
+            )
+            raise
+
+    # 方法作用：验证指标目录走结构化结果卡并渲染主题与指标明细。
+    # Args: self - pytest 测试类实例。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    def test_indicator_catalog_renders_structured_groups(self) -> None:
+        """指标目录不得退化为只显示数量摘要的简化直接回答卡。"""
+        logger.debug("test_indicator_catalog_renders_structured_groups 入口")
+        try:
+            # Arrange
+            page = Path("frontend/src/pages/ChatPage.tsx").read_text(encoding="utf-8")
+            result_card = Path("frontend/src/components/ResultCard.tsx").read_text(
+                encoding="utf-8",
+            )
+
+            # Act / Assert
+            assert "const isLLMDirect = finalResult?.source === 'llm_direct';" in page
+            assert "analysis?.indicator_groups" in result_card
+            assert "indicatorGroups.map" in result_card
+            assert "group.indicators.map" in result_card
+            logger.info("test_indicator_catalog_renders_structured_groups 完成")
+        except Exception as exc:
+            logger.error(
+                "test_indicator_catalog_renders_structured_groups 异常: %s",
                 exc,
                 exc_info=True,
             )
@@ -117,3 +158,24 @@ class TestResultRendering:
                 "test_use_chat_restores_each_turn_final_result 异常: %s", exc, exc_info=True,
             )
             raise
+
+    # 方法作用：验证结果卡展示触点归因模型、资格和确定性明细。
+    # Args: self - pytest 测试类实例。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    def test_result_card_renders_touchpoint_attribution(self) -> None:
+        """功能 18.2.13 不能退化为只显示模型生成的摘要。"""
+        # Arrange
+        result_card = Path("frontend/src/components/ResultCard.tsx").read_text(
+            encoding="utf-8",
+        )
+        types = Path("frontend/src/types/index.ts").read_text(encoding="utf-8")
+
+        # Act / Assert
+        assert "TouchpointAttributionAnalysis" in types
+        assert "analysis?.attribution" in result_card
+        assert "attribution.selection_source" in result_card
+        assert "归因证据不足" in result_card
+        assert "attributionRows" in result_card
+        assert "attributed_value" in result_card
+        assert "conversion_credit" in result_card
+        assert "chartRows" in result_card

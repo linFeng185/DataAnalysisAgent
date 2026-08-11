@@ -50,16 +50,32 @@ async def llm_direct_answer_node(state: AnalysisState) -> dict:
         from src.graph.indicator_catalog import (
             build_indicator_catalog_plan,
             build_indicator_catalog_summary,
+            review_indicator_catalog,
         )
 
         catalog_plan = build_indicator_catalog_plan(state.get("relevant_tables", []) or [])
-        answer = build_indicator_catalog_summary(catalog_plan)
+        indicator_groups = await review_indicator_catalog(catalog_plan)
+        logger.info(
+            "指标目录复检边界",
+            strategy="schema_allowlist_with_llm_review",
+            mode=catalog_plan.mode,
+            candidate_count=sum(len(table.metric_columns) for table in catalog_plan.tables),
+            accepted_count=sum(len(group.indicators) for group in indicator_groups),
+        )
+        answer = build_indicator_catalog_summary(catalog_plan, groups=indicator_groups)
+        serialized_groups = [group.model_dump() for group in indicator_groups]
         status = "needs_input" if catalog_plan.needs_input else "success"
         logger.info(
             "指标目录直接回答完成",
             mode=catalog_plan.mode,
             status=status,
             table_count=len(catalog_plan.tables),
+            summary_chars=len(answer),
+            group_count=len(serialized_groups),
+            indicator_count=sum(
+                len(group.get("indicators", []) or [])
+                for group in serialized_groups
+            ),
         )
         return {
             "final_response": {
@@ -74,14 +90,29 @@ async def llm_direct_answer_node(state: AnalysisState) -> dict:
                 "analysis": {
                     "summary": answer,
                     "insights": [],
+                    "indicator_groups": serialized_groups,
                     "recommended_chart_type": "table",
                 },
-                "chart": {"type": "table", "option": {}},
+                "chart": {
+                    "type": "none",
+                    "option": {},
+                    "status": "not_applicable",
+                    "reason": "元数据或直接问答不生成图表",
+                },
                 "activated_skills": state.get("activated_skills", []),
                 "activated_knowledge": "",
             },
-            "analysis_result": {"summary": answer, "insights": []},
-            "chart_config": {"type": "table", "option": {}},
+            "analysis_result": {
+                "summary": answer,
+                "insights": [],
+                "indicator_groups": serialized_groups,
+            },
+            "chart_config": {
+                "type": "none",
+                "option": {},
+                "status": "not_applicable",
+                "reason": "元数据或直接问答不生成图表",
+            },
         }
 
     # 对话历史先转为紧凑文本，再交由统一预算器分配。
@@ -169,12 +200,22 @@ async def llm_direct_answer_node(state: AnalysisState) -> dict:
             "data": [],
             "analysis": {"summary": answer, "insights": [],
                          "recommended_chart_type": "table"},
-            "chart": {"type": "table", "option": {}},
+            "chart": {
+                "type": "none",
+                "option": {},
+                "status": "not_applicable",
+                "reason": "元数据或直接问答不生成图表",
+            },
             "activated_skills": state.get("activated_skills", []),
             "activated_knowledge": knowledge_text[:200] if knowledge_text else "",
         },
         "analysis_result": {"summary": answer, "insights": []},
-        "chart_config": {"type": "table", "option": {}},
+        "chart_config": {
+            "type": "none",
+            "option": {},
+            "status": "not_applicable",
+            "reason": "元数据或直接问答不生成图表",
+        },
     }
 
 

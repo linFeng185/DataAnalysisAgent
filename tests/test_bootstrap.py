@@ -161,3 +161,33 @@ class TestBootstrap:
         assert context.set_resource.call_args_list[0].args == ("automation_runner", runner)
         assert context.set_resource.call_args_list[1].args == ("automation_service", service)
         assert context.set_resource.call_args_list[1].kwargs["closer"] is bootstrap._close_automation
+
+    # 方法作用：验证演示数据源只在显式启用的开发环境加载。
+    # Args: self - pytest 测试类实例；monkeypatch - pytest 补丁工具。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("env", "enabled", "expected_calls"),
+        (("dev", True, 1), ("dev", False, 0), ("prod", True, 0)),
+    )
+    async def test_demo_datasource_respects_environment_boundary(
+        self,
+        monkeypatch,
+        env: str,
+        enabled: bool,
+        expected_calls: int,
+    ) -> None:
+        """生产环境以及显式关闭时都不能注册 Demo 数据源。"""
+        # Arrange
+        import src.datasource.setup as setup_module
+        from src import bootstrap
+
+        ensure_demo = AsyncMock()
+        monkeypatch.setattr(setup_module, "ensure_demo_datasource", ensure_demo)
+        settings = SimpleNamespace(env=env, demo_datasource_enabled=enabled)
+
+        # Act
+        await bootstrap._ensure_demo_datasource(settings)
+
+        # Assert
+        assert ensure_demo.await_count == expected_calls

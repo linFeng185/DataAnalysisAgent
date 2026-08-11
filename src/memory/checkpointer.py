@@ -87,7 +87,7 @@ async def get_checkpointer():
         partial(_create_checkpointer_resource, context.settings),
         closer=_close_checkpointer_resource,
     )
-    logger.info(
+    logger.debug(
         "获取 Checkpointer 完成",
         checkpointer_type=type(resource.checkpointer).__name__,
     )

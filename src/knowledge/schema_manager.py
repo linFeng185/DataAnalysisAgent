@@ -89,7 +89,6 @@ class SchemaManager:
         doc_entries = self._load_from_docs(datasource_name)
         if shared_cached and self._entries_complete(shared_cached):
             rebound = self._rebind_entries(shared_cached, datasource_name)
-            await self._upsert_to_cache(rebound)
             merged = self._merge_entries(doc_entries, rebound)
             logger.info(
                 "Schema 连接级共享缓存命中",
@@ -1172,5 +1171,5 @@ def get_schema_manager() -> SchemaManager:
         SchemaManager,
         closer=SchemaManager.close,
     )
-    logger.info("获取 SchemaManager 完成")
+    logger.debug("获取 SchemaManager 完成")
     return result

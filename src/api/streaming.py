@@ -276,6 +276,22 @@ async def stream_analysis(user_query: str, datasource: str, session_id: str = ""
                         yield _sse("validation", {"valid": output.get("sql_valid", True)})
                     elif name == "build_response" and isinstance(output, dict):
                         public_result = sanitize_public_output(output.get("final_response", {}))
+                        public_analysis = public_result.get("analysis", {}) or {}
+                        public_groups = (
+                            public_analysis.get("indicator_groups", []) or []
+                            if isinstance(public_analysis, dict)
+                            else []
+                        )
+                        logger.info(
+                            "流式公开结果边界",
+                            source=public_result.get("source", ""),
+                            analysis_keys=(
+                                sorted(public_analysis)
+                                if isinstance(public_analysis, dict)
+                                else []
+                            ),
+                            indicator_group_count=len(public_groups),
+                        )
                         yield _sse("result", public_result)
                         decision_summary = str(public_result.get("decision_summary", "") or "")
                         if decision_summary:

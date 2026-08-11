@@ -20,7 +20,7 @@
 | 6.1.12 | 连接身份指纹 | `src/knowledge/datasource_cache.py` | 按规范化连接信息生成稳定指纹，不含用户/会话/显示名称 | 单测完成 | P1 |
 | 6.1.13 | LocalDatasourceCache | 同上 | JSON 持久化、TTL 校验、损坏文件隔离和原子替换 | 单测完成 | P1 |
 | 6.1.14 | RedisDatasourceCache | 同上 | Redis `GET/SET EX/DELETE` 多实例共享缓存 | 单测完成 | P1 |
-| 6.1.15 | SchemaManager 共享缓存接入 | `src/knowledge/schema_manager.py` | 同连接跨用户/别名复用，缓存失败降级实时内省 | 单测完成 | P1 |
+| 6.1.15 | SchemaManager 共享缓存接入 | `src/knowledge/schema_manager.py` | 同连接跨用户/别名复用，精确命中不重复向量化，缓存失败降级实时内省 | 单测完成 | P1 |
 
 ### 6.2 知识条目
 

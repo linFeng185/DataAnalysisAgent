@@ -161,12 +161,19 @@ async def _init_workflow(settings: Settings) -> None:
 # Args: settings - 当前应用配置。
 # Returns: 无返回值。
 async def _ensure_demo_datasource(settings: Settings) -> None:
-    del settings
-    logger.debug("_ensure_demo_datasource 入口")
+    enabled = settings.env == "dev" and settings.demo_datasource_enabled
+    logger.debug(
+        "_ensure_demo_datasource 入口",
+        env=settings.env,
+        enabled=enabled,
+    )
+    if not enabled:
+        logger.info("_ensure_demo_datasource 完成", skipped=True)
+        return
     from src.datasource.setup import ensure_demo_datasource
 
     await ensure_demo_datasource()
-    logger.info("_ensure_demo_datasource 完成")
+    logger.info("_ensure_demo_datasource 完成", skipped=False)
 
 
 # 方法作用：预热知识文件存储、向量库和系统知识目录。

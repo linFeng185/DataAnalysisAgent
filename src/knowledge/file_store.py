@@ -460,5 +460,5 @@ def get_file_store() -> FileStore:
 
     logger.debug("获取 FileStore 入口")
     result = get_app_context().get_or_create("file_store", FileStore)
-    logger.info("获取 FileStore 完成")
+    logger.debug("获取 FileStore 完成")
     return result

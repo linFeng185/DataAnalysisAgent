@@ -18,7 +18,7 @@
 | # | 功能 | 文件 | 描述 | 状态 |
 |---|------|------|------|------|
 | 17.2.1 | 安全与租户迁移 | `migrations/001_batch1.sql` | 创建租户、用户、权限、审计、会话、历史和知识文件表，并启用身份 RLS | 单测完成 |
-| 17.2.2 | 迁移工具 | `src/db/migrations.py`、`migrations/017_knowledge_evolution_rls_repair.sql` | 编号顺序、跨平台稳定 checksum、受控历史修复、advisory lock、单文件事务回滚和生产启动门禁 | 单测完成 |
+| 17.2.2 | 迁移工具 | `src/db/migrations.py`、`migrations/017_knowledge_evolution_rls_repair.sql` | 编号顺序、跨平台稳定 checksum、受控历史修复、聚合校验审计、advisory lock、单文件事务回滚和生产启动门禁 | 单测完成 |
 
 ### 17.3 监控与可观测性
 
@@ -34,7 +34,7 @@
 
 | # | 功能 | 描述 | 状态 |
 |---|------|------|------|
-| 17.4.1 | Dockerfile | 后端 Python builder/runtime + 前端 Node/Nginx 多阶段镜像，非 root 后端运行 | 单测完成 |
+| 17.4.1 | Dockerfile | 后端 Python builder/runtime + 前端 Node/Nginx 多阶段镜像，非 root 后端运行，PyPI/npm 源通过构建参数覆盖 | 单测完成 |
 | 17.4.2 | `docker-compose.example.yml` | 根目录前后端分离模板 + PostgreSQL 17 + Redis 7 + 嵌入式 Chroma；实际 Compose 与配置忽略 | 单测完成 |
 | 17.4.3 | `.dockerignore` | 后端/前端分别排除虚拟环境、依赖、缓存、测试、密钥和运行数据 | 单测完成 |
 
@@ -42,7 +42,7 @@
 
 | # | 功能 | 文件 | 描述 | 状态 |
 |---|------|------|------|------|
-| 17.5.1 | 生产启动配置门禁 | `src/config.py`、`src/main.py` | prod 校验认证、随机盐凭证主密钥和状态库凭证，并关闭 API 元数据 | 单测完成 |
+| 17.5.1 | 生产与开发启动门禁 | `src/config.py`、`src/main.py`、`src/bootstrap.py` | prod 校验认证和密钥；开发 reload 在调试器下自动关闭，Demo 数据源显式启用，配置读取不隐式创建 Context | 单测完成 |
 
 ### 模块收尾
 

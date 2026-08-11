@@ -175,6 +175,141 @@ async def list_tenants(
         raise HTTPException(500, "租户列表加载失败") from exc
 
 
+@router.get("/tenants/{tenant_id}/admins")
+# 方法作用：分页列出指定租户的租户管理员账号。
+# Args: tenant_id - 目标租户编号；page - 页码；page_size - 每页数量。
+# Returns: 租户摘要和不含密码信息的管理员分页结果。
+async def list_tenant_admins(
+    tenant_id: int,
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=20, ge=1, le=100),
+) -> dict:
+    """固定超级管理员只能通过租户生命周期边界查看租户管理员。"""
+    from src.api.auth import require_super_admin
+    from src.memory.pg_pool import get_pg_pool
+
+    logger.info(
+        "平台租户管理员列表入口",
+        tenant_id=tenant_id,
+        page=page,
+        page_size=page_size,
+    )
+    require_super_admin()
+    try:
+        pool = await get_pg_pool()
+        offset = (page - 1) * page_size
+        async with pool.acquire() as connection:
+            tenant = await connection.fetchrow(
+                "SELECT id, code, name, is_active FROM tenants WHERE id=$1",
+                tenant_id,
+            )
+            logger.info(
+                "平台租户管理员列表租户边界",
+                tenant_id=tenant_id,
+                tenant_found=tenant is not None,
+            )
+            if tenant is None:
+                raise HTTPException(404, "租户不存在")
+            total = int(await connection.fetchval(
+                "SELECT COUNT(*) FROM users "
+                "WHERE tenant_id=$1 AND role='tenant_admin'",
+                tenant_id,
+            ) or 0)
+            rows = await connection.fetch(
+                "SELECT id, username, tenant_id, role, is_active, failed_login_attempts, "
+                "locked_until, last_login_at, created_at FROM users "
+                "WHERE tenant_id=$1 AND role='tenant_admin' "
+                "ORDER BY id LIMIT $2 OFFSET $3",
+                tenant_id,
+                page_size,
+                offset,
+            )
+        admins = [dict(row) for row in rows]
+        result = {
+            "tenant": dict(tenant),
+            "admins": admins,
+            "total": total,
+            "page": page,
+            "page_size": page_size,
+        }
+        logger.info(
+            "平台租户管理员列表完成",
+            tenant_id=tenant_id,
+            total=total,
+            returned=len(admins),
+        )
+        return result
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error(
+            "平台租户管理员列表失败",
+            tenant_id=tenant_id,
+            error=str(exc),
+            exc_info=True,
+        )
+        raise HTTPException(500, "租户管理员列表加载失败") from exc
+
+
+@router.post("/tenants/{tenant_id}/admins/{user_id}/reset-password")
+# 方法作用：重置指定租户管理员密码并解除登录锁定。
+# Args: tenant_id - 目标租户编号；user_id - 目标管理员编号；request - 新密码。
+# Returns: 重置后的管理员最小摘要，不包含密码或哈希。
+async def reset_tenant_admin_password(
+    tenant_id: int,
+    user_id: int,
+    request: PasswordResetRequest,
+) -> dict:
+    """固定超级管理员不能通过该端点重置其他租户角色或自身密码。"""
+    from src.api.auth import SUPER_ADMIN_USER_ID, _hash_password, require_super_admin
+    from src.memory.pg_pool import get_pg_pool
+
+    logger.info(
+        "平台租户管理员密码重置入口",
+        tenant_id=tenant_id,
+        user_id=user_id,
+    )
+    require_super_admin()
+    if user_id == SUPER_ADMIN_USER_ID:
+        logger.warning(
+            "平台租户管理员密码重置阻断固定账号",
+            tenant_id=tenant_id,
+            user_id=user_id,
+        )
+        raise HTTPException(403, "固定超级管理员不能通过租户端点重置")
+    try:
+        password_hash = await asyncio.to_thread(_hash_password, request.password)
+        pool = await get_pg_pool()
+        async with pool.acquire() as connection:
+            row = await connection.fetchrow(
+                "UPDATE users SET password_hash=$1, failed_login_attempts=0, locked_until=NULL "
+                "WHERE id=$2 AND tenant_id=$3 AND role='tenant_admin' "
+                "RETURNING id, username, tenant_id, role, is_active, failed_login_attempts, "
+                "locked_until, last_login_at, created_at",
+                password_hash,
+                user_id,
+                tenant_id,
+            )
+        logger.info(
+            "平台租户管理员密码重置写回边界",
+            tenant_id=tenant_id,
+            user_id=user_id,
+            updated=row is not None,
+        )
+        if row is None:
+            raise HTTPException(404, "租户管理员不存在")
+        logger.info(
+            "平台租户管理员密码重置完成",
+            tenant_id=tenant_id,
+            user_id=user_id,
+        )
+        return {"status": "ok", "admin": dict(row)}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        _raise_write_error(exc, "租户管理员密码重置失败")
+
+
 @router.post("/tenants", status_code=201)
 # 方法作用：原子创建租户和首个 tenant_admin 账号。
 # Args: request - 租户名称与管理员凭证。

@@ -89,7 +89,7 @@ class SessionStore:
                 role=get_current_role(),
             ) as conn:
                 yield conn
-            logger.info("会话 PG 连接完成", user_id=user_id, tenant_id=tenant_id)
+            logger.debug("会话 PG 连接完成", user_id=user_id, tenant_id=tenant_id)
         except Exception as exc:
             logger.error("会话 PG 连接失败", error=str(exc), exc_info=True)
             raise
@@ -368,5 +368,5 @@ def get_session_store() -> SessionStore:
 
     logger.debug("获取 SessionStore 入口")
     result = get_app_context().get_or_create("session_store", SessionStore)
-    logger.info("获取 SessionStore 完成")
+    logger.debug("获取 SessionStore 完成")
     return result

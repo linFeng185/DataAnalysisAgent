@@ -79,6 +79,9 @@ Phase 2 关键依赖:
   11.1.2 流式查询 ──────────→ 4.1.2 StateGraph (astream_events)
   11.1.7~11.1.9 数据源API ──→ 2.3 ExternalProvider
   13.x 数据分析引擎 ─────────→ 4.8 analyze_result Node
+  13.16 触点归因规则引擎 ───→ 4.8.12 模型选择与资格闭环
+  4.8.11 自主补查闭环 ──────→ 4.8.12 归因证据补齐
+  4.8.12 触点归因结果 ──────→ 18.2.13 前端结构化展示
   14.x 可视化引擎 ───────────→ 4.9 generate_chart Node
   7.2.8 summarize_session ──→ 10.1.4 cheap_llm 工厂
   7.5.1 build_llm_context ──→ 7.3.4 long_term_store.search()

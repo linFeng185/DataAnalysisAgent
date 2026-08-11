@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import sys
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
@@ -18,7 +19,7 @@ from src.app_context import (
     use_app_context_async,
 )
 from src.bootstrap import bootstrap_all, shutdown_all
-from src.config import get_settings
+from src.config import Settings, get_settings
 from src.logging_config import get_logger, setup_logging
 from src.memory.checkpointer import configure_asyncio_event_loop
 
@@ -139,13 +140,51 @@ def create_app() -> FastAPI:
     return app
 
 
-app = create_app()
+# 方法作用：判断当前进程是否应启用 Uvicorn 开发热重载。
+# Args: settings - 当前应用配置；debugger_attached - 可选调试器连接状态。
+# Returns: 仅开发环境显式启用且未连接调试器时返回 True。
+def _should_enable_reload(
+    settings: Settings,
+    *,
+    debugger_attached: bool | None = None,
+) -> bool:
+    """避免调试器多进程与 Uvicorn reload 叠加派生重复服务进程。"""
+    attached = sys.gettrace() is not None if debugger_attached is None else debugger_attached
+    return bool(
+        settings.env == "dev"
+        and settings.server_reload_enabled
+        and not attached
+    )
+
+
+# 作为可导入 ASGI 模块时创建应用；直接执行时由 run_server 按运行模式创建。
+app: FastAPI | None = create_app() if __name__ != "__main__" else None
+
+
+# 方法作用：按环境和调试器状态启动 Uvicorn 服务。
+# Args: 无。
+# Returns: 服务退出后无返回值。
+def run_server() -> None:
+    """启动开发服务，并在无 reload 时直接传入应用对象以避免二次导入。"""
+    import uvicorn
+
+    settings = get_settings()
+    reload_enabled = _should_enable_reload(settings)
+    target = "src.main:app" if reload_enabled else create_app()
+    loop_factory = (
+        "src.main:selector_event_loop_factory"
+        if reload_enabled
+        else selector_event_loop_factory
+    )
+    uvicorn.run(
+        target,
+        host="0.0.0.0",
+        port=8000,
+        reload=reload_enabled,
+        loop=loop_factory,
+        access_log=False,
+    )
 
 
 if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(
-        "src.main:app", host="0.0.0.0", port=8000, reload=True,
-        loop="src.main:selector_event_loop_factory",
-        access_log=False,
-    )
+    run_server()

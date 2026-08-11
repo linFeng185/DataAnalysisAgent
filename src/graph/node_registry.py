@@ -72,6 +72,7 @@ def _load_default_nodes() -> None:
         from src.graph.nodes.restore_previous_result import restore_previous_result_node
         from src.graph.nodes.retrieve_schema import retrieve_schema_node
         from src.graph.nodes.save_preference import save_preference_node
+        from src.graph.nodes.supplemental_query import supplemental_query_node
         from src.graph.subgraphs.action import build_action_subgraph
         from src.graph.subgraphs.file_analysis import build_file_analysis_subgraph
         from src.graph.subgraphs.forecast import build_forecast_subgraph
@@ -90,6 +91,7 @@ def _load_default_nodes() -> None:
             ("layer4_explain", layer4_explain_node, "正在模拟执行 SQL..."),
             ("execute_sql", execute_sql_node, "正在执行查询..."),
             ("analyze_result", analyze_result_node, "正在分析查询结果..."),
+            ("supplemental_query", supplemental_query_node, "证据不足，正在补充查询..."),
             ("generate_chart", generate_chart_node, "正在生成图表..."),
             ("build_response", build_response_node, "正在组装响应..."),
             ("mcp_agent", mcp_agent_node, "正在分析文件与工具结果..."),

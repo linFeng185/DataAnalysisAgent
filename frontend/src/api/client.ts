@@ -1,4 +1,5 @@
 const BASE = '/api/v1';
+const pendingGetRequests = new Map<string, Promise<unknown>>();
 
 // 方法作用：认证失效时统一返回登录页，避免页面停留在不可用状态。
 // Args: 无。
@@ -28,8 +29,20 @@ async function request<T>(method: string, path: string, body?: Record<string, un
   return res.json();
 }
 
+// 方法作用：合并同一路径的并发 GET 请求，并在请求结束后清理进行中状态。
+// Args: path - API 相对路径。
+// Returns: 解析后的响应对象 Promise。
 export function get<T>(path: string): Promise<T> {
-  return request<T>('GET', path);
+  const existing = pendingGetRequests.get(path);
+  if (existing) return existing as Promise<T>;
+
+  const pending = request<T>('GET', path).finally(() => {
+    if (pendingGetRequests.get(path) === pending) {
+      pendingGetRequests.delete(path);
+    }
+  });
+  pendingGetRequests.set(path, pending);
+  return pending;
 }
 
 export function post<T>(path: string, body: Record<string, unknown>): Promise<T> {

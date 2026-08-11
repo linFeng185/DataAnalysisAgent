@@ -159,10 +159,20 @@ async def execute_sql_node(state: AnalysisState) -> dict:
                 state, ds_name, sql, _start, success=True, row_count=len(rows),
             )
             masked_rows = mask_sensitive_data(rows)
+            settings = get_settings()
+            collect_attribution_rows = (
+                contexts.routing.intent == "attribution"
+                or bool(state.get("collect_attribution_rows"))
+            )
+            attribution_rows = (
+                masked_rows[:settings.attribution_max_touchpoint_rows]
+                if collect_attribution_rows else []
+            )
             logger.info("节点完成", node="execute_sql", elapsed_ms=elapsed)
             return complete({
                 "generated_sql": sql,  # 同步重写后的 SQL 到前端
                 "query_result_sample": masked_rows[:200],
+                "attribution_candidate_rows": attribution_rows,
                 "query_result_full_count": len(masked_rows),
                 "query_result_truncated": truncated,
                 "query_result_statistics": {"row_count": len(masked_rows), "truncated": truncated},

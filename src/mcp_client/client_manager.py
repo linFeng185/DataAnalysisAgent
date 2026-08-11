@@ -762,5 +762,5 @@ def get_mcp_client_manager(config_path: str = "config/app.yaml") -> MCPClientMan
         partial(MCPClientManager, config_path),
         closer=MCPClientManager.close_all,
     )
-    logger.info("获取 MCPClientManager 完成")
+    logger.debug("获取 MCPClientManager 完成")
     return result

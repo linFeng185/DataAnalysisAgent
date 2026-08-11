@@ -58,13 +58,13 @@ class TestCredentialManagerEdgeCases:
     def test_decrypt_empty_string(self):
         """边界条件: 空字符串解密返回空。"""
         from src.datasource.credential_manager import CredentialManager
-        cm = CredentialManager(key="32_byte_key_for_testing_abcde!")
+        cm = CredentialManager(key="0123456789abcdef0123456789abcdef")
         assert cm.decrypt("") == ""
 
     def test_special_characters(self):
         """边界条件: 含特殊字符的密码。"""
         from src.datasource.credential_manager import CredentialManager
-        cm = CredentialManager(key="MySecretKey123456789012345678!")
+        cm = CredentialManager(key="0123456789abcdef0123456789abcdef")
         pw = "p@$$w0rd!#%^&*()"
         assert cm.decrypt(cm.encrypt(pw)) == pw
 

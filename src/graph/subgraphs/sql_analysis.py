@@ -67,7 +67,7 @@ def add_sql_analysis_flow(
     if missing:
         raise RuntimeError(f"SQL 分析节点未注册: {', '.join(missing)}")
     for name in SQL_ANALYSIS_NODE_NAMES:
-        logger.info(
+        logger.debug(
             "SQL 分析节点解析",
             node=name,
             handler_module=getattr(handlers[name], "__module__", ""),

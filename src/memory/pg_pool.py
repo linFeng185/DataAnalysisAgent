@@ -61,7 +61,7 @@ async def get_pg_pool() -> asyncpg.Pool:
         try:
             async with pool.acquire() as c:
                 await c.fetchval("SELECT 1")
-            logger.info("get_pg_pool 完成", reused=True)
+            logger.debug("get_pg_pool 完成", reused=True)
             return pool
         except Exception:
             logger.warning("PG 池失效，重建", exc_info=True)
@@ -72,7 +72,7 @@ async def get_pg_pool() -> asyncpg.Pool:
             partial(_create_pg_pool, context.settings.database_url),
             closer=_close_pg_pool_resource,
         )
-        logger.info("get_pg_pool 完成", reused=False)
+        logger.debug("get_pg_pool 完成", reused=False)
         return result
     except Exception:
         logger.error("get_pg_pool 失败", exc_info=True)
@@ -115,7 +115,7 @@ async def pg_connection(
         pool = await get_pg_pool()
         async with pg_pool_connection(pool, tenant_id, user_id, role) as connection:
             yield connection
-        logger.info(
+        logger.debug(
             "pg_connection 完成",
             tenant_id=tenant_id,
             user_id=user_id,
@@ -161,7 +161,7 @@ async def pg_pool_connection(
                 role,
             )
             yield connection
-    logger.info(
+    logger.debug(
         "指定 PG Pool 身份连接完成",
         tenant_id=tenant_id,
         user_id=user_id,

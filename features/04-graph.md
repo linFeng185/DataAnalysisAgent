@@ -63,7 +63,7 @@
 | 4.4.14 | 时间过滤拦截 `[P1]` | 同上 `_missing_time_filter()` | SQL 模式匹配：有聚合+日期列+无WHERE过滤→拦截，不依赖具体表名 | 开发完成 |
 | 4.4.15 | SQL Prompt 优化 `[P1]` | `src/llm/prompts.py` | ROUND默认两位小数、时间过滤依据聚合/统计意图 | 开发完成 |
 | 4.4.16 | 证据约束 SQL Prompt `[P1]` | `src/llm/prompts.py` + `generate_sql.py` | 注入业务知识/枚举/示例，增加粒度、JOIN 膨胀、NULL/除零和方言约束 | 单测完成 |
-| 4.4.17 | 指标目录存储形态分流 `[P0]` | `indicator_catalog.py` + `workflow.py` + `generate_sql.py` | 表式/宽表字段式只读 Schema；唯一行式目录确定性生成 DISTINCT code/name SQL；多候选请求目标表 | 单测完成 |
+| 4.4.17 | 指标目录存储形态分流 `[P0]` | `indicator_catalog.py` + `workflow.py` + `generate_sql.py` | 表式/宽表字段式只读 Schema，经数值候选过滤和字段白名单内 LLM 复检后按业务主题输出；唯一行式目录确定性生成 DISTINCT code/name SQL；多候选请求目标表 | 单测完成 |
 
 ### 4.5 layer3_validate Node
 
@@ -103,7 +103,9 @@
 | 4.8.6 | 异常检测 | 同上 | Z-Score + IQR 两种方法 | 单测完成 | P0 |
 | 4.8.7 | 占比分析 | 同上 | 集中度/分类聚合 | 单测完成 | P0 |
 | 4.8.9 | 输出: analysis_result | 同上 | summary+insights+chart+followups | 单测完成 | P0 |
-| 4.8.10 | 证据化分析 Prompt `[P1]` | `src/llm/prompts.py` + `analyze_result.py` | 注入原问题和完整性标签，输出事实/限制/置信度/行动建议 | 单测完成 |
+| 4.8.10 | 证据化分析 Prompt `[P1]` | `src/llm/prompts.py` + `analyze_result.py` | 注入原问题和完整性标签；确定性处理器完成计算后继续输出关联指标、业务影响、待验证原因、限制、置信度和条件化行动建议 | 单测完成 |
+| 4.8.11 | 证据不足自主补查闭环 `[P1]` | `analyze_result.py` + `supplemental_query.py` + `workflow.py` | 模型结构化判断证据充分性；当前授权数据库可补齐时复用完整 SQL 安全链补查并重新分析，限制轮次和查询数，失败保留首查结果 | 集成测试完成 |
+| 4.8.12 | 触点归因模型选择与资格闭环 `[P1]` | `attribution.py` + `analyze_result.py` + `output_contracts.py` + `supplemental_query.py` | 用户显式模型优先，未指定时模型受约束推荐；规则复核路径字段、顺序、转化与样本，证据不足补查或询问，确定性结果禁止模型改写 | 集成测试完成 |
 
 ### 4.9 generate_chart Node
 
@@ -113,6 +115,7 @@
 | 4.9.4 | CHART_RECOMMEND_PROMPT | `src/llm/prompts.py` | 图表推荐 Prompt | 单测完成 | P0 |
 | 4.9.5 | 交叉透视智能降维 `[P1]` | `src/graph/nodes/generate_chart.py` | X 列重复 → 按第三列拆多系列；>30行截断 | 开发完成 |
 | 4.9.6 | 伪数值列过滤 `[P1]` | 同上 | phone/id/no 类列不参与图表 | 开发完成 |
+| 4.9.7 | 图表确定性资格复核与失败可见 `[P1]` | `generate_chart.py` + `build_response.py` + `ResultCard.tsx` | 元数据/直接问答/无数据不画图；单行单值展示核心值；两行以上时间或分类加数值默认选图；table 推荐需复核；失败原因进入响应并展示 | 集成测试完成 |
 
 ### 4.10 build_response Node
 
@@ -154,7 +157,7 @@
 
 ### 模块收尾
 
-模块功能点共 85 项，已完成 85 项，待开发 0 项。
+模块功能点共 88 项，已完成 88 项，待开发 0 项。
 
 当前模块无待开发项。
 

@@ -232,7 +232,9 @@ class TestNodes:
 
     def test_generate_chart(self):
         from src.graph.nodes.generate_chart import generate_chart_node
-        assert asyncio.run(generate_chart_node({}))["chart_config"]["type"] == "table"
+        chart = asyncio.run(generate_chart_node({}))["chart_config"]
+        assert chart["type"] == "none"
+        assert chart["status"] == "not_applicable"
 
     def test_build_response_ok(self):
         from src.graph.nodes.build_response import build_response_node
