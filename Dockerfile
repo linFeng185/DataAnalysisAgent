@@ -5,7 +5,9 @@ FROM python:3.14.0-slim AS builder
 ARG INSTALL_EXTRAS="connectors,documents,structured"
 
 ENV PIP_DISABLE_PIP_VERSION_CHECK=1 \
-    PIP_NO_CACHE_DIR=1
+    PIP_NO_CACHE_DIR=1 \
+    PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple \
+    PIP_TRUSTED_HOST=pypi.tuna.tsinghua.edu.cn
 
 WORKDIR /build
 
@@ -14,9 +16,11 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 COPY pyproject.toml README.md ./
-COPY src ./src
 
 RUN python -m pip wheel --wheel-dir=/wheels ".[${INSTALL_EXTRAS}]"
+
+# src 放在依赖层之后：仅当 pyproject.toml 变更时才重建依赖层，src 改动命中已有依赖缓存
+COPY src ./src
 
 
 FROM python:3.14.0-slim AS runtime

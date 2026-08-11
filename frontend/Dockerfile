@@ -5,7 +5,8 @@ FROM node:22-alpine AS builder
 WORKDIR /build
 
 COPY package.json package-lock.json ./
-RUN npm ci
+RUN npm config set registry https://registry.npmmirror.com \
+    && npm ci
 
 COPY index.html tsconfig.json vite.config.ts ./
 COPY src ./src
