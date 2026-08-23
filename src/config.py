@@ -311,6 +311,7 @@ class Settings(BaseSettings):
     login_lockout_threshold: int = 5
     login_lockout_minutes: int = 15
     max_query_chars: int = 8_000
+    max_sql_chars: int = 20_000
     max_datasources_per_query: int = 5
     max_scan_rows: int = 10_000_000
     max_execution_time: int = 30

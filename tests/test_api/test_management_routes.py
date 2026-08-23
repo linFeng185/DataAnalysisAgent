@@ -494,7 +494,9 @@ class TestSchemaManagement:
 
         # Assert
         assert result["status"] == "ok"
-        manager.update_column_comment.assert_awaited_once_with("demo", "orders", "amount", "订单金额")
+        manager.update_column_comment.assert_awaited_once_with(
+            "demo", "orders", "amount", "订单金额", tenant_id=1,
+        )
 
 
 class TestKnowledgeUploadSafety:

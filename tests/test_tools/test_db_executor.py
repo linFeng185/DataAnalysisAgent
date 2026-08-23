@@ -32,6 +32,7 @@ class TestDBTools:
         logger.debug("test_async_execution_and_explain 入口")
         import src.connectors.registry as connector_registry
         import src.datasource.registry as datasource_registry
+        import src.api.auth as auth_module
         from src.tools.db_executor import DBExecutorTool, DBExplainTool
 
         connector = SimpleNamespace(
@@ -47,6 +48,7 @@ class TestDBTools:
         registry = SimpleNamespace(resolve=AsyncMock(return_value=datasource))
         monkeypatch.setattr(datasource_registry, "get_registry", lambda: registry)
         monkeypatch.setattr(connector_registry, "create_connector", lambda config: connector)
+        monkeypatch.setattr(auth_module, "get_current_tenant_id", lambda: 8)
 
         execution = await DBExecutorTool()._arun("SELECT 1", "demo")  # noqa: SLF001
         explain = await DBExplainTool()._arun("SELECT 1", "demo")  # noqa: SLF001
@@ -55,6 +57,10 @@ class TestDBTools:
         assert explain["success"] is True
         connector.execute_bounded.assert_awaited_once()
         assert connector.explain.await_count == 2
+        assert all(
+            call.kwargs["tenant_id"] == 8
+            for call in registry.resolve.await_args_list
+        )
         logger.info("test_async_execution_and_explain 完成")
 
     # 方法作用：验证危险 SQL 在连接数据库前被拒绝。

@@ -6,6 +6,7 @@ import time
 
 from fastapi import APIRouter, HTTPException, Query
 
+from src.api.routes._helpers import _call_with_optional_tenant
 from src.api.schemas import (
     DataSourceCreateRequest,
     DataSourceInfo,
@@ -204,11 +205,16 @@ async def list_datasources(page: int = Query(default=1, ge=1), page_size: int = 
     from src.app_context import get_tenant_policy
     from src.security.permission_check import resolve_datasource_access
 
-    items = await routes_package._registry().list_all()
+    registry = routes_package._registry()
+    tenant_id = get_current_tenant_id()
+    items = await _call_with_optional_tenant(
+        registry.list_all,
+        tenant_id=tenant_id,
+    )
     logger.debug(
         "数据源列表授权入口",
         available_count=len(items),
-        tenant_id=get_current_tenant_id(),
+        tenant_id=tenant_id,
         user_id=get_current_user_id(),
     )
     policy = get_tenant_policy()
@@ -217,7 +223,7 @@ async def list_datasources(page: int = Query(default=1, ge=1), page_size: int = 
             authorized = await resolve_datasource_access(
                 items,
                 [],
-                tenant_id=get_current_tenant_id(),
+                tenant_id=tenant_id,
                 user_id=get_current_user_id(),
                 role=get_current_role(),
                 tenant_policy=policy,
@@ -228,7 +234,7 @@ async def list_datasources(page: int = Query(default=1, ge=1), page_size: int = 
             if str(exc) == "没有可访问的数据源":
                 logger.info(
                     "数据源列表授权为空",
-                    tenant_id=get_current_tenant_id(),
+                    tenant_id=tenant_id,
                     user_id=get_current_user_id(),
                 )
                 items = []

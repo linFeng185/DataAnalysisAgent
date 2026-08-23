@@ -6,7 +6,7 @@
 
 | # | 功能 | 文件 | 描述 | 状态 |
 |---|------|------|------|------|
-| 12.1.1 | DDL/DML AST 拦截 | `src/graph/nodes/layer3_validate.py` | 拒绝写/管理语句、SELECT INTO 和已知状态变更函数 | 单测完成 |
+| 12.1.1 | DDL/DML AST 拦截 | `src/security/sql_execution.py` | 拒绝数据修改 CTE、SELECT INTO、副作用函数和危险数据库包，解析失败关闭 | 单测完成 |
 | 12.1.2 | 危险语句拦截 | 同上 | 拒绝 CALL / VACUUM / SET ROLE 及 EXPLAIN 包裹的写语句 | 单测完成 |
 | 12.1.3 | 只读白名单模式 | 同上 | 默认只允许 SELECT / SHOW / DESCRIBE / EXPLAIN SELECT | 单测完成 |
 | 12.1.4 | 数据库账号权限告警 | `src/datasource/registry.py`、各 Connector | 优先使用只读账号；已知高权限账号记录 warning 后继续连接，应用层只读 SQL 校验保持强制 | 单测完成 |
@@ -18,12 +18,13 @@
 | # | 功能 | 文件 | 描述 | 状态 |
 |---|------|------|------|------|
 | 12.2.1 | 单用户每小时查询上限 | `src/api/routes.py`、`src/security/data_masker.py` | 工作流前执行内存滑动窗口且每请求只计一次，主动回收过期用户 key（生产环境应切 Redis） | 单测完成 |
-| 12.2.2 | 单次查询最大扫描行数 | `src/config.py` | 配置项 MAX_SCAN_ROWS (默认 1000 万) | 开发完成 |
-| 12.2.3 | 单次查询最大执行时间 | `src/config.py` | 配置项 MAX_EXECUTION_TIME (默认 30 秒)，execute_sql 按方言 SET timeout | 开发完成 |
+| 12.2.2 | 单次查询最大扫描行数 | `src/config.py`、`src/security/sql_execution.py` | MAX_SCAN_ROWS（默认 1000 万），从 EXPLAIN 提取估算值并在执行前门禁 | 单测完成 |
+| 12.2.3 | 单次查询最大执行时间 | `src/config.py`、各 Connector | MAX_EXECUTION_TIME（默认 30 秒），asyncio 总超时叠加方言/驱动超时 | 单测完成 |
 | 12.2.4 | 结果集最大返回行数 | `src/config.py` | 配置项 MAX_RESULT_ROWS (默认 10 万)，execute_sql 有界读取并报告截断 | 单测完成 |
 | 12.2.5 | 公开注册接口限流 | `src/api/auth.py`、`src/config.py` | 按客户端地址限制注册频率，默认每小时 10 次 | 单测完成 | P0 |
 | 12.2.6 | 登录接口限流 | `src/api/auth.py`、`src/config.py` | 按客户端地址与规范化用户名组合限制登录尝试 | 单测完成 | P0 |
 | 12.2.7 | 请求与上传资源预算 | `src/api/routes.py`、`src/api/schemas.py` | 限制 query 字符、数据源数、上传文件数、单文件和累计字节 | 单测完成 | P0 |
+| 12.2.8 | SQL 输入字符预算 | `src/config.py`、`src/security/sql_execution.py` | MAX_SQL_CHARS（默认 20000），所有 SQL 入口在解析前统一拒绝超长输入 | 单测完成 | P0 |
 
 ### 12.3 数据安全
 
@@ -40,8 +41,8 @@
 | 12.4.1 | Cookie 认证与上下文清理 | `src/api/auth.py` | HttpOnly Cookie / Bearer 双入口，请求结束重置 ContextVar | 单测完成 |
 | 12.4.2 | 租户资源隔离 | `src/memory/`、`src/knowledge/file_store.py` | Session、History、FileStore 显式过滤 tenant_id + user_id，并启用 PG RLS | 单测完成 |
 | 12.4.3 | 生产启动安全校验 | `src/config.py`、`src/api/auth.py`、`src/main.py` | prod 拒绝匿名/弱密钥/默认 DB 凭证/临时 JWT，并关闭 Docs、Redoc、OpenAPI | 单测完成 |
-| 12.4.4 | 上传与 Word XSS 防护 | `src/api/routes.py`、`src/knowledge/doc_parser.py` | 限制上传字节数并转义 Word 段落和单元格文本 | 单测完成 |
-| 12.4.5 | 字段权限失败关闭 | `src/security/permission_check.py` | 列解析失败、SELECT * 绕过与行过滤解析失败均阻断 | 单测完成 |
+| 12.4.4 | 上传与前端 XSS 防护 | `src/api/routes.py`、`src/knowledge/doc_parser.py`、`SqlPanel.tsx` | 限制上传并转义 Word 文本；SQL 高亮双重异常时对原文执行 HTML 实体转义 | 单测完成 |
+| 12.4.5 | 字段权限失败关闭 | `src/security/permission_check.py` | 列解析失败、表别名/函数整行通配符绕过与行过滤解析失败均阻断 | 单测完成 |
 | 12.4.6 | 平台与租户管理员分权 | `src/api/auth.py`、`src/knowledge/governance.py` | super_admin 管全局；tenant_admin 仅管理本租户知识 | 单测完成 | P0 |
 | 12.4.7 | 数据源访问失败关闭 | `src/security/permission_check.py`、`src/api/routes.py` | 自动发现、显式选择、列表和多源执行统一按 tenant/user/role 授权 | 单测完成 | P0 |
 | 12.4.8 | 受管 MCP RCE/SSRF 防护 | `src/api/routes.py`、`src/mcp_client/client_manager.py` | 禁止数据库 stdio 配置，SSE 主机必须在部署方 allowlist | 单测完成 | P0 |
@@ -52,6 +53,6 @@
 
 ### 模块收尾
 
-模块功能点共 28 项，已完成 28 项，待开发 0 项。
+模块功能点共 29 项，已完成 29 项，待开发 0 项。
 
 ---

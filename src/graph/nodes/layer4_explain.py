@@ -15,9 +15,10 @@ logger = get_logger(__name__)
 # Returns: explain_errors、sql_valid 和重写后的 generated_sql。
 async def layer4_explain_node(state: AnalysisState) -> dict:
     """在真实执行前使用与执行节点相同的方言连接器检查 SQL。"""
-    from src.graph.context import read_contexts
+    from src.graph.context import read_contexts, resolve_request_identity
 
     contexts = read_contexts(state)
+    effective_tenant_id, _ = resolve_request_identity(state)
     started_at = time.monotonic()
     sql = (state.get("generated_sql", "") or "").strip()
     dialect = contexts.execution.dialect.lower()
@@ -41,7 +42,12 @@ async def layer4_explain_node(state: AnalysisState) -> dict:
 
     from src.security.sql_execution import validate_and_explain_sql
 
-    validation = await validate_and_explain_sql(sql, datasource, dialect)
+    validation = await validate_and_explain_sql(
+        sql,
+        datasource,
+        dialect,
+        tenant_id=effective_tenant_id,
+    )
     if not validation.success:
         errors = validation.details or [{
             "type": validation.error_type or "semantic_error",

@@ -95,6 +95,8 @@ class TestConnectionURL:
     async def test_oracle_create_engine_is_async_and_uses_service_name(self, monkeypatch):
         """Oracle 首次执行创建引擎时必须可 await，并使用 service_name 连接服务。"""
         # Arrange
+        from unittest.mock import MagicMock
+
         from src.connectors import oracle as oracle_module
         from src.connectors.oracle import OracleConnector
 
@@ -114,6 +116,7 @@ class TestConnectionURL:
             return object()
 
         monkeypatch.setattr(oracle_module.sa, "create_engine", fake_create_engine)
+        monkeypatch.setattr(oracle_module.sa.event, "listen", MagicMock())
         connector = OracleConnector(ds)
 
         # Act
@@ -185,8 +188,45 @@ class TestConnectionURL:
             def cursor(self):
                 return Cursor()
 
-        captured["callback"](Connection(), None)
+        connection = Connection()
+        captured["callback"](connection, None)
         assert statements == ['ALTER SESSION SET CURRENT_SCHEMA = "TEST_USER"']
+        assert connection.call_timeout == 30_000
+
+    # 方法作用：验证 SQL Server 驱动配置真实查询超时而非只依赖协程取消。
+    # Args: self - pytest 测试类实例；monkeypatch - pytest 补丁工具。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    @pytest.mark.asyncio
+    async def test_mssql_create_engine_sets_driver_query_timeout(self, monkeypatch) -> None:
+        """同步 pymssql 查询必须能在驱动层终止。"""
+        # Arrange
+        from types import SimpleNamespace
+
+        from src.connectors import mssql as mssql_module
+        from src.connectors.mssql import SQLServerConnector
+
+        captured: dict[str, object] = {}
+
+        # 方法作用：记录 SQL Server Engine 创建参数。
+        # Args: url - SQLAlchemy URL；kwargs - Engine 参数。
+        # Returns: 固定测试引擎。
+        def fake_create_engine(url, **kwargs):
+            captured.update(kwargs)
+            return object()
+
+        monkeypatch.setattr(mssql_module.sa, "create_engine", fake_create_engine)
+        monkeypatch.setattr(
+            mssql_module,
+            "get_settings",
+            lambda: SimpleNamespace(max_execution_time=17),
+            raising=False,
+        )
+
+        # Act
+        await SQLServerConnector(_ds("mssql")).create_engine()
+
+        # Assert
+        assert captured["connect_args"] == {"timeout": 17, "login_timeout": 17}
 
     # 方法作用：验证 Oracle 业务 schema 拒绝可能注入 SQL 的非法标识符。
     # Args: self - pytest 测试类实例；monkeypatch - pytest 补丁工具。
@@ -406,6 +446,94 @@ class TestConnectionURL:
         assert client.queries[0][0] == "SELECT 1"
         assert client.queries[0][2]["max_execution_time"] > 0
 
+    # 方法作用：验证 ClickHouse 有界执行使用流式客户端且只消费上限外一行。
+    # Args: self - pytest 测试类实例；monkeypatch - pytest 补丁工具。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    @pytest.mark.asyncio
+    async def test_clickhouse_execute_bounded_streams_max_rows_plus_one(self, monkeypatch) -> None:
+        """大结果不能先完整物化到内存后再切片。"""
+        # Arrange
+        from types import SimpleNamespace
+
+        from src.connectors import clickhouse as clickhouse_module
+        from src.connectors.clickhouse import ClickHouseConnector
+
+        class FakeStream:
+            """记录同步行流的消费数量与关闭状态。"""
+
+            # 方法作用：构造带列名和大量测试行的流。
+            # Args: self - 测试流；rows - 原始元组行。
+            # Returns: 无返回值。
+            def __init__(self, rows) -> None:
+                self.source = self
+                self.column_names = ["value"]
+                self._rows = iter(rows)
+                self.consumed = 0
+                self.closed = False
+
+            # 方法作用：进入同步流上下文。
+            # Args: self - 测试流。
+            # Returns: 当前测试流。
+            def __enter__(self):
+                return self
+
+            # 方法作用：退出同步流上下文并记录关闭。
+            # Args: self - 测试流；exc_type - 异常类型；exc - 异常；tb - 堆栈。
+            # Returns: False，不吞异常。
+            def __exit__(self, exc_type, exc, tb) -> bool:
+                self.closed = True
+                return False
+
+            # 方法作用：返回当前测试流迭代器。
+            # Args: self - 测试流。
+            # Returns: 当前测试流。
+            def __iter__(self):
+                return self
+
+            # 方法作用：消费并统计下一行。
+            # Args: self - 测试流。
+            # Returns: 下一条元组行。
+            def __next__(self):
+                row = next(self._rows)
+                self.consumed += 1
+                return row
+
+        stream = FakeStream([(value,) for value in range(100)])
+
+        class FakeClient:
+            """仅暴露 ClickHouse 流式查询入口。"""
+
+            # 方法作用：记录流式查询参数并返回固定测试流。
+            # Args: self - 测试客户端；sql - SQL；parameters - 参数；settings - 查询设置。
+            # Returns: 固定测试流。
+            def query_rows_stream(self, sql, parameters=None, settings=None):
+                self.call = {
+                    "sql": sql,
+                    "parameters": parameters,
+                    "settings": settings,
+                }
+                return stream
+
+        client = FakeClient()
+        connector = ClickHouseConnector(_ds("clickhouse"))
+        connector._engine = SimpleNamespace(client=client)  # noqa: SLF001
+        monkeypatch.setattr(
+            clickhouse_module,
+            "get_settings",
+            lambda: SimpleNamespace(max_execution_time=30, max_scan_rows=50),
+        )
+
+        # Act
+        rows, truncated = await connector.execute_bounded("SELECT value FROM numbers(100)", 2)
+
+        # Assert
+        assert rows == [{"value": 0}, {"value": 1}]
+        assert truncated is True
+        assert stream.consumed == 3
+        assert stream.closed is True
+        assert client.call["settings"]["max_rows_to_read"] == 50
+        assert client.call["settings"]["max_result_rows"] == 3
+
     # 方法作用：验证 ClickHouse 命名参数替换不会破坏共享前缀的长参数名。
     # Args: self - pytest 测试类实例。
     # Returns: 无返回值，断言失败时由 pytest 报告。
@@ -516,6 +644,33 @@ class TestTimeoutSQL:
 # ================================================================
 
 class TestEXPLAIN:
+
+    # 方法作用：验证通用 EXPLAIN 从数据库计划文本提取最大估算扫描行数。
+    # Args: self - pytest 测试类实例；monkeypatch - pytest 补丁工具。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    @pytest.mark.asyncio
+    async def test_explain_reports_estimated_scan_rows(self, monkeypatch) -> None:
+        """统一执行服务需要结构化估算值才能执行扫描预算。"""
+        # Arrange
+        from unittest.mock import AsyncMock
+
+        from src.connectors.postgres import PostgreSQLConnector
+
+        connector = PostgreSQLConnector(_ds("postgres"))
+        monkeypatch.setattr(
+            connector,
+            "execute",
+            AsyncMock(return_value=[{
+                "QUERY PLAN": "Seq Scan on orders  (cost=0.00..100.00 rows=25000 width=8)",
+            }]),
+        )
+
+        # Act
+        result = await connector.explain("SELECT id FROM orders")
+
+        # Assert
+        assert result["valid"] is True
+        assert result["estimated_scan_rows"] == 25_000
 
     def test_clickhouse_skipped(self, monkeypatch):
         """explain_skip_dialects 配置生效。"""

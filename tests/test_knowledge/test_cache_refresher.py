@@ -50,13 +50,14 @@ class TestCacheRefresher:
 
         old = datetime.now(timezone.utc) - timedelta(days=8)
         expired = SimpleNamespace(
-            id="table:sales.orders",
+            id="table:3:sales.orders",
             content="orders",
             metadata={
                 "source": "auto_introspect",
                 "created_at": old.isoformat(),
                 "ttl": str(7 * 24 * 60 * 60),
                 "datasource": "sales",
+                "tenant_id": 3,
             },
         )
         store = SimpleNamespace(
@@ -71,8 +72,8 @@ class TestCacheRefresher:
 
         # Assert
         assert deleted == 1
-        store.delete_by_ids.assert_awaited_once_with(["table:sales.orders"])
-        manager.refresh.assert_awaited_once_with("sales")
+        store.delete_by_ids.assert_awaited_once_with(["table:3:sales.orders"])
+        manager.refresh.assert_awaited_once_with("sales", tenant_id=3)
 
     # 方法作用：验证轮询只在指纹变化时使用已内省快照替换缓存。
     # Args: self - pytest 测试类实例。
@@ -102,7 +103,11 @@ class TestCacheRefresher:
         # Assert
         assert baseline_changed is False
         assert ddl_changed is True
-        manager.refresh_from_snapshot.assert_awaited_once_with("sales", changed)
+        manager.refresh_from_snapshot.assert_awaited_once_with(
+            "sales",
+            changed,
+            tenant_id=1,
+        )
 
     # 方法作用：验证未获取 Redis SET NX 锁时不会重复执行同一数据源刷新。
     # Args: self - pytest 测试类实例。
@@ -129,6 +134,39 @@ class TestCacheRefresher:
         assert redis.set.await_args.kwargs == {"nx": True, "ex": 60}
         manager.inspect_live_schema.assert_not_awaited()
 
+    # 方法作用：验证同名数据源的 Schema 指纹、锁和基线按租户独立分区。
+    # Args: self - pytest 测试类实例。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    async def test_schema_fingerprint_is_scoped_by_tenant(self) -> None:
+        """租户 4 首次轮询不能与租户 3 的 `sales` 基线比较并误报变化。"""
+        # Arrange
+        from src.knowledge.cache_refresher import CacheRefresher
+
+        first = SchemaSnapshot(tables=[TableSchema(
+            name="orders",
+            columns=[ColumnInfo(name="id", type="bigint")],
+        )])
+        other_tenant = SchemaSnapshot(tables=[TableSchema(
+            name="orders",
+            columns=[ColumnInfo(name="id", type="uuid")],
+        )])
+        manager = SimpleNamespace(
+            inspect_live_schema=AsyncMock(side_effect=[first, other_tenant]),
+            refresh_from_snapshot=AsyncMock(),
+        )
+        refresher = CacheRefresher(schema_manager=manager, vector_store=SimpleNamespace())
+
+        # Act
+        first_changed = await refresher.refresh_on_schema_change("sales", tenant_id=3)
+        other_changed = await refresher.refresh_on_schema_change("sales", tenant_id=4)
+
+        # Assert
+        assert first_changed is False
+        assert other_changed is False
+        assert manager.inspect_live_schema.await_args_list[0].kwargs == {"tenant_id": 3}
+        assert manager.inspect_live_schema.await_args_list[1].kwargs == {"tenant_id": 4}
+        manager.refresh_from_snapshot.assert_not_awaited()
+
     # 方法作用：验证周期服务聚合过期清理和全部已注册数据源的指纹检查。
     # Args: self - pytest 测试类实例。
     # Returns: 无返回值，断言失败时由 pytest 报告。
@@ -142,9 +180,13 @@ class TestCacheRefresher:
             refresh_on_schema_change=AsyncMock(side_effect=[True, False]),
             close=AsyncMock(),
         )
-        registry = SimpleNamespace(list_all=AsyncMock(return_value=[
-            {"name": "sales"}, {"name": "warehouse"},
-        ]))
+        registry = SimpleNamespace(
+            list_tenant_ids=AsyncMock(return_value=[3, 4]),
+            list_all=AsyncMock(side_effect=[
+                [{"name": "sales"}],
+                [{"name": "sales"}],
+            ]),
+        )
         service = CacheRefreshService(refresher, registry, interval_seconds=3600)
 
         # Act
@@ -152,7 +194,10 @@ class TestCacheRefresher:
 
         # Assert
         assert result == {"deleted": 2, "checked": 2, "changed": 1}
-        assert refresher.refresh_on_schema_change.await_count == 2
+        assert registry.list_all.await_args_list[0].kwargs == {"tenant_id": 3}
+        assert registry.list_all.await_args_list[1].kwargs == {"tenant_id": 4}
+        assert refresher.refresh_on_schema_change.await_args_list[0].kwargs == {"tenant_id": 3}
+        assert refresher.refresh_on_schema_change.await_args_list[1].kwargs == {"tenant_id": 4}
 
     # 方法作用：验证周期服务可以幂等启动并在关闭时释放刷新器。
     # Args: self - pytest 测试类实例。

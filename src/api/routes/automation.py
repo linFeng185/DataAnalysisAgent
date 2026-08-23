@@ -7,6 +7,7 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Query
 
 from src.api.auth import get_current_identity
+from src.api.routes._helpers import _call_with_optional_tenant
 from src.api.schemas import AutomationScheduleCreateRequest, AutomationScheduleUpdateRequest
 from src.app_context import get_tenant_policy
 from src.automation.models import ScheduleDefinition
@@ -59,7 +60,11 @@ async def _validate_schedule_request(
         raise HTTPException(422, "选择 email 渠道时必须填写收件邮箱")
     registry = get_registry()
     try:
-        datasource = await registry.resolve(request.datasource)
+        datasource = await _call_with_optional_tenant(
+            registry.resolve,
+            request.datasource,
+            tenant_id=identity.tenant_id,
+        )
     except DataSourceNotFoundError as exc:
         logger.warning("自动化任务数据源不存在", datasource=request.datasource)
         raise HTTPException(404, f"数据源 '{request.datasource}' 不可用") from exc
@@ -79,7 +84,10 @@ async def _validate_schedule_request(
 
         try:
             await resolve_datasource_access(
-                await registry.list_all(),
+                await _call_with_optional_tenant(
+                    registry.list_all,
+                    tenant_id=identity.tenant_id,
+                ),
                 [request.datasource],
                 tenant_id=identity.tenant_id,
                 user_id=identity.user_id,

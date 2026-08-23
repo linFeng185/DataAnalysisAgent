@@ -2,9 +2,7 @@ import { useState, useRef, useCallback, useEffect } from 'react';
 import { streamChat, fetchSessionTurns } from '../api/client';
 import type { ActionRequestPayload, ChatTurnData } from '../types';
 import { useAuth } from './AuthContext';
-import {
-  chatStorageNamespace, clearChatStorage, loadChatStorage, saveChatStorage,
-} from './chatStorage';
+import { clearChatStorage } from './chatStorage';
 
 interface ProgressNode {
   status: 'pending' | 'running' | 'done' | 'error';
@@ -72,47 +70,30 @@ function turnFromData(d: ChatTurnData, datasource: string): ChatTurn {
 // Returns: 对话状态、发送/取消/恢复操作及加载状态。
 export function useChat() {
   const { user } = useAuth();
-  const namespace = chatStorageNamespace(user?.tenant_id, user?.user_id);
-  const saved = useRef<{ turns: ChatTurn[]; sessionId: string } | null>(null);
-  if (saved.current === null && user) {
-    const stored = loadChatStorage(namespace);
-    saved.current = stored as { turns: ChatTurn[]; sessionId: string } | null;
-  }
-  const [turns, setTurns] = useState<ChatTurn[]>(saved.current?.turns || []);
+  const identityKey = user ? `${user.tenant_id}:${user.user_id}` : 'anonymous';
+  const [turns, setTurns] = useState<ChatTurn[]>([]);
   const [loading, setLoading] = useState(false);
   const [retryInfo, setRetryInfo] = useState<{current:number;max:number;reason:string}|null>(null);
-  const [sessionId, setSessionId] = useState(saved.current?.sessionId || '');
-  const [stateNamespace, setStateNamespace] = useState(namespace);
+  const [sessionId, setSessionId] = useState('');
   const [hasMore, setHasMore] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
-  const nextId = useRef(turns.length > 0 ? Math.max(...turns.map(t => t.id)) + 1 : 1);
+  const nextId = useRef(1);
   const aborterRef = useRef<AbortController | null>(null);
 
-  // 方法作用：认证身份变化时丢弃旧用户的内存状态并恢复新用户专属缓存。
-  // Args: namespace - 新身份的聊天缓存命名空间；user - 新认证身份。
+  // 方法作用：认证身份变化时终止旧请求并清空全部内存聊天状态。
+  // Args: identityKey - 当前租户与用户组成的身份键。
   // Returns: 无返回值。
   useEffect(() => {
     aborterRef.current?.abort();
     aborterRef.current = null;
-    const stored = user ? loadChatStorage(namespace) : null;
-    const restored = (stored?.turns || []) as ChatTurn[];
-    setTurns(restored);
-    setSessionId(stored?.sessionId || '');
+    setTurns([]);
+    setSessionId('');
     setHasMore(false);
     setLoading(false);
     setRetryInfo(null);
-    setStateNamespace(namespace);
-    nextId.current = restored.length > 0
-      ? Math.max(...restored.map(turn => turn.id)) + 1 : 1;
-    if (!user) clearChatStorage();
-  }, [namespace, user]);
-
-  // 每次变更持久化到 sessionStorage
-  useEffect(() => {
-    if (stateNamespace === namespace && turns.length > 0 && sessionId) {
-      saveChatStorage(namespace, turns, sessionId);
-    }
-  }, [turns, sessionId, namespace, stateNamespace]);
+    nextId.current = 1;
+    clearChatStorage();
+  }, [identityKey]);
 
   const send = useCallback((
     query: string,
@@ -276,7 +257,7 @@ export function useChat() {
       fileIds,
       actionRequest,
     );
-  }, [sessionId, namespace]);
+  }, [sessionId]);
 
   const sendMulti = useCallback((query: string, datasourcesList: string[], modelId: string, connectionId?: number) => {
     if (datasourcesList.length > 0) {
@@ -293,8 +274,7 @@ export function useChat() {
   const clearSession = useCallback(() => {
     setTurns([]); setSessionId(''); nextId.current = 1;
     setHasMore(false);
-    clearChatStorage(namespace);
-  }, [namespace]);
+  }, []);
 
   /** 恢复历史会话的逐轮结构化记录。 */
   const restoreTurns = useCallback((
@@ -306,8 +286,7 @@ export function useChat() {
     setHasMore(hasOlder);
     nextId.current = restored.length > 0
       ? Math.max(...restored.map(t => t.id)) + 1 : 1;
-    saveChatStorage(namespace, restored, sid);
-  }, [namespace]);
+  }, []);
 
   /** 瀑布流加载更早的对话轮次 */
   const loadMoreTurns = useCallback(async (sid: string, datasource: string) => {

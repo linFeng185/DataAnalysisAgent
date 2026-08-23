@@ -7,6 +7,7 @@ import asyncio
 import sqlalchemy as sa
 from sqlalchemy import URL
 
+from src.config import get_settings
 from src.connectors.base import ConnectorBase
 from src.connectors.registry import register_connector
 from src.logging_config import get_logger
@@ -44,12 +45,17 @@ class SQLServerConnector(ConnectorBase):
         """在线程池外只创建轻量 Engine，真实连接由首次查询建立。"""
         logger.debug("SQL Server 引擎创建入口", datasource=self.config.name)
         try:
+            timeout_seconds = max(1, int(get_settings().max_execution_time))
             self._engine = sa.create_engine(
                 self._build_url(),
                 pool_size=2,
                 max_overflow=5,
                 pool_pre_ping=True,
                 pool_recycle=1800,
+                connect_args={
+                    "timeout": timeout_seconds,
+                    "login_timeout": timeout_seconds,
+                },
             )
         except Exception as exc:
             logger.error("SQL Server 引擎创建失败", error=str(exc), exc_info=True)

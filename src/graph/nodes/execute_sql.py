@@ -25,15 +25,10 @@ async def _record_query_audit(
     row_count: int = 0,
     error_message: str = "",
 ) -> None:
-    from src.api.auth import get_current_tenant_id, get_current_user_id
-    from src.graph.context import read_contexts
+    from src.graph.context import resolve_request_identity
     from src.security.data_masker import log_audit
 
-    contexts = read_contexts(state)
-    user_id = contexts.request.user_id
-    tenant_id = contexts.request.tenant_id
-    effective_user_id = get_current_user_id() if user_id is None else int(user_id)
-    effective_tenant_id = get_current_tenant_id() if tenant_id is None else int(tenant_id)
+    effective_tenant_id, effective_user_id = resolve_request_identity(state)
     elapsed_ms = round((time.monotonic() - started_at) * 1000)
     logger.debug(
         "记录查询审计入口",
@@ -61,9 +56,10 @@ async def _record_query_audit(
 
 async def execute_sql_node(state: AnalysisState) -> dict:
     """Phase 2: registry → connector.execute()。Phase 1: 返回空数据 + 提示。"""
-    from src.graph.context import read_contexts
+    from src.graph.context import read_contexts, resolve_request_identity
 
     contexts = read_contexts(state)
+    effective_tenant_id, _ = resolve_request_identity(state)
     _start = time.monotonic()
     logger.info("节点开始", node="execute_sql")
     sql = (state.get("generated_sql", "") or "").strip()
@@ -147,6 +143,7 @@ async def execute_sql_node(state: AnalysisState) -> dict:
             dialect,
             explain=not contexts.execution.sql_explain_checked,
             max_rows=get_settings().max_result_rows,
+            tenant_id=effective_tenant_id,
         )
         sql = execution.sql or sql
         if execution.success:

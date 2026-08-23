@@ -39,7 +39,22 @@ async def resolve_datasource_access(
     Raises:
         PermissionError: 数据源无权访问或权限服务不可用。
     """
-    policy = tenant_policy or TenantPolicy(multi_tenant=bool(multi_tenant))
+    if tenant_policy is not None:
+        policy = tenant_policy
+        policy_source = "injected"
+    elif multi_tenant is not None:
+        policy = TenantPolicy(multi_tenant=bool(multi_tenant))
+        policy_source = "compatibility_flag"
+    else:
+        from src.app_context import get_tenant_policy
+
+        policy = get_tenant_policy()
+        policy_source = "app_context"
+    logger.info(
+        "数据源访问策略来源探针",
+        source=policy_source,
+        multi_tenant=policy.multi_tenant,
+    )
     normalized_role = normalize_role(role)
     isolation_enabled = policy.datasource_isolation_enabled
     available_by_name = {
@@ -176,13 +191,32 @@ def check_column_whitelist(sql: str, allowed_columns: list[str]) -> str | None:
             logger.warning("列白名单校验失败", reason="SQL 解析结果为空")
             return "列权限校验解析失败: SQL 为空"
 
-        for select in tree.find_all(exp.Select):
-            has_wildcard_projection = any(
-                isinstance(projection, exp.Star)
-                or (isinstance(projection, exp.Column) and projection.is_star)
-                for projection in select.expressions
-            )
-            if has_wildcard_projection:
+        from sqlglot.optimizer.scope import traverse_scope
+
+        physical_qualifiers: dict[int, str] = {}
+        table_aliases: dict[str, str] = {}
+        for scope in traverse_scope(tree):
+            scope_aliases: dict[str, str] = {}
+            for alias, source in scope.sources.items():
+                if isinstance(source, exp.Table):
+                    physical_name = str(source.name or "").strip().lower()
+                    if physical_name:
+                        scope_aliases[str(alias).lower()] = physical_name
+                        table_aliases[str(alias).lower()] = physical_name
+            for column in scope.columns:
+                qualifier = str(column.table or "").strip().lower()
+                if qualifier:
+                    physical_qualifiers[id(column)] = scope_aliases.get(qualifier, qualifier)
+        logger.info(
+            "列白名单作用域探针",
+            table_aliases=table_aliases,
+            qualified_whitelist=sorted(qualified_whitelist),
+        )
+
+        for star in tree.find_all(exp.Star):
+            parent = star.parent
+            count_parent = parent if isinstance(parent, exp.Count) else getattr(parent, "parent", None)
+            if not isinstance(count_parent, exp.Count):
                 logger.warning("列白名单校验失败", reason="投影包含通配符")
                 return "列权限不足: 启用列白名单时禁止使用通配符 *"
 
@@ -192,9 +226,10 @@ def check_column_whitelist(sql: str, allowed_columns: list[str]) -> str | None:
             if col in ("*", "1", "true", "false"):
                 continue
             qualifier = node.table.lower()
-            referenced = f"{qualifier}.{col}" if qualifier else col
+            physical_qualifier = physical_qualifiers.get(id(node), qualifier)
+            referenced = f"{physical_qualifier}.{col}" if physical_qualifier else col
             allowed = col in bare_whitelist or (
-                bool(qualifier) and referenced in qualified_whitelist
+                bool(physical_qualifier) and referenced in qualified_whitelist
             )
             if not allowed and referenced not in violations:
                 violations.append(referenced)

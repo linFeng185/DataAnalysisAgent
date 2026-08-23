@@ -15,7 +15,7 @@
 |---|------|------|------|------|--------|
 | 18.2.1 | Chat 对话界面 | `frontend/src/pages/ChatPage.tsx` | 消息输入 + 数据源选择 + 发送/取消/清空 + 会话 ID 显示 | 开发完成 | P2 |
 | 18.2.2 | 流式进度展示 | `frontend/src/hooks/useChat.ts` | SSE 逐 Node 进度 Tags（8 个节点状态）+ 按 stream_id 隔离的 token 实时推送 | 开发完成 | P2 |
-| 18.2.3 | SQL 代码高亮 | `ChatPage.tsx` TurnCard | highlight.js github-dark 主题 + 复制按钮 | 开发完成 | P2 |
+| 18.2.3 | SQL 代码高亮 | `SqlPanel.tsx` | highlight.js github-dark 主题 + 复制按钮；高亮异常兜底 HTML 转义 | 单测完成 | P2 |
 | 18.2.4 | 数据表格展示 | `ChatPage.tsx` TurnCard | Ant Design Table 动态列 + 分页（20条/页，最多100行） | 开发完成 | P2 |
 | 18.2.5 | ECharts 图表渲染 | `ChatPage.tsx` TurnCard | echarts-for-react 渲染 chart.option，空数据时显示 fallback | 开发完成 | P2 |
 | 18.2.6 | 推理过程兼容展示 | `ChatPage.tsx` TurnCard | 仅兼容历史 reasoning 字段；新请求不再接收或展示模型原始推理链 | 开发完成 | P2 |
@@ -67,13 +67,13 @@
 | # | 功能 | 文件 | 描述 | 状态 | 优先级 |
 |---|------|------|------|------|--------|
 | 18.7.1 | API 客户端 | `frontend/src/api/client.ts` | get/post/streamChat 封装 + SSE 解析 | 开发完成 | P2 |
-| 18.7.2 | useChat Hook | `frontend/src/hooks/useChat.ts` | 对话状态管理 + SSE 事件分发 | 开发完成 | P2 |
+| 18.7.2 | useChat Hook | `frontend/src/hooks/useChat.ts`、`chatStorage.ts` | 对话仅保留在内存，历史由授权 API 恢复；启动时清理旧版 sessionStorage 敏感缓存 | 单测完成 | P2 |
 | 18.7.3 | TypeScript 类型 | `frontend/src/types/index.ts` | SSEEvent / ChatResponse / DatasourceConfig / TableInfo / ColumnInfo | 开发完成 | P2 |
 | 18.7.4 | 公共组件库 | `frontend/src/components/` | SqlPanel / DataTable / ChartPanel / ProgressBar / ReasoningPanel / ResultCard | 开发完成 | P2 |
 | 18.7.5 | ErrorBoundary | `frontend/src/components/ErrorBoundary.tsx` | React Error Boundary 包裹所有页面路由 | 开发完成 | P2 |
 | 18.7.6 | 服务状态指示器 | `App.tsx` Header | 启动时 GET /health，仅展示应用服务正常或不可用；租户 LLM 状态由管理连接测试负责 | 开发完成 | P2 |
 | 18.7.7 | 响应式布局 | 全局 | 767px 以下使用抽屉导航，Header/对话/图表/表格和 Modal 自适应 | 单测完成 | P3 |
-| 18.7.8 | SSE 读取失败处理与依赖安全 | `frontend/src/api/client.ts`、`package.json` | reader 异常调用 onError 且不触发 onDone；ECharts 6.1.x，npm audit 无漏洞 | 单测完成 | P1 |
+| 18.7.8 | SSE 读取失败处理与依赖安全 | `frontend/src/api/client.ts`、`frontend/src/App.tsx`、`frontend/src/components/ChartPanel.tsx`、`vite.config.ts`、`package.json` | reader 异常调用 onError 且不触发 onDone；页面与 ECharts 按需加载并拆分 vendor chunk；ECharts 6.1.x，npm audit 无漏洞 | 单测完成 | P1 |
 
 ### 18.8 高级特性
 

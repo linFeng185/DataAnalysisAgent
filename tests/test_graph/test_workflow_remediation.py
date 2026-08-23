@@ -505,6 +505,7 @@ class TestLayer4Explain:
             result = await layer4_explain_node({
                 "datasource": "sqlite-test",
                 "dialect": "sqlite",
+                "tenant_id": 6,
                 "generated_sql": "SELECT 1",
             })
         finally:
@@ -520,6 +521,7 @@ class TestLayer4Explain:
         }
         assert result["execution_context"]["dialect"] == "sqlite"
         assert result["execution_context"]["sql_explain_checked"] is True
+        assert registry.resolve_or_none.await_args.kwargs["tenant_id"] == 6
         logger.info("test_explain_accepts_valid_sql 完成")
 
     # 方法作用：验证 PostgreSQL SQL 在 EXPLAIN 前完成方言重写并写回状态。

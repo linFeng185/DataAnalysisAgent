@@ -34,7 +34,7 @@
 | 16.3.1 | 完整 LangGraph 工作流测试 | `tests/test_graph/test_workflow_integration.py` | Fake LLM + SQLite 真实校验、EXPLAIN、执行、分析和响应 | 集成测试完成 | P1 |
 | 16.3.2 | SQL 错误重试集成测试 | 同上 | 首轮缺失字段 EXPLAIN 失败 → 条件边重生成 → 最终成功 | 集成测试完成 | P1 |
 | 16.3.3 | 安全拦截终止流程测试 | 同上 | Fake LLM 生成 DELETE → Layer 3 终止且 execute_bounded 未调用 | 集成测试完成 | P1 |
-| 16.3.4 | 三级 Schema 回退集成测试 | `tests/test_knowledge/test_schema_manager.py` | Mock 空缓存 → 验证走到 DB 内省兜底 | 待开发 | P1 |
+| 16.3.4 | 三级 Schema 回退集成测试 | `tests/test_knowledge/test_schema_manager.py` | Mock 空缓存 → 使用真实 SQLite 表结构验证 DB 内省兜底与缓存写回 | 集成测试完成 | P1 |
 | 16.3.5 | API 集成测试 | `tests/test_api/` | httpx AsyncClient + ASGITransport 覆盖 health、chat、认证和数据源生命周期 | 集成测试完成 | P1 |
 | 16.3.6 | 条件边路由测试 | `tests/test_graph/test_workflow.py`、`tests/test_graph_routing.py` | 构造 AnalysisState 验证 after_layer3 / after_layer4 / should_retry / route_by_intent | 集成测试完成 | P1 |
 
@@ -42,7 +42,7 @@
 
 | # | 功能 | 文件 | 描述 | 状态 |
 |---|------|------|------|------|
-| 16.4.1 | 生产配置与日志安全 | `tests/test_config_security.py` | 生产启动拒绝、七天日志轮转、禁用 MCP 和 Compose 凭证回归 | 单测完成 |
+| 16.4.1 | 生产配置与日志安全 | `tests/test_config_security.py` | 生产启动拒绝、七天日志轮转、异常消息凭证脱敏、禁用 MCP 和 Compose 凭证回归 | 单测完成 |
 | 16.4.2 | SQL 执行安全 | `tests/test_security/test_sql_security.py`、`tests/test_graph/test_execute_security.py` | AST 白名单、权限关闭、有界读取、脱敏与截断响应 | 单测完成 |
 | 16.4.3 | 认证与租户隔离 | `tests/test_api/test_auth_security.py`、`tests/test_memory/test_tenant_isolation.py` | Cookie、ContextVar、Session/History/FileStore 与 RLS 回归 | 单测完成 |
 | 16.4.4 | 管理 API 与上传安全 | `tests/test_api/test_management_routes.py` | 数据源生命周期、Schema 管理、XSS 转义和大小限制 | 集成测试完成 |
@@ -53,10 +53,8 @@
 
 ### 模块收尾
 
-模块功能点共 29 项，已完成 28 项，待开发 1 项。
+模块功能点共 29 项，已完成 29 项，待开发 0 项。本轮补齐空缓存到真实 SQLite DB 内省的完整回退集成测试，并验证结果写回共享缓存与向量缓存。
 
-| 功能点 | 不开发原因 | 可开发条件 | 预计开发时机 |
-|--------|------------|------------|--------------|
-| 16.3.4 三级 Schema 回退集成测试 | 已覆盖缓存读写和真实 refresh 委托，未覆盖空缓存到 DB 内省的完整回退 | 使用 SQLite MemoryDB 构造空 Chroma 缓存和真实表结构 | Phase 2，16.2.2/16.2.4 就绪后 |
+当前模块无待开发项。
 
 ---

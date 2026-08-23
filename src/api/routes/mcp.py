@@ -239,8 +239,13 @@ async def create_mcp_server(req: MCPServerCreate):
     except HTTPException:
         raise
     except Exception as exc:
-        logger.error("创建 MCP Server 失败", name=req.name, error=str(exc), exc_info=True)
-        raise HTTPException(500, f"创建失败: {exc}") from exc
+        logger.error(
+            "创建 MCP Server 失败",
+            name=req.name,
+            error_type=type(exc).__name__,
+            exc_info=True,
+        )
+        raise HTTPException(500, "创建 MCP Server 失败") from exc
 
 
 @router.delete("/mcp/servers/{name}")
@@ -298,8 +303,13 @@ async def delete_mcp_server(name: str, scope: str | None = None):
     except HTTPException:
         raise
     except Exception as exc:
-        logger.error("删除 MCP Server 失败", name=name, error=str(exc), exc_info=True)
-        raise HTTPException(500, f"删除失败: {exc}") from exc
+        logger.error(
+            "删除 MCP Server 失败",
+            name=name,
+            error_type=type(exc).__name__,
+            exc_info=True,
+        )
+        raise HTTPException(500, "删除 MCP Server 失败") from exc
 
 
 @router.post("/mcp/servers/{name}/test")
@@ -326,6 +336,11 @@ async def test_mcp_server(name: str, scope: str | None = None):
         return result
     except HTTPException:
         raise
-    except Exception as e:
-        logger.error("测试 MCP Server API 失败", name=name, error=str(e), exc_info=True)
-        return {"name": name, "ok": False, "error": str(e)}
+    except Exception as exc:
+        logger.error(
+            "测试 MCP Server API 失败",
+            name=name,
+            error_type=type(exc).__name__,
+            exc_info=True,
+        )
+        return {"name": name, "ok": False, "error": "MCP Server 连通性测试失败"}

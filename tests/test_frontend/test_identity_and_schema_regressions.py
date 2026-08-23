@@ -6,23 +6,33 @@ from pathlib import Path
 class TestIdentityAndSchemaRegressions:
     """覆盖用户切换、数据源回显和不存在 demo 数据源的缺陷。"""
 
-    # 方法作用：验证聊天持久化必须绑定租户和用户身份，避免切换账号复用旧会话。
+    # 方法作用：验证聊天仅保留在内存且身份变化会清空状态，避免浏览器持久化敏感对话。
     # Args: self - pytest 测试类实例。
     # Returns: 无返回值，断言失败时由 pytest 报告。
-    def test_chat_storage_is_namespaced_by_identity(self) -> None:
-        """不同用户不能读取同一组 chat_turns/active_session_id。"""
+    def test_chat_storage_is_memory_only_and_resets_by_identity(self) -> None:
+        """不同用户不能复用内存会话，也不能从浏览器存储恢复敏感对话。"""
         # Arrange
         source = Path("frontend/src/hooks/useChat.ts").read_text(encoding="utf-8")
+        storage_source = Path("frontend/src/hooks/chatStorage.ts").read_text(encoding="utf-8")
 
         # Act
         has_identity_key = "tenant_id" in source and "user_id" in source
-        clears_on_identity_change = "clearChatStorage" in source and "user" in source
+        resets_on_identity_change = (
+            "setTurns([]);" in source
+            and "setSessionId('');" in source
+            and "}, [identityKey]);" in source
+        )
 
         # Assert
         assert has_identity_key
-        assert clears_on_identity_change
-        assert "stateNamespace === namespace" in source
-        assert "}, [namespace]);" in source
+        assert resets_on_identity_change
+        assert "clearChatStorage" in source
+        assert "sessionStorage" not in source
+        assert "loadChatStorage" not in source
+        assert "saveChatStorage" not in source
+        assert "sessionStorage.removeItem" in storage_source
+        assert "sessionStorage.getItem" not in storage_source
+        assert "sessionStorage.setItem" not in storage_source
 
     # 方法作用：验证退出登录会清理浏览器中的会话缓存，避免下一账号看到旧内容。
     # Args: self - pytest 测试类实例。

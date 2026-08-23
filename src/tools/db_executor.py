@@ -55,9 +55,15 @@ class DBExecutorTool(BaseTool):
         datasource = datasource or self.datasource
         logger.debug("DBExecutorTool._arun 入口", datasource=datasource, sql=sql[:120])
         try:
+            from src.api.auth import get_current_tenant_id
             from src.security.sql_execution import validate_and_execute_sql
 
-            execution = await validate_and_execute_sql(sql, datasource)
+            tenant_id = int(get_current_tenant_id())
+            execution = await validate_and_execute_sql(
+                sql,
+                datasource,
+                tenant_id=tenant_id,
+            )
             if not execution.success:
                 logger.warning("DBExecutorTool._arun 拒绝", datasource=datasource, reason="SQL 校验失败")
                 return {
@@ -126,9 +132,15 @@ class DBExplainTool(BaseTool):
         datasource = datasource or self.datasource
         logger.debug("DBExplainTool._arun 入口", datasource=datasource, sql=sql[:120])
         try:
+            from src.api.auth import get_current_tenant_id
             from src.security.sql_execution import validate_and_explain_sql
 
-            explanation = await validate_and_explain_sql(sql, datasource)
+            tenant_id = int(get_current_tenant_id())
+            explanation = await validate_and_explain_sql(
+                sql,
+                datasource,
+                tenant_id=tenant_id,
+            )
             result = {
                 "success": explanation.success,
                 "explain_plan": explanation.explain_plan,

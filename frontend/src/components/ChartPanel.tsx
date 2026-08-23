@@ -1,8 +1,9 @@
-import { useEffect, useState } from 'react';
+import { lazy, Suspense, useEffect, useState } from 'react';
 import { Button, Dropdown, Empty, message, Space, Tooltip, Typography } from 'antd';
 import { BarChartOutlined, DownOutlined } from '@ant-design/icons';
-import ReactECharts from 'echarts-for-react';
 import { post } from '../api/client';
+
+const ReactECharts = lazy(() => import('echarts-for-react'));
 
 export interface ChartConfig {
   type: string;
@@ -105,8 +106,14 @@ export default function ChartPanel({ chartConfig, rows = [], height = 360 }: {
     <div>
       {toolbar}
       <div className="chart-container" style={{ height }}>
-        <ReactECharts option={current.option}
-          style={{ height: '100%' }} notMerge opts={{ renderer: 'canvas' }} />
+        <Suspense fallback={(
+          <div style={{ height: '100%', display: 'grid', placeItems: 'center' }}>
+            <Typography.Text type="secondary">图表加载中...</Typography.Text>
+          </div>
+        )}>
+          <ReactECharts option={current.option}
+            style={{ height: '100%' }} notMerge opts={{ renderer: 'canvas' }} />
+        </Suspense>
       </div>
     </div>
   );

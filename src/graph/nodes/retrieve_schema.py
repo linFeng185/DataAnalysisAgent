@@ -11,12 +11,13 @@ logger = get_logger(__name__)
 
 
 async def retrieve_schema_node(state: AnalysisState) -> dict:
-    from src.graph.context import read_contexts
+    from src.graph.context import read_contexts, resolve_request_identity
 
     contexts = read_contexts(state)
     _start = time.monotonic()
     logger.info("节点开始", node="retrieve_schema")
     datasource_name = contexts.routing.datasource
+    tenant_id, _ = resolve_request_identity(state)
     schema = state.get("resolved_schema")
 
     if schema is None:
@@ -26,6 +27,7 @@ async def retrieve_schema_node(state: AnalysisState) -> dict:
             schema = await manager.get_or_fetch_schema(
                 datasource_name,
                 user_query=contexts.request.user_query,
+                tenant_id=tenant_id,
             )
             tables_count = len(schema.tables) if schema else 0
             logger.info("Schema 检索成功", tables=tables_count)
@@ -37,7 +39,10 @@ async def retrieve_schema_node(state: AnalysisState) -> dict:
         if schema is None:
             try:
                 from src.datasource.registry import get_registry
-                ds = await get_registry().resolve_or_none(datasource_name)
+                ds = await get_registry().resolve_or_none(
+                    datasource_name,
+                    tenant_id=tenant_id,
+                )
                 if ds:
                     # 尝试从 Registry 获取已缓存的 schema
                     if ds.schema:
@@ -69,7 +74,10 @@ async def retrieve_schema_node(state: AnalysisState) -> dict:
     dialect = ""
     try:
         from src.datasource.registry import get_registry
-        ds = await get_registry().resolve_or_none(datasource_name)
+        ds = await get_registry().resolve_or_none(
+            datasource_name,
+            tenant_id=tenant_id,
+        )
         if ds:
             dialect = ds.dialect
     except Exception as exc:

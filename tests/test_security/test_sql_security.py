@@ -140,6 +140,182 @@ class TestReadonlySQLValidation:
             )
             raise
 
+    # 方法作用：验证顶层 SELECT 中嵌套的数据修改 CTE 仍被识别为写操作。
+    # Args: self - pytest 测试类实例；cte_sql - 含写操作的 PostgreSQL CTE。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    @pytest.mark.parametrize(
+        "cte_sql",
+        [
+            "WITH changed AS (DELETE FROM users RETURNING id) SELECT * FROM changed",
+            "WITH changed AS (INSERT INTO users(id) VALUES (1) RETURNING id) SELECT * FROM changed",
+            "WITH changed AS (UPDATE users SET name = 'x' RETURNING id) SELECT * FROM changed",
+        ],
+    )
+    def test_data_modifying_cte_is_rejected(self, cte_sql: str) -> None:
+        """根节点是 SELECT 也不能掩盖 CTE 内部的数据修改。"""
+        # Arrange
+        from src.security.sql_execution import validate_sql
+
+        # Act
+        result = validate_sql(cte_sql, "postgres")
+
+        # Assert
+        assert result.valid is False
+        assert result.errors[0]["type"] == "security_block"
+
+    # 方法作用：验证可从 SELECT 触发数据库状态、文件或外联副作用的函数被拒绝。
+    # Args: self - pytest 测试类实例；dialect - SQL 方言；sql - 副作用查询。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    @pytest.mark.parametrize(
+        ("dialect", "sql"),
+        [
+            ("postgres", "SELECT pg_write_file('/tmp/x', 'data', false)"),
+            ("postgres", "SELECT pg_copy_file('/tmp/source', '/tmp/target')"),
+            ("postgres", "SELECT pg_unlink('/tmp/x')"),
+            ("postgres", "SELECT lo_import('/tmp/source')"),
+            ("postgres", "SELECT pg_notify('events', 'payload')"),
+            ("mysql", "SELECT GET_LOCK('analysis-lock', 10)"),
+            ("oracle", "SELECT UTL_INADDR.GET_HOST_ADDRESS('internal.example') FROM dual"),
+            ("mssql", "SELECT * FROM OPENQUERY(linked_server, 'SELECT 1')"),
+        ],
+    )
+    def test_select_side_effect_functions_are_rejected(self, dialect: str, sql: str) -> None:
+        """只读白名单必须阻断文件访问、锁、通知和数据库外联函数。"""
+        # Arrange
+        from src.security.sql_execution import validate_sql
+
+        # Act
+        result = validate_sql(sql, dialect)
+
+        # Assert
+        assert result.valid is False
+        assert result.errors[0]["type"] == "security_block"
+
+    # 方法作用：验证统一 SQL 边界在 AST 解析前执行可配置字符预算。
+    # Args: self - pytest 测试类实例；monkeypatch - pytest 补丁工具。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    def test_sql_length_limit_covers_direct_sql_entrypoints(self, monkeypatch) -> None:
+        """Grafana、自动化和 Tool 直达 SQL 不能绕过 SQL 字符预算。"""
+        # Arrange
+        from types import SimpleNamespace
+
+        import src.config as config_module
+        from src.security.sql_execution import validate_sql
+
+        monkeypatch.setattr(
+            config_module,
+            "get_settings",
+            lambda: SimpleNamespace(max_sql_chars=8),
+        )
+
+        # Act
+        boundary = validate_sql("SELECT 1", "postgres")
+        oversized = validate_sql("SELECT 10", "postgres")
+
+        # Assert
+        assert boundary.valid is True
+        assert oversized.valid is False
+        assert oversized.errors[0]["type"] == "security_block"
+        assert "8" in oversized.errors[0]["message"]
+
+    # 方法作用：验证 EXPLAIN 估算扫描行数超出预算时不会执行真实查询。
+    # Args: self - pytest 测试类实例；monkeypatch - pytest 补丁工具。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    async def test_scan_budget_blocks_execution_before_query(self, monkeypatch) -> None:
+        """已知超大扫描计划必须在 `execute_bounded()` 前失败关闭。"""
+        # Arrange
+        from types import SimpleNamespace
+        from unittest.mock import AsyncMock
+
+        import src.config as config_module
+        import src.security.sql_execution as execution_module
+
+        connector = SimpleNamespace(
+            explain=AsyncMock(return_value={
+                "valid": True,
+                "errors": [],
+                "estimated_scan_rows": 101,
+            }),
+            execute_bounded=AsyncMock(return_value=([], False)),
+        )
+        monkeypatch.setattr(
+            execution_module,
+            "_resolve_sql_target",
+            AsyncMock(return_value=(object(), connector, "postgres")),
+        )
+        monkeypatch.setattr(
+            config_module,
+            "get_settings",
+            lambda: SimpleNamespace(
+                max_sql_chars=20_000,
+                max_execution_time=30,
+                max_scan_rows=100,
+                max_result_rows=10,
+            ),
+        )
+
+        # Act
+        result = await execution_module.validate_and_execute_sql(
+            "SELECT id FROM large_table",
+            "sales",
+            "postgres",
+        )
+
+        # Assert
+        assert result.success is False
+        assert result.error_type == "resource_limit"
+        connector.execute_bounded.assert_not_awaited()
+
+    # 方法作用：验证数据库驱动未及时返回时统一执行边界按配置终止等待。
+    # Args: self - pytest 测试类实例；monkeypatch - pytest 补丁工具。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    async def test_execution_timeout_covers_connectors_without_native_timeout(self, monkeypatch) -> None:
+        """Oracle、SQL Server 和 SQLite 等路径也必须受总超时保护。"""
+        # Arrange
+        import asyncio
+        from types import SimpleNamespace
+        from unittest.mock import AsyncMock
+
+        import src.config as config_module
+        import src.security.sql_execution as execution_module
+
+        # 方法作用：模拟无法在配置时间内完成的数据库查询。
+        # Args: sql - SQL；max_rows - 最大返回行数。
+        # Returns: 不返回，等待期间由统一超时取消。
+        async def slow_execute(sql: str, max_rows: int):
+            await asyncio.sleep(0.1)
+            return [], False
+
+        connector = SimpleNamespace(execute_bounded=AsyncMock(side_effect=slow_execute))
+        monkeypatch.setattr(
+            execution_module,
+            "_resolve_sql_target",
+            AsyncMock(return_value=(object(), connector, "sqlite")),
+        )
+        monkeypatch.setattr(
+            config_module,
+            "get_settings",
+            lambda: SimpleNamespace(
+                max_sql_chars=20_000,
+                max_execution_time=0.01,
+                max_scan_rows=100,
+                max_result_rows=10,
+            ),
+        )
+
+        # Act
+        result = await execution_module.validate_and_execute_sql(
+            "SELECT id FROM records",
+            "local",
+            "sqlite",
+            explain=False,
+        )
+
+        # Assert
+        assert result.success is False
+        assert result.error_type == "timeout"
+        assert result.error == "数据库查询超时"
+
 
 class TestPermissionFailureClosed:
     """覆盖列权限与行过滤失败关闭。"""
@@ -234,6 +410,47 @@ class TestPermissionFailureClosed:
         assert denied_error is not None
         assert "secret.id" in denied_error
 
+    # 方法作用：验证 SQL 表别名不能冒充列白名单中的授权真实表名。
+    # Args: self - pytest 测试类实例。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    def test_qualified_whitelist_resolves_alias_to_physical_table(self) -> None:
+        """把 secret 表别名设为 public 时仍应按 secret.id 判定权限。"""
+        # Arrange
+        from src.security.permission_check import check_column_whitelist
+
+        # Act
+        error = check_column_whitelist(
+            "SELECT public.id FROM secret AS public",
+            ["public.id"],
+        )
+
+        # Assert
+        assert error is not None
+        assert "secret.id" in error
+
+    # 方法作用：验证函数参数中的整行通配符不能绕过列白名单。
+    # Args: self - pytest 测试类实例；sql - 会返回整行内容的查询。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    @pytest.mark.parametrize(
+        "sql",
+        [
+            "SELECT ROW(orders.*)::text FROM orders",
+            "SELECT JSON_BUILD_ARRAY(orders.*) FROM orders",
+            "SELECT CONCAT(orders.*) FROM orders",
+        ],
+    )
+    def test_whole_row_wildcard_inside_function_is_rejected(self, sql: str) -> None:
+        """通配符藏在函数或行构造器中时仍会泄露未授权列。"""
+        # Arrange
+        from src.security.permission_check import check_column_whitelist
+
+        # Act
+        error = check_column_whitelist(sql, ["orders.id"])
+
+        # Assert
+        assert error is not None
+        assert "通配符" in error
+
 
 class TestAuditSanitization:
     """覆盖查询审计不记录明文 SQL。"""
@@ -303,6 +520,44 @@ class TestAuditSanitization:
 
 class TestDatasourceAuthorization:
     """覆盖数据源候选发现和显式访问授权。"""
+
+    # 方法作用：验证调用方省略兼容参数时仍使用 AppContext 的集中租户策略。
+    # Args: self - pytest 测试类实例；monkeypatch - pytest 补丁工具。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    async def test_default_policy_comes_from_app_context(self, monkeypatch) -> None:
+        """多租户 Context 下不得因漏传 tenant_policy 自动进入 trusted 模式。"""
+        # Arrange
+        from types import SimpleNamespace
+        from unittest.mock import AsyncMock, MagicMock
+
+        import src.app_context as app_context_module
+        import src.security.permission_check as permission_module
+        from src.security.tenant_policy import TenantPolicy
+
+        connection = SimpleNamespace(fetch=AsyncMock(return_value=[]))
+        acquire = MagicMock()
+        acquire.return_value.__aenter__ = AsyncMock(return_value=connection)
+        acquire.return_value.__aexit__ = AsyncMock(return_value=False)
+        monkeypatch.setattr(
+            permission_module,
+            "get_pg_pool",
+            AsyncMock(return_value=SimpleNamespace(acquire=acquire)),
+        )
+        monkeypatch.setattr(
+            app_context_module,
+            "get_tenant_policy",
+            lambda: TenantPolicy(multi_tenant=True),
+        )
+
+        # Act / Assert
+        with pytest.raises(PermissionError, match="无权访问数据源: finance"):
+            await permission_module.resolve_datasource_access(
+                [{"name": "finance", "dialect": "postgres"}],
+                ["finance"],
+                tenant_id=4,
+                user_id=7,
+                role="analyst",
+            )
 
     # 方法作用：验证自动发现只返回当前用户有权访问的数据源。
     # Args: self - pytest 测试类实例；monkeypatch - pytest 补丁工具。

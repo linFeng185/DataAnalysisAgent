@@ -79,8 +79,10 @@ class SourceQueryRequest(BaseModel):
     ) -> SourceQueryRequest:
         """从扁平兼容状态提取单源 worker 所需的显式字段。"""
         from src.graph.context import read_contexts
+        from src.graph.context import resolve_request_identity
 
         contexts = read_contexts(state)
+        tenant_id, user_id = resolve_request_identity(state)
         datasource_access = contexts.permission.datasource_access
         permission_data = datasource_access.get(datasource)
         if datasource_access and permission_data is None:
@@ -97,8 +99,8 @@ class SourceQueryRequest(BaseModel):
             global_query=contexts.request.user_query.strip(),
             selected_datasources=selected,
             session_id=contexts.request.session_id,
-            tenant_id=contexts.request.tenant_id,
-            user_id=contexts.request.user_id,
+            tenant_id=tenant_id,
+            user_id=user_id,
             user_role=contexts.request.user_role,
             request_rate_limit_checked=contexts.request.request_rate_limit_checked,
             intent=contexts.routing.intent or "query",

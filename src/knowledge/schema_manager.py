@@ -63,7 +63,16 @@ class SchemaManager:
 
     # ── 公开接口 ──────────────────────────────────────
 
-    async def get_or_fetch_schema(self, datasource_name: str, user_query: str = ""):
+    # 方法作用：按连接级缓存、向量缓存和实时内省三级回退获取 Schema。
+    # Args: datasource_name - 数据源名称；user_query - 可选语义筛选问题；tenant_id - 可选显式租户 ID。
+    # Returns: 当前数据源的 SchemaSnapshot，无法获取时返回空快照。
+    async def get_or_fetch_schema(
+        self,
+        datasource_name: str,
+        user_query: str = "",
+        *,
+        tenant_id: int | None = None,
+    ):
         """
         获取 Schema 的主入口 — 三级回退。
 
@@ -76,8 +85,10 @@ class SchemaManager:
             "获取 Schema 入口",
             datasource=datasource_name,
             has_query=bool(user_query),
+            tenant_id=tenant_id,
         )
-        datasource = await self._resolve_datasource(datasource_name)
+        tenant_kwargs = {"tenant_id": int(tenant_id)} if tenant_id is not None else {}
+        datasource = await self._resolve_datasource(datasource_name, **tenant_kwargs)
         fingerprint = ""
         if datasource is not None:
             from src.knowledge.datasource_cache import build_connection_fingerprint
@@ -88,7 +99,11 @@ class SchemaManager:
         shared_cached = await self._read_shared_cache(fingerprint)
         doc_entries = self._load_from_docs(datasource_name)
         if shared_cached and self._entries_complete(shared_cached):
-            rebound = self._rebind_entries(shared_cached, datasource_name)
+            rebound = self._rebind_entries(
+                shared_cached,
+                datasource_name,
+                **tenant_kwargs,
+            )
             merged = self._merge_entries(doc_entries, rebound)
             logger.info(
                 "Schema 连接级共享缓存命中",
@@ -99,7 +114,7 @@ class SchemaManager:
             snapshot = self._build_snapshot(merged)
             if user_query:
                 snapshot = await self._filter_relevant_tables(
-                    snapshot, user_query, datasource_name,
+                    snapshot, user_query, datasource_name, **tenant_kwargs,
                 )
             logger.info(
                 "获取 Schema 完成",
@@ -117,14 +132,16 @@ class SchemaManager:
             await self._delete_shared_cache(fingerprint)
 
         # ② 兼容旧 VectorStore 缓存，并在命中后迁移到连接级缓存
-        cached = await self._query_cache(datasource_name)
+        cached = await self._query_cache(datasource_name, **tenant_kwargs)
         if cached and not self._any_expired(cached):
             if self._entries_complete(cached):
                 logger.info("Schema 缓存命中", datasource=datasource_name, entries=len(cached))
                 await self._write_shared_cache(fingerprint, cached)
                 snapshot = self._build_snapshot(cached)
                 if user_query:
-                    snapshot = await self._filter_relevant_tables(snapshot, user_query, datasource_name)
+                    snapshot = await self._filter_relevant_tables(
+                        snapshot, user_query, datasource_name, **tenant_kwargs,
+                    )
                 logger.info(
                     "获取 Schema 完成",
                     datasource=datasource_name,
@@ -142,7 +159,7 @@ class SchemaManager:
 
         # ③ DB 内省，文档条目只参与当前知识合并，不写入跨用户精确缓存
         logger.info("Schema 缓存未命中，触发 DB 内省", datasource=datasource_name)
-        introspected = await self._introspect_from_db(datasource_name)
+        introspected = await self._introspect_from_db(datasource_name, **tenant_kwargs)
 
         # 合并：文档优先于自动内省
         merged = self._merge_entries(doc_entries, introspected)
@@ -174,7 +191,9 @@ class SchemaManager:
         result = merged or cached or []
         snapshot = self._build_snapshot(result)
         if user_query:
-            snapshot = await self._filter_relevant_tables(snapshot, user_query, datasource_name)
+            snapshot = await self._filter_relevant_tables(
+                snapshot, user_query, datasource_name, **tenant_kwargs,
+            )
         logger.info(
             "获取 Schema 完成",
             datasource=datasource_name,
@@ -183,7 +202,12 @@ class SchemaManager:
         )
         return snapshot
 
-    async def _resolve_datasource(self, datasource_name: str):
+    async def _resolve_datasource(
+        self,
+        datasource_name: str,
+        *,
+        tenant_id: int | None = None,
+    ):
         """解析当前数据源配置以生成连接级缓存身份。
 
         Args:
@@ -197,7 +221,12 @@ class SchemaManager:
             from src.datasource.registry import get_registry
 
             self._ensure_external_provider()
-            datasource = await get_registry().resolve_or_none(datasource_name)
+            resolver = get_registry().resolve_or_none
+            datasource = (
+                await resolver(datasource_name, tenant_id=tenant_id)
+                if tenant_id is not None
+                else await resolver(datasource_name)
+            )
             logger.info(
                 "解析共享缓存数据源完成",
                 datasource=datasource_name,
@@ -377,8 +406,15 @@ class SchemaManager:
         logger.info("清理共享缓存条目完成", entry_count=len(result))
         return result
 
+    # 方法作用：把连接级共享条目重新绑定到当前别名和租户分区。
+    # Args: self - SchemaManager 实例；entries - 共享缓存条目；datasource_name - 当前数据源别名；tenant_id - 可选显式租户 ID。
+    # Returns: 已写入当前安全上下文的 Schema 条目列表。
     def _rebind_entries(
-        self, entries: list[KnowledgeEntry], datasource_name: str,
+        self,
+        entries: list[KnowledgeEntry],
+        datasource_name: str,
+        *,
+        tenant_id: int | None = None,
     ) -> list[KnowledgeEntry]:
         """将共享条目绑定到当前别名和安全上下文用于向量索引。
 
@@ -393,23 +429,29 @@ class SchemaManager:
             "绑定共享缓存条目入口",
             datasource=datasource_name,
             entry_count=len(entries),
+            tenant_id=tenant_id,
+        )
+        effective_tenant_id = (
+            self._current_tenant_id() if tenant_id is None else int(tenant_id)
         )
         result: list[KnowledgeEntry] = []
         for entry in entries:
             metadata = dict(entry.metadata)
             metadata.update({
                 "datasource": datasource_name,
-                "tenant_id": self._current_tenant_id(),
+                "tenant_id": effective_tenant_id,
                 "owner_user_id": self._current_user_id(),
                 "visibility": "tenant",
             })
             if entry.category == "table":
                 entry_id = self._scoped_entry_id(
                     "table", datasource_name, entry.table_name,
+                    tenant_id=effective_tenant_id,
                 )
             elif entry.category == "column":
                 entry_id = self._scoped_entry_id(
                     "column", datasource_name, entry.table_name, entry.column_name,
+                    tenant_id=effective_tenant_id,
                 )
             else:
                 continue
@@ -423,7 +465,12 @@ class SchemaManager:
 
     # ── 私有：缓存查询 ─────────────────────────────────
 
-    async def _query_cache(self, datasource_name: str) -> list[KnowledgeEntry]:
+    async def _query_cache(
+        self,
+        datasource_name: str,
+        *,
+        tenant_id: int | None = None,
+    ) -> list[KnowledgeEntry]:
         """从向量存储检索指定数据源的所有知识条目。"""
         logger.debug("查询 Schema 缓存入口", datasource=datasource_name)
         try:
@@ -436,8 +483,11 @@ class SchemaManager:
             }
             from src.app_context import get_tenant_policy
             if get_tenant_policy().knowledge_isolation_enabled:
-                from src.api.auth import get_current_tenant_id
-                filters["tenant_id"] = get_current_tenant_id()
+                filters["tenant_id"] = (
+                    self._current_tenant_id()
+                    if tenant_id is None
+                    else int(tenant_id)
+                )
             results = await store.get_by_filter(
                 filters, limit=10000)
             entries = []
@@ -469,23 +519,33 @@ class SchemaManager:
             return []
 
     # 方法作用：使用已完成内省的快照原子替换指定数据源的共享和向量缓存。
-    # Args: self - SchemaManager 实例；datasource_name - 数据源名称；snapshot - 实时 Schema 快照。
+    # Args: self - SchemaManager 实例；datasource_name - 数据源名称；snapshot - 实时 Schema 快照；tenant_id - 可选显式租户 ID。
     # Returns: 输入的 SchemaSnapshot。
-    async def refresh_from_snapshot(self, datasource_name: str, snapshot):
+    async def refresh_from_snapshot(
+        self,
+        datasource_name: str,
+        snapshot,
+        *,
+        tenant_id: int | None = None,
+    ):
         logger.debug("使用实时快照刷新 Schema 入口", datasource=datasource_name)
-        datasource = await self._resolve_datasource(datasource_name)
+        datasource = await self._resolve_datasource(datasource_name, tenant_id=tenant_id)
         fingerprint = ""
         if datasource is not None:
             from src.knowledge.datasource_cache import build_connection_fingerprint
 
             fingerprint = build_connection_fingerprint(datasource)
-        entries = self._snapshot_to_entries(datasource_name, snapshot)
+        entries = self._snapshot_to_entries(
+            datasource_name,
+            snapshot,
+            tenant_id=tenant_id,
+        )
         await self._delete_shared_cache(fingerprint)
         try:
             from src.memory.vector_store import get_vector_store
 
             store = await get_vector_store()
-            cached = await self._query_cache(datasource_name)
+            cached = await self._query_cache(datasource_name, tenant_id=tenant_id)
             stale_ids = [entry.id for entry in cached]
             if stale_ids:
                 deleted = await store.delete_by_ids(stale_ids)
@@ -512,7 +572,12 @@ class SchemaManager:
         )
         return snapshot
 
-    async def refresh(self, datasource_name: str):
+    async def refresh(
+        self,
+        datasource_name: str,
+        *,
+        tenant_id: int | None = None,
+    ):
         """清理指定数据源缓存并执行真实 DB Schema 刷新。
 
         Args:
@@ -522,7 +587,7 @@ class SchemaManager:
             刷新后的 SchemaSnapshot。
         """
         logger.debug("Schema 刷新入口", datasource=datasource_name)
-        datasource = await self._resolve_datasource(datasource_name)
+        datasource = await self._resolve_datasource(datasource_name, tenant_id=tenant_id)
         fingerprint = ""
         if datasource is not None:
             from src.knowledge.datasource_cache import build_connection_fingerprint
@@ -532,14 +597,14 @@ class SchemaManager:
         try:
             from src.memory.vector_store import get_vector_store
             store = await get_vector_store()
-            cached = await self._query_cache(datasource_name)
+            cached = await self._query_cache(datasource_name, tenant_id=tenant_id)
             if cached:
                 deleted = await store.delete_by_ids([entry.id for entry in cached])
                 logger.info("Schema 旧缓存已删除", datasource=datasource_name, deleted=deleted)
         except Exception as exc:
             logger.warning("Schema 旧缓存清理失败，继续内省", datasource=datasource_name, error=str(exc))
 
-        entries = await self._introspect_from_db(datasource_name)
+        entries = await self._introspect_from_db(datasource_name, tenant_id=tenant_id)
         if entries:
             await self._upsert_to_cache(entries)
             await self._write_shared_cache(fingerprint, entries)
@@ -547,8 +612,17 @@ class SchemaManager:
         logger.info("Schema 刷新完成", datasource=datasource_name, tables=len(snapshot.tables))
         return snapshot
 
+    # 方法作用：更新当前租户 Schema 缓存中的字段备注。
+    # Args: self - SchemaManager 实例；datasource_name - 数据源名称；table_name - 表名；column_name - 字段名；comment - 新备注；tenant_id - 可选显式租户 ID。
+    # Returns: 找到并更新字段时返回 True，否则返回 False。
     async def update_column_comment(
-        self, datasource_name: str, table_name: str, column_name: str, comment: str,
+        self,
+        datasource_name: str,
+        table_name: str,
+        column_name: str,
+        comment: str,
+        *,
+        tenant_id: int | None = None,
     ) -> bool:
         """更新缓存中的字段备注。
 
@@ -566,12 +640,17 @@ class SchemaManager:
             datasource=datasource_name,
             table=table_name,
             column=column_name,
+            tenant_id=tenant_id,
         )
         try:
             from src.memory.vector_store import VectorEntry, get_vector_store
             store = await get_vector_store()
             entry_id = self._scoped_entry_id(
-                "column", datasource_name, table_name, column_name,
+                "column",
+                datasource_name,
+                table_name,
+                column_name,
+                tenant_id=tenant_id,
             )
             entry = await store.get_by_id(entry_id)
             if entry is None:
@@ -667,14 +746,19 @@ class SchemaManager:
     # ── 私有：DB 内省 ──────────────────────────────────
 
     # 方法作用：绕过缓存读取实时数据库 Schema，并让权限异常继续传播到治理边界。
-    # Args: self - SchemaManager 实例；datasource_name - 数据源名称。
+    # Args: self - SchemaManager 实例；datasource_name - 数据源名称；tenant_id - 可选显式租户 ID。
     # Returns: 当前数据库的 SchemaSnapshot。
-    async def inspect_live_schema(self, datasource_name: str):
+    async def inspect_live_schema(
+        self,
+        datasource_name: str,
+        *,
+        tenant_id: int | None = None,
+    ):
         from src.datasource.introspection import introspect_database
         from src.datasource.registry import get_registry
 
         self._ensure_external_provider()
-        datasource = await get_registry().resolve(datasource_name)
+        datasource = await get_registry().resolve(datasource_name, tenant_id=tenant_id)
         if datasource is None:
             raise LookupError(f"数据源 '{datasource_name}' 未找到")
 
@@ -704,10 +788,15 @@ class SchemaManager:
         return snapshot
 
     # 方法作用：将 Schema 权限异常持久化为租户可见的系统告警并累计指标。
-    # Args: self - SchemaManager 实例；error - 统一元数据权限异常。
+    # Args: self - SchemaManager 实例；error - 统一元数据权限异常；tenant_id - 可选显式租户 ID。
     # Returns: 无返回值。
-    async def _store_schema_permission_warning(self, error) -> None:
-        tenant_id = self._current_tenant_id()
+    async def _store_schema_permission_warning(
+        self,
+        error,
+        *,
+        tenant_id: int | None = None,
+    ) -> None:
+        tenant_id = self._current_tenant_id() if tenant_id is None else int(tenant_id)
         owner_user_id = self._current_user_id()
         warning = KnowledgeEntry(
             id=f"warning:schema-permission:{tenant_id}:{error.datasource}",
@@ -741,11 +830,23 @@ class SchemaManager:
             tenant_id=tenant_id,
         )
 
-    async def _introspect_from_db(self, datasource_name: str) -> list[KnowledgeEntry]:
+    async def _introspect_from_db(
+        self,
+        datasource_name: str,
+        *,
+        tenant_id: int | None = None,
+    ) -> list[KnowledgeEntry]:
         """从数据库系统表自动拉取表结构，转为 KnowledgeEntry 列表。"""
         try:
-            snapshot = await self.inspect_live_schema(datasource_name)
-            entries = self._snapshot_to_entries(datasource_name, snapshot)
+            snapshot = await self.inspect_live_schema(
+                datasource_name,
+                tenant_id=tenant_id,
+            )
+            entries = self._snapshot_to_entries(
+                datasource_name,
+                snapshot,
+                tenant_id=tenant_id,
+            )
             logger.info(
                 "DB 内省完成",
                 datasource=datasource_name,
@@ -757,7 +858,7 @@ class SchemaManager:
             from src.datasource.introspection import MetadataPermissionError
 
             if isinstance(exc, MetadataPermissionError):
-                await self._store_schema_permission_warning(exc)
+                await self._store_schema_permission_warning(exc, tenant_id=tenant_id)
                 return []
             logger.error(
                 "DB 内省失败",
@@ -768,12 +869,16 @@ class SchemaManager:
             return []
 
     def _snapshot_to_entries(
-        self, datasource_name: str, snapshot
+        self,
+        datasource_name: str,
+        snapshot,
+        *,
+        tenant_id: int | None = None,
     ) -> list[KnowledgeEntry]:
         """将 SchemaSnapshot 转为表级 + 字段级双粒度 KnowledgeEntry 列表。"""
         entries: list[KnowledgeEntry] = []
         now = datetime.now(timezone.utc)
-        tenant_id = self._current_tenant_id()
+        tenant_id = self._current_tenant_id() if tenant_id is None else int(tenant_id)
         owner_user_id = self._current_user_id()
         logger.info(
             "Schema 条目身份解析边界",
@@ -1008,8 +1113,16 @@ class SchemaManager:
     # 语义搜索返回的候选表数量
     _SEMANTIC_TOP_K: int = 20
 
+    # 方法作用：按查询语义和外键关系筛选大规模 Schema，并保持租户过滤。
+    # Args: self - SchemaManager 实例；snapshot - 完整 Schema；user_query - 用户问题；datasource_name - 数据源名称；tenant_id - 可选显式租户 ID。
+    # Returns: 筛选后的 SchemaSnapshot。
     async def _filter_relevant_tables(
-        self, snapshot, user_query: str, datasource_name: str
+        self,
+        snapshot,
+        user_query: str,
+        datasource_name: str,
+        *,
+        tenant_id: int | None = None,
     ):
         """语义搜索 + FK 图扩张，从大量表中筛选与查询相关的子集。"""
         tables = snapshot.tables if snapshot else []
@@ -1022,7 +1135,12 @@ class SchemaManager:
         fk_graph = self._build_fk_graph(tables)
 
         # ② 语义搜索相关表
-        matched_names = await self._semantic_search_tables(user_query, datasource_name, tables)
+        matched_names = await self._semantic_search_tables(
+            user_query,
+            datasource_name,
+            tables,
+            tenant_id=tenant_id,
+        )
         logger.info("语义搜索完成", matched=len(matched_names),
                     tables=sorted(matched_names))
 
@@ -1069,8 +1187,16 @@ class SchemaManager:
             result.update(neighbors)
         return result
 
+    # 方法作用：在当前数据源和租户知识分区中检索相关表名。
+    # Args: self - SchemaManager 实例；user_query - 用户查询；datasource_name - 数据源名称；tables - 候选表；tenant_id - 可选显式租户 ID。
+    # Returns: 相关表名集合。
     async def _semantic_search_tables(
-        self, user_query: str, datasource_name: str, tables: list
+        self,
+        user_query: str,
+        datasource_name: str,
+        tables: list,
+        *,
+        tenant_id: int | None = None,
     ) -> set[str]:
         """通过向量语义搜索找到与用户查询最相关的表。"""
         logger.debug(
@@ -1083,6 +1209,9 @@ class SchemaManager:
             from src.app_context import get_tenant_policy
             from src.memory.vector_store import get_vector_store
             store = await get_vector_store()
+            effective_tenant_id = (
+                self._current_tenant_id() if tenant_id is None else int(tenant_id)
+            )
             results = await store.search(
                 user_query,
                 top_k=50,
@@ -1091,7 +1220,7 @@ class SchemaManager:
                     "datasource": datasource_name,
                     "visibility": "tenant",
                     **(
-                        {"tenant_id": self._current_tenant_id()}
+                        {"tenant_id": effective_tenant_id}
                         if get_tenant_policy().knowledge_isolation_enabled
                         else {}
                     ),

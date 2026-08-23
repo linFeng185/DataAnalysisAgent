@@ -343,6 +343,56 @@ class TestSnapshotToEntries:
 class TestSchemaManagerIntegration:
     """SchemaManager ChromaDB 集成测试 -- mock collection 避免 ChromaDB 初始化。"""
 
+    # 方法作用：验证空向量缓存会回退到真实 SQLite 元数据内省并写回缓存。
+    # Args: self - pytest 测试类实例；sqlite_memory_db - 已建表并写入样本的 SQLite 测试库；monkeypatch - pytest 运行时替换工具。
+    # Returns: 无返回值，断言 Schema、行数和缓存写入契约。
+    async def test_empty_cache_falls_back_to_live_sqlite_introspection(
+        self, sqlite_memory_db, monkeypatch,
+    ) -> None:
+        """缓存为空时应返回 orders 表及其字段，而不是空快照或预置 schema。"""
+        # Arrange
+        from types import SimpleNamespace
+        from unittest.mock import AsyncMock
+
+        import src.datasource.registry as registry_module
+        import src.memory.vector_store as vector_module
+        from src.datasource.registry import DataSourceRegistry
+        from src.knowledge.schema_manager import SchemaManager
+
+        registry = DataSourceRegistry()
+        registry.register_config(sqlite_memory_db.datasource)
+        monkeypatch.setattr(registry_module, "get_registry", lambda: registry)
+
+        vector_store = SimpleNamespace(
+            get_by_filter=AsyncMock(return_value=[]),
+            upsert=AsyncMock(return_value=1),
+        )
+        monkeypatch.setattr(
+            vector_module,
+            "get_vector_store",
+            AsyncMock(return_value=vector_store),
+        )
+        shared_cache = SimpleNamespace(
+            get=AsyncMock(return_value=None),
+            set=AsyncMock(),
+            delete=AsyncMock(return_value=False),
+        )
+        manager = SchemaManager(datasource_cache=shared_cache)
+        monkeypatch.setattr(manager, "_ensure_external_provider", lambda: None)
+        monkeypatch.setattr(manager, "_load_from_docs", lambda _: [])
+
+        # Act
+        snapshot = await manager.get_or_fetch_schema(sqlite_memory_db.datasource.name)
+
+        # Assert
+        assert [table.name for table in snapshot.tables] == ["orders"]
+        table = snapshot.tables[0]
+        assert {column.name for column in table.columns} == {"id", "customer", "amount"}
+        assert table.row_count_estimate == 3
+        vector_store.get_by_filter.assert_awaited_once()
+        vector_store.upsert.assert_awaited_once()
+        shared_cache.set.assert_awaited_once()
+
     async def test_cache_write_and_read(self, monkeypatch):
         from unittest.mock import AsyncMock
 
@@ -489,6 +539,63 @@ class TestSchemaManagerManagement:
         assert all(entry.metadata["owner_user_id"] == 9 for entry in entries)
         tenant_id.assert_called_once_with()
         user_id.assert_called_once_with()
+
+    # 方法作用：验证 Schema 主入口把显式租户贯穿解析、缓存和内省链路。
+    # Args: self - pytest 测试类实例；monkeypatch - pytest 运行时替换工具。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    async def test_get_or_fetch_schema_propagates_explicit_tenant(self, monkeypatch):
+        """显式租户调用不能依赖当前 ContextVar 才能保证缓存隔离。"""
+        # Arrange
+        from unittest.mock import AsyncMock
+
+        from src.knowledge.schema_manager import SchemaManager
+
+        manager = SchemaManager(datasource_cache=SimpleNamespace(
+            get=AsyncMock(return_value=None),
+            set=AsyncMock(),
+            delete=AsyncMock(return_value=False),
+        ))
+        monkeypatch.setattr(manager, "_resolve_datasource", AsyncMock(return_value=None))
+        monkeypatch.setattr(manager, "_load_from_docs", lambda _: [])
+        monkeypatch.setattr(manager, "_query_cache", AsyncMock(return_value=[]))
+        monkeypatch.setattr(manager, "_introspect_from_db", AsyncMock(return_value=[]))
+
+        # Act
+        await manager.get_or_fetch_schema("sales", tenant_id=42)
+
+        # Assert
+        manager._resolve_datasource.assert_awaited_once_with("sales", tenant_id=42)
+        manager._query_cache.assert_awaited_once_with("sales", tenant_id=42)
+        manager._introspect_from_db.assert_awaited_once_with("sales", tenant_id=42)
+
+    # 方法作用：验证共享缓存重新绑定时使用显式租户构建条目身份。
+    # Args: self - pytest 测试类实例；monkeypatch - pytest 运行时替换工具。
+    # Returns: 无返回值，断言条目 ID 和租户元数据正确。
+    def test_rebind_shared_entries_uses_explicit_tenant(self, monkeypatch):
+        """共享连接缓存跨租户复用时，向量条目必须绑定请求租户。"""
+        # Arrange
+        from src.knowledge.models import KnowledgeEntry, KnowledgeSource
+        from src.knowledge.schema_manager import SchemaManager
+
+        monkeypatch.setattr(
+            "src.app_context.get_tenant_policy",
+            lambda: SimpleNamespace(knowledge_isolation_enabled=True),
+        )
+        manager = SchemaManager(datasource_cache=SimpleNamespace())
+        entries = [KnowledgeEntry(
+            id="table:shared.orders",
+            content="orders",
+            source=KnowledgeSource.AUTO_INTROSPECT,
+            category="table",
+            table_name="orders",
+        )]
+
+        # Act
+        rebound = manager._rebind_entries(entries, "sales", tenant_id=42)
+
+        # Assert
+        assert rebound[0].id == "table:42:sales.orders"
+        assert rebound[0].metadata["tenant_id"] == 42
 
     async def test_update_column_comment_upserts_changed_content(self, monkeypatch):
         """字段备注更新应重写指定字段的向量文本。"""

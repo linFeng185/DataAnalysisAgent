@@ -26,12 +26,12 @@
 
 | # | 功能 | 文件 | 描述 | 状态 |
 |---|------|------|------|------|
-| 8.2.1 | FastMCP 实例化 | `src/mcp/server.py` | FastMCP("data-analysis-agent") 创建 MCP Server | 开发完成 |
-| 8.2.2 | query_database Tool | 同上 | 以自然语言查询数据库，返回分析结果与图表 | 开发完成 |
-| 8.2.3 | list_datasources Tool | 同上 | 列出当前所有可用数据源及描述 | 开发完成 |
-| 8.2.4 | get_table_schema Tool | 同上 | 获取指定表的完整结构信息 | 开发完成 |
-| 8.2.5 | get_metrics Tool | 同上 | 查询业务指标口径定义和计算公式 | 开发完成 |
-| 8.2.6 | MCP Server 启动入口 | `src/mcp/__main__.py` | `python -m src.mcp` 启动 MCP Server | 开发完成 |
+| 8.2.1 | FastMCP 实例化 | `src/mcp_client/server.py` | FastMCP("data-analysis-agent") 创建 MCP Server | 单测完成 |
+| 8.2.2 | query_database Tool | 同上 | 以自然语言查询数据库，返回分析结果与图表；异常响应不泄露内部细节 | 单测完成 |
+| 8.2.3 | list_datasources Tool | 同上 | 列出当前所有可用数据源及描述；异常返回稳定协议错误 | 单测完成 |
+| 8.2.4 | get_table_schema Tool | 同上 | 获取指定表的完整结构信息，未找到与内部故障使用不同契约 | 单测完成 |
+| 8.2.5 | get_metrics Tool | 同上 | 查询业务指标口径定义和计算公式；异常响应脱敏 | 单测完成 |
+| 8.2.6 | MCP Server 启动入口 | `src/mcp/__main__.py` | `python -m src.mcp` 启动 MCP Server，并兼容旧 mcp_client 入口 | 单测完成 |
 | 8.2.7 | Claude Code 集成配置 | `claude_code_mcp.json` | 配置为 Claude Code 可调用的 MCP Server | 开发完成 |
 
 ### 8.3 MCP Agent Node
@@ -47,7 +47,7 @@
 
 | # | 功能 | 文件 | 描述 | 状态 |
 |---|------|------|------|------|
-| 8.4.1 | MCP 作用域管理 API `[P0]` | `src/api/routes.py` + `migrations/004_resource_scopes.sql` | 三级权限管理；配置库故障返回 503，不以 HTTP 200 空列表掩盖 | 单测完成 |
+| 8.4.1 | MCP 作用域管理 API `[P0]` | `src/api/routes.py` + `migrations/004_resource_scopes.sql` | 三级权限管理；存储故障可见但创建、删除、连通测试响应不泄露内部异常 | 单测完成 |
 | 8.4.2 | 受管 MCP 进程与网络边界 `[P0]` | `src/api/routes.py` + `src/mcp_client/client_manager.py` | 数据库配置仅允许管理员创建 SSE；禁用 stdio/进程参数并按精确主机 allowlist 加载 | 单测完成 |
 
 ### 模块收尾

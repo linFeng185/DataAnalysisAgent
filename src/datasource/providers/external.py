@@ -488,6 +488,14 @@ class ExternalDataSourceProvider(DataSourceProvider):
             if tenant_id is None or source_tenant == int(tenant_id)
         ]
 
+    # 方法作用：为受信任的系统后台任务枚举已加载数据源的全部租户。
+    # Args: self - ExternalDataSourceProvider 实例。
+    # Returns: 去重并升序排列的租户 ID。
+    async def list_tenant_ids(self) -> list[int]:
+        result = sorted({int(source_tenant) for source_tenant, _ in self._sources})
+        logger.info("枚举外部数据源租户完成", tenant_count=len(result))
+        return result
+
     @staticmethod
     def _effective_tenant_id(tenant_id: int | None) -> int:
         if tenant_id is not None:

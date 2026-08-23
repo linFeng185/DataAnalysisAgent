@@ -7,8 +7,8 @@
 | # | 功能 | 文件 | 描述 | 状态 |
 |---|------|------|------|------|
 | 9.1.1 | Skill dataclass | `src/skill_manager.py` | name / version / description / triggers / depends_on / tools / system_prompt_override / output_schema_extension / source_path / enabled | 开发完成 |
-| 9.1.2 | SkillManager 类 | `src/skill_manager.py` | Skill 发现、加载、激活与生命周期管理 | 开发完成 |
-| 9.1.3 | discover() | 同上 | 启动时扫描 skills/ 目录，发现所有 SKILL.md | 开发完成 |
+| 9.1.2 | SkillManager 类 | `src/skill_manager.py` | Skill 发现、加载、激活、原子启停状态持久化与生命周期管理 | 单测完成 |
+| 9.1.3 | discover() | 同上 | 扫描全部 SKILL.md 并恢复复合 resource_id 的持久启停状态；状态损坏时失败关闭 | 单测完成 |
 | 9.1.4 | _parse_skill_manifest() | 同上 | 解析 SKILL.md 的 YAML frontmatter + Markdown body | 开发完成 |
 | 9.1.5 | _check_dependencies() | 同上 | 检查依赖 (mcp_servers / skills / python_packages) 是否满足 | 开发完成 |
 | 9.1.6 | match_skills() | 同上 | 根据用户输入匹配激活 Skill: 关键词 + 意图 + 表名三重 OR 匹配 | 开发完成 |
@@ -46,7 +46,7 @@
 
 | # | 功能 | 文件 | 描述 | 状态 |
 |---|------|------|------|------|
-| 9.4.1 | 本地 Skill 扫描 | `src/skill_manager.py` | 多目录扫描 + 缓存注入 + 手动刷新 | 开发完成 |
+| 9.4.1 | 本地 Skill 扫描 | `src/skill_manager.py` | 多目录扫描 + 缓存注入 + 手动刷新，刷新不重置管理员启停选择 | 单测完成 |
 | 9.4.2 | Git 子模块支持 | `.gitmodules` | 社区 Skill 用 git submodule 引入 | 待开发 |
 | 9.4.3 | Skill Registry 接口 | `src/skill_registry.py`、`src/skill_manager.py` | approved 目录、HTTPS 主机白名单、SHA-256、ZIP 安全检查和三级作用域安装 | 单测完成 |
 
@@ -55,9 +55,9 @@
 | # | 功能 | 文件 | 描述 | 状态 |
 |---|------|------|------|------|
 | 9.5.1 | 列表 API | `src/api/routes.py` | GET /skills — is_builtin/triggers/tools/deps | 开发完成 |
-| 9.5.2 | 批量上传 | 同上 | POST /skills/upload — 文件夹递归 + YAML 解析 | 开发完成 |
-| 9.5.3 | 启用/禁用/删除 | 同上 | PUT toggle + DELETE（内置保护） | 开发完成 |
-| 9.5.4 | 刷新 + 内容 | 同上 | POST /refresh + GET /{name}/content | 开发完成 |
+| 9.5.2 | 批量上传 | 同上 | POST /skills/upload — 文件夹递归、YAML/签名校验、失败回滚与安全错误分类 | 单测完成 |
+| 9.5.3 | 启用/禁用/删除 | 同上 | PUT toggle 先原子持久化再改内存，跨刷新/重启恢复；DELETE 保护内置项 | 单测完成 |
+| 9.5.4 | 刷新 + 内容 | 同上 | POST /refresh + GET /{name}/content，内部刷新异常响应脱敏 | 单测完成 |
 | 9.5.5 | 前端管理页 | `SkillsPage.tsx` | 列表/切换/上传/详情 Modal/刷新/删除 | 开发完成 |
 | 9.5.6 | Skill 作用域管理授权 `[P0]` | `src/api/routes.py` | system 仅超管、tenant 仅租户管理员、private 仅本人上传/启停/删除 | 单测完成 |
 

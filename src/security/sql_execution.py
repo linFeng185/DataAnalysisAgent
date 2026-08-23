@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import re
 from typing import Any
 
@@ -14,20 +15,76 @@ logger = get_logger(__name__)
 
 _STATE_MUTATING_FUNCTIONS = frozenset({
     "benchmark",
+    "dblink_connect",
+    "dblink_connect_u",
+    "dblink_disconnect",
     "dblink_exec",
+    "get_lock",
     "load_file",
+    "lo_create",
     "lo_export",
+    "lo_from_bytea",
+    "lo_import",
+    "lo_put",
+    "lo_unlink",
     "nextval",
+    "opendatasource",
+    "openquery",
+    "openrowset",
     "pg_advisory_lock",
     "pg_advisory_lock_shared",
+    "pg_backup_start",
+    "pg_backup_stop",
+    "pg_cancel_backend",
+    "pg_copy_file",
+    "pg_create_restore_point",
+    "pg_log_backend_memory_contexts",
+    "pg_notify",
     "pg_read_file",
     "pg_reload_conf",
+    "pg_rotate_logfile",
     "pg_sleep",
+    "pg_switch_wal",
+    "pg_terminate_backend",
     "pg_try_advisory_lock",
     "pg_try_advisory_lock_shared",
+    "pg_unlink",
+    "pg_wal_replay_pause",
+    "pg_wal_replay_resume",
+    "pg_write_file",
+    "release_all_locks",
+    "release_lock",
     "set_config",
     "setval",
     "sleep",
+    "sys_eval",
+    "sys_exec",
+})
+_DANGEROUS_FUNCTION_PREFIXES = (
+    "dictget",
+    "dblink_",
+    "hdfs",
+    "http_",
+    "mongodb",
+    "mysql",
+    "odbc",
+    "postgresql",
+    "remote",
+    "s3",
+    "url",
+)
+_DANGEROUS_ORACLE_PACKAGES = frozenset({
+    "dbms_java",
+    "dbms_job",
+    "dbms_ldap",
+    "dbms_lock",
+    "dbms_pipe",
+    "dbms_scheduler",
+    "utl_file",
+    "utl_http",
+    "utl_inaddr",
+    "utl_smtp",
+    "utl_tcp",
 })
 _WRITE_PREFIX = re.compile(
     r"^\s*(?:INSERT|UPDATE|DELETE|DROP|CREATE|ALTER|TRUNCATE|RENAME|GRANT|"
@@ -91,6 +148,21 @@ def _strip_sql_comments(sql: str) -> str:
 # Returns: 预检错误列表，空列表表示继续按真实方言解析。
 def _precheck_sql(sql: str, dialect: str) -> list[dict[str, Any]]:
     logger.debug("SQL 连接前预检入口", dialect=dialect, sql_chars=len(sql))
+    from src.config import get_settings
+
+    max_sql_chars = max(1, int(getattr(get_settings(), "max_sql_chars", 20_000)))
+    if len(sql) > max_sql_chars:
+        result = [{
+            "type": "security_block",
+            "message": f"SQL 不能超过 {max_sql_chars} 个字符",
+        }]
+        logger.warning(
+            "SQL 连接前预检拒绝",
+            reason="SQL 字符预算超限",
+            sql_chars=len(sql),
+            max_sql_chars=max_sql_chars,
+        )
+        return result
     if not sql.strip():
         result = [{"type": "syntax_error", "message": "SQL 不能为空"}]
         logger.warning("SQL 连接前预检拒绝", reason="SQL 为空")
@@ -114,7 +186,28 @@ def _query_side_effect(tree: Any, query_type: type[Any]) -> str:
     try:
         from sqlglot import exp
 
-        if isinstance(tree, exp.Select) and tree.args.get("into") is not None:
+        mutating_types = (
+            exp.Alter,
+            exp.Copy,
+            exp.Create,
+            exp.Delete,
+            exp.Drop,
+            exp.Insert,
+            exp.LoadData,
+            exp.Merge,
+            exp.TruncateTable,
+            exp.Update,
+        )
+        mutating_nodes = [type(node).__name__ for node in tree.walk() if isinstance(node, mutating_types)]
+        logger.info(
+            "SQL AST 写操作探针",
+            statement_type=type(tree).__name__,
+            mutating_nodes=mutating_nodes,
+        )
+
+        if mutating_nodes:
+            result = f"写操作 {mutating_nodes[0]}"
+        elif isinstance(tree, exp.Select) and tree.args.get("into") is not None:
             result = "SELECT INTO"
         elif isinstance(tree, exp.Select) and tree.args.get("locks"):
             result = "SELECT FOR UPDATE/SHARE"
@@ -131,9 +224,19 @@ def _query_side_effect(tree: Any, query_type: type[Any]) -> str:
                     function_type=type(function).__name__,
                     function_name=function_name,
                 )
-                if function_name in _STATE_MUTATING_FUNCTIONS or function_name.startswith("xp_"):
+                if (
+                    function_name in _STATE_MUTATING_FUNCTIONS
+                    or function_name.startswith("xp_")
+                    or function_name.startswith(_DANGEROUS_FUNCTION_PREFIXES)
+                ):
                     result = f"状态变更函数 {function_name}"
                     break
+            if not result:
+                for dotted in tree.find_all(exp.Dot):
+                    qualified = re.sub(r"\s+", "", dotted.sql()).lower()
+                    if any(f"{package}." in qualified for package in _DANGEROUS_ORACLE_PACKAGES):
+                        result = f"危险数据库包 {qualified.split('(', 1)[0]}"
+                        break
     except Exception as exc:
         logger.error("检查查询副作用失败", error=str(exc), exc_info=True)
         raise
@@ -244,10 +347,20 @@ def extract_sql_function_names(sql: str, dialect: str) -> list[str]:
 
 
 # 方法作用：解析数据源并取得绑定其共享引擎的 Connector。
-# Args: datasource - 数据源名称；dialect - 调用方提示方言。
+# Args: datasource - 数据源名称；dialect - 调用方提示方言；tenant_id - 可选显式租户 ID。
 # Returns: 数据源配置、Connector 和 Registry 权威方言。
-async def _resolve_sql_target(datasource: str, dialect: str) -> tuple[Any, Any, str]:
-    logger.debug("解析 SQL 执行目标入口", datasource=datasource, dialect=dialect)
+async def _resolve_sql_target(
+    datasource: str,
+    dialect: str,
+    *,
+    tenant_id: int | None = None,
+) -> tuple[Any, Any, str]:
+    logger.debug(
+        "解析 SQL 执行目标入口",
+        datasource=datasource,
+        dialect=dialect,
+        tenant_id=tenant_id,
+    )
     from src.datasource.registry import get_registry
 
     registry = get_registry()
@@ -255,7 +368,11 @@ async def _resolve_sql_target(datasource: str, dialect: str) -> tuple[Any, Any, 
     if resolver is None:
         logger.error("解析 SQL 执行目标失败", datasource=datasource, reason="Registry 缺少解析接口")
         raise RuntimeError("DataSourceRegistry 缺少解析接口")
-    resolved = await resolver(datasource)
+    resolved = (
+        await resolver(datasource, tenant_id=tenant_id)
+        if tenant_id is not None
+        else await resolver(datasource)
+    )
     if resolved is None:
         logger.error("解析 SQL 执行目标失败", datasource=datasource, reason="数据源不可用")
         raise RuntimeError(f"数据源 '{datasource}' 不可用")
@@ -309,22 +426,74 @@ def _failure_result(
     return result
 
 
+# 方法作用：把 EXPLAIN 中的估算扫描行数转换为统一资源超限明细。
+# Args: plan - Connector EXPLAIN 结果；max_scan_rows - 最大允许扫描行数。
+# Returns: 超限时返回单条明细，否则返回空列表。
+def _scan_budget_details(
+    plan: dict[str, Any],
+    max_scan_rows: int,
+) -> list[dict[str, Any]]:
+    raw_estimate = plan.get("estimated_scan_rows")
+    if raw_estimate is None:
+        logger.info("SQL 扫描预算探针", estimate_available=False, limit=max_scan_rows)
+        return []
+    try:
+        estimated_scan_rows = max(0, int(float(raw_estimate)))
+    except (TypeError, ValueError):
+        logger.warning("SQL 扫描预算估算值无效", estimate=str(raw_estimate)[:100])
+        return []
+    exceeded = estimated_scan_rows > max_scan_rows
+    logger.info(
+        "SQL 扫描预算探针",
+        estimate_available=True,
+        estimated_scan_rows=estimated_scan_rows,
+        limit=max_scan_rows,
+        exceeded=exceeded,
+    )
+    if not exceeded:
+        return []
+    return [{
+        "type": "resource_limit",
+        "message": (
+            f"查询计划预计扫描 {estimated_scan_rows} 行，"
+            f"超过上限 {max_scan_rows} 行"
+        ),
+        "estimated_scan_rows": estimated_scan_rows,
+        "max_scan_rows": max_scan_rows,
+    }]
+
+
 # 方法作用：按真实数据源方言完成重写、只读校验和 EXPLAIN。
-# Args: sql - 待检查 SQL；datasource - 数据源名；dialect - 调用方提示方言。
+# Args: sql - 待检查 SQL；datasource - 数据源名；dialect - 调用方提示方言；tenant_id - 可选显式租户 ID。
 # Returns: EXPLAIN 成功或明确失败的 SQLExecutionResult。
 async def validate_and_explain_sql(
     sql: str,
     datasource: str,
     dialect: str = "",
+    *,
+    tenant_id: int | None = None,
 ) -> SQLExecutionResult:
-    logger.debug("统一 SQL EXPLAIN 入口", datasource=datasource, dialect=dialect)
+    logger.debug(
+        "统一 SQL EXPLAIN 入口",
+        datasource=datasource,
+        dialect=dialect,
+        tenant_id=tenant_id,
+    )
     precheck_errors = _precheck_sql(sql, dialect)
     if precheck_errors:
         return _failure_result(sql, dialect, "SQL 校验失败", "security", precheck_errors)
     try:
-        _, connector, authoritative_dialect = await _resolve_sql_target(datasource, dialect)
+        from src.config import get_settings
         from src.tools.sql_rewriter import rewrite_sql
 
+        settings = get_settings()
+        timeout_seconds = max(0.001, float(getattr(settings, "max_execution_time", 30)))
+        async with asyncio.timeout(timeout_seconds):
+            _, connector, authoritative_dialect = await _resolve_sql_target(
+                datasource,
+                dialect,
+                tenant_id=tenant_id,
+            )
         rewritten_sql = rewrite_sql(sql, authoritative_dialect)
         validation = validate_sql(rewritten_sql, authoritative_dialect)
         if not validation.valid:
@@ -340,7 +509,8 @@ async def validate_and_explain_sql(
                 error_type,
                 validation.errors,
             )
-        plan = await connector.explain(rewritten_sql)
+        async with asyncio.timeout(timeout_seconds):
+            plan = await connector.explain(rewritten_sql)
         if not plan.get("valid", False):
             errors = plan.get("errors", []) or [{
                 "type": "semantic_error",
@@ -354,6 +524,19 @@ async def validate_and_explain_sql(
                 "sql_semantic",
                 errors,
             )
+        max_scan_rows = max(1, int(getattr(settings, "max_scan_rows", 10_000_000)))
+        scan_errors = _scan_budget_details(plan, max_scan_rows)
+        if scan_errors:
+            return _failure_result(
+                rewritten_sql,
+                authoritative_dialect,
+                "查询扫描预算超限",
+                "resource_limit",
+                scan_errors,
+            )
+    except TimeoutError:
+        logger.warning("统一 SQL EXPLAIN 超时", datasource=datasource)
+        return _failure_result(sql, dialect, "数据库查询超时", "timeout")
     except Exception as exc:
         must_fail_closed(FailureDomain.DATABASE)
         logger.error(
@@ -375,7 +558,7 @@ async def validate_and_explain_sql(
 
 
 # 方法作用：按真实数据源方言完成只读校验、可选 EXPLAIN 和有界执行。
-# Args: sql - 待执行 SQL；datasource - 数据源名；dialect - 调用方提示方言；explain - 是否执行 EXPLAIN；max_rows - 结果上限。
+# Args: sql - 待执行 SQL；datasource - 数据源名；dialect - 调用方提示方言；explain - 是否执行 EXPLAIN；max_rows - 结果上限；tenant_id - 可选显式租户 ID。
 # Returns: 数据、截断状态或明确错误的 SQLExecutionResult。
 async def validate_and_execute_sql(
     sql: str,
@@ -384,6 +567,7 @@ async def validate_and_execute_sql(
     *,
     explain: bool = True,
     max_rows: int | None = None,
+    tenant_id: int | None = None,
 ) -> SQLExecutionResult:
     logger.debug(
         "统一 SQL 执行入口",
@@ -391,15 +575,23 @@ async def validate_and_execute_sql(
         dialect=dialect,
         explain=explain,
         max_rows=max_rows,
+        tenant_id=tenant_id,
     )
     precheck_errors = _precheck_sql(sql, dialect)
     if precheck_errors:
         return _failure_result(sql, dialect, "SQL 校验失败", "security", precheck_errors)
     try:
-        _, connector, authoritative_dialect = await _resolve_sql_target(datasource, dialect)
         from src.config import get_settings
         from src.tools.sql_rewriter import rewrite_sql
 
+        settings = get_settings()
+        timeout_seconds = max(0.001, float(getattr(settings, "max_execution_time", 30)))
+        async with asyncio.timeout(timeout_seconds):
+            _, connector, authoritative_dialect = await _resolve_sql_target(
+                datasource,
+                dialect,
+                tenant_id=tenant_id,
+            )
         rewritten_sql = rewrite_sql(sql, authoritative_dialect)
         validation = validate_sql(rewritten_sql, authoritative_dialect)
         if not validation.valid:
@@ -416,7 +608,8 @@ async def validate_and_execute_sql(
                 validation.errors,
             )
         if explain:
-            plan = await connector.explain(rewritten_sql)
+            async with asyncio.timeout(timeout_seconds):
+                plan = await connector.explain(rewritten_sql)
             if not plan.get("valid", False):
                 errors = plan.get("errors", []) or [{
                     "type": "semantic_error",
@@ -432,8 +625,22 @@ async def validate_and_execute_sql(
                     "sql_semantic",
                     errors,
                 )
-        limit = max_rows if max_rows is not None else int(get_settings().max_result_rows)
-        rows, truncated = await connector.execute_bounded(rewritten_sql, max(1, limit))
+            max_scan_rows = max(1, int(getattr(settings, "max_scan_rows", 10_000_000)))
+            scan_errors = _scan_budget_details(plan, max_scan_rows)
+            if scan_errors:
+                return _failure_result(
+                    rewritten_sql,
+                    authoritative_dialect,
+                    "查询扫描预算超限",
+                    "resource_limit",
+                    scan_errors,
+                )
+        limit = max_rows if max_rows is not None else int(settings.max_result_rows)
+        async with asyncio.timeout(timeout_seconds):
+            rows, truncated = await connector.execute_bounded(rewritten_sql, max(1, limit))
+    except TimeoutError:
+        logger.warning("统一 SQL 执行超时", datasource=datasource)
+        return _failure_result(sql, dialect, "数据库查询超时", "timeout")
     except Exception as exc:
         must_fail_closed(FailureDomain.DATABASE)
         logger.error(

@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING
 from fastapi import APIRouter, File, HTTPException, UploadFile
 
 from src.api.schemas import ChatRequest, ChatResponse
+from src.api.routes._helpers import _call_with_optional_tenant
 from src.logging_config import get_logger
 
 logger = get_logger(__name__)
@@ -123,7 +124,11 @@ async def _resolve_chat_access(req: ChatRequest) -> dict[str, dict]:
     try:
         import src.api.routes as routes_package
 
-        available = await routes_package._registry().list_all()
+        registry = routes_package._registry()
+        available = await _call_with_optional_tenant(
+            registry.list_all,
+            tenant_id=get_current_tenant_id(),
+        )
         result = await resolve_datasource_access(
             available,
             requested,
@@ -275,6 +280,28 @@ async def _read_chat_uploads(
     return prepared
 
 
+# 方法作用：逆序删除当前批次已经保存的聊天附件，补偿部分提交。
+# Args: store - 当前 FileStore；saved_files - 已返回 file_id 的附件摘要。
+# Returns: 无返回值，单项回滚失败时记录日志并继续其余项。
+async def _rollback_chat_files(store, saved_files: list[dict[str, int | str]]) -> None:
+    """回滚必须按精确 ID 执行，不能按文件名误删历史同名附件。"""
+    logger.info("聊天附件回滚入口", saved_count=len(saved_files))
+    for saved_file in reversed(saved_files):
+        file_id = int(saved_file["file_id"])
+        try:
+            deleted = await store.delete_by_id(file_id, knowledge_scope="private")
+            if not deleted:
+                logger.error("聊天附件回滚未删除记录", file_id=file_id)
+        except Exception as exc:
+            logger.error(
+                "聊天附件回滚失败",
+                file_id=file_id,
+                error_type=type(exc).__name__,
+                exc_info=True,
+            )
+    logger.info("聊天附件回滚完成", attempted=len(saved_files))
+
+
 @router.post("/chat/files")
 # 方法作用：把聊天附件保存为当前用户私有文件并返回结构化 file_id。
 # Args: files - multipart/form-data 中的附件列表。
@@ -309,12 +336,24 @@ async def upload_chat_files(files: list[UploadFile] = File(...)) -> dict:
     )
     store = get_file_store()
     saved_files: list[dict[str, int | str]] = []
-    for filename, content, size in prepared:
-        file_id = await store.save(filename, content, knowledge_scope="private")
-        if file_id is None:
-            logger.error("聊天附件持久化失败", filename=filename)
-            raise HTTPException(503, "附件存储暂不可用")
-        saved_files.append({"file_id": int(file_id), "filename": filename, "size": size})
+    current_filename = ""
+    try:
+        for filename, content, size in prepared:
+            current_filename = filename
+            file_id = await store.save(filename, content, knowledge_scope="private")
+            if file_id is None:
+                raise RuntimeError("FileStore.save 未返回文件 ID")
+            saved_files.append({"file_id": int(file_id), "filename": filename, "size": size})
+    except Exception as exc:
+        logger.error(
+            "聊天附件批量持久化失败",
+            filename=current_filename,
+            saved_count=len(saved_files),
+            error_type=type(exc).__name__,
+            exc_info=True,
+        )
+        await _rollback_chat_files(store, saved_files)
+        raise HTTPException(503, "附件存储暂不可用") from exc
     logger.info("聊天附件上传完成", saved_count=len(saved_files))
     return {"files": saved_files, "total": len(saved_files)}
 

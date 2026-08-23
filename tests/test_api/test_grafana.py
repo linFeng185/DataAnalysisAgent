@@ -26,12 +26,43 @@ class TestGrafanaRoutes:
         monkeypatch.setattr(route, "resolve_datasource_access", AsyncMock(return_value={
             "sales": {"name": "sales", "dialect": "postgres"},
         }))
+        policy = object()
+        monkeypatch.setattr(route, "get_tenant_policy", lambda: policy, raising=False)
 
         # Act
         result = await route.search()
 
         # Assert
         assert result == ["sales"]
+        assert route.resolve_datasource_access.await_args.kwargs["tenant_policy"] is policy
+
+    # 方法作用：验证 Grafana 数据源列表失败时不以无租户调用覆盖原始 TypeError。
+    # Args: self - pytest 测试类实例；monkeypatch - pytest 补丁工具。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    async def test_available_datasources_does_not_retry_internal_type_error(self, monkeypatch) -> None:
+        """内部列表错误应转换为 503，且 Registry 只执行一次。"""
+        # Arrange
+        import pytest
+        from fastapi import HTTPException
+
+        import src.api.routes.grafana as route
+        from src.security.tenant_policy import RequestIdentity
+
+        calls = 0
+
+        async def _list_all(*, tenant_id: int | None = None):
+            nonlocal calls
+            calls += 1
+            assert tenant_id == 4
+            raise TypeError("registry body failure")
+
+        monkeypatch.setattr(route, "get_registry", lambda: SimpleNamespace(list_all=_list_all))
+
+        # Act / Assert
+        with pytest.raises(HTTPException) as exc_info:
+            await route._available_datasources(RequestIdentity(4, 7, "analyst"))
+        assert exc_info.value.status_code == 503
+        assert calls == 1
 
     # 方法作用：验证 query 返回 Grafana table 结构并复用只读有界执行。
     # Args: self - pytest 测试类实例；monkeypatch - pytest 补丁工具。
@@ -66,6 +97,7 @@ class TestGrafanaRoutes:
         assert result[0]["type"] == "table"
         assert result[0]["columns"] == [{"text": "id"}, {"text": "value"}]
         assert result[0]["rows"] == [[1, 2]]
+        assert route.validate_and_execute_sql.await_args.kwargs["tenant_id"] == 4
 
         monkeypatch.setattr(route, "validate_sql", lambda sql, dialect: SimpleNamespace(valid=False, errors=[{"message": "禁止: DROP"}]))
         with pytest.raises(HTTPException) as exc_info:

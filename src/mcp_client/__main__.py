@@ -1,8 +1,8 @@
-"""8.2.6 MCP Server 启动入口 — `python -m src.mcp`。"""
+"""兼容旧的 `python -m src.mcp_client` 启动方式。"""
 
 from __future__ import annotations
 
-from src.mcp_client.server import create_mcp_server
+from src.mcp.__main__ import main
 
 if __name__ == "__main__":
-    create_mcp_server().run()
+    main()

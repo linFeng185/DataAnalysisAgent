@@ -602,7 +602,7 @@ class TestEndpoints:
 
         assert response.status_code == 200
         assert response.json()["tables"][0]["name"] == "orders"
-        manager.get_or_fetch_schema.assert_awaited_once_with("oracle_xe")
+        manager.get_or_fetch_schema.assert_awaited_once_with("oracle_xe", tenant_id=1)
 
     # 验证会话列表仅在确有下一条记录时报告下一页。
     # Args: monkeypatch - pytest 提供的运行时替换工具。

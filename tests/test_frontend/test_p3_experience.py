@@ -48,6 +48,22 @@ class TestP3Experience:
         assert "mobile-health" in app
         assert "@media (max-width: 767px)" in styles
 
+    # 方法作用：验证页面路由按需加载并将大型第三方依赖拆分为独立 chunk。
+    # Args: self - pytest 测试类实例。
+    # Returns: 无返回值，断言前端性能契约未回退。
+    def test_route_pages_are_lazy_loaded_and_vendor_chunks_split(self) -> None:
+        """首屏不得静态加载所有管理页面和图表编辑依赖。"""
+        # Arrange
+        app = Path("frontend/src/App.tsx").read_text(encoding="utf-8")
+        vite = Path("frontend/vite.config.ts").read_text(encoding="utf-8")
+
+        # Act / Assert
+        assert "lazy(() => import('./pages/ChatPage'))" in app
+        assert "lazy(() => import('./pages/AdminPage'))" in app
+        assert "<Suspense" in app
+        assert "manualChunks" in vite
+        assert "echarts" in vite
+
     # 方法作用：验证 Skills 管理页提供 Registry 目录和安装入口。
     # Args: self - pytest 测试类实例。
     # Returns: 无返回值，断言失败时由 pytest 报告。

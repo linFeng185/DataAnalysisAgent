@@ -145,7 +145,10 @@ async def _analyze_one(
             enabled_skill_count=len(request.enabled_skill_ids),
         )
 
-        resolved = await get_registry().resolve_or_none(datasource)
+        resolved = await get_registry().resolve_or_none(
+            datasource,
+            tenant_id=request.tenant_id,
+        )
         if resolved is None:
             logger.warning("单源分析跳过", datasource=datasource, reason="数据源连接失败或不存在")
             return SourceQueryResult.failed(

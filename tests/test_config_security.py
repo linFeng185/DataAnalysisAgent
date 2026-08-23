@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import warnings
 from logging.handlers import TimedRotatingFileHandler
 from pathlib import Path
 from unittest.mock import AsyncMock
@@ -300,6 +301,31 @@ class TestLoggingRetention:
         assert redacted["database"]["password"] == "[REDACTED]"
         assert redacted["api_key"] == "[REDACTED]"
 
+    # 方法作用：验证普通 error/detail 字段中的凭证文本也会被统一脱敏。
+    # Args: self - pytest 测试类实例。
+    # Returns: 无返回值，断言敏感值不会出现在结构化日志字段中。
+    def test_error_text_credentials_are_redacted(self) -> None:
+        """调用方使用 error=str(exc) 时不得绕过日志凭证过滤。"""
+        # Arrange
+        from src import logging_config
+
+        event = {
+            "event": "外部服务失败",
+            "error": "password=error-secret Authorization: Bearer error-token",
+            "detail": "postgresql://user:detail-secret@host/db",
+        }
+
+        # Act
+        redacted = logging_config._redact_sensitive_fields(None, "error", event)  # noqa: SLF001
+
+        # Assert
+        rendered = repr(redacted)
+        assert "error-secret" not in rendered
+        assert "error-token" not in rendered
+        assert "detail-secret" not in rendered
+        assert redacted["error"].count("[REDACTED]") == 2
+        assert "[REDACTED]" in redacted["detail"]
+
     # 方法作用：验证异常堆栈保留定位信息但不输出函数局部敏感变量。
     # Args: self - pytest 测试类实例；tmp_path - pytest 临时目录；monkeypatch - pytest 运行时替换工具。
     # Returns: 无返回值，断言日志文件不包含局部密码。
@@ -333,6 +359,81 @@ class TestLoggingRetention:
         content = log_file.read_text(encoding="utf-8")
         assert "RuntimeError" in content
         assert "traceback-local-secret" not in content
+
+    # 方法作用：验证异常消息中的凭证不会绕过结构化日志脱敏处理。
+    # Args: self - pytest 测试类实例；tmp_path - pytest 临时目录；monkeypatch - pytest 运行时替换工具；log_format - 日志输出格式。
+    # Returns: 无返回值，断言日志中不含异常凭证原文且保留堆栈类型。
+    @pytest.mark.parametrize("log_format", ["console", "json"])
+    def test_exception_message_credentials_are_redacted(self, tmp_path, monkeypatch, log_format) -> None:
+        """Console 和 JSON 日志都必须过滤异常文本中的密码、令牌和 URL 凭证。"""
+        # Arrange
+        from src import logging_config
+        from src.config import Settings
+
+        log_file = tmp_path / "logs" / "app.log"
+        settings = Settings(log_file=str(log_file), log_format=log_format, log_level="INFO")
+        monkeypatch.setattr(logging_config, "get_settings", lambda: settings)
+
+        # Act
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            logging_config.setup_logging()
+            try:
+                raise RuntimeError(
+                    "connection failed password=probe-secret token=Bearer probe-token "
+                    "postgresql://user:url-secret@host/db"
+                )
+            except RuntimeError:
+                logging_config.get_logger("tests.logging.credentials").exception("异常脱敏探针")
+            handlers = list(logging.getLogger().handlers)
+            for handler in handlers:
+                handler.flush()
+            content = log_file.read_text(encoding="utf-8")
+            for handler in handlers:
+                logging.getLogger().removeHandler(handler)
+                handler.close()
+
+        # Assert
+        assert "RuntimeError" in content
+        assert "probe-secret" not in content
+        assert "probe-token" not in content
+        assert "url-secret" not in content
+        assert "[REDACTED]" in content
+        assert not any("format_exc_info" in str(item.message) for item in caught)
+
+    # 方法作用：验证日志格式切换后旧 BoundLogger 不会触发重复异常格式化警告。
+    # Args: self - pytest 测试类实例；tmp_path - pytest 临时目录；monkeypatch - pytest 运行时替换工具。
+    # Returns: 无返回值，断言两种格式切换均无 UserWarning。
+    def test_switching_log_format_does_not_warn_for_cached_logger(self, tmp_path, monkeypatch) -> None:
+        """JSON 初始化后复用的旧 logger 切换到 Console 仍应安全渲染。"""
+        # Arrange
+        from src import logging_config
+        from src.config import Settings
+
+        log_file = tmp_path / "logs" / "app.log"
+        cached_logger = logging_config.get_logger("tests.logging.cached")
+        warnings_seen: list[str] = []
+
+        # Act
+        for log_format in ("json", "console"):
+            settings = Settings(log_file=str(log_file), log_format=log_format, log_level="INFO")
+            monkeypatch.setattr(logging_config, "get_settings", lambda settings=settings: settings)
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter("always")
+                logging_config.setup_logging()
+                try:
+                    raise RuntimeError("token=cache-secret")
+                except RuntimeError:
+                    cached_logger.exception("缓存 logger 异常")
+                for handler in logging.getLogger().handlers:
+                    handler.flush()
+                warnings_seen.extend(str(item.message) for item in caught)
+
+        # Assert
+        assert not any("format_exc_info" in message for message in warnings_seen)
+        for handler in list(logging.getLogger().handlers):
+            logging.getLogger().removeHandler(handler)
+            handler.close()
 
     # 方法作用：验证 JSON 文件日志直接保留中文字符而不是 Unicode 转义序列。
     # Args: self - pytest 测试类实例；tmp_path - pytest 临时目录；monkeypatch - pytest 运行时替换工具。

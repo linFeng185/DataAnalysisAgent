@@ -117,6 +117,22 @@ class TestResultRendering:
             )
             raise
 
+    # 方法作用：验证 SQL 高亮异常兜底在写入 innerHTML 前执行 HTML 转义。
+    # Args: self - pytest 测试类实例。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    def test_sql_panel_escapes_raw_sql_when_highlighting_fails(self) -> None:
+        """双重高亮失败时，用户可控 SQL 不能以标签或事件属性进入 DOM。"""
+        # Arrange
+        component = Path("frontend/src/components/SqlPanel.tsx").read_text(encoding="utf-8")
+
+        # Act / Assert
+        assert "function escapeHtml" in component
+        assert "return escapeHtml(code)" in component
+        assert "catch { return code; }" not in component
+        assert "'&': '&amp;'" in component
+        assert "'<': '&lt;'" in component
+        assert "'>': '&gt;'" in component
+
     # 方法作用：验证聊天 Hook 按 stream_id 隔离并行推理和内容流。
     # Args: self - pytest 测试类实例。
     # Returns: 无返回值，断言失败时由 pytest 报告。

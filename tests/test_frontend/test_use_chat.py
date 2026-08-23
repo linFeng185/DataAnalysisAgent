@@ -195,3 +195,22 @@ def test_use_chat_does_not_store_model_reasoning() -> None:
 
     # Assert
     assert all(token not in source for token in forbidden)
+
+
+# 方法作用：验证前端不再把完整对话和会话 ID 持久化到 Web Storage。
+# Args: 无。
+# Returns: 无返回值，断言失败时由 pytest 报告。
+def test_use_chat_does_not_persist_sensitive_conversation_in_session_storage() -> None:
+    """浏览器存储只允许清理旧版本缓存，不能读取或写入当前对话。"""
+    # Arrange
+    hook = Path("frontend/src/hooks/useChat.ts").read_text(encoding="utf-8")
+    storage = Path("frontend/src/hooks/chatStorage.ts").read_text(encoding="utf-8")
+
+    # Act / Assert
+    assert "loadChatStorage" not in hook
+    assert "saveChatStorage" not in hook
+    assert "sessionStorage" not in hook
+    assert "sessionStorage.getItem" not in storage
+    assert "sessionStorage.setItem" not in storage
+    assert "JSON.stringify(turns)" not in storage
+    assert "sessionStorage.removeItem" in storage

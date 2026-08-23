@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter, HTTPException, Query
 
+from src.api.routes._helpers import _call_with_optional_tenant
 from src.api.schemas import ColumnCommentRequest, TableInfo
 from src.exceptions import DataSourceNotFoundError
 from src.logging_config import get_logger
@@ -19,6 +20,7 @@ async def _resolve_datasource_name(datasource: str) -> str:
     normalized = str(datasource or "").strip()
     import src.api.routes as routes_package
     from src.api.auth import get_current_identity
+    from src.app_context import get_tenant_policy
     from src.security.permission_check import resolve_datasource_access
 
     identity = get_current_identity()
@@ -26,10 +28,10 @@ async def _resolve_datasource_name(datasource: str) -> str:
     if not hasattr(registry, "list_all"):
         logger.warning("Schema Registry 缺少列表能力，保留显式数据源兼容路径")
         return normalized
-    try:
-        items = await registry.list_all(tenant_id=identity.tenant_id)
-    except TypeError:
-        items = await registry.list_all()
+    items = await _call_with_optional_tenant(
+        registry.list_all,
+        tenant_id=identity.tenant_id,
+    )
     if not items:
         logger.info("Schema 默认数据源为空", reason="当前身份没有可访问数据源")
         if normalized:
@@ -53,6 +55,7 @@ async def _resolve_datasource_name(datasource: str) -> str:
             tenant_id=identity.tenant_id,
             user_id=identity.user_id,
             role=identity.role,
+            tenant_policy=get_tenant_policy(),
         )
     except PermissionError as exc:
         if normalized:
@@ -88,13 +91,23 @@ async def list_tables(
         return {"tables": [], "datasource": "", "total": 0, "page": page, "page_size": page_size}
     try:
         import src.api.routes as routes_package
+        from src.api.auth import get_current_identity
 
-        ds = await routes_package._registry().resolve(datasource)
+        identity = get_current_identity()
+        ds = await _call_with_optional_tenant(
+            routes_package._registry().resolve,
+            datasource,
+            tenant_id=identity.tenant_id,
+        )
     except DataSourceNotFoundError as exc:
         raise HTTPException(404, f"数据源 '{datasource}' 未找到") from exc
     if ds.schema is None:
         logger.info("Schema 路由触发延迟内省", datasource=datasource)
-        ds.schema = await routes_package._schema_manager().get_or_fetch_schema(datasource)
+        ds.schema = await _call_with_optional_tenant(
+            routes_package._schema_manager().get_or_fetch_schema,
+            datasource,
+            tenant_id=identity.tenant_id,
+        )
     tables = []
     for t in (ds.schema.tables if ds.schema else []):
         if search and search.lower() not in t.name.lower():
@@ -117,13 +130,23 @@ async def get_table(table_name: str, datasource: str = Query(default="")):
         raise HTTPException(404, "当前身份没有可用数据源")
     try:
         import src.api.routes as routes_package
+        from src.api.auth import get_current_identity
 
-        ds = await routes_package._registry().resolve(datasource)
+        identity = get_current_identity()
+        ds = await _call_with_optional_tenant(
+            routes_package._registry().resolve,
+            datasource,
+            tenant_id=identity.tenant_id,
+        )
     except DataSourceNotFoundError as exc:
         raise HTTPException(404, f"数据源 '{datasource}' 未找到") from exc
     if ds.schema is None:
         logger.info("表详情路由触发延迟内省", datasource=datasource)
-        ds.schema = await routes_package._schema_manager().get_or_fetch_schema(datasource)
+        ds.schema = await _call_with_optional_tenant(
+            routes_package._schema_manager().get_or_fetch_schema,
+            datasource,
+            tenant_id=identity.tenant_id,
+        )
     for t in (ds.schema.tables if ds.schema else []):
         if t.name == table_name:
             return TableInfo(name=t.name, description=t.description,
@@ -153,12 +176,22 @@ async def refresh_schema(datasource: str = Query(default="")):
     require_tenant_admin()
     try:
         import src.api.routes as routes_package
+        from src.api.auth import get_current_identity
 
-        await routes_package._registry().resolve(datasource)
+        identity = get_current_identity()
+        await _call_with_optional_tenant(
+            routes_package._registry().resolve,
+            datasource,
+            tenant_id=identity.tenant_id,
+        )
     except DataSourceNotFoundError as exc:
         logger.warning("Schema 刷新数据源不存在", datasource=datasource)
         raise HTTPException(404, f"数据源 '{datasource}' 未找到") from exc
-    snapshot = await routes_package._schema_manager().refresh(datasource)
+    snapshot = await _call_with_optional_tenant(
+        routes_package._schema_manager().refresh,
+        datasource,
+        tenant_id=identity.tenant_id,
+    )
     result = {
         "status": "ok",
         "message": "刷新完成",
@@ -194,12 +227,23 @@ async def update_column_comment(
     require_tenant_admin()
     try:
         import src.api.routes as routes_package
+        from src.api.auth import get_current_identity
 
-        await routes_package._registry().resolve(datasource)
+        identity = get_current_identity()
+        await _call_with_optional_tenant(
+            routes_package._registry().resolve,
+            datasource,
+            tenant_id=identity.tenant_id,
+        )
     except DataSourceNotFoundError as exc:
         raise HTTPException(404, f"数据源 '{datasource}' 未找到") from exc
-    updated = await routes_package._schema_manager().update_column_comment(
-        datasource, table_name, column_name, req.comment,
+    updated = await _call_with_optional_tenant(
+        routes_package._schema_manager().update_column_comment,
+        datasource,
+        table_name,
+        column_name,
+        req.comment,
+        tenant_id=identity.tenant_id,
     )
     if not updated:
         raise HTTPException(404, f"字段 '{table_name}.{column_name}' 未找到")

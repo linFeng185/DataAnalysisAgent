@@ -58,9 +58,7 @@ class SchemaExplorerTool(BaseTool):
             from src.knowledge.schema_manager import get_schema_manager
 
             manager = get_schema_manager()
-            schema = await manager.get_or_fetch_schema(
-                datasource, user_query=query,
-            )
+            schema = await manager.get_or_fetch_schema(datasource, user_query=query)
             if schema and schema.tables:
                 result = schema.to_prompt_text()
             else:

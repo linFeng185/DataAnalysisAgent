@@ -27,8 +27,16 @@ def create_mcp_server():
         """8.2.2 自然语言查询数据库。"""
         logger.debug("MCP 数据库查询入口", datasource=datasource, chart=chart)
         try:
+            from src.api.auth import get_current_identity
             from src.graph.workflow import app
-            result = await app.ainvoke({"user_query": question, "datasource": datasource})
+            identity = get_current_identity()
+            result = await app.ainvoke({
+                "user_query": question,
+                "datasource": datasource,
+                "tenant_id": identity.tenant_id,
+                "user_id": identity.user_id,
+                "user_role": identity.role,
+            })
             final = result.get("final_response", {})
             out = {"success": final.get("success", True), "sql": final.get("sql", ""),
                    "analysis": final.get("analysis", {})}
@@ -38,9 +46,14 @@ def create_mcp_server():
                 out["data"] = final["data"][:100]
             logger.info("MCP 数据库查询完成", datasource=datasource, success=out["success"])
             return out
-        except Exception as e:
-            logger.error("MCP 数据库查询失败", datasource=datasource, error=str(e), exc_info=True)
-            return {"error": str(e)}
+        except Exception as exc:
+            logger.error(
+                "MCP 数据库查询失败",
+                datasource=datasource,
+                error_type=type(exc).__name__,
+                exc_info=True,
+            )
+            return {"error": "数据库查询暂不可用"}
 
     # 方法作用：列出当前应用可用的数据源。
     # Args: 无。
@@ -50,8 +63,10 @@ def create_mcp_server():
         """8.2.3 列出所有可用数据源。"""
         logger.debug("MCP 数据源列表入口")
         try:
+            from src.api.auth import get_current_identity
             from src.datasource.registry import get_registry
-            dss = await get_registry().list_all()
+            identity = get_current_identity()
+            dss = await get_registry().list_all(tenant_id=identity.tenant_id)
             result = {"datasources": [
                 {
                     "name": d.get("name", "") if isinstance(d, dict) else d.name,
@@ -66,9 +81,13 @@ def create_mcp_server():
             ]}
             logger.info("MCP 数据源列表完成", count=len(result["datasources"]))
             return result
-        except Exception as e:
-            logger.error("MCP 数据源列表失败", error=str(e), exc_info=True)
-            return {"error": str(e)}
+        except Exception as exc:
+            logger.error(
+                "MCP 数据源列表失败",
+                error_type=type(exc).__name__,
+                exc_info=True,
+            )
+            return {"error": "数据源列表暂不可用"}
 
     # 方法作用：读取指定数据源的单表结构。
     # Args: datasource - 数据源名；table_name - 表名。
@@ -78,8 +97,13 @@ def create_mcp_server():
         """8.2.4 获取指定表结构。"""
         logger.debug("MCP 表结构查询入口", datasource=datasource, table=table_name)
         try:
+            from src.api.auth import get_current_identity
             from src.knowledge.schema_manager import get_schema_manager
-            schema = await get_schema_manager().get_or_fetch_schema(datasource)
+            identity = get_current_identity()
+            schema = await get_schema_manager().get_or_fetch_schema(
+                datasource,
+                tenant_id=identity.tenant_id,
+            )
             if schema:
                 for t in schema.tables:
                     if t.name.lower() == table_name.lower():
@@ -94,15 +118,15 @@ def create_mcp_server():
                         return result
             logger.info("MCP 表结构查询完成", datasource=datasource, table=table_name, found=False)
             return {"error": f"表 '{table_name}' 未找到"}
-        except Exception as e:
+        except Exception as exc:
             logger.error(
                 "MCP 表结构查询失败",
                 datasource=datasource,
                 table=table_name,
-                error=str(e),
+                error_type=type(exc).__name__,
                 exc_info=True,
             )
-            return {"error": str(e)}
+            return {"error": "表结构查询暂不可用"}
 
     # 方法作用：检索指定业务指标的知识规则。
     # Args: metric_name - 业务指标名。
@@ -122,9 +146,14 @@ def create_mcp_server():
             ]}
             logger.info("MCP 指标查询完成", metric=metric_name, count=len(result["rules"]))
             return result
-        except Exception as e:
-            logger.error("MCP 指标查询失败", metric=metric_name, error=str(e), exc_info=True)
-            return {"error": str(e)}
+        except Exception as exc:
+            logger.error(
+                "MCP 指标查询失败",
+                metric=metric_name,
+                error_type=type(exc).__name__,
+                exc_info=True,
+            )
+            return {"error": "指标查询暂不可用"}
 
     logger.info("创建 MCP Server 完成")
     return mcp

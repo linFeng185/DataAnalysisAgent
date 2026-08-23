@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import inspect
 import time
+from typing import Any
 
 from fastapi import APIRouter, HTTPException
 
@@ -21,6 +23,63 @@ def _app():
 def _registry():
     from src.datasource.registry import get_registry
     return get_registry()
+
+
+# 方法作用：调用支持可选租户参数的异步 Registry 方法，并安全兼容旧签名。
+# Args: method - 待调用的方法；args - 位置参数；tenant_id - 当前租户 ID。
+# Returns: 被调用方法的返回值；同步返回值也会原样返回。
+async def _call_with_optional_tenant(
+    method: Any,
+    *args: Any,
+    tenant_id: int | None,
+) -> Any:
+    """只在方法签名明确不支持租户参数时走旧 Provider 兼容路径。"""
+    try:
+        signature = inspect.signature(method)
+        parameters = signature.parameters.values()
+        tenant_parameter = signature.parameters.get("tenant_id")
+        supports_positional = bool(
+            tenant_parameter
+            and tenant_parameter.kind is inspect.Parameter.POSITIONAL_ONLY
+        )
+        supports_keyword = (
+            bool(tenant_parameter) and not supports_positional
+        ) or any(
+            parameter.kind is inspect.Parameter.VAR_KEYWORD
+            for parameter in parameters
+        )
+    except (TypeError, ValueError):
+        supports_positional = False
+        supports_keyword = None
+
+    logger.debug(
+        "API 租户参数兼容调用入口",
+        method=getattr(method, "__qualname__", repr(method)),
+        tenant_id=tenant_id,
+        supports_positional=supports_positional,
+        supports_keyword=supports_keyword,
+    )
+    if supports_positional:
+        result = method(*args, tenant_id)
+        return await result if inspect.isawaitable(result) else result
+    if supports_keyword is False:
+        result = method(*args)
+        return await result if inspect.isawaitable(result) else result
+
+    try:
+        result = method(*args, tenant_id=tenant_id)
+    except TypeError as exc:
+        # 未知签名时仅识别明确的未知关键字错误，避免吞掉方法体内部异常。
+        message = str(exc).lower()
+        if supports_keyword is True or "unexpected keyword argument" not in message:
+            raise
+        logger.info(
+            "API 租户参数兼容回退",
+            method=getattr(method, "__qualname__", repr(method)),
+            reason="旧方法签名不接受 tenant_id",
+        )
+        result = method(*args)
+    return await result if inspect.isawaitable(result) else result
 
 # ---- MCP Server 管理 ----
 

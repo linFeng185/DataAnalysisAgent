@@ -8,6 +8,64 @@ from types import SimpleNamespace
 class TestExecuteSQLSecurity:
     """覆盖 4.7 与 12.2/12.3 的执行边界。"""
 
+    # 方法作用：验证 Graph 状态缺少租户字段时仍从可信 ContextVar 传递租户并写入审计。
+    # Args: self - pytest 测试类实例；monkeypatch - pytest 补丁工具。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    async def test_execution_uses_context_tenant_when_state_is_legacy(self, monkeypatch):
+        """旧 checkpoint 不含 tenant_id 时不得落到租户 0 或默认租户。"""
+        # Arrange
+        from types import SimpleNamespace
+        from unittest.mock import AsyncMock
+
+        import src.api.auth as auth_module
+        import src.security.data_masker as data_masker
+        import src.security.sql_execution as sql_execution
+        from src.graph.nodes import execute_sql as execute_module
+
+        execution_calls: list[dict] = []
+
+        # 方法作用：记录统一 SQL 执行边界收到的显式租户。
+        # Args: args - SQL 执行位置参数；kwargs - 执行选项。
+        # Returns: 最小成功结果，避免访问真实数据库。
+        async def fake_execute(*args, **kwargs):
+            execution_calls.append(dict(kwargs))
+            return SimpleNamespace(
+                success=True,
+                sql=args[0],
+                data=[],
+                truncated=False,
+                details=[],
+                error="",
+                error_type="",
+            )
+
+        audit = AsyncMock()
+        monkeypatch.setattr(sql_execution, "validate_and_execute_sql", fake_execute)
+        monkeypatch.setattr(data_masker, "log_audit", audit)
+        monkeypatch.setattr(execute_module, "get_tenant_policy", lambda: SimpleNamespace(
+            datasource_isolation_enabled=False,
+        ))
+        monkeypatch.setattr(execute_module, "get_settings", lambda: SimpleNamespace(
+            max_result_rows=10,
+            attribution_max_touchpoint_rows=10,
+        ))
+        tenant_token = auth_module._current_tenant_id.set(4)  # noqa: SLF001
+
+        # Act
+        try:
+            await execute_module.execute_sql_node({
+                "datasource": "sales",
+                "dialect": "postgres",
+                "generated_sql": "SELECT 1",
+                "request_rate_limit_checked": True,
+            })
+        finally:
+            auth_module._current_tenant_id.reset(tenant_token)  # noqa: SLF001
+
+        # Assert
+        assert execution_calls[0]["tenant_id"] == 4
+        assert audit.await_args.kwargs["tenant_id"] == 4
+
     async def test_result_is_bounded_and_masked(self, monkeypatch):
         """查询应有界读取，并在写入 state 前脱敏 PII。"""
         # Arrange

@@ -282,6 +282,7 @@ DATASOURCE_CACHE_BACKEND=redis
 | `CORS_ALLOWED_ORIGINS` | 允许跨域的前端 origin，逗号分隔 | 空（拒绝跨域） |
 | `SECURITY_HSTS_SECONDS` | 生产 HTTPS 的 HSTS 时长 | 31536000 |
 | `MAX_QUERIES_PER_HOUR` | 每小时最大查询数 | 100 |
+| `MAX_SQL_CHARS` | 统一 SQL 执行入口允许的最大字符数 | 20000 |
 | `MAX_EXECUTION_TIME` | SQL 执行超时（秒） | 30 |
 | `ENV` | 运行环境（dev 开启 /docs）| prod |
 | `LOG_LEVEL` | 日志级别 | INFO |

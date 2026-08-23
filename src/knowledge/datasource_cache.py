@@ -34,6 +34,7 @@ _DEFAULT_PORTS = {
 }
 _NAMESPACE_PARAMS = (
     "catalog",
+    "db_path",
     "http_port",
     "schema",
     "search_path",
@@ -60,14 +61,22 @@ def build_connection_fingerprint(datasource: DataSourceConfig) -> str:
             datasource.dialect.strip().lower(), datasource.dialect.strip().lower(),
         )
         port = int(datasource.port or _DEFAULT_PORTS.get(dialect, 0))
-        database = datasource.database.strip()
-        if dialect == "sqlite" and database not in {"", ":memory:"}:
-            database = os.path.normcase(os.path.abspath(os.path.expanduser(database)))
         namespace = {
             key: datasource.extra_params.get(key)
             for key in _NAMESPACE_PARAMS
             if datasource.extra_params.get(key) not in (None, "")
         }
+        database = datasource.database.strip()
+        if dialect == "sqlite":
+            # SQLiteConnector 优先使用 extra_params.db_path，指纹必须与真实连接路径一致。
+            configured_path = str(namespace.get("db_path") or database).strip()
+            if configured_path:
+                normalized_path = os.path.normcase(
+                    os.path.abspath(os.path.expanduser(configured_path))
+                ) if configured_path != ":memory:" else configured_path
+                database = normalized_path
+                if "db_path" in namespace:
+                    namespace["db_path"] = normalized_path
         if dialect == "clickhouse" and namespace.get("http_port"):
             port = int(namespace["http_port"])
         identity = {
@@ -166,9 +175,14 @@ def _deserialize_record(raw: str | bytes, fingerprint: str) -> list[KnowledgeEnt
             raise ValueError("缓存版本不兼容")
         if payload.get("fingerprint") != fingerprint:
             raise ValueError("缓存连接指纹不匹配")
+        created_at = datetime.fromisoformat(str(payload["created_at"]))
+        if created_at.tzinfo is None:
+            created_at = created_at.replace(tzinfo=timezone.utc)
         expires_at = datetime.fromisoformat(str(payload["expires_at"]))
         if expires_at.tzinfo is None:
             expires_at = expires_at.replace(tzinfo=timezone.utc)
+        if expires_at <= created_at:
+            raise ValueError("缓存过期时间必须晚于创建时间")
         if datetime.now(timezone.utc) >= expires_at:
             logger.warning("数据库缓存已过期", fingerprint=fingerprint[:12])
             raise CacheExpiredError("缓存已过期")
@@ -333,6 +347,9 @@ class LocalDatasourceCache:
         try:
             os.replace(path, target)
             logger.info("隔离损坏缓存完成", source=str(path), target=str(target))
+        except FileNotFoundError:
+            # 并发请求可能已经完成替换，当前请求无需再次隔离。
+            logger.info("隔离损坏缓存跳过", path=str(path), reason="已被其他请求隔离")
         except Exception as exc:
             logger.error("隔离损坏缓存失败", path=str(path), error=str(exc), exc_info=True)
             raise
@@ -377,28 +394,67 @@ class RedisDatasourceCache:
         key = self._key_for(fingerprint)
         try:
             raw = await self._client.get(key)
-            if raw is None:
-                logger.info("Redis 数据库缓存未命中", fingerprint=fingerprint[:12])
-                return None
-            entries = _deserialize_record(raw, fingerprint)
-            logger.info(
-                "读取 Redis 数据库缓存完成",
-                fingerprint=fingerprint[:12],
-                entry_count=len(entries),
-            )
-            return entries
-        except CacheExpiredError:
-            await self.delete(fingerprint)
-            logger.info("Redis 数据库过期缓存已删除", fingerprint=fingerprint[:12])
-            return None
         except Exception as exc:
             logger.error(
-                "读取 Redis 数据库缓存失败",
+                "读取 Redis 数据库缓存失败，Redis 服务不可用",
                 fingerprint=fingerprint[:12],
                 error=str(exc),
                 exc_info=True,
             )
             raise
+        if raw is None:
+            logger.info("Redis 数据库缓存未命中", fingerprint=fingerprint[:12])
+            return None
+        try:
+            entries = _deserialize_record(raw, fingerprint)
+        except CacheExpiredError:
+            try:
+                await self.delete(fingerprint)
+            except Exception as exc:
+                logger.warning(
+                    "删除 Redis 过期缓存失败，继续按缓存未命中处理",
+                    fingerprint=fingerprint[:12],
+                    error=str(exc),
+                    exc_info=True,
+                )
+            logger.info("Redis 数据库过期缓存已按未命中处理", fingerprint=fingerprint[:12])
+            return None
+        except Exception as exc:
+            logger.warning(
+                "Redis 数据库缓存载荷无效，按未命中处理",
+                fingerprint=fingerprint[:12],
+                error=str(exc),
+                exc_info=True,
+            )
+            await self._discard_invalid_record(key, fingerprint)
+            return None
+        logger.info(
+            "读取 Redis 数据库缓存完成",
+            fingerprint=fingerprint[:12],
+            entry_count=len(entries),
+        )
+        return entries
+
+    # 方法作用：删除 Redis 中无法解析的缓存载荷并隔离清理故障。
+    # Args: self - Redis 缓存实例；key - 已生成的 Redis key；fingerprint - 连接指纹。
+    # Returns: 无返回值，删除失败只记录日志并保持缓存未命中语义。
+    async def _discard_invalid_record(self, key: str, fingerprint: str) -> None:
+        logger.debug("清理 Redis 无效缓存入口", fingerprint=fingerprint[:12], key=key)
+        try:
+            deleted = bool(await self._client.delete(key))
+        except Exception as exc:
+            logger.warning(
+                "清理 Redis 无效缓存失败，继续按缓存未命中处理",
+                fingerprint=fingerprint[:12],
+                error=str(exc),
+                exc_info=True,
+            )
+            return
+        logger.info(
+            "清理 Redis 无效缓存完成",
+            fingerprint=fingerprint[:12],
+            deleted=deleted,
+        )
 
     # 使用 Redis SET EX 写入指定连接的缓存条目。
     # Args: fingerprint - 连接指纹；entries - 待缓存的 Schema 知识条目。

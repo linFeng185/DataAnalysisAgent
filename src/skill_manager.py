@@ -7,6 +7,8 @@ from __future__ import annotations
 
 import importlib.util
 import io
+import json
+import os
 import shutil
 import sys
 import tempfile
@@ -87,6 +89,8 @@ class SkillManager:
 
         self.trusted_public_keys = parse_trusted_public_keys(trusted_public_keys)
         self.require_signatures = bool(require_signatures)
+        self.enabled_state_path = self.managed_dir / ".enabled-state.json"
+        self._enabled_overrides: dict[str, bool] = {}
         self.all_dirs: list[Path] = []
         self.skills: dict[str, Skill] = {}
         logger.info("初始化 SkillManager 完成", system_dirs=1 + len(self.extra_dirs))
@@ -97,6 +101,8 @@ class SkillManager:
     async def discover(self) -> None:
         """全量扫描受信任目录，Manifest 不能自行扩大作用域。"""
         logger.debug("Skill 全量扫描入口")
+        enabled_overrides = self._load_enabled_overrides()
+        logger.info("Skill 启停状态读取完成", override_count=len(enabled_overrides))
         self.all_dirs = [self.builtin_dir] + self.extra_dirs + [self.managed_dir]
         fresh: dict[str, Skill] = {}
         for d in [self.builtin_dir] + self.extra_dirs:
@@ -104,12 +110,16 @@ class SkillManager:
                 logger.info("Skill 目录不存在", path=str(d))
                 continue
             for skill_md in sorted(d.glob("*/SKILL.md")):
-                self._load_discovered_skill(fresh, skill_md, "system", 0, 0)
+                self._load_discovered_skill(
+                    fresh, skill_md, "system", 0, 0, enabled_overrides,
+                )
 
         system_upload_dir = self.managed_dir / "system"
         if system_upload_dir.exists():
             for skill_md in sorted(system_upload_dir.glob("*/SKILL.md")):
-                self._load_discovered_skill(fresh, skill_md, "system", 0, 0)
+                self._load_discovered_skill(
+                    fresh, skill_md, "system", 0, 0, enabled_overrides,
+                )
 
         tenant_root = self.managed_dir / "tenant"
         if tenant_root.exists():
@@ -119,7 +129,9 @@ class SkillManager:
                 except ValueError:
                     logger.warning("跳过非法租户 Skill 路径", path=str(skill_md))
                     continue
-                self._load_discovered_skill(fresh, skill_md, "tenant", tenant_id, 0)
+                self._load_discovered_skill(
+                    fresh, skill_md, "tenant", tenant_id, 0, enabled_overrides,
+                )
 
         private_root = self.managed_dir / "private"
         if private_root.exists():
@@ -131,13 +143,19 @@ class SkillManager:
                     logger.warning("跳过非法个人 Skill 路径", path=str(skill_md))
                     continue
                 self._load_discovered_skill(
-                    fresh, skill_md, "private", tenant_id, owner_user_id,
+                    fresh,
+                    skill_md,
+                    "private",
+                    tenant_id,
+                    owner_user_id,
+                    enabled_overrides,
                 )
+        self._enabled_overrides = enabled_overrides
         self.skills = fresh
         logger.info("Skill 扫描完成", total=len(self.skills))
 
     # 方法作用：解析并加入一个由目录确定作用域的 Skill。
-    # Args: fresh - 新缓存；skill_md - 清单路径；scope - 可信作用域；tenant_id - 所属租户；owner_user_id - 所有者。
+    # Args: fresh - 新缓存；skill_md - 清单路径；scope - 可信作用域；tenant_id - 所属租户；owner_user_id - 所有者；enabled_overrides - 持久启停状态。
     # Returns: 无返回值。
     def _load_discovered_skill(
         self,
@@ -146,6 +164,7 @@ class SkillManager:
         scope: str,
         tenant_id: int,
         owner_user_id: int,
+        enabled_overrides: dict[str, bool],
     ) -> None:
         logger.debug("加载发现 Skill 入口", path=str(skill_md), scope=scope)
         try:
@@ -159,6 +178,13 @@ class SkillManager:
             if skill.resource_id in fresh:
                 logger.warning("Skill 复合标识重复，保留先发现项", resource_id=skill.resource_id)
                 return
+            if skill.resource_id in enabled_overrides:
+                skill.enabled = enabled_overrides[skill.resource_id]
+                logger.info(
+                    "Skill 启停状态恢复完成",
+                    resource_id=skill.resource_id,
+                    enabled=skill.enabled,
+                )
             missing = self._check_dependencies(skill)
             if missing:
                 logger.warning("Skill 缺少依赖", skill=skill.name, missing=missing)
@@ -185,8 +211,91 @@ class SkillManager:
             skill.resource_id = self._resource_key(
                 skill.name, skill.scope, skill.tenant_id, skill.owner_user_id,
             )
+        if skill.resource_id in self._enabled_overrides:
+            skill.enabled = self._enabled_overrides[skill.resource_id]
         self.skills[skill.resource_id] = skill
         logger.info("Skill 已注入缓存", name=skill.name, resource_id=skill.resource_id)
+
+    # 方法作用：读取并严格校验持久化的 Skill 启停覆盖状态。
+    # Args: 无。
+    # Returns: 以复合资源标识为键的布尔状态映射。
+    def _load_enabled_overrides(self) -> dict[str, bool]:
+        """损坏状态必须阻断刷新，避免禁用项被默认重新启用。"""
+        if not self.enabled_state_path.exists():
+            return {}
+        try:
+            raw = json.loads(self.enabled_state_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, UnicodeError) as exc:
+            logger.error(
+                "Skill 启停状态文件损坏",
+                error_type=type(exc).__name__,
+                exc_info=True,
+            )
+            raise ValueError("Skill 启停状态文件损坏") from exc
+        if not isinstance(raw, dict) or any(
+            not isinstance(key, str) or not isinstance(value, bool)
+            for key, value in raw.items()
+        ):
+            logger.error("Skill 启停状态文件结构非法")
+            raise ValueError("Skill 启停状态文件损坏")
+        return dict(raw)
+
+    # 方法作用：通过同目录临时文件和原子替换持久化 Skill 启停状态。
+    # Args: overrides - 待持久化的完整复合资源状态映射。
+    # Returns: 无返回值。
+    def _persist_enabled_overrides(self, overrides: dict[str, bool]) -> None:
+        """只有原子替换成功后，调用方才允许更新内存状态。"""
+        logger.debug("持久化 Skill 启停状态入口", override_count=len(overrides))
+        self.managed_dir.mkdir(parents=True, exist_ok=True)
+        temp_path: Path | None = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                encoding="utf-8",
+                dir=self.managed_dir,
+                prefix=".enabled-state-",
+                suffix=".tmp",
+                delete=False,
+            ) as handle:
+                json.dump(overrides, handle, ensure_ascii=False, sort_keys=True)
+                handle.write("\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+                temp_path = Path(handle.name)
+            os.replace(temp_path, self.enabled_state_path)
+        except Exception as exc:
+            if temp_path is not None:
+                temp_path.unlink(missing_ok=True)
+            logger.error(
+                "持久化 Skill 启停状态失败",
+                error_type=type(exc).__name__,
+                exc_info=True,
+            )
+            raise
+        logger.info("持久化 Skill 启停状态完成", override_count=len(overrides))
+
+    # 方法作用：先持久化再更新指定 Skill 的启用状态。
+    # Args: skill - 当前管理器缓存中的 Skill；enabled - 目标启用状态。
+    # Returns: 无返回值。
+    def set_enabled(self, skill: Skill, enabled: bool) -> None:
+        """启停状态跨 refresh 和进程重启恢复，写失败时不修改内存。"""
+        logger.debug(
+            "设置 Skill 启停状态入口",
+            resource_id=skill.resource_id,
+            enabled=enabled,
+        )
+        if not skill.resource_id or self.skills.get(skill.resource_id) is not skill:
+            raise ValueError("Skill 不属于当前管理器缓存")
+        overrides = self._load_enabled_overrides()
+        overrides[skill.resource_id] = bool(enabled)
+        self._persist_enabled_overrides(overrides)
+        self._enabled_overrides = overrides
+        skill.enabled = bool(enabled)
+        logger.info(
+            "设置 Skill 启停状态完成",
+            resource_id=skill.resource_id,
+            enabled=skill.enabled,
+        )
 
     # 方法作用：验证并安装 Registry ZIP 到 API 授权的可信作用域目录。
     # Args: self - 管理器；package - Registry 元数据；archive_bytes - 已验签 ZIP；scope - 作用域；tenant_id - 租户；user_id - 用户。

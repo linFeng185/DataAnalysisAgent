@@ -181,3 +181,40 @@ class TestAutomationRunner:
         # Assert
         assert result == {"due": 2, "succeeded": 1, "failed": 1}
         assert runner.run.await_count == 2
+
+    # 方法作用：验证后台调度从数据源发现到统一 SQL 执行始终显式携带任务租户。
+    # Args: self - pytest 测试类实例；monkeypatch - pytest 补丁工具。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    async def test_execute_schedule_query_propagates_schedule_tenant(self, monkeypatch) -> None:
+        """请求 ContextVar 缺失时也不能回落到默认租户的数据源。"""
+        # Arrange
+        import src.app_context as app_context_module
+        import src.datasource.registry as registry_module
+        import src.security.sql_execution as sql_execution_module
+        from src.automation.runner import execute_schedule_query
+
+        schedule = self._schedule("report")
+        registry = SimpleNamespace(list_all=AsyncMock(return_value=[{
+            "name": "sales",
+            "dialect": "postgres",
+        }]))
+        executor = AsyncMock(return_value=SimpleNamespace(
+            success=True,
+            data=[{"total": 1}],
+            error="",
+        ))
+        monkeypatch.setattr(registry_module, "get_registry", lambda: registry)
+        monkeypatch.setattr(
+            app_context_module,
+            "get_tenant_policy",
+            lambda: SimpleNamespace(datasource_isolation_enabled=False),
+        )
+        monkeypatch.setattr(sql_execution_module, "validate_and_execute_sql", executor)
+
+        # Act
+        rows = await execute_schedule_query(schedule)
+
+        # Assert
+        assert rows == [{"total": 1}]
+        registry.list_all.assert_awaited_once_with(tenant_id=3)
+        assert executor.await_args.kwargs["tenant_id"] == 3

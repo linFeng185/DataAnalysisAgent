@@ -231,7 +231,13 @@ async def execute_schedule_query(schedule: ScheduleDefinition) -> list[dict[str,
     from src.security.sql_execution import validate_and_execute_sql
 
     registry = get_registry()
-    available = await registry.list_all()
+    available = await registry.list_all(tenant_id=schedule.tenant_id)
+    logger.info(
+        "自动化任务租户数据源边界探针",
+        schedule_id=schedule.id,
+        tenant_id=schedule.tenant_id,
+        available_count=len(available),
+    )
     policy = get_tenant_policy()
     if policy.datasource_isolation_enabled:
         access = await resolve_datasource_access(
@@ -259,6 +265,7 @@ async def execute_schedule_query(schedule: ScheduleDefinition) -> list[dict[str,
         schedule.datasource,
         schedule.dialect,
         explain=True,
+        tenant_id=schedule.tenant_id,
     )
     if not result.success:
         raise RuntimeError(result.error or "定时 SQL 执行失败")

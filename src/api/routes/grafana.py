@@ -9,6 +9,8 @@ from typing import Any
 from fastapi import APIRouter, Body, HTTPException
 
 from src.api.auth import get_current_identity
+from src.api.routes._helpers import _call_with_optional_tenant
+from src.app_context import get_tenant_policy
 from src.datasource.registry import get_registry
 from src.logging_config import get_logger
 from src.security.permission_check import (
@@ -38,6 +40,7 @@ async def search() -> list[str]:
             tenant_id=identity.tenant_id,
             user_id=identity.user_id,
             role=identity.role,
+            tenant_policy=get_tenant_policy(),
         )
     except PermissionError as exc:
         logger.warning("Grafana 数据源搜索权限拒绝", tenant_id=identity.tenant_id, user_id=identity.user_id)
@@ -79,6 +82,7 @@ async def query(payload: dict[str, Any] = Body(...)) -> list[dict[str, Any]]:
             tenant_id=identity.tenant_id,
             user_id=identity.user_id,
             role=identity.role,
+            tenant_policy=get_tenant_policy(),
         )
     except PermissionError as exc:
         logger.warning(
@@ -97,6 +101,7 @@ async def query(payload: dict[str, Any] = Body(...)) -> list[dict[str, Any]]:
             available,
             acl_snapshot[datasource_name],
             semaphore,
+            tenant_id=identity.tenant_id,
         )
         for target, datasource_name in prepared
     ), return_exceptions=True)
@@ -135,7 +140,7 @@ async def query(payload: dict[str, Any] = Body(...)) -> list[dict[str, Any]]:
 
 
 # 方法作用：在并发和超时边界内执行单个已授权 Grafana target。
-# Args: target/datasource_name/payload - 目标上下文；available - 数据源摘要；permission - ACL 快照；semaphore - 并发门限。
+# Args: target/datasource_name/payload - 目标上下文；available - 数据源摘要；permission - ACL 快照；semaphore - 并发门限；tenant_id - 可信租户 ID。
 # Returns: Grafana table 或 time series 结果。
 async def _execute_target(
     target: dict[str, Any],
@@ -144,8 +149,15 @@ async def _execute_target(
     available: list[dict[str, Any]],
     permission: dict[str, Any],
     semaphore: asyncio.Semaphore,
+    *,
+    tenant_id: int | None = None,
 ) -> dict[str, Any]:
     async with semaphore:
+        logger.info(
+            "Grafana 目标执行身份边界",
+            datasource=datasource_name,
+            tenant_id=tenant_id,
+        )
         datasource_meta = next(
             (item for item in available if str(item.get("name")) == datasource_name),
             {},
@@ -175,6 +187,7 @@ async def _execute_target(
                     datasource_name,
                     dialect,
                     explain=False,
+                    tenant_id=tenant_id,
                 )
         except TimeoutError as exc:
             logger.warning("Grafana 目标查询超时", datasource=datasource_name)
@@ -213,10 +226,12 @@ async def tag_values() -> list[dict[str, Any]]:
 # Args: identity - 当前请求身份。
 # Returns: Registry 数据源摘要列表。
 async def _available_datasources(identity: Any) -> list[dict[str, Any]]:
+    registry = get_registry()
     try:
-        return await get_registry().list_all(tenant_id=identity.tenant_id)
-    except TypeError:
-        return await get_registry().list_all()
+        return await _call_with_optional_tenant(
+            registry.list_all,
+            tenant_id=identity.tenant_id,
+        )
     except Exception as exc:
         logger.error("Grafana 数据源列表读取失败", error=str(exc), exc_info=True)
         raise HTTPException(503, "数据源服务暂时不可用") from exc

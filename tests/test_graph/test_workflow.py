@@ -460,7 +460,7 @@ class TestMultiSource:
 
             # Assert：连接失败立即成为来源级错误，后续链路未执行。
             assert result == {"datasource": "missing", "success": False, "error": "数据源连接失败或不存在"}
-            registry.resolve_or_none.assert_awaited_once_with("missing")
+            registry.resolve_or_none.assert_awaited_once_with("missing", tenant_id=1)
             retrieve_schema.assert_not_awaited()
             logger.info("test_worker_short_circuits_unreachable_datasource 完成")
         except Exception as exc:

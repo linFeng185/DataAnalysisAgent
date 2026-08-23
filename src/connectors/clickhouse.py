@@ -389,14 +389,22 @@ class ClickHouseConnector(ConnectorBase):
         max_rows: int,
         params: dict | None = None,
     ) -> tuple[list[dict], bool]:
-        """在线程池执行同步客户端，并在返回边界截断结果。"""
+        """在线程池消费同步行流，并在达到 max_rows + 1 后立即关闭响应。"""
         logger.debug(
             "ClickHouse 有界执行入口",
             datasource=self.config.name,
             max_rows=max_rows,
             sql=sql,
         )
-        rows = await self.execute(sql, params)
+        if self._engine is None:
+            await self.create_engine()
+        bound_sql, bound_params = self._bind_parameters(sql, params)
+        rows = await asyncio.to_thread(
+            self._execute_bounded_stream,
+            bound_sql,
+            bound_params,
+            max(1, int(max_rows)),
+        )
         truncated = len(rows) > max_rows
         bounded = rows[:max_rows]
         logger.info(
@@ -406,6 +414,43 @@ class ClickHouseConnector(ConnectorBase):
             truncated=truncated,
         )
         return bounded, truncated
+
+    # 方法作用：同步消费 ClickHouse HTTP 行流并在上限外一行处主动关闭。
+    # Args: self - ClickHouseConnector；sql - 已绑定 SQL；params - ClickHouse 参数；max_rows - 最大返回行数。
+    # Returns: 最多 max_rows + 1 条字典行，用于判断截断。
+    def _execute_bounded_stream(
+        self,
+        sql: str,
+        params: dict | None,
+        max_rows: int,
+    ) -> list[dict]:
+        settings = get_settings()
+        query_settings = {
+            "max_execution_time": max(1, int(settings.max_execution_time)),
+            "max_rows_to_read": max(1, int(getattr(settings, "max_scan_rows", 10_000_000))),
+            "read_overflow_mode": "throw",
+            "max_result_rows": max_rows + 1,
+            "result_overflow_mode": "break",
+        }
+        stream_context = self._engine.client.query_rows_stream(
+            sql,
+            parameters=params,
+            settings=query_settings,
+        )
+        rows: list[dict] = []
+        with stream_context as stream:
+            column_names = list(stream.source.column_names)
+            for row in stream:
+                rows.append(self._row_to_dict(dict(zip(column_names, row, strict=False))))
+                if len(rows) > max_rows:
+                    break
+        logger.info(
+            "ClickHouse 流式有界读取完成",
+            datasource=self.config.name,
+            consumed_rows=len(rows),
+            max_rows=max_rows,
+        )
+        return rows
 
     async def close(self) -> None:
         """关闭 ClickHouse 客户端连接。

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 
 def _write_skill(root: Path, name: str, keyword: str) -> None:
     """写入最小 Skill 清单供作用域发现测试使用。"""
@@ -174,3 +176,83 @@ class TestSkillScopeIsolation:
         assert manager.get_upload_dir("private", tenant_id=4, user_id=7) == (
             tmp_path / "managed" / "private" / "4" / "7"
         )
+
+    # 方法作用：验证 Skill 启停状态在刷新和管理器重建后仍能恢复。
+    # Args: self - pytest 测试类实例；tmp_path - pytest 临时目录。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    async def test_enabled_state_survives_discovery_and_manager_restart(
+        self, tmp_path: Path,
+    ) -> None:
+        """手动禁用不能因 refresh 或进程重启时重新扫描 Manifest 而失效。"""
+        # Arrange
+        from src.skill_manager import SkillManager
+
+        builtin = tmp_path / "builtin"
+        managed = tmp_path / "managed"
+        _write_skill(builtin, "quality", "质量")
+        manager = SkillManager(str(builtin), managed_dir=str(managed))
+        await manager.discover()
+        skill = manager.get_skill("quality", tenant_id=4, user_id=7)
+        assert skill is not None
+
+        # Act
+        manager.set_enabled(skill, False)
+        await manager.discover()
+        reloaded = SkillManager(str(builtin), managed_dir=str(managed))
+        await reloaded.discover()
+
+        # Assert
+        assert manager.get_skill("quality", tenant_id=4, user_id=7).enabled is False
+        assert reloaded.get_skill("quality", tenant_id=4, user_id=7).enabled is False
+
+    # 方法作用：验证持久化失败时 Skill 内存状态保持原值。
+    # Args: self - pytest 测试类实例；tmp_path - pytest 临时目录；monkeypatch - pytest 补丁工具。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    async def test_enabled_state_write_failure_keeps_memory_unchanged(
+        self, tmp_path: Path, monkeypatch,
+    ) -> None:
+        """磁盘写入失败不能返回失败后却在当前进程中悄悄改变状态。"""
+        # Arrange
+        from src.skill_manager import SkillManager
+
+        builtin = tmp_path / "builtin"
+        managed = tmp_path / "managed"
+        _write_skill(builtin, "quality", "质量")
+        manager = SkillManager(str(builtin), managed_dir=str(managed))
+        await manager.discover()
+        skill = manager.get_skill("quality", tenant_id=4, user_id=7)
+        assert skill is not None and skill.enabled is True
+        monkeypatch.setattr(
+            manager,
+            "_persist_enabled_overrides",
+            lambda overrides: (_ for _ in ()).throw(OSError("disk full")),
+        )
+
+        # Act / Assert
+        with pytest.raises(OSError, match="disk full"):
+            manager.set_enabled(skill, False)
+        assert skill.enabled is True
+
+    # 方法作用：验证损坏的 Skill 状态文件不会覆盖现有有效缓存。
+    # Args: self - pytest 测试类实例；tmp_path - pytest 临时目录。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    async def test_corrupt_enabled_state_fails_closed_and_keeps_cache(
+        self, tmp_path: Path,
+    ) -> None:
+        """状态文件不可解析时 refresh 应失败，原缓存不能被半成品替换。"""
+        # Arrange
+        from src.skill_manager import SkillManager
+
+        builtin = tmp_path / "builtin"
+        managed = tmp_path / "managed"
+        _write_skill(builtin, "quality", "质量")
+        manager = SkillManager(str(builtin), managed_dir=str(managed))
+        await manager.discover()
+        original = manager.get_skill("quality", tenant_id=4, user_id=7)
+        managed.mkdir(parents=True, exist_ok=True)
+        (managed / ".enabled-state.json").write_text("{broken", encoding="utf-8")
+
+        # Act / Assert
+        with pytest.raises(ValueError, match="Skill 启停状态文件损坏"):
+            await manager.discover()
+        assert manager.get_skill("quality", tenant_id=4, user_id=7) is original

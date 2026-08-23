@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { lazy, Suspense, useState, useEffect } from 'react';
 import { BrowserRouter, Routes, Route, NavLink, Navigate, useLocation } from 'react-router-dom';
 import { Layout, Menu, ConfigProvider, Tag, Typography, theme, Grid, Button, Drawer } from 'antd';
 import {
@@ -8,16 +8,6 @@ import {
   SafetyCertificateOutlined, LogoutOutlined, UserOutlined,
   MenuOutlined, ScheduleOutlined,
 } from '@ant-design/icons';
-import ChatPage from './pages/ChatPage';
-import DatasourcePage from './pages/DatasourcePage';
-import SchemaPage from './pages/SchemaPage';
-import HistoryPage from './pages/HistoryPage';
-import SkillsPage from './pages/SkillsPage';
-import KnowledgePage from './pages/KnowledgePage';
-import McpPage from './pages/McpPage';
-import AdminPage from './pages/AdminPage';
-import AutomationPage from './pages/AutomationPage';
-import LoginPage from './pages/LoginPage';
 import { AuthProvider } from './hooks/AuthContext';
 import { useAuth } from './hooks/AuthContext';
 import ErrorBoundary from './components/ErrorBoundary';
@@ -26,6 +16,23 @@ import type { HealthResponse } from './types';
 import zhCN from 'antd/locale/zh_CN';
 
 const { Header, Sider, Content } = Layout;
+
+const ChatPage = lazy(() => import('./pages/ChatPage'));
+const DatasourcePage = lazy(() => import('./pages/DatasourcePage'));
+const SchemaPage = lazy(() => import('./pages/SchemaPage'));
+const HistoryPage = lazy(() => import('./pages/HistoryPage'));
+const SkillsPage = lazy(() => import('./pages/SkillsPage'));
+const KnowledgePage = lazy(() => import('./pages/KnowledgePage'));
+const McpPage = lazy(() => import('./pages/McpPage'));
+const AdminPage = lazy(() => import('./pages/AdminPage'));
+const AutomationPage = lazy(() => import('./pages/AutomationPage'));
+const LoginPage = lazy(() => import('./pages/LoginPage'));
+
+const pageFallback = (
+  <div style={{ minHeight: 240, display: 'grid', placeItems: 'center' }}>
+    页面加载中...
+  </div>
+);
 
 // 方法作用：等待认证状态并阻止未登录会话进入工作台。
 // Args: 无。
@@ -164,17 +171,19 @@ function AppContent() {
         </Drawer>
         <Content className="app-content" style={{ background: '#f5f5f5', minWidth: 0 }}>
           <ErrorBoundary>
-            <Routes>
-              <Route path="/" element={<ChatPage />} />
-              <Route path="/datasource" element={<DatasourcePage />} />
-              <Route path="/schema" element={<SchemaPage />} />
-              <Route path="/history" element={<HistoryPage />} />
-              <Route path="/skills" element={<SkillsPage />} />
-              <Route path="/knowledge" element={<KnowledgePage />} />
-              <Route path="/automation" element={<AutomationPage />} />
-              <Route path="/mcp" element={<McpPage />} />
-              <Route path="/admin" element={<AdminRoute />} />
-            </Routes>
+            <Suspense fallback={pageFallback}>
+              <Routes>
+                <Route path="/" element={<ChatPage />} />
+                <Route path="/datasource" element={<DatasourcePage />} />
+                <Route path="/schema" element={<SchemaPage />} />
+                <Route path="/history" element={<HistoryPage />} />
+                <Route path="/skills" element={<SkillsPage />} />
+                <Route path="/knowledge" element={<KnowledgePage />} />
+                <Route path="/automation" element={<AutomationPage />} />
+                <Route path="/mcp" element={<McpPage />} />
+                <Route path="/admin" element={<AdminRoute />} />
+              </Routes>
+            </Suspense>
           </ErrorBoundary>
         </Content>
       </Layout>
@@ -191,7 +200,7 @@ export default function App() {
       <BrowserRouter>
         <AuthProvider>
           <Routes>
-            <Route path="/login" element={<LoginPage />} />
+            <Route path="/login" element={<Suspense fallback={pageFallback}><LoginPage /></Suspense>} />
             <Route path="/*" element={<ProtectedApp />} />
           </Routes>
         </AuthProvider>

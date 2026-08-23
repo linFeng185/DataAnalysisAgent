@@ -8,6 +8,7 @@ from typing import Any
 import sqlalchemy as sa
 from sqlalchemy import URL
 
+from src.config import get_settings
 from src.connectors.base import ConnectorBase
 from src.connectors.registry import register_connector
 from src.logging_config import get_logger
@@ -179,6 +180,7 @@ class OracleConnector(ConnectorBase):
         logger.debug("Oracle 引擎创建入口", datasource=self.config.name)
         try:
             current_schema = self._get_current_schema()
+            call_timeout_ms = max(1, int(get_settings().max_execution_time)) * 1000
             self._engine = sa.create_engine(
                 self._build_url(),
                 pool_size=2,
@@ -186,11 +188,13 @@ class OracleConnector(ConnectorBase):
                 pool_pre_ping=True,
                 pool_recycle=1800,
             )
-            if current_schema:
-                # 方法作用：在每个新 Oracle DBAPI 连接上切换业务 schema。
-                # Args: dbapi_connection - 原生连接；connection_record - SQLAlchemy 连接记录。
-                # Returns: 无返回值。
-                def _set_current_schema(dbapi_connection, connection_record) -> None:
+            # 方法作用：为每个 Oracle DBAPI 连接设置调用超时并按需切换业务 schema。
+            # Args: dbapi_connection - 原生连接；connection_record - SQLAlchemy 连接记录。
+            # Returns: 无返回值。
+            def _configure_session(dbapi_connection, connection_record) -> None:
+                del connection_record
+                dbapi_connection.call_timeout = call_timeout_ms
+                if current_schema:
                     cursor = dbapi_connection.cursor()
                     try:
                         cursor.execute(
@@ -199,7 +203,8 @@ class OracleConnector(ConnectorBase):
                     finally:
                         cursor.close()
 
-                sa.event.listen(self._engine, "connect", _set_current_schema)
+            sa.event.listen(self._engine, "connect", _configure_session)
+            if current_schema:
                 logger.info(
                     "Oracle 会话 schema 配置完成",
                     datasource=self.config.name,

@@ -121,3 +121,61 @@ class TestDatasourceLifecycleApi:
 
         assert caught.value.status_code == 404
         registry.list_all.assert_awaited_once_with(tenant_id=3)
+
+    # 方法作用：验证 Schema 数据源解析显式注入当前 AppContext 的集中租户策略。
+    # Args: self - pytest 测试类实例；monkeypatch - 身份、Registry 与权限补丁。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    async def test_schema_injects_central_tenant_policy(self, monkeypatch) -> None:
+        """Schema ACL 不得因漏传策略回落到单租户 trusted 模式。"""
+        # Arrange
+        import src.api.auth as auth
+        import src.api.routes as routes
+        import src.app_context as app_context_module
+        import src.security.permission_check as permission_module
+        from src.api.routes.schema import _resolve_datasource_name
+
+        identity = SimpleNamespace(tenant_id=3, user_id=7, role="analyst")
+        registry = SimpleNamespace(list_all=AsyncMock(return_value=[{
+            "name": "sales", "dialect": "postgres",
+        }]))
+        resolver = AsyncMock(return_value={"sales": {"name": "sales"}})
+        policy = object()
+        monkeypatch.setattr(auth, "get_current_identity", lambda: identity)
+        monkeypatch.setattr(routes, "_registry", lambda: registry)
+        monkeypatch.setattr(permission_module, "resolve_datasource_access", resolver)
+        monkeypatch.setattr(app_context_module, "get_tenant_policy", lambda: policy)
+
+        # Act
+        result = await _resolve_datasource_name("sales")
+
+        # Assert
+        assert result == "sales"
+        assert resolver.await_args.kwargs["tenant_policy"] is policy
+
+    # 方法作用：验证 Schema Registry 内部 TypeError 不会触发无租户重试。
+    # Args: self - pytest 测试类实例；monkeypatch - pytest 补丁工具。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    async def test_schema_does_not_retry_internal_type_error(self, monkeypatch) -> None:
+        """租户列表读取失败时必须保留原异常且只调用一次。"""
+        # Arrange
+        import src.api.auth as auth
+        import src.api.routes as routes
+        from src.api.routes.schema import _resolve_datasource_name
+
+        identity = SimpleNamespace(tenant_id=3, user_id=7, role="analyst")
+        calls = 0
+
+        async def _list_all(*, tenant_id: int | None = None):
+            nonlocal calls
+            calls += 1
+            assert tenant_id == 3
+            raise TypeError("registry body failure")
+
+        registry = SimpleNamespace(list_all=_list_all)
+        monkeypatch.setattr(auth, "get_current_identity", lambda: identity)
+        monkeypatch.setattr(routes, "_registry", lambda: registry)
+
+        # Act / Assert
+        with pytest.raises(TypeError, match="registry body failure"):
+            await _resolve_datasource_name("sales")
+        assert calls == 1

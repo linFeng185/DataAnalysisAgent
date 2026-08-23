@@ -81,7 +81,9 @@ def _check_02_config_loading() -> bool:
 
     try:
         import yaml
-        mcp_config = yaml.safe_load(open("config/app.example.yaml", encoding="utf-8"))
+        mcp_config = yaml.safe_load(
+            Path("config/app.example.yaml").read_text(encoding="utf-8")
+        )
         servers = mcp_config.get("mcp_servers", {})
         active_k = [k for k, v in servers.items() if isinstance(v, dict)]
         all_ok &= check("MCP配置加载", len(active_k) > 0, f"活跃: {active_k}")
@@ -89,8 +91,6 @@ def _check_02_config_loading() -> bool:
         all_ok &= check("MCP配置加载", False, str(e))
 
     try:
-        from pathlib import Path
-
         import yaml
 
         datasource_path = Path("config/datasources.example.yaml")

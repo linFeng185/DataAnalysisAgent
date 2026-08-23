@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import math
+import re
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
 from decimal import Decimal
@@ -258,7 +259,7 @@ class ConnectorBase(ABC):
             logger.warning("连接器 EXPLAIN 跳过", datasource=self.config.name, reason="模板为空")
             return {"valid": True, "errors": []}
         try:
-            await self.execute(self.explain_template.format(sql=sql))
+            plan_rows = await self.execute(self.explain_template.format(sql=sql))
         except Exception as exc:
             logger.error("连接器 EXPLAIN 失败", datasource=self.config.name, error=str(exc), exc_info=True)
             return {
@@ -268,8 +269,49 @@ class ConnectorBase(ABC):
                     "message": str(exc).split("Stack trace:")[0][:500],
                 }],
             }
-        logger.info("连接器 EXPLAIN 完成", datasource=self.config.name, valid=True)
-        return {"valid": True, "errors": []}
+        estimated_scan_rows = self._estimate_scan_rows(plan_rows)
+        logger.info(
+            "连接器 EXPLAIN 完成",
+            datasource=self.config.name,
+            valid=True,
+            estimated_scan_rows=estimated_scan_rows,
+        )
+        result = {"valid": True, "errors": [], "plan": plan_rows}
+        if estimated_scan_rows is not None:
+            result["estimated_scan_rows"] = estimated_scan_rows
+        return result
+
+    # 方法作用：从常见数据库 EXPLAIN 映射或文本中提取最大估算扫描行数。
+    # Args: plan - Connector 返回的计划行、JSON 映射或文本。
+    # Returns: 最大非负估算行数；计划不含估算值时返回 None。
+    @staticmethod
+    def _estimate_scan_rows(plan: Any) -> int | None:
+        estimates: list[int] = []
+        stack: list[tuple[str, Any]] = [("", plan)]
+        while stack:
+            key, value = stack.pop()
+            normalized_key = re.sub(r"[^a-z]", "", key.casefold())
+            if isinstance(value, Mapping):
+                stack.extend((str(child_key), child_value) for child_key, child_value in value.items())
+                continue
+            if isinstance(value, (list, tuple)):
+                stack.extend((key, item) for item in value)
+                continue
+            if normalized_key in {"estimatedrows", "estimatedscanrows", "planrows", "cardinality"}:
+                try:
+                    estimates.append(max(0, int(float(value))))
+                except (TypeError, ValueError):
+                    logger.warning("EXPLAIN 估算行数字段无效", field=key)
+            if isinstance(value, str):
+                estimates.extend(
+                    int(match)
+                    for match in re.findall(
+                        r"(?:rows|cardinality)\s*[=:]\s*(\d+)",
+                        value,
+                        flags=re.IGNORECASE,
+                    )
+                )
+        return max(estimates) if estimates else None
 
     # 方法作用：执行方言健康探针。
     # Args: 无。

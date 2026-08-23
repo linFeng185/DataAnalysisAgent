@@ -404,6 +404,59 @@ class FileStore:
             logger.error("删除知识文件失败", error=str(exc), exc_info=True)
             return False
 
+    # 方法作用：按精确文件 ID 删除当前身份有权管理的记录。
+    # Args: file_id - 文件主键；knowledge_scope - 可选范围过滤。
+    # Returns: 精确记录被删除时返回 True，不存在、无连接或失败返回 False。
+    async def delete_by_id(self, file_id: int, *, knowledge_scope: str = "") -> bool:
+        """为批量上传补偿提供不会误删同名历史文件的精确边界。"""
+        from src.api.auth import get_current_role
+        from src.knowledge.governance import normalize_role
+
+        tenant_id, user_id = _current_identity()
+        role = normalize_role(get_current_role())
+        logger.debug(
+            "按 ID 删除知识文件入口",
+            file_id=file_id,
+            tenant_id=tenant_id,
+            user_id=user_id,
+            role=role,
+            knowledge_scope=knowledge_scope,
+        )
+        if int(file_id) <= 0:
+            logger.warning("按 ID 删除知识文件拒绝", file_id=file_id, reason="ID 非正数")
+            return False
+        await self._ensure()
+        try:
+            async with self._connect() as conn:
+                if conn is None:
+                    logger.info("按 ID 删除知识文件回退", file_id=file_id, reason="PG 不可用")
+                    return False
+                status = await conn.execute(
+                    "DELETE FROM knowledge_files WHERE id = $1 AND ("
+                    "($4 = 'super_admin' AND knowledge_scope = 'system') OR "
+                    "(($4 IN ('super_admin', 'tenant_admin')) AND "
+                    "knowledge_scope = 'tenant' AND tenant_id = $2) OR "
+                    "(knowledge_scope = 'private' AND tenant_id = $2 AND user_id = $3)"
+                    ") AND ($5 = '' OR knowledge_scope = $5)",
+                    int(file_id), tenant_id, user_id, role, knowledge_scope,
+                )
+                deleted = not status.endswith(" 0")
+                logger.info(
+                    "按 ID 删除知识文件完成",
+                    file_id=file_id,
+                    deleted=deleted,
+                    user_id=user_id,
+                )
+                return deleted
+        except Exception as exc:
+            logger.error(
+                "按 ID 删除知识文件失败",
+                file_id=file_id,
+                error_type=type(exc).__name__,
+                exc_info=True,
+            )
+            return False
+
 
 def _content_type(ext: str) -> str:
     """根据扩展名获取文件 MIME 类型。

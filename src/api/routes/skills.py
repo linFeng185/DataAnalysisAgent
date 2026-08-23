@@ -17,6 +17,31 @@ _started_at = time.time()
 # ---- Skills 管理 ----
 
 
+# 方法作用：把 Skill 上传异常映射为不包含服务端路径和凭证的受控错误分类。
+# Args: exc - 上传读取、解析、验签或缓存注入异常。
+# Returns: 可安全返回客户端的错误文案。
+def _skill_upload_error_message(exc: Exception) -> str:
+    """保留用户可纠正的错误类别，同时隐藏内部实现细节。"""
+    import yaml
+
+    public_validation_errors = {
+        "非内置 Skill 缺少 SIGNATURE.json",
+        "Skill 签名信封格式无效",
+        "Skill 仅允许 Ed25519 签名",
+        "Skill 包摘要与签名信封不一致",
+        "Skill Ed25519 签名校验失败",
+    }
+    if isinstance(exc, ValueError) and str(exc) in public_validation_errors:
+        return str(exc)
+    if isinstance(exc, UnicodeError):
+        return "SKILL.md 必须使用 UTF-8 编码"
+    if isinstance(exc, (ValueError, yaml.YAMLError)):
+        return "Skill 包校验失败"
+    if isinstance(exc, OSError):
+        return "Skill 文件存储失败"
+    return "Skill 包处理失败"
+
+
 @router.get("/skills")
 # 方法作用：列出当前身份可见的 Skill 资源。
 # Args: skill_scope - 可选 system/tenant/private 过滤范围。
@@ -257,7 +282,7 @@ def _cache_uploaded_skills(
             logger.error(
                 "Skill 上传缓存注入失败",
                 name=item["name"],
-                error=str(exc),
+                error_type=type(exc).__name__,
                 exc_info=True,
             )
             # 校验失败时回滚本次写入，避免磁盘残留在下次扫描中反复报错。
@@ -267,7 +292,10 @@ def _cache_uploaded_skills(
 
                 shutil.rmtree(skill_dir)
                 logger.info("Skill 上传失败目录已回滚", name=item["name"])
-            errors.append({"file": item["file"], "error": str(exc)})
+            errors.append({
+                "file": item["file"],
+                "error": _skill_upload_error_message(exc),
+            })
     logger.info("缓存上传 Skill 完成", errors=len(errors))
     return errors
 
@@ -298,9 +326,12 @@ def _write_uploaded_skill(
         logger.warning(
             "写入单个 Skill 解码失败",
             filename=uploaded_file.filename,
-            error=str(exc),
+            error_type=type(exc).__name__,
         )
-        return None, False, {"file": uploaded_file.filename, "error": str(exc)}
+        return None, False, {
+            "file": uploaded_file.filename,
+            "error": _skill_upload_error_message(exc),
+        }
     match = re.match(r"^---\s*\n(.*?)\n---", content, re.DOTALL)
     skill_name = None
     if match:
@@ -557,9 +588,13 @@ async def refresh_skills():
         result = {"status": "ok", "total": len(visible)}
         logger.info("Skill 刷新完成", total=len(visible))
         return result
-    except Exception as e:
-        logger.error("Skill 刷新失败", error=str(e), exc_info=True)
-        raise HTTPException(500, str(e)) from e
+    except Exception as exc:
+        logger.error(
+            "Skill 刷新失败",
+            error_type=type(exc).__name__,
+            exc_info=True,
+        )
+        raise HTTPException(500, "Skill 刷新失败") from exc
 
 
 @router.get("/skills/{skill_name}/content")
@@ -623,7 +658,7 @@ async def toggle_skill(
             owner_user_id=skill.owner_user_id,
         ):
             raise HTTPException(403, "无权修改该 Skill")
-        skill.enabled = enabled
+        mgr.set_enabled(skill, enabled)
         logger.info("Skill 启停完成", name=skill_name, scope=skill.scope, enabled=enabled)
         return {
             "status": "ok", "name": skill_name, "scope": skill.scope,
@@ -631,8 +666,14 @@ async def toggle_skill(
         }
     except HTTPException:
         raise
-    except Exception as e:
-        raise HTTPException(500, str(e)) from e
+    except Exception as exc:
+        logger.error(
+            "Skill 启停失败",
+            name=skill_name,
+            error_type=type(exc).__name__,
+            exc_info=True,
+        )
+        raise HTTPException(500, "Skill 启停失败") from exc
 
 
 @router.delete("/skills/{skill_name}")

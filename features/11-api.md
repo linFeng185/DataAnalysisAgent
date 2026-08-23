@@ -20,10 +20,10 @@
 | 11.1.12 | POST /mcp/{name}/reset | `src/api/routes.py` | Phase 2: MCP reset (依赖模块 8) | 待开发[^8] | P1 |
 | 11.1.13 | GET /metrics | `src/api/routes.py` | Phase 2: 指标列表 (依赖模块 6) | 待开发 | P2 |
 | 11.1.14 | GET /skills | `src/api/routes.py` | `GET /api/v1/skills` | 列出所有 Skill，含 is_builtin/triggers/tools/deps | 开发完成 | P2 |
-| 11.1.15 | POST /skills/upload | `src/api/routes.py` | `POST /api/v1/skills/upload` | 批量上传 SKILL.md，递归匹配 + YAML 解析 | 开发完成 | P2 |
-| 11.1.16 | POST /skills/refresh | `src/api/routes.py` | `POST /api/v1/skills/refresh` | 全量重扫所有 Skill 目录 | 开发完成 | P2 |
+| 11.1.15 | POST /skills/upload | `src/api/routes.py` | `POST /api/v1/skills/upload` | 批量上传、验签、失败回滚和受控错误分类 | 单测完成 | P2 |
+| 11.1.16 | POST /skills/refresh | `src/api/routes.py` | `POST /api/v1/skills/refresh` | 全量重扫并恢复持久启停状态 | 单测完成 | P2 |
 | 11.1.17 | GET /skills/{name}/content | `src/api/routes.py` | `GET /api/v1/skills/{name}/content` | 返回 SKILL.md 原始内容 | 开发完成 | P2 |
-| 11.1.18 | PUT /skills/{name}/toggle | `src/api/routes.py` | 启用/禁用 Skill | 开发完成 | P2 |
+| 11.1.18 | PUT /skills/{name}/toggle | `src/api/routes.py` | 原子持久化启用/禁用状态，异常响应脱敏 | 单测完成 | P2 |
 | 11.1.19 | DELETE /skills/{name} | `src/api/routes.py` | 删除 Skill（内置禁止） | 开发完成 | P2 |
 | 11.1.20 | GET /knowledge | `src/api/routes.py` | `GET /api/v1/knowledge` | 列出知识条目，支持 category + search | 开发完成 | P2 |
 | 11.1.21 | GET /knowledge/docs | `src/api/routes.py` | `GET /api/v1/knowledge/docs` | 列出已索引文档（全格式） | 开发完成 | P2 |
@@ -47,6 +47,7 @@
 | 11.1.39 | 会话完整删除 `[P0]` | `src/api/routes.py`、`src/memory/history_store.py` | 返回完整 session_id；删除同步清理历史和新旧 Checkpointer 线程 | 单测完成 | P0 |
 | 11.1.40 | Grafana SimpleJSON 查询协议 | `src/api/routes/grafana.py` | `/grafana/search`、`/grafana/query`、`/grafana/annotations` 复用 JWT、租户、数据源 ACL 和只读有界执行 | 单测完成 | P2 |
 | 11.1.41 | SQL 自动优化建议 | `src/api/routes/optimization.py` | `/optimization/advice` 返回确定性问题、候选索引和重写证据，明确不执行 DDL | 单测完成 | P3 |
+| 11.1.42 | POST /chat/files | `src/api/routes/chat.py`、`src/knowledge/file_store.py` | 私有附件批量预校验；部分保存失败按精确 file_id 逆序补偿，不误删同名历史文件 | 单测完成 | P1 |
 
 ### 11.2 分页增强
 
@@ -87,7 +88,7 @@
 
 ### 模块收尾
 
-模块功能点共 59 项，已完成 57 项，待开发 2 项。
+模块功能点共 60 项，已完成 58 项，待开发 2 项。
 
 | 功能点 | 不开发原因 | 可开发条件 | 预计开发时机 |
 |--------|------------|------------|--------------|

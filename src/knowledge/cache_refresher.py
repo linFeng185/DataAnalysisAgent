@@ -81,22 +81,34 @@ class CacheRefresher:
         if not expired:
             logger.info("过期 Schema 缓存刷新完成", expired=0, deleted=0)
             return 0
-        datasources = sorted({
-            self._entry_datasource(entry.id, entry.metadata)
+        datasource_scopes = sorted({
+            (
+                self._entry_tenant_id(entry.metadata),
+                self._entry_datasource(entry.id, entry.metadata),
+            )
             for entry in expired
             if self._entry_datasource(entry.id, entry.metadata)
         })
         deleted = 0
-        for datasource in datasources:
-            token = await self._acquire_lock(datasource)
+        for tenant_id, datasource in datasource_scopes:
+            token = await self._acquire_lock(datasource, tenant_id=tenant_id)
             if token is None:
-                logger.info("过期 Schema 主动刷新跳过", datasource=datasource, reason="锁被占用")
+                logger.info(
+                    "过期 Schema 主动刷新跳过",
+                    datasource=datasource,
+                    tenant_id=tenant_id,
+                    reason="锁被占用",
+                )
                 continue
             try:
-                await self._schema_manager.refresh(datasource)
+                await self._schema_manager.refresh(datasource, tenant_id=tenant_id)
                 # SchemaManager 成功后再检查旧 ID；若刷新已写入同 ID 的新快照，不删除新条目。
                 refreshed_entries = await store.get_by_filter(
-                    {"source": "auto_introspect", "datasource": datasource},
+                    {
+                        "source": "auto_introspect",
+                        "datasource": datasource,
+                        "tenant_id": tenant_id,
+                    },
                     limit=10_000,
                 )
                 refreshed_by_id = {entry.id: entry for entry in refreshed_entries}
@@ -104,6 +116,7 @@ class CacheRefresher:
                     entry.id
                     for entry in expired
                     if self._entry_datasource(entry.id, entry.metadata) == datasource
+                    and self._entry_tenant_id(entry.metadata) == tenant_id
                     and (
                         entry.id not in refreshed_by_id
                         or self._is_expired(refreshed_by_id[entry.id].metadata)
@@ -114,49 +127,85 @@ class CacheRefresher:
                 logger.info(
                     "过期 Schema 刷新后清理完成",
                     datasource=datasource,
+                    tenant_id=tenant_id,
                     stale_count=len(stale_ids),
                 )
             except Exception as exc:
                 logger.error(
                     "过期 Schema 主动刷新失败",
                     datasource=datasource,
+                    tenant_id=tenant_id,
                     error=str(exc),
                     exc_info=True,
                 )
             finally:
-                await self._release_lock(datasource, token)
+                await self._release_lock(datasource, token, tenant_id=tenant_id)
         logger.info(
             "过期 Schema 缓存刷新完成",
             expired=len(expired),
             deleted=deleted,
-            datasource_count=len(datasources),
+            datasource_count=len(datasource_scopes),
         )
         return int(deleted)
 
     # 方法作用：轮询实时 Schema 指纹，仅在 DDL 变化时使用已有快照刷新缓存。
-    # Args: self - 刷新器；datasource_name - 数据源名称。
+    # Args: self - 刷新器；datasource_name - 数据源名称；tenant_id - 数据源归属租户。
     # Returns: 本轮检测到变化并刷新时返回 True。
-    async def refresh_on_schema_change(self, datasource_name: str) -> bool:
-        token = await self._acquire_lock(datasource_name)
+    async def refresh_on_schema_change(
+        self,
+        datasource_name: str,
+        *,
+        tenant_id: int = 1,
+    ) -> bool:
+        token = await self._acquire_lock(datasource_name, tenant_id=tenant_id)
         if token is None:
-            logger.info("Schema 指纹轮询跳过", datasource=datasource_name, reason="锁被占用")
+            logger.info(
+                "Schema 指纹轮询跳过",
+                datasource=datasource_name,
+                tenant_id=tenant_id,
+                reason="锁被占用",
+            )
             return False
         try:
-            snapshot = await self._schema_manager.inspect_live_schema(datasource_name)
+            snapshot = await self._schema_manager.inspect_live_schema(
+                datasource_name,
+                tenant_id=tenant_id,
+            )
             current = compute_schema_fingerprint(snapshot)
-            previous = await self._get_fingerprint(datasource_name)
+            previous = await self._get_fingerprint(datasource_name, tenant_id=tenant_id)
             if not previous:
-                await self._set_fingerprint(datasource_name, current)
-                logger.info("Schema 指纹基线建立", datasource=datasource_name)
+                await self._set_fingerprint(
+                    datasource_name,
+                    current,
+                    tenant_id=tenant_id,
+                )
+                logger.info(
+                    "Schema 指纹基线建立",
+                    datasource=datasource_name,
+                    tenant_id=tenant_id,
+                )
                 return False
             if previous == current:
-                logger.info("Schema 指纹未变化", datasource=datasource_name)
+                logger.info(
+                    "Schema 指纹未变化",
+                    datasource=datasource_name,
+                    tenant_id=tenant_id,
+                )
                 return False
-            await self._schema_manager.refresh_from_snapshot(datasource_name, snapshot)
-            await self._set_fingerprint(datasource_name, current)
+            await self._schema_manager.refresh_from_snapshot(
+                datasource_name,
+                snapshot,
+                tenant_id=tenant_id,
+            )
+            await self._set_fingerprint(
+                datasource_name,
+                current,
+                tenant_id=tenant_id,
+            )
             logger.warning(
                 "Schema 变化已触发缓存刷新",
                 datasource=datasource_name,
+                tenant_id=tenant_id,
                 previous=previous[:12],
                 current=current[:12],
             )
@@ -165,12 +214,13 @@ class CacheRefresher:
             logger.error(
                 "Schema 指纹轮询失败",
                 datasource=datasource_name,
+                tenant_id=tenant_id,
                 error=str(exc),
                 exc_info=True,
             )
             return False
         finally:
-            await self._release_lock(datasource_name, token)
+            await self._release_lock(datasource_name, token, tenant_id=tenant_id)
 
     # 方法作用：关闭由刷新器持有的 Redis 客户端。
     # Args: self - 刷新器。
@@ -218,34 +268,61 @@ class CacheRefresher:
             return explicit
         if ":" not in entry_id or "." not in entry_id:
             return ""
-        return entry_id.split(":", 1)[1].split(".", 1)[0]
+        suffix = entry_id.split(":", 1)[1]
+        if ":" in suffix:
+            suffix = suffix.split(":", 1)[1]
+        return suffix.split(".", 1)[0]
+
+    # 方法作用：从 Schema 缓存元数据恢复租户 ID，旧条目回落到默认租户。
+    # Args: self - 刷新器；metadata - VectorEntry 元数据。
+    # Returns: 正整数租户 ID。
+    def _entry_tenant_id(self, metadata: dict[str, Any]) -> int:
+        try:
+            tenant_id = int(metadata.get("tenant_id", 1) or 1)
+        except (TypeError, ValueError):
+            logger.warning("Schema 缓存租户元数据无效，使用默认租户")
+            return 1
+        return tenant_id if tenant_id > 0 else 1
 
     # 方法作用：使用 Redis SET NX EX 或进程内集合获取单数据源刷新锁。
-    # Args: self - 刷新器；datasource_name - 数据源名称。
+    # Args: self - 刷新器；datasource_name - 数据源名称；tenant_id - 数据源归属租户。
     # Returns: 锁令牌；锁被占用返回 None。
-    async def _acquire_lock(self, datasource_name: str) -> str | None:
+    async def _acquire_lock(
+        self,
+        datasource_name: str,
+        *,
+        tenant_id: int,
+    ) -> str | None:
         token = uuid4().hex
+        scope_key = f"{int(tenant_id)}:{datasource_name}"
         if self._redis is not None:
             acquired = await self._redis.set(
-                f"schema_refresh_lock:{datasource_name}",
+                f"schema_refresh_lock:{scope_key}",
                 token,
                 nx=True,
                 ex=self._lock_ttl_seconds,
             )
             return token if acquired else None
-        if datasource_name in self._local_locks:
+        if scope_key in self._local_locks:
             return None
-        self._local_locks.add(datasource_name)
+        self._local_locks.add(scope_key)
         return token
 
     # 方法作用：仅由锁持有者释放 Redis 或进程内刷新锁。
-    # Args: self - 刷新器；datasource_name - 数据源名称；token - 获取锁时的令牌。
+    # Args: self - 刷新器；datasource_name - 数据源名称；token - 获取锁时的令牌；tenant_id - 数据源归属租户。
     # Returns: 无返回值。
-    async def _release_lock(self, datasource_name: str, token: str) -> None:
+    async def _release_lock(
+        self,
+        datasource_name: str,
+        token: str,
+        *,
+        tenant_id: int,
+    ) -> None:
+        scope_key = f"{int(tenant_id)}:{datasource_name}"
         if self._redis is None:
-            self._local_locks.discard(datasource_name)
+            self._local_locks.discard(scope_key)
             return
-        key = f"schema_refresh_lock:{datasource_name}"
+        key = f"schema_refresh_lock:{scope_key}"
         evaluate = getattr(self._redis, "eval", None)
         if evaluate is not None:
             await evaluate(
@@ -262,22 +339,30 @@ class CacheRefresher:
             await self._redis.delete(key)
 
     # 方法作用：读取进程内或 Redis 中保存的上一轮 Schema 指纹。
-    # Args: self - 刷新器；datasource_name - 数据源名称。
+    # Args: self - 刷新器；datasource_name - 数据源名称；tenant_id - 数据源归属租户。
     # Returns: 上一轮指纹；不存在返回空字符串。
-    async def _get_fingerprint(self, datasource_name: str) -> str:
+    async def _get_fingerprint(self, datasource_name: str, *, tenant_id: int) -> str:
+        scope_key = f"{int(tenant_id)}:{datasource_name}"
         if self._redis is None:
-            return self._schema_fingerprints.get(datasource_name, "")
-        raw = await self._redis.get(f"schema_fingerprint:{datasource_name}")
+            return self._schema_fingerprints.get(scope_key, "")
+        raw = await self._redis.get(f"schema_fingerprint:{scope_key}")
         return raw.decode("utf-8") if isinstance(raw, bytes) else str(raw or "")
 
     # 方法作用：持久保存最新 Schema 指纹供下一轮比较。
-    # Args: self - 刷新器；datasource_name - 数据源名称；fingerprint - 最新指纹。
+    # Args: self - 刷新器；datasource_name - 数据源名称；fingerprint - 最新指纹；tenant_id - 数据源归属租户。
     # Returns: 无返回值。
-    async def _set_fingerprint(self, datasource_name: str, fingerprint: str) -> None:
+    async def _set_fingerprint(
+        self,
+        datasource_name: str,
+        fingerprint: str,
+        *,
+        tenant_id: int,
+    ) -> None:
+        scope_key = f"{int(tenant_id)}:{datasource_name}"
         if self._redis is None:
-            self._schema_fingerprints[datasource_name] = fingerprint
+            self._schema_fingerprints[scope_key] = fingerprint
             return
-        await self._redis.set(f"schema_fingerprint:{datasource_name}", fingerprint)
+        await self._redis.set(f"schema_fingerprint:{scope_key}", fingerprint)
 
 
 class CacheRefreshService:
@@ -326,13 +411,25 @@ class CacheRefreshService:
     # Returns: 过期删除数、检查数和变更数摘要。
     async def run_once(self) -> dict[str, int]:
         deleted = await self._refresher.refresh_expired()
-        items = await self._registry.list_all()
-        names = sorted({str(item.get("name", "")) for item in items if item.get("name")})
+        tenant_ids = await self._registry.list_tenant_ids()
         changed = 0
-        for name in names:
-            if await self._refresher.refresh_on_schema_change(name):
-                changed += 1
-        result = {"deleted": deleted, "checked": len(names), "changed": changed}
+        checked = 0
+        logger.info("Schema 周期刷新租户枚举探针", tenant_ids=tenant_ids)
+        for tenant_id in tenant_ids:
+            items = await self._registry.list_all(tenant_id=tenant_id)
+            names = sorted({
+                str(item.get("name", ""))
+                for item in items
+                if item.get("name")
+            })
+            for name in names:
+                checked += 1
+                if await self._refresher.refresh_on_schema_change(
+                    name,
+                    tenant_id=tenant_id,
+                ):
+                    changed += 1
+        result = {"deleted": deleted, "checked": checked, "changed": changed}
         logger.info("Schema 缓存周期刷新完成", **result)
         return result
 

@@ -32,6 +32,7 @@ LLM 驱动的数据分析智能体。用自然语言提问，自动完成：轮�
 │   ├── security/         ⑫ 安全模块 — API/IP 策略 + SQL 统一执行 + 脱敏 + 限流 + 审计 + 出站策略
 │   ├── db/               ⑬ 状态库基础设施 — 版本化迁移 + URL 工具
 │   ├── mcp_client/       ⑭ MCP 集成 — 客户端管理 + 工具暴露
+│   ├── mcp/              ⑭.1 MCP Server 稳定模块入口（python -m src.mcp）
 │   ├── app_context.py        应用级依赖容器 + ASGI 请求绑定 + 资源关闭
 │   ├── config.py             配置管理 (pydantic-settings)
 │   ├── bootstrap.py          分阶段启动/关闭编排
@@ -205,8 +206,9 @@ POST /api/v1/chat {"query": "本月 GMV 排名？", "stream": true}
 | `security/api_access_policy.py` | YAML 基线 + PostgreSQL 动态策略原子快照、模板匹配、可信代理与 CIDR 黑白名单 |
 | `security/sql_execution.py` | 权威方言解析、AST 只读校验、EXPLAIN 与有界执行唯一入口 |
 | `failure_policy.py` | SQL/数据库 fail-closed 与 LLM/知识/处理器 fail-open 决策矩阵 |
-| `mcp/client_manager.py` | MCP Client 独立连接栈、自动迁移、system/tenant/private 请求级工具过滤 |
-| `mcp/server.py` | MCP Server（暴露 4 个工具） |
+| `mcp_client/client_manager.py` | MCP Client 独立连接栈、自动迁移、system/tenant/private 请求级工具过滤 |
+| `mcp_client/server.py` | MCP Server（暴露 4 个工具，内部异常返回稳定脱敏协议） |
+| `mcp/__main__.py` | `python -m src.mcp` 稳定启动入口，旧 `src.mcp_client` 入口复用同一实现 |
 
 ### ⑬ `src/db/` — 状态库迁移
 

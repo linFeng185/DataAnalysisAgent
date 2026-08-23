@@ -47,6 +47,76 @@ class TestChatAttachments:
             knowledge_scope="private",
         )
 
+    # 方法作用：验证批量附件部分保存失败时按文件 ID 回滚先前写入。
+    # Args: self - pytest 测试类实例；monkeypatch - pytest 补丁工具。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    async def test_upload_chat_files_rolls_back_partial_saves(self, monkeypatch) -> None:
+        """第二个文件失败不能让第一个私有文件成为无引用残留。"""
+        # Arrange
+        chat_routes = importlib.import_module("src.api.routes.chat")
+        import src.config as config_module
+        import src.knowledge.file_store as file_store_module
+
+        store = SimpleNamespace(
+            save=AsyncMock(side_effect=[17, None]),
+            delete_by_id=AsyncMock(return_value=True),
+        )
+        monkeypatch.setattr(file_store_module, "get_file_store", lambda: store)
+        monkeypatch.setattr(config_module, "get_settings", lambda: SimpleNamespace(
+            max_upload_bytes=1024,
+            max_upload_files=10,
+            max_upload_total_bytes=2048,
+        ))
+        files = [
+            UploadFile(filename="orders.csv", file=io.BytesIO(b"id\n1\n")),
+            UploadFile(filename="customers.csv", file=io.BytesIO(b"id\n2\n")),
+        ]
+
+        # Act
+        with pytest.raises(HTTPException) as exc_info:
+            await chat_routes.upload_chat_files(files)
+
+        # Assert
+        assert exc_info.value.status_code == 503
+        assert exc_info.value.detail == "附件存储暂不可用"
+        store.delete_by_id.assert_awaited_once_with(17, knowledge_scope="private")
+
+    # 方法作用：验证保存抛出异常且回滚失败时仍返回稳定的存储错误。
+    # Args: self - pytest 测试类实例；monkeypatch - pytest 补丁工具。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    async def test_upload_chat_files_preserves_error_when_rollback_fails(
+        self, monkeypatch,
+    ) -> None:
+        """补偿删除失败应进入日志，不能覆盖原始上传失败协议。"""
+        # Arrange
+        chat_routes = importlib.import_module("src.api.routes.chat")
+        import src.config as config_module
+        import src.knowledge.file_store as file_store_module
+
+        store = SimpleNamespace(
+            save=AsyncMock(side_effect=[17, RuntimeError("database unavailable")]),
+            delete_by_id=AsyncMock(side_effect=RuntimeError("rollback unavailable")),
+        )
+        monkeypatch.setattr(file_store_module, "get_file_store", lambda: store)
+        monkeypatch.setattr(config_module, "get_settings", lambda: SimpleNamespace(
+            max_upload_bytes=1024,
+            max_upload_files=10,
+            max_upload_total_bytes=2048,
+        ))
+        files = [
+            UploadFile(filename="orders.csv", file=io.BytesIO(b"id\n1\n")),
+            UploadFile(filename="customers.csv", file=io.BytesIO(b"id\n2\n")),
+        ]
+
+        # Act
+        with pytest.raises(HTTPException) as exc_info:
+            await chat_routes.upload_chat_files(files)
+
+        # Assert
+        assert exc_info.value.status_code == 503
+        assert exc_info.value.detail == "附件存储暂不可用"
+        store.delete_by_id.assert_awaited_once_with(17, knowledge_scope="private")
+
     # 方法作用：验证聊天附件上传拒绝数量、单文件和累计大小超限。
     # Args: self - pytest 测试类实例；monkeypatch - pytest 补丁工具。
     # Returns: 无返回值，断言失败时由 pytest 报告。

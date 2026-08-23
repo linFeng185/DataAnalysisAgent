@@ -33,6 +33,7 @@ async def advice(payload: dict[str, Any] = Body(...)) -> dict[str, Any]:
     metadata_limitations: list[str] = []
     if request.datasource.strip():
         from src.api.auth import get_current_identity
+        from src.app_context import get_tenant_policy
         from src.datasource.registry import get_registry
         from src.security.permission_check import resolve_datasource_access
 
@@ -46,6 +47,7 @@ async def advice(payload: dict[str, Any] = Body(...)) -> dict[str, Any]:
                 tenant_id=identity.tenant_id,
                 user_id=identity.user_id,
                 role=identity.role,
+                tenant_policy=get_tenant_policy(),
             )
             datasource = await registry.resolve(request.datasource, tenant_id=identity.tenant_id)
         except PermissionError as exc:
@@ -72,7 +74,10 @@ async def advice(payload: dict[str, Any] = Body(...)) -> dict[str, Any]:
             try:
                 from src.knowledge.schema_manager import get_schema_manager
 
-                snapshot = await get_schema_manager().get_or_fetch_schema(request.datasource)
+                snapshot = await get_schema_manager().get_or_fetch_schema(
+                    request.datasource,
+                    tenant_id=identity.tenant_id,
+                )
                 schema, discovered_indexes, discovered_statistics = _snapshot_evidence(snapshot)
                 indexes = indexes or discovered_indexes
                 statistics = statistics or discovered_statistics

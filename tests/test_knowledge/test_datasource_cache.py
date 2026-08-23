@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
+import threading
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -119,6 +122,34 @@ class TestConnectionFingerprint:
         assert len(fingerprints) == 3
         logger.info("test_different_connection_uses_different_fingerprint 完成")
 
+    # 方法作用：验证 SQLite 实际 db_path 变化时连接级缓存不会发生碰撞。
+    # Args: self - pytest 测试类实例。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    def test_sqlite_extra_db_path_is_part_of_fingerprint(self) -> None:
+        """database 为空而由 db_path 指定的两个 SQLite 文件必须隔离。"""
+        # Arrange
+        from src.knowledge.datasource_cache import build_connection_fingerprint
+
+        first = DataSourceConfig(
+            name="one",
+            dialect="sqlite",
+            mode="external",
+            extra_params={"db_path": "C:/data/one.db"},
+        )
+        second = DataSourceConfig(
+            name="two",
+            dialect="sqlite",
+            mode="external",
+            extra_params={"db_path": "C:/data/two.db"},
+        )
+
+        # Act
+        first_key = build_connection_fingerprint(first)
+        second_key = build_connection_fingerprint(second)
+
+        # Assert
+        assert first_key != second_key
+
 
 class TestLocalDatasourceCache:
     """覆盖功能 6.1.13：本地持久化、TTL 和损坏隔离。"""
@@ -187,6 +218,85 @@ class TestLocalDatasourceCache:
         assert list(tmp_path.glob(f"{fingerprint}.corrupt-*.json"))
         logger.info("test_corrupt_record_is_quarantined 完成")
 
+    # 验证并发读取同一损坏文件时，只有一个请求执行隔离，其他请求仍返回缓存未命中。
+    # Args: self - pytest 测试类实例；tmp_path - pytest 临时目录；monkeypatch - pytest 补丁工具。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    async def test_concurrent_corrupt_reads_do_not_raise(self, tmp_path, monkeypatch):
+        """隔离竞态不应把损坏缓存升级为请求异常。"""
+        logger.debug("test_concurrent_corrupt_reads_do_not_raise 入口")
+        import src.knowledge.datasource_cache as cache_module
+        from src.knowledge.datasource_cache import LocalDatasourceCache
+
+        fingerprint = "e" * 64
+        cache_file = tmp_path / f"{fingerprint}.json"
+        cache_file.write_text("{not-json", encoding="utf-8")
+        cache = LocalDatasourceCache(tmp_path, ttl_seconds=3600)
+        exists_barrier = threading.Barrier(2)
+        exists_lock = threading.Lock()
+        original_exists = Path.exists
+        original_replace = cache_module.os.replace
+        exists_calls = 0
+        replace_calls = 0
+
+        def synchronized_exists(path):
+            nonlocal exists_calls
+            if path == cache_file:
+                with exists_lock:
+                    exists_calls += 1
+                    should_wait = exists_calls <= 2
+                if should_wait:
+                    exists_barrier.wait(timeout=5)
+            return original_exists(path)
+
+        def flaky_replace(source, target):
+            nonlocal replace_calls
+            with exists_lock:
+                replace_calls += 1
+                call_number = replace_calls
+            if call_number == 2:
+                raise FileNotFoundError("simulated concurrent quarantine race")
+            return original_replace(source, target)
+
+        monkeypatch.setattr(Path, "exists", synchronized_exists)
+        monkeypatch.setattr(cache_module.os, "replace", flaky_replace)
+
+        results = await asyncio.gather(
+            asyncio.to_thread(cache._quarantine, cache_file),
+            asyncio.to_thread(cache._quarantine, cache_file),
+            return_exceptions=True,
+        )
+
+        assert results == [None, None]
+        assert not cache_file.exists()
+        assert list(tmp_path.glob(f"{fingerprint}.corrupt-*.json"))
+        logger.info("test_concurrent_corrupt_reads_do_not_raise 完成")
+
+    # 方法作用：验证缺失 created_at 的缓存载荷按结构损坏处理。
+    # Args: self - pytest 测试类实例；tmp_path - pytest 临时目录。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    async def test_missing_created_at_is_quarantined(self, tmp_path) -> None:
+        """缓存契约缺少创建时间时必须返回 miss 并隔离文件。"""
+        # Arrange
+        from src.knowledge.datasource_cache import LocalDatasourceCache
+
+        fingerprint = "d" * 64
+        cache_file = tmp_path / f"{fingerprint}.json"
+        cache_file.write_text(json.dumps({
+            "version": 1,
+            "fingerprint": fingerprint,
+            "expires_at": (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat(),
+            "entries": [],
+        }), encoding="utf-8")
+        cache = LocalDatasourceCache(tmp_path, ttl_seconds=3600)
+
+        # Act
+        restored = await cache.get(fingerprint)
+
+        # Assert
+        assert restored is None
+        assert not cache_file.exists()
+        assert list(tmp_path.glob(f"{fingerprint}.corrupt-*.json"))
+
     # 验证空指纹被拒绝，避免写入不可追踪的共享文件。
     # Args: self - pytest 测试类实例；tmp_path - pytest 临时目录。
     # Returns: 无返回值，断言失败时由 pytest 报告。
@@ -204,6 +314,76 @@ class TestLocalDatasourceCache:
 
 class TestRedisDatasourceCache:
     """覆盖功能 6.1.14：Redis 键、TTL、读写和删除。"""
+
+    # 验证 Redis 中无法解析的载荷按缓存未命中处理，并删除坏键。
+    # Args: self - pytest 测试类实例。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    async def test_corrupt_record_returns_miss_and_deletes_key(self):
+        """损坏 JSON 不应把缓存故障升级为 Redis 服务故障。"""
+        logger.debug("test_corrupt_record_returns_miss_and_deletes_key 入口")
+        from src.knowledge.datasource_cache import RedisDatasourceCache
+
+        fingerprint = "e" * 64
+        client = SimpleNamespace(
+            get=AsyncMock(return_value=b"{bad-json"),
+            delete=AsyncMock(return_value=1),
+        )
+        cache = RedisDatasourceCache(
+            "redis://unused", prefix="tests:datasource", ttl_seconds=60, client=client,
+        )
+
+        restored = await cache.get(fingerprint)
+
+        key = f"tests:datasource:v1:{fingerprint}"
+        assert restored is None
+        client.get.assert_awaited_once_with(key)
+        client.delete.assert_awaited_once_with(key)
+        logger.info("test_corrupt_record_returns_miss_and_deletes_key 完成")
+
+    # 验证清理损坏载荷失败时仍保持缓存未命中语义，不阻断实时降级路径。
+    # Args: self - pytest 测试类实例。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    async def test_corrupt_record_delete_failure_still_returns_miss(self):
+        """Redis 删除坏键失败不应重新抛出清理异常。"""
+        logger.debug("test_corrupt_record_delete_failure_still_returns_miss 入口")
+        from src.knowledge.datasource_cache import RedisDatasourceCache
+
+        client = SimpleNamespace(
+            get=AsyncMock(return_value=b"not-json"),
+            delete=AsyncMock(side_effect=ConnectionError("delete unavailable")),
+        )
+        cache = RedisDatasourceCache(
+            "redis://unused", prefix="tests:datasource", ttl_seconds=60, client=client,
+        )
+
+        restored = await cache.get("f" * 64)
+
+        assert restored is None
+        client.delete.assert_awaited_once()
+        logger.info("test_corrupt_record_delete_failure_still_returns_miss 完成")
+
+    # 验证 Redis 读取本身失败时不被误判为载荷损坏，调用方仍能感知服务故障。
+    # Args: self - pytest 测试类实例。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    async def test_redis_get_failure_is_propagated(self):
+        """Redis 连接异常必须继续向上传播，且不执行坏键清理。"""
+        logger.debug("test_redis_get_failure_is_propagated 入口")
+        from src.knowledge.datasource_cache import RedisDatasourceCache
+
+        failure = ConnectionError("redis unavailable")
+        client = SimpleNamespace(
+            get=AsyncMock(side_effect=failure),
+            delete=AsyncMock(return_value=1),
+        )
+        cache = RedisDatasourceCache(
+            "redis://unused", prefix="tests:datasource", ttl_seconds=60, client=client,
+        )
+
+        with pytest.raises(ConnectionError, match="redis unavailable"):
+            await cache.get("1" * 64)
+
+        client.delete.assert_not_awaited()
+        logger.info("test_redis_get_failure_is_propagated 完成")
 
     # 验证 Redis 写入携带命名空间和过期时间，并可恢复条目。
     # Args: self - pytest 测试类实例。

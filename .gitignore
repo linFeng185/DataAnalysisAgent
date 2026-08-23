@@ -69,3 +69,4 @@ data/generated/
 /data/model-cache/
 /data/postgres/
 /data/redis/
+/data/skills/.enabled-state.json

@@ -7,7 +7,7 @@
 | # | 功能 | 文件 | 描述 | 状态 |
 |---|------|------|------|------|
 | 6.1.1 | SchemaManager 类 | `src/knowledge/schema_manager.py` | 三级回退并实际使用配置的本地 ONNX 模型目录，后端异常记录完整日志 | 单测完成 |
-| 6.1.2 | get_or_fetch_schema() | 同上 | Schema 获取的主入口，包装完整三级回退逻辑 | 开发完成 |
+| 6.1.2 | get_or_fetch_schema() | 同上 | Schema 获取的主入口，包装完整三级回退逻辑并贯穿显式租户隔离 | 单测完成 |
 | 6.1.3 | _query_cache() | 同上 | 查 ChromaDB 缓存，检查 TTL 是否过期 | 开发完成 |
 | 6.1.4 | _find_uncached() | 同上 | 找出哪些表尚未缓存或已过期 → 合并为 _any_expired() | 开发完成 |
 | 6.1.5 | _load_from_docs() | 同上 | 从 docs/metrics/ 目录加载 Markdown 文档 → 通过 DocLoader 实现 | 开发完成 |
@@ -46,9 +46,9 @@
 
 | # | 功能 | 文件 | 描述 | 状态 |
 |---|------|------|------|------|
-| 6.4.1 | CacheRefresher 类 | `src/knowledge/cache_refresher.py` | 绑定应用生命周期的周期刷新服务，按配置间隔清理和轮询 | 单测完成 |
-| 6.4.2 | refresh_expired() | 同上 | 批量清理过期 AUTO_INTROSPECT 条目并主动重载受影响数据源 | 单测完成 |
-| 6.4.3 | refresh_on_schema_change() | 同上 | 对规范化实时 Schema 计算稳定指纹，DDL 变化时复用快照刷新 | 单测完成 |
+| 6.4.1 | CacheRefresher 类 | `src/knowledge/cache_refresher.py` | 绑定应用生命周期，按 tenant_id+datasource 隔离周期轮询、锁和内存指纹 | 单测完成 |
+| 6.4.2 | refresh_expired() | 同上 | 按租户批量清理过期 AUTO_INTROSPECT 条目并以显式身份主动重载数据源 | 单测完成 |
+| 6.4.3 | refresh_on_schema_change() | 同上 | 对租户内规范化实时 Schema 计算稳定指纹，DDL 变化时复用快照刷新 | 单测完成 |
 | 6.4.4 | DDL 触发器/CDC 集成 (远期) | 同上 | 接入数据库原生 DDL 变更通知 | 待开发 | P3 |
 | 6.4.5 | Redis 分布式锁 | 同上 | SET NX EX 租约和令牌校验释放，防止多实例重复刷新同一数据源 | 单测完成 | P1 |
 

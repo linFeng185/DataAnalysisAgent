@@ -195,6 +195,7 @@ registration_max_per_hour: 10
 login_lockout_threshold: 5
 login_lockout_minutes: 15
 max_query_chars: 8000
+max_sql_chars: 20000
 max_datasources_per_query: 5
 max_scan_rows: 10000000
 max_execution_time: 30

@@ -78,6 +78,61 @@ class AnalysisContexts(BaseModel):
     execution: ExecutionContext
 
 
+_MISSING_IDENTITY = object()
+
+
+# 方法作用：读取状态中显式保存的兼容身份字段，区分缺失字段和系统租户 0。
+# Args: state - LangGraph 状态或旧 checkpoint 映射；field_name - 身份字段名。
+# Returns: 显式字段值；字段不存在时返回内部缺失标记。
+def _explicit_identity_value(state: Mapping[str, Any], field_name: str) -> Any:
+    if field_name in state:
+        return state.get(field_name)
+    group = state.get("request_context", {}) or {}
+    if isinstance(group, Mapping) and field_name in group:
+        return group.get(field_name)
+    return _MISSING_IDENTITY
+
+
+# 方法作用：解析请求级租户和用户身份，避免旧状态在后台执行时回落到错误租户。
+# Args: state - 当前 LangGraph 状态或兼容旧 checkpoint。
+# Returns: (tenant_id, user_id) 二元组，显式的系统身份 0 保持不变。
+def resolve_request_identity(state: Mapping[str, Any]) -> tuple[int, int]:
+    tenant_raw = _explicit_identity_value(state, "tenant_id")
+    user_raw = _explicit_identity_value(state, "user_id")
+    if tenant_raw is _MISSING_IDENTITY or tenant_raw is None:
+        from src.api.auth import get_current_tenant_id
+
+        tenant_id = int(get_current_tenant_id())
+        tenant_source = "contextvar"
+    else:
+        tenant_id = int(tenant_raw)
+        tenant_source = "state"
+    if user_raw is _MISSING_IDENTITY or user_raw is None:
+        from src.api.auth import get_current_user_id
+
+        user_id = int(get_current_user_id())
+        user_source = "contextvar"
+    else:
+        user_id = int(user_raw)
+        user_source = "state"
+    if tenant_id < 0 or user_id < 0:
+        logger.error(
+            "请求身份解析拒绝",
+            tenant_id=tenant_id,
+            user_id=user_id,
+            reason="身份编号不能为负数",
+        )
+        raise ValueError("身份编号不能为负数")
+    logger.info(
+        "请求身份解析完成",
+        tenant_id=tenant_id,
+        user_id=user_id,
+        tenant_source=tenant_source,
+        user_source=user_source,
+    )
+    return tenant_id, user_id
+
+
 def _read_value(
     state: Mapping[str, Any],
     group_name: str,
