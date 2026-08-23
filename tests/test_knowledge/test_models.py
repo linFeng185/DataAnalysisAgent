@@ -112,3 +112,23 @@ class TestKnowledgeEntry:
         d = {"id": "t", "content": "hi", "source": "bogus", "category": "table"}
         e = KnowledgeEntry.from_dict(d)
         assert e.source == KnowledgeSource.AUTO_INTROSPECT
+
+    # 方法作用：验证历史空标签占位值不会重新进入前端数据。
+    # Args: self - pytest 测试类实例。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    def test_from_dict_filters_empty_tag_values(self) -> None:
+        """空字符串、空白和历史 [''] 占位标签都应被过滤。"""
+        # Arrange
+        entry = KnowledgeEntry.from_dict({
+            "id": "t",
+            "content": "hi",
+            "source": "manual_doc",
+            "category": "table",
+            "tags": ["", "  ", "['']", "业务"],
+        })
+
+        # Act
+        tags = entry.tags
+
+        # Assert
+        assert tags == ["业务"]

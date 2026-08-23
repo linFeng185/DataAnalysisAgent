@@ -86,3 +86,24 @@ class TestUploadManagerRetention:
         except Exception as exc:
             logger.error("test_expired_finished_task_is_pruned 异常: %s", exc, exc_info=True)
             raise
+
+    # 方法作用：验证没有可索引分块的文档进入错误终态而不是伪装成功。
+    # Args: self - pytest 测试类实例；monkeypatch - pytest 补丁工具。
+    # Returns: 无返回值，断言任务状态和错误原因。
+    async def test_process_empty_chunks_marks_task_error(self, monkeypatch) -> None:
+        """短文本被最小分块阈值过滤后必须明确提示上传失败。"""
+        # Arrange
+        import src.knowledge.upload_manager as upload_module
+        from src.knowledge.doc_parser import ChunkConfig
+
+        task = upload_module.UploadTask(file_name="short.txt")
+        monkeypatch.setattr(upload_module, "extract_text", lambda *_: "短文本")
+        monkeypatch.setattr(upload_module, "chunk_text", lambda *_: [])
+
+        # Act
+        await upload_module.UploadManager().process(task, b"short", ChunkConfig())
+
+        # Assert
+        assert task.status == "error"
+        assert task.chunks_count == 0
+        assert "过短" in task.error

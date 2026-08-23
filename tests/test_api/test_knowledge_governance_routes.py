@@ -16,6 +16,24 @@ logger = logging.getLogger(__name__)
 class TestKnowledgeScopeRoutes:
     """验证上传范围在保存原文件之前完成授权。"""
 
+    # 方法作用：验证知识列表标签解析过滤历史空占位值。
+    # Args: self - pytest 测试类实例。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    def test_normalize_knowledge_tags_filters_empty_placeholders(self) -> None:
+        """列表 API 不应把 [''] 或空白标签返回给前端。"""
+        # Arrange
+        from src.api.routes.knowledge import _normalize_knowledge_tags
+
+        # Act
+        values = [
+            _normalize_knowledge_tags(["", " ", "业务"]),
+            _normalize_knowledge_tags("['']"),
+            _normalize_knowledge_tags("['业务', '数据']"),
+        ]
+
+        # Assert
+        assert values == [["业务"], [], ["业务", "数据"]]
+
     # 验证租户管理员不能上传系统知识。
     # Args: self - pytest 测试类实例；monkeypatch - pytest 补丁工具。
     # Returns: 无返回值，断言失败时由 pytest 报告。

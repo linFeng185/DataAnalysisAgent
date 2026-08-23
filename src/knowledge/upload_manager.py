@@ -242,6 +242,8 @@ class UploadManager:
                 chunks = chunk_text(text, config, task.file_name)
             task.chunks_count = len(chunks)
             logger.info("分块完成", task_id=task.id, chunks=len(chunks))
+            if not chunks:
+                raise ValueError("文档内容过短，未生成可索引分块")
 
             await _write_to_chromadb(
                 chunks, task.file_name, config, category,

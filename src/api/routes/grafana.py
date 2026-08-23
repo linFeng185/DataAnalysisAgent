@@ -53,7 +53,14 @@ async def search() -> list[str]:
     return result
 
 
-@router.post("/grafana/query")
+@router.post(
+    "/grafana/query",
+    summary="执行 Grafana 只读查询",
+    description=(
+        "执行 target.rawSql 中的只读 SQL。请求的 range 仅会替换 SQL 中的 "
+        "`$__timeFilter(column)` 宏；如需按时间范围过滤，必须在 rawSql 的 WHERE 条件中显式使用该宏。"
+    ),
+)
 # 方法作用：执行 Grafana targets 中的只读 SQL 并返回 table 或 time series 数据。
 # Args: payload - SimpleJSON 查询请求体。
 # Returns: Grafana 可识别的结果数组；权限或安全失败抛出 HTTPException。

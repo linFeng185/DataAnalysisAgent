@@ -26,8 +26,13 @@ logger = logging.getLogger(__name__)
 if not _ENV_FILE.exists() and _ENV_EXAMPLE.exists():
     logger.warning(".env 不存在，请参考 %s 创建本地配置", _ENV_EXAMPLE)
 
-# 将 .env 中所有键值注入 os.environ，确保 CredentialManager.resolve_env_ref 能解析 ${VAR} 占位符
+# 记录启动时由 .env 注入的键，支持显式 _env_file=None 时准确排除 dotenv 来源。
+_environment_before_dotenv = set(os.environ)
 load_dotenv(_ENV_FILE)
+_DOTENV_INJECTED_VALUES = {
+    key: os.environ[key]
+    for key in set(os.environ) - _environment_before_dotenv
+}
 
 
 class ApiAccessRouteConfig(BaseModel):
@@ -187,6 +192,14 @@ class Settings(BaseSettings):
             yaml_file=config_path,
             yaml_file_encoding="utf-8",
         )
+        # Pydantic 的 env_settings 会看到 import 阶段注入的 .env；显式禁用 dotenv 时将其移除，
+        # 但保留测试或部署运行期间后来设置的真实环境变量覆盖。
+        if getattr(dotenv_settings, "env_file", None) is None:
+            env_vars = getattr(env_settings, "env_vars", {})
+            for key, value in _DOTENV_INJECTED_VALUES.items():
+                normalized_key = key.lower()
+                if env_vars.get(normalized_key) == value:
+                    env_vars.pop(normalized_key, None)
         result = (
             init_settings,
             env_settings,

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -46,6 +47,46 @@ class TestNoLLMFallback:
         assert result["generated_sql"] == ""
         assert "LLM" in result["execution_error"]
 
+
+class TestAnalyzeResultTimeout:
+    """覆盖分析模型调用的显式超时和输出预算。"""
+
+    # 方法作用：验证分析模型超时后回退确定性分析，不阻塞整个工作流。
+    # Args: self - pytest 测试类实例；monkeypatch - pytest 补丁工具。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    async def test_llm_analysis_timeout_falls_back(self, monkeypatch) -> None:
+        """慢模型必须在资源预算内取消并返回规则结果。"""
+        # Arrange
+        import src.config as config_module
+        import src.graph.nodes.analyze_result as analyze_module
+
+        async def slow_invoke(_messages):
+            await asyncio.sleep(0.2)
+            return SimpleNamespace(content="{}")
+
+        monkeypatch.setattr(config_module, "get_settings", lambda: SimpleNamespace(
+            llm_timeout=0.1,
+            llm_model="test",
+            analysis_data_max_chars=50_000,
+        ))
+        monkeypatch.setattr(
+            analyze_module,
+            "get_llm",
+            lambda temperature=0.3: SimpleNamespace(ainvoke=slow_invoke),
+        )
+
+        # Act
+        result = await analyze_module._llm_analyze(
+            [{"value": 1}],
+            "SELECT value FROM metrics",
+            {"columns": {}},
+            "",
+            "",
+            "",
+        )
+
+        # Assert
+        assert "summary" in result
 
 class TestSQLiteIntrospection:
     """覆盖 SQLite 专用系统表和 PRAGMA 路由。"""

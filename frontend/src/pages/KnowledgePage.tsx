@@ -327,9 +327,12 @@ export default function KnowledgePage() {
               { title: '来源', dataIndex: 'source', width: 80,
                 render: v => <Tag color={v === 'user_upload' ? 'orange' : 'green'}>{v || '-'}</Tag> },
               { title: '标签', dataIndex: 'tags', width: 150,
-                render: (values: string[]) => values?.length
-                  ? <Space size={[0, 4]} wrap>{values.slice(0, 3).map(value => <Tag key={value}>{value}</Tag>)}</Space>
-                  : '-' },
+                render: (values: string[]) => {
+                  const cleanValues = (values || []).map(value => String(value).trim()).filter(Boolean);
+                  return cleanValues.length
+                  ? <Space size={[0, 4]} wrap>{cleanValues.slice(0, 3).map(value => <Tag key={value}>{value}</Tag>)}</Space>
+                  : '-';
+                } },
               { title: '', key: 'actions', width: 36,
                 render: (_: unknown, r: KnowledgeEntry) => (
                   !r.can_delete ? (
@@ -476,7 +479,9 @@ export default function KnowledgePage() {
             <Descriptions.Item label="源文件">{entryDetail.source_file || '—'}</Descriptions.Item>
             <Descriptions.Item label="来源"><Tag color={entryDetail.source === 'user_upload' ? 'orange' : 'green'}>{entryDetail.source || '—'}</Tag></Descriptions.Item>
             <Descriptions.Item label="标签">
-              {entryDetail.tags?.length ? entryDetail.tags.map(value => <Tag key={value}>{value}</Tag>) : '—'}
+              {entryDetail.tags?.map(value => String(value).trim()).filter(Boolean).length
+                ? entryDetail.tags.map(value => String(value).trim()).filter(Boolean).map(value => <Tag key={value}>{value}</Tag>)
+                : '—'}
             </Descriptions.Item>
           </Descriptions>
           <Typography.Title level={5}>内容</Typography.Title>

@@ -308,6 +308,7 @@ def get_task_llm(
             temperature=temperature,
             reasoning=effective_reasoning,
             reasoning_effort=reasoning_effort,
+            max_tokens=max_tokens,
         )
     else:
         logger.error("创建任务 LLM 失败", task=task, reason="没有授权的可用模型")

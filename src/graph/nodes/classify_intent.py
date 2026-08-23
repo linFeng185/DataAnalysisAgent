@@ -81,6 +81,21 @@ async def classify_intent_node(state: AnalysisState) -> dict:
         llm_plan = await _llm_classify(q)
         intent = llm_plan.intent if llm_plan is not None else "chat"
 
+    # 短统计问题即使被模型误判为 chat，也必须进入 SQL 查询链路。
+    statistical_markers = (
+        "统计", "总数", "总量", "总金额", "数量", "多少", "合计", "汇总", "平均",
+    )
+    if intent == "chat" and any(marker in q for marker in statistical_markers):
+        logger.info(
+            "统计类问题意图兜底",
+            query=q[:80],
+            previous_intent=intent,
+            matched_markers=[marker for marker in statistical_markers if marker in q],
+        )
+        intent = "query"
+        # 丢弃 chat 的模型操作字段，避免后续任务计划仍被写成 conversation。
+        llm_plan = None
+
     preliminary_plan = build_task_plan(intent, query=contexts.request.user_query)
     if preliminary_plan.capability == "forecast" and intent == "chat":
         intent = "trend"

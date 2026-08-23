@@ -83,6 +83,42 @@ class TestMemoryRuntime:
         identity = memory_store.save_sql_template.await_args.kwargs["identity"]
         assert (identity.tenant_id, identity.user_id) == (4, 7)
 
+    # 方法作用：验证多数据源成功 SQL 逐条进入知识进化观察，而不是拼接后整体校验。
+    # Args: self - pytest 测试类实例；monkeypatch - pytest 补丁工具。
+    # Returns: 无返回值，断言每个数据源的 SQL 都独立传递。
+    async def test_build_response_observes_multi_source_sql_individually(self, monkeypatch) -> None:
+        """多源 SQL 头注释不能让知识进化安全校验拒绝整批观察。"""
+        # Arrange
+        import src.memory.history_store as history_module
+        import src.memory.knowledge_evolution as evolution_module
+        import src.memory.long_term_store as store_module
+        from src.graph.nodes.build_response import build_response_node
+
+        memory_store = SimpleNamespace(save_sql_template=AsyncMock())
+        evolution = SimpleNamespace(observe_successful_sql=AsyncMock())
+        monkeypatch.setattr(store_module, "get_long_term_memory_store", AsyncMock(return_value=memory_store))
+        monkeypatch.setattr(evolution_module, "get_knowledge_evolution_service", AsyncMock(return_value=evolution))
+        monkeypatch.setattr(history_module, "get_history_store", lambda: SimpleNamespace(add=AsyncMock()))
+
+        # Act
+        await build_response_node({
+            "user_query": "统计订单数",
+            "tenant_id": 4,
+            "user_id": 7,
+            "user_role": "analyst",
+            "multi_source_results": [
+                {"datasource": "mysql", "dialect": "mysql", "sql": "SELECT COUNT(*) FROM orders", "success": True, "data": [{"count": 1}]},
+                {"datasource": "postgres", "dialect": "postgres", "sql": "SELECT COUNT(*) FROM orders", "success": True, "data": [{"count": 2}]},
+            ],
+            "analysis_result": {"summary": "共 3 单"},
+            "query_result_sample": [{"count": 1}],
+            "execution_context": {"sql_valid": True},
+        })
+
+        # Assert
+        observed_sql = [call.args[1] for call in evolution.observe_successful_sql.await_args_list]
+        assert observed_sql == ["SELECT COUNT(*) FROM orders", "SELECT COUNT(*) FROM orders"]
+
     # 方法作用：验证生产迁移创建身份隔离长期记忆、归档和补偿表。
     # Args: self - pytest 测试类实例。
     # Returns: 无返回值，断言失败时由 pytest 报告。

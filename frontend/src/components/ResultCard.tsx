@@ -110,7 +110,6 @@ export default function ResultCard({
       children: <ChartPanel chartConfig={chartConfig} rows={chartRows} />,
     }] : []),
     ...(renderedReport ? [{ key: 'report', label: '报告正文', children: <Typography.Paragraph style={{ whiteSpace: 'pre-wrap', marginBottom: 0 }}>{renderedReport}</Typography.Paragraph> }] : []),
-    ...(tokens ? [{ key: 'raw', label: '完整响应', children: <div style={{ background: '#f5f5f5', padding: 12, borderRadius: 6, whiteSpace: 'pre-wrap', maxHeight: 300, overflow: 'auto', fontSize: 13 }}>{tokens}</div> }] : []),
   ];
 
   return (

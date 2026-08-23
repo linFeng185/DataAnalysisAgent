@@ -117,7 +117,8 @@ class KnowledgeEntry:
     def to_dict(self) -> dict:
         """转为 ChromaDB metadata dict（不支持嵌套dict，metadata 序列化为 JSON 字符串）。"""
         import json as _json
-        tags = self.tags if self.tags else [""]
+        # ChromaDB metadata 不接受空列表，存储层保留占位值，读取/API 边界会过滤它。
+        tags = [str(tag).strip() for tag in self.tags if str(tag).strip()] or [""]
         return {
             "id": self.id,
             "content": self.content,
@@ -179,9 +180,14 @@ class KnowledgeEntry:
         except (ValueError, TypeError):
             ttl = 0
 
-        tags = d.get("tags", [])
-        if tags == [""] or tags is None:
-            tags = []
+        raw_tags = d.get("tags", [])
+        if isinstance(raw_tags, str):
+            raw_tags = raw_tags.split(",")
+        tags = [
+            str(tag).strip()
+            for tag in (raw_tags or [])
+            if str(tag).strip() and str(tag).strip() not in {"['']", '[""]'}
+        ]
 
         locator = d.get("locator", {})
         if not locator and isinstance(d.get("locator_json"), str):

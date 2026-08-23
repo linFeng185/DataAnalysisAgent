@@ -628,6 +628,46 @@ class TestSchemaManagerManagement:
         assert saved.id == "column:demo.orders.amount"
         assert "订单金额" in saved.content
 
+    # 方法作用：验证字段备注同步写回 Registry 的 SchemaSnapshot。
+    # Args: self - pytest 测试类实例；monkeypatch - pytest 补丁工具。
+    # Returns: 无返回值，断言 GET 使用的内存快照已包含新备注。
+    async def test_update_column_comment_updates_registry_snapshot(self, monkeypatch):
+        """字段备注保存后，Schema 路由立即读取到更新值。"""
+        # Arrange
+        from types import SimpleNamespace
+        from unittest.mock import AsyncMock
+
+        import src.memory.vector_store as vector_module
+        from src.datasource.schema_snapshot import ColumnInfo, SchemaSnapshot, TableSchema
+        from src.knowledge.schema_manager import SchemaManager
+        from src.memory.vector_store import VectorEntry
+
+        datasource = SimpleNamespace(schema=SchemaSnapshot(tables=[TableSchema(
+            name="orders",
+            columns=[ColumnInfo(name="amount", type="DECIMAL", comment="旧备注")],
+        )]))
+        entry = VectorEntry(
+            id="column:demo.orders.amount",
+            content="orders.amount: DECIMAL - 旧备注",
+            metadata={"type": "DECIMAL", "tenant_id": 1},
+        )
+        store = SimpleNamespace(
+            get_by_id=AsyncMock(return_value=entry),
+            upsert=AsyncMock(return_value=1),
+        )
+        manager = SchemaManager()
+        monkeypatch.setattr(manager, "_resolve_datasource", AsyncMock(return_value=datasource))
+        monkeypatch.setattr(vector_module, "get_vector_store", AsyncMock(return_value=store))
+
+        # Act
+        updated = await manager.update_column_comment(
+            "demo", "orders", "amount", "新备注",
+        )
+
+        # Assert
+        assert updated is True
+        assert datasource.schema.tables[0].columns[0].comment == "新备注"
+
 
 class TestExternalProviderOwnership:
     """覆盖功能 2.1.4、6.1.1：Schema 懒加载不得覆盖启动恢复的数据源。"""

@@ -115,6 +115,33 @@ class TestRetrieveSchemaContext:
         assert result["few_shot_examples"][0]["sql"] == "SELECT COUNT(*) FROM orders"
         logger.info("test_retrieve_schema_preserves_database_semantics 完成")
 
+    # 方法作用：验证知识库内容在长期记忆前写入 grounding 上下文。
+    # Args: self - pytest 测试类实例；monkeypatch - pytest 补丁工具。
+    # Returns: 无返回值，断言业务知识不会被预算优先截断。
+    async def test_retrieve_schema_puts_knowledge_before_memory(self, monkeypatch):
+        """有限 Prompt 预算下，业务规则应优先于可选长期记忆。"""
+        # Arrange
+        import src.graph.nodes.retrieve_schema as retrieve_module
+
+        monkeypatch.setattr(
+            retrieve_module,
+            "_load_knowledge_context",
+            AsyncMock(return_value="业务口径：VIP 必须使用 customers.customer_level='VIP'"),
+        )
+        monkeypatch.setattr(retrieve_module, "_load_enum_dictionary", AsyncMock(return_value={}))
+
+        # Act
+        result = await retrieve_module.retrieve_schema_node({
+            "datasource": "demo",
+            "resolved_schema": SchemaSnapshot(),
+            "dialect": "postgres",
+            "intent": "query",
+            "long_term_memories_text": "长期记忆：历史 SQL 模板和用户偏好" * 200,
+        })
+
+        # Assert
+        assert result["long_term_memories_text"].startswith("业务口径：VIP")
+
 
 class TestSQLPromptGrounding:
     """覆盖功能 4.4.16：SQL Prompt 证据上下文和约束。"""

@@ -111,7 +111,7 @@ export default function DatasourcePage() {
 
   useEffect(() => { void load(); }, []);
 
-  // 方法作用：在编辑弹窗完成挂载后回填配置，避免 destroyOnClose 丢弃未挂载字段值。
+  // 方法作用：在编辑弹窗完成挂载后回填配置，避免销毁隐藏内容时丢弃未挂载字段值。
   // Args: 无，读取 open/editing/datasource 状态。
   // Returns: 无返回值。
   useEffect(() => {
@@ -245,14 +245,16 @@ export default function DatasourcePage() {
                     />
                   </Tooltip>
                   <Popconfirm title="确定删除?" onConfirm={() => handleDelete(datasource.name)}>
-                    <Tooltip title="删除">
-                      <Button
-                        aria-label={`删除 ${datasource.name}`}
-                        danger
-                        icon={<DeleteOutlined />}
-                        size="small"
-                      />
-                    </Tooltip>
+                    <span>
+                      <Tooltip title="删除">
+                        <Button
+                          aria-label={`删除 ${datasource.name}`}
+                          danger
+                          icon={<DeleteOutlined />}
+                          size="small"
+                        />
+                      </Tooltip>
+                    </span>
                   </Popconfirm>
                 </Space>
               ),
@@ -266,7 +268,7 @@ export default function DatasourcePage() {
         open={open}
         onCancel={closeModal}
         width={560}
-        destroyOnClose
+        destroyOnHidden
         footer={[
           <Button key="test" icon={<ApiOutlined />} loading={testing} onClick={handleTest}>测试连接</Button>,
           <Button key="cancel" onClick={closeModal}>取消</Button>,

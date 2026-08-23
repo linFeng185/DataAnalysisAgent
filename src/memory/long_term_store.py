@@ -16,6 +16,7 @@ logger = get_logger(__name__)
 _RESOURCE_KIND = "long_term_memory"
 _MIN_CONFIDENCE = 0.3
 _MEMORY_RESOURCE = "long_term_memory_store"
+_TOUCH_INTERVAL_SECONDS = 86_400
 
 
 class LongTermMemoryStore:
@@ -97,7 +98,8 @@ class LongTermMemoryStore:
             memories = [item[1] for item in sorted(
                 selected.values(), key=lambda item: item[0], reverse=True,
             )[:limit]]
-            for memory in memories:
+            touch_candidates = [memory for memory in memories if self._touch_due(memory)]
+            for memory in touch_candidates:
                 await self._touch(memory, identity=current_identity)
             logger.info(
                 "长期记忆检索完成",
@@ -105,6 +107,7 @@ class LongTermMemoryStore:
                 user_id=current_identity.user_id,
                 result_count=len(memories),
                 expired_count=len(set(expired_ids)),
+                touched_count=len(touch_candidates),
             )
             return memories
         except Exception as exc:
@@ -427,17 +430,26 @@ class LongTermMemoryStore:
                     )
             except Exception as exc:
                 logger.warning("长期记忆访问状态写回 PG 失败", error=str(exc), exc_info=True)
-        try:
-            from src.memory.vector_store import VectorEntry
+        # 访问时间和次数只影响生命周期，不影响向量内容；避免每次命中重新 embedding/upsert。
+        logger.debug(
+            "长期记忆访问状态已降频写回",
+            entry_id=memory.id,
+            access_count=memory.access_count,
+        )
 
-            store = await self._vector()
-            await store.upsert([VectorEntry(
-                id=memory.id,
-                content=memory.content,
-                metadata=_vector_metadata(memory),
-            )])
-        except Exception as exc:
-            logger.warning("长期记忆访问状态写回 VectorStore 失败", error=str(exc), exc_info=True)
+    # 方法作用：判断长期记忆是否达到低频访问状态写回间隔。
+    # Args: self - 当前 Store；memory - 待判断的记忆对象。
+    # Returns: 上次访问早于间隔或缺少时间时返回 True。
+    @staticmethod
+    def _touch_due(memory: LongTermMemory) -> bool:
+        """只对长时间未访问的记忆写回访问统计。"""
+        last_accessed = memory.last_accessed_at
+        if last_accessed is None:
+            return True
+        if last_accessed.tzinfo is None:
+            last_accessed = last_accessed.replace(tzinfo=timezone.utc)
+        age = (datetime.now(timezone.utc) - last_accessed).total_seconds()
+        return age >= _TOUCH_INTERVAL_SECONDS
 
     # 方法作用：删除已过期记忆并同步清理 VectorStore。
     # Args: self - 当前 Store；now - 截止时间，缺省为当前 UTC。

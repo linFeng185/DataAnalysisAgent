@@ -145,8 +145,42 @@ class TestLongTermMemoryIsolation:
             },
         ]
         vector.delete_by_ids.assert_awaited_once_with(["expired"])
-        assert pg.execute.await_count >= 2
-        vector.upsert.assert_awaited_once()
+        assert pg.execute.await_count == 1
+        vector.upsert.assert_not_awaited()
+
+    # 方法作用：验证近期命中的长期记忆不会重复写 PG 或向量索引。
+    # Args: self - pytest 测试类实例。
+    # Returns: 无返回值，断言近期记忆只参与读取。
+    async def test_search_does_not_touch_recent_memory(self) -> None:
+        """同一轮或短时间内重复命中不应触发写放大。"""
+        # Arrange
+        from src.memory.long_term_store import LongTermMemoryStore
+        from src.security.tenant_policy import RequestIdentity, TenantPolicy
+
+        recent = self._result(
+            "recent",
+            visibility="private",
+            tenant_id=4,
+            owner_user_id=7,
+        )
+        vector = SimpleNamespace(
+            search=AsyncMock(side_effect=[[recent], [], []]),
+            upsert=AsyncMock(),
+            delete_by_ids=AsyncMock(),
+        )
+        pg = SimpleNamespace(execute=AsyncMock())
+        store = LongTermMemoryStore(pg_pool=pg, vector_store=vector, policy=TenantPolicy(True))
+
+        # Act
+        result = await store.search(
+            "订单",
+            identity=RequestIdentity(tenant_id=4, user_id=7, role="analyst"),
+        )
+
+        # Assert
+        assert [item.id for item in result] == ["recent"]
+        pg.execute.assert_not_awaited()
+        vector.upsert.assert_not_awaited()
 
     # 方法作用：验证向量后端返回越界结果时业务层仍执行租户所有者复核。
     # Args: self - pytest 测试类实例。

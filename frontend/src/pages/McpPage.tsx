@@ -15,7 +15,18 @@ export default function McpPage() {
   const ld = async () => { setLoading(true); try { const d=await get<{servers:McpServer[]}>('/mcp/servers'); setServers(d.servers||[]); } catch { message.error('加载失败'); } finally { setLoading(false); } };
   useEffect(() => { ld(); }, []);
 
-  const add = async () => { try { const v=await form.validateFields(); await post('/mcp/servers',v as Record<string,unknown>); message.success('已添加'); setOpen(false); form.resetFields(); ld(); } catch { message.error('添加失败'); } };
+  // 方法作用：校验并创建 MCP Server，同时将服务端拒绝原因反馈给用户。
+  // Args: 无，读取当前表单字段。
+  // Returns: 无返回值；成功关闭弹窗，失败展示后端错误详情。
+  const add = async (): Promise<void> => {
+    try {
+      const v = await form.validateFields();
+      await post('/mcp/servers', v as Record<string, unknown>);
+      message.success('已添加'); setOpen(false); form.resetFields(); void ld();
+    } catch (error) {
+      message.error(error instanceof Error ? error.message : '添加失败');
+    }
+  };
   const test = async (server:McpServer) => { try { const r=await post<{ok:boolean;error?:string}>(`/mcp/servers/${encodeURIComponent(server.name)}/test?scope=${server.scope}`,{}); message.success(r.ok?'连接成功':'失败: '+(r.error||'')); } catch { message.error('测试失败'); } };
   const delSrv = async (server:McpServer) => { try { await del(`/mcp/servers/${encodeURIComponent(server.name)}?scope=${server.scope}`); message.success('已删除'); ld(); } catch { message.error('删除失败'); } };
 

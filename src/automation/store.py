@@ -277,8 +277,15 @@ class AutomationStore:
                     "INSERT INTO analysis_schedule_runs "
                     "(id,schedule_id,tenant_id,user_id,status,result_payload,finished_at) "
                     "VALUES ($1::uuid,$2::uuid,$3,$4,'success',$5::jsonb,NOW())",
+                    # 运行记录与任务时间戳在同一条事务语句中落库，手动运行立即可见。
                     run_id, schedule.id, schedule.tenant_id, schedule.user_id,
                     json.dumps(payload, ensure_ascii=False),
+                )
+                await connection.execute(
+                    "UPDATE analysis_schedules SET last_run_at=NOW() "
+                    "WHERE id=$1::uuid AND tenant_id=$2",
+                    schedule.id,
+                    schedule.tenant_id,
                 )
                 if notification is not None:
                     await connection.execute(
@@ -304,6 +311,12 @@ class AutomationStore:
                 "VALUES ($1::uuid,$2::uuid,$3,$4,'failed',$5,NOW())",
                 str(uuid4()), schedule.id, schedule.tenant_id, schedule.user_id,
                 error[:500],
+            )
+            await connection.execute(
+                "UPDATE analysis_schedules SET last_run_at=NOW() "
+                "WHERE id=$1::uuid AND tenant_id=$2",
+                schedule.id,
+                schedule.tenant_id,
             )
 
     # 方法作用：分页列出当前用户站内通知。

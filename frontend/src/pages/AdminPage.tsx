@@ -1090,7 +1090,7 @@ export default function AdminPage() {
       { key: 'access', label: '访问策略', children: accessPolicyWorkspace },
     ]} />
 
-    <Modal title="创建租户" open={tenantModal} onOk={() => void createTenant()} onCancel={() => setTenantModal(false)} destroyOnClose>
+    <Modal title="创建租户" open={tenantModal} onOk={() => void createTenant()} onCancel={() => setTenantModal(false)} destroyOnHidden>
       <Form form={tenantForm} layout="vertical">
         <Form.Item name="code" label="租户编码" rules={[{ required: true, pattern: /^[a-z0-9][a-z0-9-]{0,31}$/ }]}><Input /></Form.Item>
         <Form.Item name="name" label="租户名称" rules={[{ required: true, max: 128 }]}><Input /></Form.Item>
@@ -1101,7 +1101,7 @@ export default function AdminPage() {
 
     <Modal title="物理删除租户" open={Boolean(deleteTenantTarget)}
       okText="永久删除" okButtonProps={{ danger: true }} onOk={() => void deleteTenant()}
-      onCancel={() => { setDeleteTenantTarget(null); deleteTenantForm.resetFields(); }} destroyOnClose>
+      onCancel={() => { setDeleteTenantTarget(null); deleteTenantForm.resetFields(); }} destroyOnHidden>
       <Alert type="error" showIcon message="此操作不可恢复"
         description="将删除该租户的用户、会话、历史、数据源、知识库、缓存、自动化任务、LLM 配置、MCP 和 Skills。" />
       <Form form={deleteTenantForm} layout="vertical" style={{ marginTop: 16 }}>
@@ -1116,7 +1116,7 @@ export default function AdminPage() {
       </Form>
     </Modal>
 
-    <Modal title="创建用户" open={userModal} onOk={() => void createUser()} onCancel={() => setUserModal(false)} destroyOnClose>
+    <Modal title="创建用户" open={userModal} onOk={() => void createUser()} onCancel={() => setUserModal(false)} destroyOnHidden>
       <Form form={userForm} layout="vertical" initialValues={{ role: 'analyst' }}>
         {!isTenantAdmin && <Form.Item name="tenant_id" label="所属租户" rules={[{ required: true }]}><Select options={tenants.filter(t => t.is_active).map(t => ({ value: t.id, label: t.name }))} /></Form.Item>}
         <Form.Item name="username" label="用户名" rules={[{ required: true, max: 64 }]}><Input /></Form.Item>
@@ -1127,7 +1127,7 @@ export default function AdminPage() {
 
     <Modal title={editingProvider ? '编辑模型厂商' : '新增模型厂商'} open={providerModal}
       onOk={() => void saveProvider()} onCancel={() => { setProviderModal(false); setEditingProvider(null); }}
-      width={920} destroyOnClose>
+      width={920} destroyOnHidden>
       <Form form={providerForm} layout="vertical">
         <Form.Item name="code" label="厂商编码" rules={[{ required: true, pattern: /^[A-Za-z0-9][A-Za-z0-9_-]*$/ }]}><Input disabled={Boolean(editingProvider)} /></Form.Item>
         <Form.Item name="display_name" label="展示名称" rules={[{ required: true }]}><Input /></Form.Item>
@@ -1178,7 +1178,7 @@ export default function AdminPage() {
     </Modal>
 
     <Modal title={editingModel ? '编辑模型目录' : '新增模型目录'} open={modelModal}
-      onOk={() => void saveModel()} onCancel={() => { setModelModal(false); setEditingModel(null); }} destroyOnClose>
+      onOk={() => void saveModel()} onCancel={() => { setModelModal(false); setEditingModel(null); }} destroyOnHidden>
       <Form form={modelForm} layout="vertical">
         <Form.Item name="model_id" label="模型 ID" rules={[{ required: true }]}><Input disabled={Boolean(editingModel)} /></Form.Item>
         <Form.Item name="display_name" label="展示名称" rules={[{ required: true }]}><Input /></Form.Item>
@@ -1186,7 +1186,7 @@ export default function AdminPage() {
       </Form>
     </Modal>
 
-    <Modal title={editingConnection ? '编辑命名连接' : '新增命名连接'} open={connectionModal} onOk={() => void saveConnection()} onCancel={() => { setEditingConnection(null); setConnectionModal(false); }} destroyOnClose>
+    <Modal title={editingConnection ? '编辑命名连接' : '新增命名连接'} open={connectionModal} onOk={() => void saveConnection()} onCancel={() => { setEditingConnection(null); setConnectionModal(false); }} destroyOnHidden>
       <Form form={connectionForm} layout="vertical">
         <Form.Item name="provider_id" label="模型厂商" rules={[{ required: true }]}><Select disabled={Boolean(editingConnection)} onChange={value => void loadProviderModels(value)} options={providers.filter(item => item.is_active).map(item => ({ value: item.id, label: `${item.display_name} (${item.code})` }))} /></Form.Item>
         <Form.Item name="name" label="连接名称" rules={[{ required: true, max: 128 }]}><Input /></Form.Item>
@@ -1201,14 +1201,14 @@ export default function AdminPage() {
         setPasswordUser(null);
         setPasswordTenantId(null);
         passwordForm.resetFields();
-      }} destroyOnClose>
+      }} destroyOnHidden>
       <Form form={passwordForm} layout="vertical">
         <Form.Item name="password" label="新密码" rules={[{ required: true, min: 8, max: 72 }]}><Input.Password /></Form.Item>
       </Form>
     </Modal>
 
     <Modal title={editingPolicy ? '编辑访问策略' : '创建访问策略'} open={policyModal}
-      onOk={() => void saveAccessPolicy()} onCancel={() => { setPolicyModal(false); setEditingPolicy(null); }} destroyOnClose>
+      onOk={() => void saveAccessPolicy()} onCancel={() => { setPolicyModal(false); setEditingPolicy(null); }} destroyOnHidden>
       <Form form={policyForm} layout="vertical">
         <Form.Item name="policy_key" label="策略编号" rules={[{ required: true, pattern: /^[a-z][a-z0-9_-]+$/ }]}> <Input disabled={Boolean(editingPolicy)} /> </Form.Item>
         <Form.Item name="path" label="接口路径" rules={[{ required: true, pattern: /^\// }]}><Input placeholder="/api/v1/reports" /></Form.Item>
@@ -1226,7 +1226,7 @@ export default function AdminPage() {
     </Modal>
 
     <Modal title={`为 ${rulePolicy?.policy_key || ''} 添加 IP 规则`} open={Boolean(rulePolicy)}
-      onOk={() => void createIpRule()} onCancel={() => setRulePolicy(null)} destroyOnClose>
+      onOk={() => void createIpRule()} onCancel={() => setRulePolicy(null)} destroyOnHidden>
       <Form form={ruleForm} layout="vertical">
         <Form.Item name="action" label="规则动作" rules={[{ required: true }]}><Select options={[{ value: 'deny', label: '拒绝' }, { value: 'allow', label: '允许' }]} /></Form.Item>
         <Form.Item name="cidr" label="IP / CIDR" rules={[{ required: true }]}><Input placeholder="203.0.113.0/24" /></Form.Item>

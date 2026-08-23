@@ -141,7 +141,8 @@ async def retrieve_schema_node(state: AnalysisState) -> dict:
     few_shot_examples = list(getattr(schema, "sql_templates", []) or []) if schema else []
     memory_text = str(state.get("long_term_memories_text", "") or "").strip()
     merged_context = "\n\n---\n\n".join(
-        section for section in (memory_text, knowledge_text.strip()) if section
+        # 业务知识是当前问题的 grounding，必须先于可选长期记忆进入有限预算。
+        section for section in (knowledge_text.strip(), memory_text) if section
     )
     result = {
         "dialect": dialect,

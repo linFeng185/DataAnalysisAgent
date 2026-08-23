@@ -1,5 +1,6 @@
 import { useState, useRef, useCallback, useEffect } from 'react';
 import { streamChat, fetchSessionTurns } from '../api/client';
+import type { ChatAbortController } from '../api/client';
 import type { ActionRequestPayload, ChatTurnData } from '../types';
 import { useAuth } from './AuthContext';
 import { clearChatStorage } from './chatStorage';
@@ -28,7 +29,7 @@ export interface ChatTurn {
   datasource: string;
   assistant: AssistantContent;
   finalResult: Record<string, unknown> | null;
-  status: 'streaming' | 'done' | 'error';
+  status: 'streaming' | 'done' | 'error' | 'cancelled';
   errorMessage: string;
 }
 
@@ -78,7 +79,8 @@ export function useChat() {
   const [hasMore, setHasMore] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
   const nextId = useRef(1);
-  const aborterRef = useRef<AbortController | null>(null);
+  const aborterRef = useRef<ChatAbortController | null>(null);
+  const streamingTurnIdRef = useRef<number | null>(null);
 
   // 方法作用：认证身份变化时终止旧请求并清空全部内存聊天状态。
   // Args: identityKey - 当前租户与用户组成的身份键。
@@ -111,6 +113,7 @@ export function useChat() {
     setRetryInfo(null);
     setLoading(true);
     const turnId = nextId.current++;
+    streamingTurnIdRef.current = turnId;
     const newTurn: ChatTurn = {
       id: turnId, userQuery: query, datasource,
       assistant: emptyAssistant(),
@@ -159,39 +162,14 @@ export function useChat() {
             }));
             break;
           case 'llm_start':
-            if (e.stream_id) updateAssistant(a => {
-              const existingBuffers = a.streamBuffers || {};
-              return { streamBuffers: {
-                ...existingBuffers,
-                [e.stream_id as string]: existingBuffers[e.stream_id as string] || {
-                  node: (e.node as string) || 'unknown', tokens: '',
-                },
-              } };
-            });
+            // 中间模型输出仅用于服务端协议续接，前端不保存或展示原始内容。
+            void e.stream_id;
             break;
           case 'thinking':
             // 兼容旧事件但不保存或展示原始模型推理内容。
             break;
           case 'token':
-            if (e.content) updateAssistant(a => {
-              const streamId = (e.stream_id as string) || `legacy:${(e.node as string) || 'unknown'}`;
-              const existingBuffers = a.streamBuffers || {};
-              const current = existingBuffers[streamId] || {
-                node: (e.node as string) || 'unknown', tokens: '',
-              };
-              const streamBuffers = {
-                ...existingBuffers,
-                [streamId]: {
-                  ...current,
-                  tokens: current.tokens + (e.content as string),
-                },
-              };
-              const tokens = Object.entries(streamBuffers)
-                .filter(([, buffer]) => buffer.tokens)
-                .map(([id, buffer]) => `【${buffer.node} · ${id.slice(0, 8)}】\n${buffer.tokens}`)
-                .join('\n\n');
-              return { streamBuffers, tokens };
-            });
+            // generate_sql/analyze_result 等中间节点的原始 token 不进入聊天消息。
             break;
           case 'llm_end':
             break;
@@ -237,13 +215,21 @@ export function useChat() {
         }
       },
       () => {
-        setLoading(false); setRetryInfo(null);
+        const isCurrentTurn = streamingTurnIdRef.current === turnId;
+        if (isCurrentTurn) {
+          setLoading(false); setRetryInfo(null);
+          streamingTurnIdRef.current = null;
+        }
         setTurns(prev => prev.map(t =>
           t.id === turnId && t.status === 'streaming' ? { ...t, status: 'done' } : t,
         ));
       },
       (err) => {
-        setLoading(false); setRetryInfo(null);
+        const isCurrentTurn = streamingTurnIdRef.current === turnId;
+        if (isCurrentTurn) {
+          setLoading(false); setRetryInfo(null);
+          streamingTurnIdRef.current = null;
+        }
         setTurns(prev => prev.map(t =>
           t.id === turnId ? { ...t, status: 'error', errorMessage: err } : t,
         ));
@@ -257,6 +243,26 @@ export function useChat() {
       fileIds,
       actionRequest,
     );
+    const controller = aborterRef.current;
+    if (!controller) return;
+    controller.onCancelled = () => {
+      const isCurrentTurn = streamingTurnIdRef.current === turnId;
+      if (isCurrentTurn) {
+        setLoading(false); setRetryInfo(null);
+        streamingTurnIdRef.current = null;
+      }
+      setTurns(prev => prev.map(t => t.id === turnId && t.status === 'streaming' ? {
+        ...t,
+        status: 'cancelled',
+        errorMessage: '已取消',
+        assistant: {
+          ...t.assistant,
+          progressNodes: {},
+          streamBuffers: {},
+          tokens: '',
+        },
+      } : t));
+    };
   }, [sessionId]);
 
   const sendMulti = useCallback((query: string, datasourcesList: string[], modelId: string, connectionId?: number) => {
@@ -270,6 +276,21 @@ export function useChat() {
     aborterRef.current = null;
     setRetryInfo(null);
     setLoading(false);
+    const turnId = streamingTurnIdRef.current;
+    streamingTurnIdRef.current = null;
+    if (turnId !== null) {
+      setTurns(prev => prev.map(t => t.id === turnId && t.status === 'streaming' ? {
+        ...t,
+        status: 'cancelled',
+        errorMessage: '已取消',
+        assistant: {
+          ...t.assistant,
+          progressNodes: {},
+          streamBuffers: {},
+          tokens: '',
+        },
+      } : t));
+    }
   }, []);
   const clearSession = useCallback(() => {
     setTurns([]); setSessionId(''); nextId.current = 1;

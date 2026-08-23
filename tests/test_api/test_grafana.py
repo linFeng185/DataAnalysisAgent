@@ -10,6 +10,23 @@ from unittest.mock import AsyncMock
 class TestGrafanaRoutes:
     """覆盖 Grafana 协议功能 19.8。"""
 
+    # 方法作用：验证 Grafana OpenAPI 明确说明时间宏的使用约定。
+    # Args: self - pytest 测试类实例。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    def test_query_openapi_documents_time_filter_macro(self) -> None:
+        """range 不会自动改写 SQL，文档必须要求显式宏。"""
+        # Arrange
+        import src.api.routes.grafana as route
+
+        # Act
+        operation = next(
+            item for item in route.router.routes
+            if getattr(item, "path", "") == "/grafana/query"
+        )
+
+        # Assert
+        assert "$__timeFilter(column)" in str(getattr(operation, "description", ""))
+
     # 方法作用：验证 search 只返回当前身份授权的数据源名称。
     # Args: self - pytest 测试类实例；monkeypatch - pytest 补丁工具。
     # Returns: 无返回值。

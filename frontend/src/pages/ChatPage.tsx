@@ -1,4 +1,5 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
+import { useLocation, useNavigate } from 'react-router-dom';
 import { Input, Select, Tag, Typography, Space, Tooltip, message, Card, Button, Spin, Switch } from 'antd';
 import {
   SendOutlined, RobotOutlined, ClearOutlined,
@@ -58,6 +59,8 @@ function saveDs(name: string): void {
 // Args: 无。
 // Returns: 对话分析页面。
 export default function ChatPage() {
+  const location = useLocation();
+  const navigate = useNavigate();
   const [query, setQuery] = useState('');
   const [ds, setDs] = useState<string[]>(() => { const v = loadDs(); return v ? [v] : []; });
   const [modelId, setModelId] = useState('');
@@ -79,6 +82,7 @@ export default function ChatPage() {
   const msgAreaRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const prevTurnsLen = useRef(turns.length);
+  const replayedSessionRef = useRef('');
 
   useEffect(() => {
     get<{ datasources: DatasourceConfig[] }>('/datasources')
@@ -137,6 +141,33 @@ export default function ChatPage() {
       msgAreaRef.current.scrollTop = msgAreaRef.current.scrollHeight;
     }
   }, [sessionId]);
+
+  // 方法作用：消费历史页传入的会话详情并恢复每轮结构化结果。
+  // Args: locationState - 路由状态中的历史会话详情；restore - useChat 恢复函数。
+  // Returns: 无返回值；消费后清理路由状态避免重复回放。
+  useEffect(() => {
+    const state = location.state as { replaySession?: {
+      session?: SessionInfo;
+      turns?: Parameters<typeof restoreTurns>[0];
+      has_more?: boolean;
+    } } | null;
+    const replay = state?.replaySession;
+    const replayId = replay?.session?.session_id || '';
+    if (!replay || !replayId || replayedSessionRef.current === replayId) return;
+    replayedSessionRef.current = replayId;
+    restoreTurns(
+      replay.turns || [],
+      replayId,
+      replay.session?.datasource || '',
+      Boolean(replay.has_more),
+    );
+    if (replay.session?.datasource) {
+      setDs([replay.session.datasource]);
+      saveDs(replay.session.datasource);
+    }
+    navigate('/', { replace: true, state: null });
+    message.success('已恢复历史会话');
+  }, [location.state, navigate, restoreTurns]);
 
   // 方法作用：校验当前输入并携带数据源、模型、Skill 和附件发起流式分析。
   // Args: 无。
@@ -412,16 +443,18 @@ export default function ChatPage() {
                 : [];
               return <>
                 <Tooltip title={supported ? '控制当前对话是否启用模型推理' : '当前模型不支持推理'}>
-                  <Space className="chat-reasoning-toggle" size={4}>
-                    <Typography.Text type="secondary" style={{ fontSize: 12 }}>推理</Typography.Text>
-                    <Switch size="small" checked={reasoningEnabled} disabled={!supported}
-                      onChange={enabled => {
-                        setReasoningEnabled(enabled);
-                        setReasoningEffort(enabled
-                          ? String(capabilities.reasoning_default_effort || reasoningEfforts[0] || '')
-                          : '');
-                      }} />
-                  </Space>
+                  <span className="chat-reasoning-toggle">
+                    <Space size={4}>
+                      <Typography.Text type="secondary" style={{ fontSize: 12 }}>推理</Typography.Text>
+                      <Switch size="small" checked={reasoningEnabled} disabled={!supported}
+                        onChange={enabled => {
+                          setReasoningEnabled(enabled);
+                          setReasoningEffort(enabled
+                            ? String(capabilities.reasoning_default_effort || reasoningEfforts[0] || '')
+                            : '');
+                        }} />
+                    </Space>
+                  </span>
                 </Tooltip>
                 {supported && reasoningEnabled && reasoningEfforts.length > 0 && <Select className="chat-depth-select" size="small"
                   aria-label="推理深度" value={reasoningEffort || undefined}
@@ -487,6 +520,7 @@ function TurnBubble({ turn, onSendMessage, onConfirmAction }: {
   const { userQuery, assistant, finalResult, status } = turn;
   const hasResult = status === 'done' && !!finalResult;
   const hasError = status === 'error';
+  const isCancelled = status === 'cancelled';
   const isStreaming = status === 'streaming';
   const isRestored = status === 'done' && !finalResult;
   const isLLMDirect = finalResult?.source === 'llm_direct';
@@ -550,14 +584,10 @@ function TurnBubble({ turn, onSendMessage, onConfirmAction }: {
             <ReasoningPanel summary={assistant.decisionSummary} />
           )}
 
-          {isStreaming && assistant.tokens && (
-            <div style={{
-              background: '#fafafa', padding: '12px 16px', borderRadius: 12,
-              lineHeight: 1.7, whiteSpace: 'pre-wrap', fontSize: 14,
-              border: '1px solid #f0f0f0',
-            }}>
-              {assistant.tokens}<LoadingOutlined style={{ color: '#1677ff', marginLeft: 2 }} />
-            </div>
+          {isCancelled && (
+            <Card size="small" style={{ background: '#fafafa', borderRadius: 12 }}>
+              <Typography.Text type="secondary">本轮分析已取消，可重新发送问题。</Typography.Text>
+            </Card>
           )}
 
           {isStreaming && !assistant.decisionSummary && !assistant.tokens

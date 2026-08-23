@@ -262,10 +262,12 @@ export default function AutomationPage() {
                           </Tooltip>
                           <Popconfirm title="确定删除此任务？"
                             onConfirm={() => void deleteSchedule(schedule.id)}>
-                            <Tooltip title="删除">
-                              <Button aria-label={`删除 ${schedule.name}`} size="small" danger
-                                icon={<DeleteOutlined />} />
-                            </Tooltip>
+                            <span>
+                              <Tooltip title="删除">
+                                <Button aria-label={`删除 ${schedule.name}`} size="small" danger
+                                  icon={<DeleteOutlined />} />
+                              </Tooltip>
+                            </span>
                           </Popconfirm>
                         </Space>
                       ) },
@@ -344,7 +346,7 @@ export default function AutomationPage() {
         okText="创建"
         confirmLoading={saving}
         width={680}
-        destroyOnClose
+        destroyOnHidden
       >
         <Form form={form} layout="vertical" requiredMark={false}>
           <Form.Item name="kind" label="任务类型" rules={[{ required: true }]}>

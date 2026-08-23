@@ -348,8 +348,18 @@ class TestAutomationStore:
         # Assert
         assert baseline == {"metrics": {"sales": 100}}
         assert connection.transaction.call_count == 1
-        assert connection.execute.await_count == 3
-        failure_args = connection.execute.await_args.args
+        assert connection.execute.await_count == 5
+        update_queries = [
+            call.args[0] for call in connection.execute.await_args_list
+            if call.args and "analysis_schedules SET last_run_at" in call.args[0]
+        ]
+        assert len(update_queries) == 2
+        failure_calls = [
+            call for call in connection.execute.await_args_list
+            if call.args and "status,error_message" in call.args[0]
+        ]
+        assert len(failure_calls) == 1
+        failure_args = failure_calls[0].args
         assert failure_args[-1] == "database unavailable"
 
 

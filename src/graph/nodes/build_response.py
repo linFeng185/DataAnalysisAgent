@@ -375,14 +375,25 @@ async def build_response_node(state: AnalysisState) -> dict:
     # 仅学习当前身份下成功执行的 SQL，避免把失败语句和安全短路结果污染模板库。
     tenant_id = contexts.request.tenant_id
     user_id = contexts.request.user_id
-    if (
+    evolution_eligible = bool(
         query.strip()
         and gen_sql.strip()
         and tenant_id > 0
         and user_id > 0
         and is_successful_response(final_result)
-        and final_result.get("source") == "sql_query"
-    ):
+        and final_result.get("source") in {"sql_query", "multi_source_query"}
+    )
+    logger.info(
+        "成功 SQL 自进化资格判定",
+        source=final_result.get("source", ""),
+        eligible=evolution_eligible,
+        has_query=bool(query.strip()),
+        has_sql=bool(gen_sql.strip()),
+        tenant_id=tenant_id,
+        user_id=user_id,
+        successful=is_successful_response(final_result),
+    )
+    if evolution_eligible:
         try:
             from src.memory.long_term_store import get_long_term_memory_store
             from src.security.tenant_policy import RequestIdentity
@@ -410,17 +421,30 @@ async def build_response_node(state: AnalysisState) -> dict:
                 from src.memory.knowledge_evolution import get_knowledge_evolution_service
 
                 evolution = await get_knowledge_evolution_service()
-                await evolution.observe_successful_sql(
-                    query,
-                    gen_sql,
-                    contexts.execution.dialect or "unknown",
-                    execution_success=True,
-                    validated=bool(
-                        contexts.execution.sql_valid
-                        or contexts.execution.sql_explain_checked
-                    ),
-                    identity=identity,
-                    datasource=contexts.routing.datasource,
+                observation_statements = sql_statements or [{
+                    "sql": gen_sql,
+                    "dialect": contexts.execution.dialect or "unknown",
+                    "datasource": contexts.routing.datasource,
+                }]
+                for statement in observation_statements:
+                    statement_sql = str(statement.get("sql", "") or "").strip()
+                    if not statement_sql:
+                        continue
+                    await evolution.observe_successful_sql(
+                        query,
+                        statement_sql,
+                        str(statement.get("dialect", "") or contexts.execution.dialect or "unknown"),
+                        execution_success=True,
+                        validated=bool(
+                            contexts.execution.sql_valid
+                            or contexts.execution.sql_explain_checked
+                        ),
+                        identity=identity,
+                        datasource=str(statement.get("datasource", "") or contexts.routing.datasource),
+                    )
+                logger.info(
+                    "成功 SQL 自进化观察完成",
+                    statement_count=len([item for item in observation_statements if str(item.get("sql", "") or "").strip()]),
                 )
             except Exception as exc:
                 logger.error(

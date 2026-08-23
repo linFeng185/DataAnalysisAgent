@@ -1,6 +1,7 @@
 import { lazy, Suspense, useState, useEffect } from 'react';
 import { BrowserRouter, Routes, Route, NavLink, Navigate, useLocation } from 'react-router-dom';
 import { Layout, Menu, ConfigProvider, Tag, Typography, theme, Grid, Button, Drawer } from 'antd';
+import type { MenuProps } from 'antd';
 import {
   MessageOutlined, DatabaseOutlined, HistoryOutlined, SettingOutlined,
   CheckCircleOutlined, LoadingOutlined,
@@ -77,42 +78,40 @@ function AppContent() {
   }, []);
 
   const menuKey = location.pathname === '/' ? 'chat' : location.pathname.replace('/', '') || 'chat';
+  const navigationItems: MenuProps['items'] = [
+    { key: 'chat', icon: <MessageOutlined />, label: <NavLink to="/">对话分析</NavLink> },
+    user?.role !== 'viewer'
+      ? { key: 'datasource', icon: <DatabaseOutlined />, label: <NavLink to="/datasource">数据源</NavLink> }
+      : null,
+    user?.role !== 'viewer'
+      ? { key: 'schema', icon: <SettingOutlined />, label: <NavLink to="/schema">表结构</NavLink> }
+      : null,
+    { key: 'history', icon: <HistoryOutlined />, label: <NavLink to="/history">历史</NavLink> },
+    user?.role !== 'viewer'
+      ? { key: 'skills', icon: <ThunderboltOutlined />, label: <NavLink to="/skills">Skills</NavLink> }
+      : null,
+    user?.role !== 'viewer'
+      ? { key: 'knowledge', icon: <ReadOutlined />, label: <NavLink to="/knowledge">知识库</NavLink> }
+      : null,
+    user?.role !== 'viewer'
+      ? { key: 'automation', icon: <ScheduleOutlined />, label: <NavLink to="/automation">自动化</NavLink> }
+      : null,
+    ['super_admin', 'tenant_admin'].includes(user?.role || '')
+      ? { key: 'mcp', icon: <ApiOutlined />, label: <NavLink to="/mcp">MCP</NavLink> }
+      : null,
+    ['super_admin', 'tenant_admin'].includes(user?.role || '')
+      ? { key: 'admin', icon: <SafetyCertificateOutlined />, label: <NavLink to="/admin">管理工作区</NavLink> }
+      : null,
+  ].filter((item): item is NonNullable<typeof item> => item !== null);
   const navigationMenu = (
     <Menu
       theme="dark"
       mode="inline"
       selectedKeys={[menuKey]}
+      items={navigationItems}
       style={{ marginTop: 4 }}
       onClick={() => setMobileNavOpen(false)}
-    >
-      <Menu.Item key="chat" icon={<MessageOutlined />}>
-        <NavLink to="/">对话分析</NavLink>
-      </Menu.Item>
-      {user?.role !== 'viewer' && <Menu.Item key="datasource" icon={<DatabaseOutlined />}>
-        <NavLink to="/datasource">数据源</NavLink>
-      </Menu.Item>}
-      {user?.role !== 'viewer' && <Menu.Item key="schema" icon={<SettingOutlined />}>
-        <NavLink to="/schema">表结构</NavLink>
-      </Menu.Item>}
-      <Menu.Item key="history" icon={<HistoryOutlined />}>
-        <NavLink to="/history">历史</NavLink>
-      </Menu.Item>
-      {user?.role !== 'viewer' && <Menu.Item key="skills" icon={<ThunderboltOutlined />}>
-        <NavLink to="/skills">Skills</NavLink>
-      </Menu.Item>}
-      {user?.role !== 'viewer' && <Menu.Item key="knowledge" icon={<ReadOutlined />}>
-        <NavLink to="/knowledge">知识库</NavLink>
-      </Menu.Item>}
-      {user?.role !== 'viewer' && <Menu.Item key="automation" icon={<ScheduleOutlined />}>
-        <NavLink to="/automation">自动化</NavLink>
-      </Menu.Item>}
-      {['super_admin', 'tenant_admin'].includes(user?.role || '') && <Menu.Item key="mcp" icon={<ApiOutlined />}>
-        <NavLink to="/mcp">MCP</NavLink>
-      </Menu.Item>}
-      {['super_admin', 'tenant_admin'].includes(user?.role || '') && <Menu.Item key="admin" icon={<SafetyCertificateOutlined />}>
-        <NavLink to="/admin">管理工作区</NavLink>
-      </Menu.Item>}
-    </Menu>
+    />
   );
 
   return (

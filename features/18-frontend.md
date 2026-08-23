@@ -13,17 +13,17 @@
 
 | # | 功能 | 文件 | 描述 | 状态 | 优先级 |
 |---|------|------|------|------|--------|
-| 18.2.1 | Chat 对话界面 | `frontend/src/pages/ChatPage.tsx` | 消息输入 + 数据源选择 + 发送/取消/清空 + 会话 ID 显示 | 开发完成 | P2 |
-| 18.2.2 | 流式进度展示 | `frontend/src/hooks/useChat.ts` | SSE 逐 Node 进度 Tags（8 个节点状态）+ 按 stream_id 隔离的 token 实时推送 | 开发完成 | P2 |
+| 18.2.1 | Chat 对话界面 | `frontend/src/pages/ChatPage.tsx` | 消息输入 + 数据源选择 + 发送/取消/清空 + 会话 ID 显示；取消后明确标记本轮状态 | 单测完成 | P2 |
+| 18.2.2 | 流式进度展示 | `frontend/src/hooks/useChat.ts` | SSE 逐 Node 进度 Tags（8 个节点状态）；中间 token 仅兼容协议，不在前端保存或展示 | 单测完成 | P2 |
 | 18.2.3 | SQL 代码高亮 | `SqlPanel.tsx` | highlight.js github-dark 主题 + 复制按钮；高亮异常兜底 HTML 转义 | 单测完成 | P2 |
 | 18.2.4 | 数据表格展示 | `ChatPage.tsx` TurnCard | Ant Design Table 动态列 + 分页（20条/页，最多100行） | 开发完成 | P2 |
 | 18.2.5 | ECharts 图表渲染 | `ChatPage.tsx` TurnCard | echarts-for-react 渲染 chart.option，空数据时显示 fallback | 开发完成 | P2 |
-| 18.2.6 | 推理过程兼容展示 | `ChatPage.tsx` TurnCard | 仅兼容历史 reasoning 字段；新请求不再接收或展示模型原始推理链 | 开发完成 | P2 |
+| 18.2.6 | 推理过程兼容展示 | `ChatPage.tsx` TurnCard | 仅兼容历史 reasoning 字段；新请求不再接收或展示模型原始推理链 | 单测完成 | P2 |
 | 18.2.7 | 推荐追问 | `ChatPage.tsx` | 完成后显示 follow_up_questions Tags，点击自动发送 | 开发完成 | P2 |
 | 18.2.8 | 欢迎引导页 | `ChatPage.tsx` | 无对话时居中显示示例问题卡片 + 渐变 Logo | 开发完成 | P2 |
 | 18.2.9 | 数据源动态加载 | `ChatPage.tsx` | 从 GET /datasources 动态获取选项 | 开发完成 | P2 |
 | 18.2.10 | 分析结果稳定渲染 | `DataTable.tsx`、`ResultCard.tsx` | 所有行字段并集兜底、按数据源展示最终 SQL、table 结果不重复显示空图表；指标目录按主题展示，业务分析按关联指标/影响/原因/建议分区 | 单测完成 | P1 |
-| 18.2.11 | 并行模型流分组 | `useChat.ts` | 按 stream_id 分组推理与原始响应，避免多数据源 token 交错 | 单测完成 | P1 |
+| 18.2.11 | 并行模型流分组 | `useChat.ts` | 兼容识别 stream_id，避免原始中间响应进入聊天消息；多数据源结果按最终结构化事件归并 | 单测完成 | P1 |
 | 18.2.12 | 历史会话逐轮恢复 | `useChat.ts`、`ChatPage.tsx` | 每轮消费自己的 final_result，恢复 SQL、数据、分析、图表和推理；长会话向前分页 | 集成测试完成 | P1 |
 | 18.2.13 | 触点归因结果展示 | `ResultCard.tsx`、`types/index.ts` | 展示选中模型、选择来源、资格摘要和按触点归因值/占比，证据不足时展示缺口 | 单测完成 | P1 |
 
@@ -66,7 +66,7 @@
 
 | # | 功能 | 文件 | 描述 | 状态 | 优先级 |
 |---|------|------|------|------|--------|
-| 18.7.1 | API 客户端 | `frontend/src/api/client.ts` | get/post/streamChat 封装 + SSE 解析 | 开发完成 | P2 |
+| 18.7.1 | API 客户端 | `frontend/src/api/client.ts` | get/post/streamChat 封装 + SSE 解析；支持 AbortController 取消回调和 FastAPI detail 错误解析 | 单测完成 | P2 |
 | 18.7.2 | useChat Hook | `frontend/src/hooks/useChat.ts`、`chatStorage.ts` | 对话仅保留在内存，历史由授权 API 恢复；启动时清理旧版 sessionStorage 敏感缓存 | 单测完成 | P2 |
 | 18.7.3 | TypeScript 类型 | `frontend/src/types/index.ts` | SSEEvent / ChatResponse / DatasourceConfig / TableInfo / ColumnInfo | 开发完成 | P2 |
 | 18.7.4 | 公共组件库 | `frontend/src/components/` | SqlPanel / DataTable / ChartPanel / ProgressBar / ReasoningPanel / ResultCard | 开发完成 | P2 |

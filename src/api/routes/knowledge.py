@@ -7,6 +7,7 @@ import io
 import json
 import os
 import time
+import ast
 
 from fastapi import APIRouter, File, HTTPException, Query, UploadFile
 
@@ -19,6 +20,37 @@ from src.logging_config import get_logger
 logger = get_logger(__name__)
 router = APIRouter()
 _started_at = time.time()
+
+
+# 方法作用：把向量元数据中的多种标签表示规范化为非空名称列表。
+# Args: raw_tags - 可能是列表、逗号字符串或历史 Python 列表文本。
+# Returns: 去除空白、空占位标签和重复值后的标签名称列表。
+def _normalize_knowledge_tags(raw_tags: object) -> list[str]:
+    if raw_tags is None:
+        return []
+    values: object = raw_tags
+    if isinstance(raw_tags, str):
+        text = raw_tags.strip()
+        if not text or text in {"['']", '[""]'}:
+            return []
+        if text.startswith("[") and text.endswith("]"):
+            try:
+                values = json.loads(text)
+            except (json.JSONDecodeError, TypeError):
+                try:
+                    values = ast.literal_eval(text)
+                except (ValueError, SyntaxError):
+                    values = text
+        if isinstance(values, str):
+            values = values.split(",")
+    if not isinstance(values, (list, tuple, set)):
+        values = [values]
+    result: list[str] = []
+    for value in values:
+        name = str(value).strip()
+        if name and name not in {"['']", '[""]'} and name not in result:
+            result.append(name)
+    return result
 
 
 def _is_path_within(base_dir: str, target_path: str) -> bool:
@@ -153,7 +185,7 @@ async def list_knowledge(
                 "source_file": meta.get("source_file", ""),
                 "scope": visibility,
                 "tag_ids": json.loads(meta.get("tag_ids_json", "[]") or "[]"),
-                "tags": [tag for tag in str(meta.get("tags", "")).split(",") if tag],
+                "tags": _normalize_knowledge_tags(meta.get("tags", "")),
                 "is_builtin": meta.get("visibility") == "system" or not is_user,
                 "tenant_id": resource_tenant_id,
                 "owner_user_id": meta.get("owner_user_id"),

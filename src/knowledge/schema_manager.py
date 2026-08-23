@@ -643,6 +643,28 @@ class SchemaManager:
             tenant_id=tenant_id,
         )
         try:
+            # Registry 中的 SchemaSnapshot 是 Schema 路由的即时读取源，先同步它再更新向量缓存。
+            datasource = await self._resolve_datasource(datasource_name, tenant_id=tenant_id)
+            snapshot = getattr(datasource, "schema", None) if datasource is not None else None
+            if snapshot is None and datasource is not None:
+                snapshot = await self.get_or_fetch_schema(
+                    datasource_name,
+                    tenant_id=tenant_id,
+                )
+                datasource.schema = snapshot
+            schema_updated = False
+            if snapshot is not None:
+                for table in snapshot.tables:
+                    if table.name != table_name:
+                        continue
+                    for column in table.columns:
+                        if column.name == column_name:
+                            column.comment = comment
+                            schema_updated = True
+                            break
+                    if schema_updated:
+                        break
+
             from src.memory.vector_store import VectorEntry, get_vector_store
             store = await get_vector_store()
             entry_id = self._scoped_entry_id(
@@ -654,6 +676,12 @@ class SchemaManager:
             )
             entry = await store.get_by_id(entry_id)
             if entry is None:
+                if schema_updated:
+                    logger.warning(
+                        "字段备注向量条目不存在，已保留 Registry 快照更新",
+                        entry_id=entry_id,
+                    )
+                    return True
                 logger.warning("字段备注更新目标不存在", entry_id=entry_id)
                 return False
             metadata = dict(entry.metadata or {})
@@ -661,8 +689,12 @@ class SchemaManager:
             entry.metadata = metadata
             entry.content = self._format_column_detail(table_name, column_name, column_type, comment)
             await store.upsert([VectorEntry(entry.id, entry.content, metadata)])
-            logger.info("字段备注更新完成", entry_id=entry_id)
-            return True
+            logger.info(
+                "字段备注更新完成",
+                entry_id=entry_id,
+                schema_updated=schema_updated,
+            )
+            return schema_updated or entry is not None
         except Exception as exc:
             logger.error("字段备注更新失败", error=str(exc), exc_info=True)
             return False

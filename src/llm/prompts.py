@@ -349,7 +349,7 @@ _INITIAL_PROMPTS: dict[str, PromptDefinition] = {
         task="analyze_result",
         template=DATA_ANALYSIS_SYSTEM,
         output_model=AnalysisOutput,
-        context_budget=10000,
+        context_budget=7000,
     ),
     "attribution.select": PromptDefinition(
         prompt_id="attribution.select",

@@ -24,9 +24,25 @@ async function request<T>(method: string, path: string, body?: Record<string, un
   if (res.status === 401) redirectToLogin();
   if (!res.ok) {
     const text = await res.text().catch(() => '');
-    throw new Error(text || `API error: ${res.status}`);
+    throw new Error(formatApiError(text, `API error: ${res.status}`));
   }
   return res.json();
+}
+
+// 方法作用：将 FastAPI 错误响应转换为用户可读的简短消息。
+// Args: text - HTTP 响应正文；fallback - 正文为空或无法解析时的回退消息。
+// Returns: 优先返回 JSON detail 字段，否则返回原文或回退消息。
+function formatApiError(text: string, fallback: string): string {
+  const raw = String(text || '').trim();
+  if (!raw) return fallback;
+  try {
+    const payload = JSON.parse(raw) as { detail?: unknown };
+    if (typeof payload.detail === 'string' && payload.detail.trim()) return payload.detail;
+    if (payload.detail !== undefined && payload.detail !== null) return String(payload.detail);
+  } catch {
+    // 非 JSON 响应继续展示服务端原文。
+  }
+  return raw;
 }
 
 // 方法作用：合并同一路径的并发 GET 请求，并在请求结束后清理进行中状态。
@@ -66,6 +82,10 @@ import type {
   ActionRequestPayload, ChatTurnData, ChatUploadedFile,
   SessionDetailResponse, SessionListResponse,
 } from '../types';
+
+export interface ChatAbortController extends AbortController {
+  onCancelled?: () => void;
+}
 
 export async function fetchSessions(cursor?: string | null, limit = 20): Promise<SessionListResponse> {
   const params = new URLSearchParams();
@@ -113,7 +133,7 @@ export async function uploadChatFiles(files: File[]): Promise<ChatUploadedFile[]
 }
 
 // 方法作用：发送带租户 LLM 连接和模型选择的 SSE 聊天请求并分发事件。
-// Args: query - 用户问题；datasource - 主数据源；sessionId - 会话；onEvent/onDone/onError - 事件回调；datasources - 多数据源；modelId - 模型标识；llmConnectionId - 命名连接；enabledSkillIds - Skill 资源 ID；reasoningEnabled/reasoningEffort - 推理偏好；fileIds - 请求级附件；actionRequest - 结构化动作请求。
+// Args: query - 用户问题；datasource - 主数据源；sessionId - 会话；onEvent/onDone/onError - 事件、完成和错误回调；datasources - 多数据源；modelId - 模型标识；llmConnectionId - 命名连接；enabledSkillIds - Skill 资源 ID；reasoningEnabled/reasoningEffort - 推理偏好；fileIds - 请求级附件；actionRequest - 结构化动作请求。
 // Returns: 可取消当前请求的 AbortController。
 export function streamChat(
   query: string,
@@ -130,8 +150,15 @@ export function streamChat(
   reasoningEffort = '',
   fileIds: number[] = [],
   actionRequest?: ActionRequestPayload,
-): AbortController {
-  const controller = new AbortController();
+): ChatAbortController {
+  const controller = new AbortController() as ChatAbortController;
+  let cancellationNotified = false;
+  const notifyCancelled = (): void => {
+    if (cancellationNotified) return;
+    cancellationNotified = true;
+    controller.onCancelled?.();
+  };
+  controller.signal.addEventListener('abort', notifyCancelled, { once: true });
   fetch(`${BASE}/chat`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -155,7 +182,7 @@ export function streamChat(
     if (res.status === 401) redirectToLogin();
     if (!res.ok) {
       const text = await res.text().catch(() => '');
-      onError(text || `HTTP ${res.status}`);
+      onError(formatApiError(text, `HTTP ${res.status}`));
       return;
     }
     const reader = res.body?.getReader();
@@ -181,14 +208,18 @@ export function streamChat(
         }
       }
     } catch (error) {
-      if (!controller.signal.aborted) {
-        onError(error instanceof Error ? error.message : '流式读取失败');
-      }
+      if (controller.signal.aborted) notifyCancelled();
+      else onError(error instanceof Error ? error.message : '流式读取失败');
+      return;
+    }
+    if (controller.signal.aborted) {
+      notifyCancelled();
       return;
     }
     onDone();
   }).catch((e) => {
-    if (e.name !== 'AbortError') onError(e.message);
+    if (e.name === 'AbortError' || controller.signal.aborted) notifyCancelled();
+    else onError(e.message);
   });
   return controller;
 }

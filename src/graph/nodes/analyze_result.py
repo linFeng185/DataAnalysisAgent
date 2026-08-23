@@ -68,14 +68,35 @@ def is_llm_available() -> bool:
 
 
 # 方法作用：兼容旧 Mock 接口并创建结果分析任务模型。
-# Args: temperature - 分析文本生成温度。
+# Args: temperature - 分析文本生成温度；max_tokens - 输出 token 上限。
 # Returns: 按 analyze_result 任务策略创建的 ChatModel。
-def get_llm(temperature: float = 0.3):
+def get_llm(temperature: float = 0.3, max_tokens: int | None = None):
     """创建结果分析模型，默认使用快速本地模型。"""
-    logger.debug("创建分析任务模型入口", temperature=temperature)
-    model = _get_task_llm("analyze_result", temperature=temperature, reasoning=None)
+    logger.debug(
+        "创建分析任务模型入口",
+        temperature=temperature,
+        max_tokens=max_tokens,
+    )
+    kwargs: dict[str, Any] = {"temperature": temperature, "reasoning": None}
+    if max_tokens is not None:
+        kwargs["max_tokens"] = max_tokens
+    model = _get_task_llm("analyze_result", **kwargs)
     logger.info("创建分析任务模型完成")
     return model
+
+
+# 方法作用：创建带输出上限的分析模型并兼容旧测试替身。
+# Args: max_tokens - 分析 JSON 的最大输出 token 数。
+# Returns: 可执行结果分析的 ChatModel。
+def _get_analysis_llm(max_tokens: int = 2048) -> Any:
+    try:
+        return get_llm(temperature=0.3, max_tokens=max_tokens)
+    except TypeError as exc:
+        # 旧扩展点可能只接受 temperature，保留显式兼容而不吞掉其他类型错误。
+        if "max_tokens" not in str(exc):
+            raise
+        logger.warning("分析模型工厂不支持 max_tokens，回退兼容调用")
+        return get_llm(temperature=0.3)
 
 
 async def analyze_result_node(state: AnalysisState) -> dict:
@@ -906,7 +927,17 @@ async def _llm_analyze(
         from src.config import get_settings
         from src.llm.adapters.registry import get_adapter
         from src.llm.invocation import prepare_invocation
-        llm = get_llm(temperature=0.3)
+        settings = get_settings()
+        llm = _get_analysis_llm(max_tokens=2048)
+        timeout_seconds = max(
+            0.1,
+            min(float(getattr(settings, "llm_timeout", 60)), 45.0),
+        )
+        logger.info(
+            "分析模型调用资源预算",
+            timeout_seconds=timeout_seconds,
+            max_tokens=2048,
+        )
         prepared = prepare_invocation(
             "analysis.result",
             prompt_sections,
@@ -915,8 +946,11 @@ async def _llm_analyze(
             metadata={"node": "analyze_result", "intent": intent},
             model=llm,
         )
-        resp = await prepared.model.ainvoke(prepared.messages)
-        adapter = get_adapter(get_settings().llm_model)
+        resp = await asyncio.wait_for(
+            prepared.model.ainvoke(prepared.messages),
+            timeout=timeout_seconds,
+        )
+        adapter = get_adapter(getattr(settings, "llm_model", ""))
         parsed = adapter.parse_response(resp)
         parsed_content = str(getattr(parsed, "content", "") or "").strip()
         if not parsed_content:
@@ -939,6 +973,21 @@ async def _llm_analyze(
             supplemental_question_count=len(result["supplemental_questions"]),
         )
         return result
+    except TimeoutError:
+        logger.warning(
+            "LLM 分析调用超时，回退确定性分析",
+            timeout_seconds=timeout_seconds,
+            input_rows=len(rows),
+        )
+        return _rule_analyze(
+            rows,
+            stats,
+            trend,
+            outlier,
+            conc,
+            chart_type,
+            intent,
+        )
     except Exception as e:
         logger.error("LLM 分析失败", error=str(e), exc_info=True)
         logger.info(
