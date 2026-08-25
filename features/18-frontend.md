@@ -51,7 +51,7 @@
 
 | # | 功能 | 文件 | 描述 | 状态 | 优先级 |
 |---|------|------|------|------|--------|
-| 18.5.1 | 历史列表 | `frontend/src/pages/HistoryPage.tsx` | Table 含时间/查询/SQL/状态/行数 + 数据源筛选下拉 | 开发完成 | P2 |
+| 18.5.1 | 历史列表 | `frontend/src/pages/HistoryPage.tsx` | Table 含时间/查询/SQL/状态/行数/失败原因 + 数据源筛选下拉 | 开发完成 | P2 |
 | 18.5.2 | 搜索过滤 | 同上 | 按查询内容/SQL 关键字前端搜索 | 开发完成 | P2 |
 | 18.5.3 | 回放历史对话 | 同上 | 点击历史条目逐轮恢复结构化响应，Checkpointer 不可用或服务重启时回退 JSONB 查询历史 | 集成测试完成 | P3 |
 
@@ -68,7 +68,7 @@
 |---|------|------|------|------|--------|
 | 18.7.1 | API 客户端 | `frontend/src/api/client.ts` | get/post/streamChat 封装 + SSE 解析；支持 AbortController 取消回调和 FastAPI detail 错误解析 | 单测完成 | P2 |
 | 18.7.2 | useChat Hook | `frontend/src/hooks/useChat.ts`、`chatStorage.ts` | 对话仅保留在内存，历史由授权 API 恢复；启动时清理旧版 sessionStorage 敏感缓存 | 单测完成 | P2 |
-| 18.7.3 | TypeScript 类型 | `frontend/src/types/index.ts` | SSEEvent / ChatResponse / DatasourceConfig / TableInfo / ColumnInfo | 开发完成 | P2 |
+| 18.7.3 | TypeScript 类型 | `frontend/src/types/index.ts` | SSEEvent / ChatResponse / DatasourceConfig / TableInfo / ColumnInfo，包含激活 Skill 和知识来源摘要 | 开发完成 | P2 |
 | 18.7.4 | 公共组件库 | `frontend/src/components/` | SqlPanel / DataTable / ChartPanel / ProgressBar / ReasoningPanel / ResultCard | 开发完成 | P2 |
 | 18.7.5 | ErrorBoundary | `frontend/src/components/ErrorBoundary.tsx` | React Error Boundary 包裹所有页面路由 | 开发完成 | P2 |
 | 18.7.6 | 服务状态指示器 | `App.tsx` Header | 启动时 GET /health，仅展示应用服务正常或不可用；租户 LLM 状态由管理连接测试负责 | 开发完成 | P2 |

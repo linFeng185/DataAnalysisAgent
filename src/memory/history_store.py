@@ -353,6 +353,7 @@ class HistoryStore:
         start = (page - 1) * page_size
         result = {"history": items[start:start + page_size], "total": total,
                   "page": page, "page_size": page_size}
+        result["history"] = [_with_history_error(item) for item in result["history"]]
         logger.info("列出历史完成", source="memory", count=len(result["history"]), user_id=user_id)
         return result
 
@@ -418,7 +419,40 @@ def _pg_row_to_dict(row) -> dict:
         "success": row["success"] if row["success"] is not None else True,
         "row_count": row["row_count"] or 0,
         "final_result": raw_final_result if isinstance(raw_final_result, dict) else {},
+        "error_message": _history_error_message(
+            raw_final_result if isinstance(raw_final_result, dict) else {},
+            bool(row["success"] if row["success"] is not None else True),
+        ),
     }
+
+
+# 方法作用：从历史结构化响应提取脱敏失败原因，兼容旧记录。
+# Args: final_result - 轮次最终响应；success - 历史记录是否成功。
+# Returns: 失败原因；成功记录返回空字符串。
+def _history_error_message(final_result: dict, success: bool) -> str:
+    if success:
+        return ""
+    safe_reason = str(final_result.get("failure_reason", "") or "").strip()
+    if safe_reason:
+        return safe_reason
+    error_code = str(final_result.get("error_code", "") or "").strip()
+    if error_code:
+        from src.graph.outcome import public_error_message
+
+        return public_error_message(error_code, fallback="查询失败")
+    return "查询失败"
+
+
+# 方法作用：为内存回退历史补齐与 PG 一致的失败原因字段。
+# Args: item - 内存历史记录。
+# Returns: 带 error_message 的历史记录副本。
+def _with_history_error(item: dict) -> dict:
+    result = dict(item)
+    result["error_message"] = _history_error_message(
+        result.get("final_result", {}) if isinstance(result.get("final_result", {}), dict) else {},
+        bool(result.get("success", True)),
+    )
+    return result
 
 
 # 方法作用：从当前 AppContext 获取历史记录存储。

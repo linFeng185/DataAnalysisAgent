@@ -525,7 +525,11 @@ function TurnBubble({ turn, onSendMessage, onConfirmAction }: {
   const isRestored = status === 'done' && !finalResult;
   const isLLMDirect = finalResult?.source === 'llm_direct';
   const activeSkills = (finalResult?.activated_skills as string[]) || [];
-  const activeKnowledge = (finalResult?.activated_knowledge as string) || '';
+  const activeKnowledge = Array.isArray(finalResult?.activated_knowledge)
+    ? finalResult.activated_knowledge as Array<Record<string, unknown>>
+    : finalResult?.activated_knowledge
+      ? [{ source_file: String(finalResult.activated_knowledge), category: 'general' }]
+      : [];
 
   return (
     <div style={{ marginBottom: 18 }}>
@@ -552,7 +556,7 @@ function TurnBubble({ turn, onSendMessage, onConfirmAction }: {
           <RobotOutlined style={{ color: '#fff', fontSize: 16 }} />
         </div>
         <div style={{ flex: 1, minWidth: 0 }}>
-          {(activeSkills.length > 0 || activeKnowledge) && hasResult && (
+          {(activeSkills.length > 0 || activeKnowledge.length > 0) && hasResult && (
             <div style={{
               marginBottom: 6, padding: '4px 10px',
               background: 'linear-gradient(135deg, #f6ffed 0%, #f9f0ff 100%)',
@@ -567,12 +571,15 @@ function TurnBubble({ turn, onSendMessage, onConfirmAction }: {
                   ))}
                 </span>
               )}
-              {activeKnowledge && (
+              {activeKnowledge.length > 0 && (
                 <span style={{ fontSize: 11 }}>
                   <ReadOutlined style={{ color: '#722ed1', marginRight: 3 }} />
-                  <Typography.Text type="secondary" style={{ fontSize: 11, maxWidth: 160 }} ellipsis>
-                    {activeKnowledge.slice(0, 60)}
-                  </Typography.Text>
+                  {activeKnowledge.slice(0, 2).map((item, index) => (
+                    <Tag key={`${String(item.source_id || item.source_file || index)}`} color="purple"
+                      style={{ marginLeft: 2, fontSize: 10, lineHeight: '18px' }}>
+                      {String(item.source_file || item.category || item.source_id || '知识库')}
+                    </Tag>
+                  ))}
                 </span>
               )}
             </div>

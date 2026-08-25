@@ -37,6 +37,8 @@ class TestSchemaMutableDefaults:
 
             # Act / Assert
             assert all(field.default_factory is not None for field in fields)
+            assert "activated_skills" in ChatResponse.model_fields
+            assert "activated_knowledge" in ChatResponse.model_fields
             logger.info("test_mutable_fields_use_default_factory 完成")
         except Exception as exc:
             logger.error(

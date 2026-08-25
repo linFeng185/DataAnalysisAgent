@@ -90,7 +90,11 @@ async def query_structured_asset(
     sql: str = Query(..., min_length=1),
     sheet_name: str | None = Query(default=None),
 ):
-    """对上传的 CSV/Excel/Parquet 执行受控只读 SQL。"""
+    """对上传的 CSV/Excel/Parquet 执行受控只读 SQL。
+
+    单文件资产固定注册为 DuckDB 表 ``data``；Excel 多 sheet 会使用返回体
+    ``tables`` 中的安全别名，调用方应先通过 ``/assets/profile`` 获取映射。
+    """
     from src.config import get_settings
     from src.knowledge.structured_query import StructuredQueryEngine, StructuredQueryError
 

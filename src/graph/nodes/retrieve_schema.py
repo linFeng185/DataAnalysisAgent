@@ -2,12 +2,26 @@
 
 from __future__ import annotations
 
+import asyncio
 import time
+from typing import Any
 
 from src.graph.state import AnalysisState
 from src.logging_config import get_logger
 
 logger = get_logger(__name__)
+
+
+class KnowledgeContext(str):
+    """带结构化来源摘要的知识上下文字符串，兼容旧的字符串调用方。"""
+
+    # 方法作用：创建可直接拼接到 Prompt 的知识文本并附带命中来源摘要。
+    # Args: cls - KnowledgeContext 类型；text - 已渲染知识文本；sources - 来源摘要列表。
+    # Returns: 可按 str 使用且暴露 sources 属性的上下文实例。
+    def __new__(cls, text: str, sources: list[dict]) -> KnowledgeContext:
+        value = str.__new__(cls, text)
+        value.sources = list(sources)
+        return value
 
 
 async def retrieve_schema_node(state: AnalysisState) -> dict:
@@ -124,10 +138,12 @@ async def retrieve_schema_node(state: AnalysisState) -> dict:
     skip_intents = {"chat"}
 
     should_load = intent not in skip_intents or retry_count > 0
-    knowledge_text = await _load_knowledge_context(
+    knowledge_result = await _load_knowledge_context(
         datasource_name,
         contexts.request.user_query,
     ) if should_load else ""
+    knowledge_text = str(knowledge_result or "")
+    knowledge_sources = list(getattr(knowledge_result, "sources", []) or [])
     if not should_load:
         logger.debug("知识库跳过（chat 意图无需 SQL）", datasource=datasource_name)
 
@@ -172,6 +188,7 @@ async def retrieve_schema_node(state: AnalysisState) -> dict:
         "business_rules_text": business_rules_text,
         "enum_dictionary": enum_dictionary,
         "long_term_memories_text": merged_context,
+        "activated_knowledge": knowledge_sources,
         "conversation_history": history,
     }
     from src.graph.skill_activation import activate_skills
@@ -190,6 +207,8 @@ async def retrieve_schema_node(state: AnalysisState) -> dict:
         knowledge_chars=len(knowledge_text),
         memory_chars=len(memory_text),
         merged_context_chars=len(merged_context),
+        knowledge_source_count=len(knowledge_sources),
+        knowledge_categories=sorted({str(item.get("category", "")) for item in knowledge_sources}),
         business_rule_count=len(raw_business_rules),
         few_shot_count=len(few_shot_examples[:5]),
     )
@@ -244,7 +263,7 @@ async def _load_knowledge_context(datasource: str, query: str) -> str:
     - 只返回最相关的 Top-3，避免上下文爆炸
     """
     try:
-        from src.knowledge.content_safety import render_evidence_context
+        from src.knowledge.content_safety import render_trusted_knowledge_context
         from src.knowledge.retrieval import search_knowledge
         from src.memory.vector_store import get_vector_store
         store = await get_vector_store()
@@ -252,33 +271,80 @@ async def _load_knowledge_context(datasource: str, query: str) -> str:
         if total == 0:
             return ""
 
-        relevant = await search_knowledge(
-            store,
-            query if query else datasource,
-            datasource=datasource,
-            top_k=5,
+        search_query = query if query else datasource
+        search_tasks = [
+            search_knowledge(store, search_query, datasource=datasource, top_k=8),
+            # 用户上传、人工文档和用户修正分别召回，避免大量自动 Schema 条目占满候选窗口。
+            *[
+                search_knowledge(
+                    store,
+                    search_query,
+                    datasource=datasource,
+                    source=source,
+                    top_k=5,
+                )
+                for source in ("user_upload", "manual_doc", "user_correction")
+            ],
+        ]
+        search_results = await asyncio.gather(*search_tasks, return_exceptions=True)
+        unique: dict[str, Any] = {}
+        for candidate_group in search_results:
+            if isinstance(candidate_group, Exception):
+                logger.warning("知识优先来源召回失败", error=str(candidate_group))
+                continue
+            for evidence in candidate_group:
+                unique[evidence.source_id] = evidence
+        relevant = sorted(
+            unique.values(),
+            key=lambda evidence: (
+                float(evidence.scores.get("rerank", evidence.scores.get("fused", 0.0)) or 0.0),
+                float(evidence.scores.get("knowledge_priority", 0.0) or 0.0),
+            ),
+            reverse=True,
         )
 
         top_chunks: list[str] = []
+        source_summaries: list[dict] = []
         for evidence in relevant[:3]:
-            chunk = render_evidence_context(evidence, max_chars=1000)
+            chunk = render_trusted_knowledge_context(evidence, max_chars=1000)
             top_chunks.append(chunk)
+            source_summaries.append(_knowledge_source_summary(evidence))
             logger.debug(
                 "知识库匹配",
                 score=evidence.scores.get("relevance", 0.0),
                 source_id=evidence.source_id[:30],
-                preview=evidence.content[:80],
+                category=str(evidence.metadata.get("category", "") or ""),
+                source=str(evidence.metadata.get("source", "") or ""),
                 lexical_score=evidence.scores.get("lexical", 0.0),
+                knowledge_priority=evidence.scores.get("knowledge_priority", 0.0),
             )
 
         if top_chunks:
             logger.info("知识库语义检索命中", datasource=datasource or "全部",
                         total=total, matched=len(relevant), top=len(top_chunks),
-                        query=query[:60] if query else "")
-            return "\n\n---\n\n".join(top_chunks)
+                        query=query[:60] if query else "",
+                        source_count=len(source_summaries))
+            return KnowledgeContext("\n\n---\n\n".join(top_chunks), source_summaries)
         logger.info("知识库无匹配结果", datasource=datasource or "全部",
                     total=total, query=query[:60] if query else "")
         return ""
     except Exception as e:
         logger.error("知识库检索失败", error=str(e), exc_info=True)
         return ""
+
+
+# 方法作用：生成前端可展示的知识来源摘要，避免把完整知识正文写回结果卡片。
+# Args: evidence - 已命中的知识证据。
+# Returns: 来源文件、类别、定位和相关性组成的结构化摘要。
+def _knowledge_source_summary(evidence: Any) -> dict[str, Any]:
+    metadata = evidence.metadata or {}
+    return {
+        "source_id": str(evidence.source_id),
+        "category": str(metadata.get("category", "") or "general"),
+        "source": str(metadata.get("source", "") or "unknown"),
+        "source_file": str(metadata.get("source_file", "") or ""),
+        "table_name": str(metadata.get("table_name", "") or ""),
+        "locator": dict(evidence.locator or {}),
+        "relevance": round(float(evidence.scores.get("rerank", evidence.scores.get("fused", 0.0)) or 0.0), 4),
+        "trust_level": "trusted_knowledge",
+    }

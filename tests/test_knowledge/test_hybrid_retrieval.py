@@ -91,3 +91,56 @@ class TestHybridRetrieval:
         assert result[0].source_id == "doc"
         to_thread.assert_awaited_once()
         monkeypatch.setattr(retrieval_module.asyncio, "to_thread", original_to_thread)
+
+    async def test_business_rule_priority_beats_schema_enumerations(self, monkeypatch):
+        """同一问题下人工业务规则应优先于自动内省列条目。"""
+        # Arrange
+        import src.knowledge.retrieval as retrieval_module
+        from src.memory.vector_store import VectorEntry, VectorSearchResult
+
+        monkeypatch.setattr(
+            retrieval_module,
+            "build_accessible_knowledge_filters",
+            lambda **kwargs: [{"tenant_id": 1, "visibility": "tenant"} | (
+                {"source": kwargs["source"]} if kwargs.get("source") else {}
+            )],
+        )
+
+        class Store:
+            async def search(self, query, top_k, filters):
+                return [
+                    VectorSearchResult(
+                        id=f"enum-{index}",
+                        content=f"users.vip_level: {index}普通",
+                        metadata={
+                            "category": "column",
+                            "source": "auto_introspect",
+                            "table_name": "users",
+                        },
+                        score=0.85 - index * 0.01,
+                    )
+                    for index in range(5)
+                ]
+
+            async def get_by_filter(self, filters, limit):
+                if filters.get("source") in {None, "", "user_upload"}:
+                    return [VectorEntry(
+                        id="rule-1",
+                        content="VIP 客户统计必须使用 customers.customer_level='VIP'",
+                        metadata={
+                            "category": "business_rule",
+                            "source": "user_upload",
+                            "source_file": "vip.md",
+                        },
+                    )]
+                return []
+
+        # Act
+        results = await retrieval_module.search_knowledge(
+            Store(), "VIP 客户统计口径", top_k=3,
+        )
+
+        # Assert
+        assert results[0].source_id == "rule-1"
+        assert results[0].metadata["category"] == "business_rule"
+        assert results[0].scores["knowledge_priority"] > 0.9

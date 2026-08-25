@@ -208,6 +208,48 @@ class TestSQLPromptGrounding:
         assert "使用订单分析技能" in system
         assert sql == "SELECT COUNT(*) FROM orders"
         assert explanation == "ok"
+
+    def test_select_prompt_tables_keeps_relevant_schema_and_budget(self):
+        """详细 Schema 应优先保留与问题相关的表，同时不影响完整表白名单。"""
+        # Arrange
+        from src.graph.nodes.generate_sql import (
+            build_table_whitelist_context,
+            format_schema_for_prompt,
+            select_prompt_tables,
+        )
+
+        tables = [
+            {
+                "name": "users",
+                "description": "用户资料",
+                "columns": [{"name": "user_id", "type": "BIGINT", "comment": "用户编号"}],
+            },
+            {
+                "name": "orders",
+                "description": "订单事实",
+                "columns": [{"name": "order_amount", "type": "DECIMAL", "comment": "订单金额"}],
+            },
+            {
+                "name": "inventory",
+                "description": "库存快照",
+                "columns": [{"name": "stock_qty", "type": "INT", "comment": "库存数量"}],
+            },
+        ]
+
+        # Act
+        selected = select_prompt_tables(
+            tables,
+            "统计订单金额",
+            dialect="mysql",
+            max_chars=900,
+        )
+        rendered = format_schema_for_prompt(selected, "mysql")
+        whitelist = build_table_whitelist_context(tables)
+
+        # Assert
+        assert selected[0]["name"] == "orders"
+        assert len(rendered) <= 900 or len(selected) == 1
+        assert all(table["name"] in whitelist for table in tables)
         logger.info("test_llm_generate_uses_real_dialect_and_strong_constraints 完成")
 
     # 方法作用：验证同步 LLM 工厂冷启动不会阻塞多数据源 worker 共用的事件循环。

@@ -54,6 +54,18 @@ class TestOutcomeContract:
         assert "管理后台" in message
         assert "数据源" not in message
 
+    def test_public_failure_reason_hides_driver_details(self) -> None:
+        """历史失败原因只保留安全分类，不泄露驱动返回的连接细节。"""
+        # Arrange
+        from src.graph.outcome import public_failure_reason
+
+        # Act
+        message = public_failure_reason("SQL_EXECUTION_FAILED", "configuration")
+
+        # Assert
+        assert message == "数据源配置、认证或连接失败"
+        assert "password" not in message.lower()
+
     # 方法作用：验证统一响应出口保留外部动作的人工确认状态。
     # Args: self - pytest 测试类实例。
     # Returns: 无返回值，断言失败时由 pytest 报告。

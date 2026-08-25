@@ -39,7 +39,7 @@
 | 11.1.31 | 数据源管理生命周期 | `src/api/routes.py` | 注册后可见、删除后不可见、重复删除返回 404 | 集成测试完成 | P1 |
 | 11.1.32 | 知识上传安全边界 | `src/api/routes.py` | 写入前限制文件数、单文件和累计字节，Word 文本安全转义 | 单测完成 | P1 |
 | 11.1.33 | POST /assets/profile | `src/api/routes.py` | CSV/Excel/Parquet 列级 profile 和质量摘要 | 单测完成 | P1 |
-| 11.1.34 | POST /assets/query | `src/api/routes.py` | 上传结构化文件执行 DuckDB 只读 SQL，返回结果和截断状态 | 单测完成 | P1 |
+| 11.1.34 | POST /assets/query | `src/api/routes.py` | 上传结构化文件执行 DuckDB 只读 SQL；单文件固定表名为 `data`，多 Sheet 表名从返回体 `tables` 获取，返回结果和截断状态 | 单测完成 | P1 |
 | 11.1.35 | 知识范围 API | `src/api/routes.py` | 知识列表/文档上传/删除支持 system、tenant、private 范围与角色授权 | 集成测试完成 | P1 |
 | 11.1.36 | 知识标签 API | `src/api/routes.py` | 标签搜索、个人标签创建、超级管理员维护与提升全局标签 | 集成测试完成 | P1 |
 | 11.1.37 | POST /auth/register 注册保护 | `src/api/auth.py` | 公开注册按客户端地址限流，bcrypt 在线程池执行，多租户创建在事务内完成 | 单测完成 | P0 |

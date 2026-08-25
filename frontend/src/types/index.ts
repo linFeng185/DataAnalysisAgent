@@ -108,6 +108,17 @@ export interface ChatResponse {
   session_id?: string;
   error_code?: string;
   error_message?: string;
+  activated_skills?: string[];
+  activated_knowledge?: Array<{
+    source_id: string;
+    category: string;
+    source: string;
+    source_file?: string;
+    table_name?: string;
+    locator?: Record<string, unknown>;
+    relevance?: number;
+    trust_level?: string;
+  }> | string;
 }
 
 export interface DatasourceConfig {
@@ -193,6 +204,8 @@ export interface HistoryItem {
   datasource?: string;
   session_id?: string;
   row_count?: number;
+  error_message?: string;
+  final_result?: Record<string, unknown>;
 }
 
 export interface SkillInfo {

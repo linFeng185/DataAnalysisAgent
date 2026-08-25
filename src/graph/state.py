@@ -136,6 +136,9 @@ class AnalysisState(TypedDict, total=False):
     long_term_memories_text: Annotated[str, UntrackedValue]
     """长期记忆与知识库文本，由 prepare_turn / retrieve_schema 合并后注入 Prompt。"""
 
+    activated_knowledge: Annotated[list[dict[str, Any]], UntrackedValue]
+    """当前轮命中的知识来源摘要，不保存完整知识正文。"""
+
     # ── SQL 生成层 ─────────────────────────────────
     generated_sql: Annotated[str, UntrackedValue]
     """LLM 生成的 SQL 语句。—— generate_sql 写，layer3_validate / execute_sql 读"""

@@ -17,7 +17,7 @@ logger = get_logger(__name__)
 
 # 构造所有知识检索必须携带的结构化过滤条件。
 # Args: datasource - 可选数据库数据源名称；category - 可选知识类别；asset_id - 可选资产 ID。
-#       owner_only - 是否限制当前用户；tenant_id - 测试或后台任务显式租户。
+#       owner_only - 是否限制当前用户；tenant_id - 测试或后台任务显式租户；source - 可选知识来源。
 # Returns: VectorStore 兼容的 metadata 精确过滤字典。
 def build_knowledge_filters(
     datasource: str = "",
@@ -25,12 +25,14 @@ def build_knowledge_filters(
     asset_id: str = "",
     owner_only: bool = False,
     tenant_id: int | None = None,
+    source: str = "",
 ) -> dict[str, Any]:
     logger.debug(
         "构造知识检索过滤入口",
         datasource=datasource,
         category=category,
         asset_id=asset_id,
+        source=source,
         owner_only=owner_only,
     )
     filters: dict[str, Any] = {"visibility": "tenant"}
@@ -46,13 +48,15 @@ def build_knowledge_filters(
         filters["category"] = category
     if asset_id:
         filters["asset_id"] = asset_id
+    if source:
+        filters["source"] = source
     logger.info("构造知识检索过滤完成", filter_keys=sorted(filters))
     return filters
 
 
 # 构造当前身份可访问的系统、租户和个人三组知识过滤条件。
 # Args: datasource - 可选数据库数据源名称；category - 可选知识类别；asset_id - 可选资产 ID；
-#       tenant_id - 后台任务显式租户；user_id - 后台任务显式用户。
+#       tenant_id - 后台任务显式租户；user_id - 后台任务显式用户；source - 可选知识来源。
 # Returns: 三组彼此隔离的 VectorStore metadata 精确过滤字典。
 def build_accessible_knowledge_filters(
     datasource: str = "",
@@ -60,12 +64,14 @@ def build_accessible_knowledge_filters(
     asset_id: str = "",
     tenant_id: int | None = None,
     user_id: int | None = None,
+    source: str = "",
 ) -> list[dict[str, Any]]:
     logger.debug(
         "构造可访问知识过滤入口",
         datasource=datasource,
         category=category,
         asset_id=asset_id,
+        source=source,
         tenant_id=tenant_id,
         user_id=user_id,
     )
@@ -79,6 +85,8 @@ def build_accessible_knowledge_filters(
         shared["category"] = category
     if asset_id:
         shared["asset_id"] = asset_id
+    if source:
+        shared["source"] = source
 
     filters: list[dict[str, Any]] = [{"visibility": "system", **shared}]
     tenant_filter: dict[str, Any] = {"visibility": "tenant", **shared}
@@ -129,7 +137,7 @@ def vector_result_to_evidence(result: Any, default_version: str = "v1") -> Evide
 
 # 执行带强制范围过滤的语义检索并去重排序。
 # Args: store - VectorStore 实例；query - 用户检索文本；datasource - 数据源名称。
-#       category - 可选知识类别；asset_id - 可选资产 ID；top_k - 返回数量。
+#       category - 可选知识类别；asset_id - 可选资产 ID；top_k - 返回数量；source - 可选知识来源。
 # Returns: 按相关性排序的 Evidence 列表。
 async def search_knowledge(
     store: Any,
@@ -139,12 +147,14 @@ async def search_knowledge(
     asset_id: str = "",
     top_k: int = 5,
     hybrid: bool = True,
+    source: str = "",
 ) -> list[Evidence]:
     logger.debug(
         "安全知识检索入口",
         query=query[:80],
         datasource=datasource,
         category=category,
+        source=source,
         top_k=top_k,
     )
     if not query.strip():
@@ -154,6 +164,7 @@ async def search_knowledge(
         datasource=datasource,
         category=category,
         asset_id=asset_id,
+        source=source,
     )
     bounded_top_k = min(max(top_k, 1), 50)
     unique: dict[str, Evidence] = {}
@@ -179,10 +190,19 @@ async def search_knowledge(
                 continue
             visibility = str(filters.get("visibility", "tenant"))
             evidence.metadata.setdefault("visibility", visibility)
+            logger.debug(
+                "知识向量候选边界",
+                source_id=evidence.source_id[:40],
+                category=str(evidence.metadata.get("category", "") or ""),
+                source=str(evidence.metadata.get("source", "") or ""),
+                visibility=visibility,
+                relevance=evidence.scores.get("relevance", 0.0),
+            )
             evidence.scores["vector"] = evidence.scores.get("relevance", 0.0)
             evidence.scores["lexical"] = 0.0
             evidence.scores["scope_priority"] = float(scope_priority.get(visibility, 0))
-            evidence.scores["fused"] = evidence.scores["vector"] * 0.65
+            evidence.scores["knowledge_priority"] = _knowledge_priority(evidence)
+            evidence.scores["fused"] = _fused_score(evidence)
             existing = unique.get(evidence.source_id)
             if (
                 existing is None
@@ -211,6 +231,14 @@ async def search_knowledge(
                     )
                     visibility = str(filters.get("visibility", "tenant"))
                     evidence.metadata.setdefault("visibility", visibility)
+                    logger.debug(
+                        "知识关键词候选边界",
+                        source_id=evidence.source_id[:40],
+                        category=str(evidence.metadata.get("category", "") or ""),
+                        source=str(evidence.metadata.get("source", "") or ""),
+                        visibility=visibility,
+                        lexical=lexical_score,
+                    )
                     priority = float(scope_priority.get(visibility, 0))
                     existing = unique.get(evidence.source_id)
                     if existing:
@@ -221,15 +249,14 @@ async def search_knowledge(
                                 existing.scores.get("lexical", 0.0),
                             )
                             existing.scores["scope_priority"] = priority
-                            existing.scores["fused"] = (
-                                existing.scores.get("vector", 0.0) * 0.65
-                                + existing.scores["lexical"] * 0.75
-                            )
+                            existing.scores["knowledge_priority"] = _knowledge_priority(existing)
+                            existing.scores["fused"] = _fused_score(existing)
                     else:
                         evidence.scores["vector"] = 0.0
                         evidence.scores["lexical"] = lexical_score
                         evidence.scores["scope_priority"] = priority
-                        evidence.scores["fused"] = lexical_score * 0.75
+                        evidence.scores["knowledge_priority"] = _knowledge_priority(evidence)
+                        evidence.scores["fused"] = _fused_score(evidence)
                         unique[evidence.source_id] = evidence
             except Exception as exc:
                 from src.failure_policy import FailureDomain, fallback_allowed
@@ -255,8 +282,64 @@ async def search_knowledge(
         hits=len(ordered),
         scope_count=len(filter_groups),
         hybrid=hybrid,
+        category_counts=_count_metadata(ordered, "category"),
+        source_counts=_count_metadata(ordered, "source"),
+        top_sources=[item.source_id[:40] for item in ordered[:5]],
     )
     return ordered
+
+
+# 方法作用：按知识类别和来源计算业务知识优先级，避免 Schema 自动枚举淹没业务规则。
+# Args: evidence - 已转换的知识证据。
+# Returns: 0 到 1 之间的可信业务优先级分数。
+def _knowledge_priority(evidence: Evidence) -> float:
+    metadata = evidence.metadata or {}
+    category = str(metadata.get("category", "") or "").strip().lower()
+    source = str(metadata.get("source", "") or "").strip().lower()
+    category_scores = {
+        "business_rule": 1.0,
+        "metric": 0.98,
+        "indicator": 0.98,
+        "sql_template": 0.86,
+        "general": 0.78,
+        "table": 0.28,
+        "column": 0.14,
+        "enum_value": 0.12,
+    }
+    source_scores = {
+        "manual_doc": 1.0,
+        "user_upload": 0.96,
+        "user_correction": 0.95,
+        "orm_model": 0.72,
+        "db_comment": 0.66,
+        "auto_introspect": 0.18,
+        "system_warning": 0.0,
+    }
+    category_score = category_scores.get(category, 0.55)
+    source_score = source_scores.get(source, 0.5)
+    return round(category_score * 0.65 + source_score * 0.35, 4)
+
+
+# 方法作用：把向量、关键词、范围和业务优先级合并为可比较的召回分数。
+# Args: evidence - 已写入基础分数的证据。
+# Returns: 用于候选排序的融合分数。
+def _fused_score(evidence: Evidence) -> float:
+    vector = float(evidence.scores.get("vector", evidence.scores.get("relevance", 0.0)) or 0.0)
+    lexical = float(evidence.scores.get("lexical", 0.0) or 0.0)
+    scope = float(evidence.scores.get("scope_priority", 0.0) or 0.0)
+    business_priority = float(evidence.scores.get("knowledge_priority", _knowledge_priority(evidence)) or 0.0)
+    return vector * 0.65 + lexical * 0.75 + scope * 0.03 + business_priority * 0.4
+
+
+# 方法作用：统计结果中来源或类别的数量，供检索诊断日志使用。
+# Args: evidence - 检索结果；field_name - metadata 字段名。
+# Returns: 字段值到数量的映射。
+def _count_metadata(evidence: list[Evidence], field_name: str) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for item in evidence:
+        value = str(item.metadata.get(field_name, "") or "unknown")
+        counts[value] = counts.get(value, 0) + 1
+    return counts
 
 
 # 方法作用：计算查询与知识正文/字段元数据的关键词重叠分数。

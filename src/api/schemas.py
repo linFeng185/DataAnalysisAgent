@@ -115,6 +115,8 @@ class ChatResponse(BaseModel):
     chart: dict = Field(default_factory=dict)
     decision_summary: str = ""
     artifact: dict = Field(default_factory=dict)
+    activated_skills: list[str] = Field(default_factory=list)
+    activated_knowledge: list[dict] | str = Field(default_factory=list)
     error_code: str = ""
     error_message: str = ""
 

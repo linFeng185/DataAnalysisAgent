@@ -469,6 +469,8 @@ async def chat(req: ChatRequest):
         chart=f.get("chart", result.get("chart_config", {})),
         decision_summary=str(f.get("decision_summary", "") or ""),
         artifact=f.get("artifact", {}),
+        activated_skills=list(f.get("activated_skills", result.get("activated_skills", [])) or []),
+        activated_knowledge=f.get("activated_knowledge", result.get("activated_knowledge", [])) or [],
         error_code=f.get("error_code", ""),
         error_message=f.get("error_message", ""),
     )

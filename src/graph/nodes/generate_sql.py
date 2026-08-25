@@ -149,9 +149,17 @@ async def generate_sql_node(state: AnalysisState, config: RunnableConfig) -> dic
             "execution_error_type": "",
         }
 
-    # 表结构 → Markdown 格式（用于 Prompt）
-    schema_text = format_schema_for_prompt(tables, dialect)
+    # 表结构 → Markdown 格式（用于 Prompt）；白名单使用完整授权表，详细 Schema 按问题裁剪。
+    prompt_tables = select_prompt_tables(tables, query, dialect=dialect, max_chars=6000)
+    schema_text = format_schema_for_prompt(prompt_tables, dialect)
     table_whitelist = build_table_whitelist_context(tables)
+    logger.info(
+        "SQL Schema Prompt 裁剪完成",
+        total_tables=len(tables),
+        prompt_tables=len(prompt_tables),
+        schema_chars=len(schema_text),
+        whitelist_chars=len(table_whitelist),
+    )
     # 获取该方言的 SQL 语法速查表
     dialect_hint = get_dialect_cheatsheet(dialect)
     # 技能系统注入的额外 Prompt（Phase 2）
@@ -935,3 +943,58 @@ def format_schema_for_prompt(tables: list[dict], dialect: str = "") -> str:
             lines.append(f"分区键: {partition_key}")
         lines.append("")
     return "\n".join(lines)
+
+
+# 方法作用：按用户问题相关性裁剪详细 Schema，同时保留至少一张可用表。
+# Args: tables - 完整授权表结构；query - 用户问题；dialect - 数据库方言；max_chars - 详细 Schema 上限。
+# Returns: 不超过字符预算的相关表列表；空输入返回空列表。
+def select_prompt_tables(
+    tables: list[dict],
+    query: str,
+    *,
+    dialect: str = "",
+    max_chars: int = 6000,
+) -> list[dict]:
+    if max_chars <= 0:
+        raise ValueError("max_chars 必须大于零")
+    if not tables:
+        return []
+    query_tokens = set(re.findall(r"[A-Za-z0-9_]+|[\u4e00-\u9fff]", str(query or "").lower()))
+    ranked: list[tuple[int, int, dict]] = []
+    for index, table in enumerate(tables):
+        if not isinstance(table, dict):
+            continue
+        searchable = " ".join([
+            str(table.get("name", "") or ""),
+            str(table.get("description", "") or ""),
+            " ".join(
+                f"{column.get('name', '')} {column.get('comment', '')}"
+                for column in table.get("columns", []) or []
+                if isinstance(column, dict)
+            ),
+        ]).lower()
+        tokens = set(re.findall(r"[A-Za-z0-9_]+|[\u4e00-\u9fff]", searchable))
+        overlap = len(query_tokens & tokens) if query_tokens else 0
+        ranked.append((overlap, -index, table))
+    ranked.sort(reverse=True, key=lambda item: (item[0], item[1]))
+    if not ranked:
+        return []
+
+    selected: list[dict] = []
+    for _, _, table in ranked:
+        candidate = selected + [table]
+        rendered = format_schema_for_prompt(candidate, dialect)
+        if len(rendered) <= max_chars or not selected:
+            selected.append(table)
+        if selected and len(rendered) > max_chars and len(selected) > 1:
+            break
+    logger.info(
+        "详细 Schema 按需裁剪完成",
+        query=query[:80],
+        total=len(tables),
+        selected=len(selected),
+        matched=[table.get("name", "") for _, _, table in ranked[:len(selected)]],
+        max_chars=max_chars,
+        rendered_chars=len(format_schema_for_prompt(selected, dialect)),
+    )
+    return selected

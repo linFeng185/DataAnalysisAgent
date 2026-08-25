@@ -100,7 +100,7 @@ async def llm_direct_answer_node(state: AnalysisState) -> dict:
                     "reason": "元数据或直接问答不生成图表",
                 },
                 "activated_skills": state.get("activated_skills", []),
-                "activated_knowledge": "",
+                "activated_knowledge": state.get("activated_knowledge", "") or "",
             },
             "analysis_result": {
                 "summary": answer,
@@ -207,7 +207,7 @@ async def llm_direct_answer_node(state: AnalysisState) -> dict:
                 "reason": "元数据或直接问答不生成图表",
             },
             "activated_skills": state.get("activated_skills", []),
-            "activated_knowledge": knowledge_text[:200] if knowledge_text else "",
+            "activated_knowledge": state.get("activated_knowledge", []) or [],
         },
         "analysis_result": {"summary": answer, "insights": []},
         "chart_config": {

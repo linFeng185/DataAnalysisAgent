@@ -29,6 +29,21 @@ def public_error_message(error_code: str, *, fallback: str = "处理失败") -> 
     return _ERROR_MESSAGES.get(error_code, fallback)
 
 
+# 方法作用：把内部执行错误类型转换成可写入历史的脱敏失败原因。
+# Args: error_code - 统一错误码；error_type - 执行阶段分类。
+# Returns: 不包含连接串、凭证和堆栈的用户可见原因。
+def public_failure_reason(error_code: str, error_type: str = "") -> str:
+    reasons = {
+        "rate_limit": "请求频率超过限制",
+        "security": "查询涉及未授权字段或被安全策略拦截",
+        "sql_semantic": "SQL 与当前 Schema 或字段语义不匹配",
+        "transient": "数据源暂时不可用或查询超时",
+        "configuration": "数据源配置、认证或连接失败",
+        "llm_unavailable": _ERROR_MESSAGES["LLM_UNAVAILABLE"],
+    }
+    return reasons.get(str(error_type or "").strip(), public_error_message(error_code))
+
+
 # 方法作用：从新旧响应字段中解析统一任务状态。
 # Args: response - 最终响应或历史恢复响应。
 # Returns: success、failed、needs_input、needs_confirmation 或 partial 状态。

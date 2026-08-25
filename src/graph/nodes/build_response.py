@@ -10,6 +10,7 @@ from src.graph.outcome import (
     build_decision_summary,
     is_successful_response,
     public_error_message,
+    public_failure_reason,
     sanitize_public_output,
     status_from_response,
 )
@@ -271,7 +272,8 @@ async def build_response_node(state: AnalysisState) -> dict:
         }
         if exec_error:
             final_result["error_code"] = error_code
-            final_result["error_message"] = public_error_message(error_code)
+            final_result["error_message"] = public_failure_reason(error_code, error_type)
+            final_result["failure_reason"] = final_result["error_message"]
 
     if multi_source_results and successful_sources:
         final_result["source"] = "multi_source_query"
@@ -290,21 +292,27 @@ async def build_response_node(state: AnalysisState) -> dict:
 
     # 附加技能与知识库
     final_result["activated_skills"] = state.get("activated_skills", []) or []
+    if "activated_knowledge" in state:
+        knowledge_value = state.get("activated_knowledge")
+        final_result["activated_knowledge"] = (
+            knowledge_value
+            if isinstance(knowledge_value, str)
+            else list(knowledge_value or [])
+        )
+    else:
+        final_result.setdefault("activated_knowledge", "")
     logger.info(
         "响应知识展示写回边界",
         source=final_result.get("source", ""),
-        has_explicit_knowledge="activated_knowledge" in final_result,
-        explicit_knowledge_chars=len(str(final_result.get("activated_knowledge", "") or "")),
+        knowledge_source_count=len(final_result["activated_knowledge"])
+        if isinstance(final_result["activated_knowledge"], list) else 0,
         state_knowledge_chars=len(str(state.get("long_term_memories_text", "") or "")),
     )
-    if "activated_knowledge" not in final_result:
-        final_result["activated_knowledge"] = _bounded_text(
-            state.get("long_term_memories_text", "") or "",
-        )
     logger.info(
         "响应知识展示写回完成",
         source=final_result.get("source", ""),
-        knowledge_chars=len(str(final_result.get("activated_knowledge", "") or "")),
+        knowledge_source_count=len(final_result["activated_knowledge"])
+        if isinstance(final_result["activated_knowledge"], list) else 0,
     )
     final_result = sanitize_public_output(final_result)
 

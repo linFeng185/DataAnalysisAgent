@@ -159,6 +159,9 @@ export default function SkillsPage() {
   const scopeColor: Record<KnowledgeScope, string> = {
     system: 'blue', tenant: 'green', private: 'default',
   };
+  const emptySkillsDescription = user?.role === 'super_admin'
+    ? '暂无 Skill，可从 Registry 安装或导入 SKILL.md'
+    : '当前作用域暂无可见 Skill，系统 Skill 由平台管理员维护';
 
   return (
     <div style={{ maxWidth: 1000, margin: '0 auto' }}>
@@ -186,7 +189,7 @@ export default function SkillsPage() {
       }>
         <Table<SkillInfo> dataSource={skills} rowKey={r => `${r.scope}:${r.tenant_id}:${r.owner_user_id}:${r.name}`} loading={loading}
           scroll={{ x: 860 }}
-          locale={{ emptyText: <Empty description="暂无 Skill" /> }}
+          locale={{ emptyText: <Empty description={emptySkillsDescription} /> }}
           size="small"
           onRow={r => ({ onClick: () => openDetail(r), style: { cursor: 'pointer' } })}
           columns={[

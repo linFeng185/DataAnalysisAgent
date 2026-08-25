@@ -159,6 +159,7 @@ async def prepare_turn_node(state: AnalysisState) -> dict:
         "enum_dictionary": {},
         "user_preferences": user_preferences,
         "long_term_memories_text": long_term_memories_text,
+        "activated_knowledge": [],
         "needs_decompose": False,
         "decompose_steps": [],
         "generated_sql": "",

@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Card, Table, Tag, Input, Select, Empty, message, Space, Button, Tooltip } from 'antd';
+import { Card, Table, Tag, Input, Select, Empty, message, Space, Button, Tooltip, Typography } from 'antd';
 import { PlayCircleOutlined } from '@ant-design/icons';
 import { fetchSession, get } from '../api/client';
 import type { HistoryItem, DatasourceConfig } from '../types';
@@ -91,6 +91,14 @@ export default function HistoryPage() {
               render: (v: number) => v !== undefined ? v : '-' },
             { title: '状态', dataIndex: 'success', key: 'success', width: 80,
               render: (v: boolean) => v ? <Tag color="green">成功</Tag> : <Tag color="red">失败</Tag> },
+            { title: '失败原因', dataIndex: 'error_message', key: 'error_message', width: 210,
+              render: (v: string, record: HistoryItem) => record.success || !v ? '-' : (
+                <Tooltip title={v}>
+                  <Typography.Text type="danger" ellipsis style={{ maxWidth: 190, display: 'inline-block' }}>
+                    {v}
+                  </Typography.Text>
+                </Tooltip>
+              ) },
             { title: '回放', key: 'replay', width: 60,
               render: (_: unknown, record: HistoryItem) => (
                 <Tooltip title={record.session_id ? '回放会话' : '该记录无会话'}>

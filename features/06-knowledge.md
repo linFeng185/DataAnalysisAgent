@@ -90,7 +90,7 @@
 | 6.8.5 | 上传 VectorStore 收口 | `src/knowledge/upload_manager.py` | 上传写入统一走 VectorStore，不访问 Chroma 私有对象 | 单测完成 | P0 |
 | 6.8.6 | 知识管理 API VectorStore 收口 | `src/api/routes.py` | 列表/删除保留 ACL；磁盘回退使用 realpath/commonpath，内部异常响应脱敏 | 单测完成 | P0 |
 | 6.8.7 | 混合召回 | `src/knowledge/retrieval.py` | 向量召回与正文/字段关键词精确匹配融合，保持同一 ACL 过滤 | 单测完成 | P1 |
-| 6.8.8 | 不可信内容隔离 | `src/knowledge/content_safety.py`、`src/graph/nodes/retrieve_schema.py` | 检测提示词注入、证据分隔渲染，禁止文档内容改变系统指令或工具权限 | 单测完成 | P0 |
+| 6.8.8 | 可信知识与外部内容分层 | `src/knowledge/content_safety.py`、`src/graph/nodes/retrieve_schema.py` | 已审核知识库作为业务规则/指标口径上下文；附件、网页保持不可信隔离；任何内容不得改变系统安全、权限或工具边界 | 单测完成 | P0 |
 | 6.8.9 | LightweightReranker | `src/knowledge/reranker.py` | 对向量/关键词候选按字段精确度、来源多样性和相似度做确定性重排 | 单测完成 | P1 |
 | 6.8.10 | RetrievalEvaluation | `src/knowledge/retrieval_eval.py` | 计算 Recall@K、MRR、引用命中率和租户越权召回指标 | 单测完成 | P1 |
 

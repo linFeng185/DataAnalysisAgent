@@ -32,7 +32,13 @@ def rerank_evidence(evidence: list[Evidence], query: str, top_k: int = 5) -> lis
         if not phrase_score and query_tokens:
             field_tokens = set(_tokenize(field_text))
             phrase_score = 1.0 if query_tokens and query_tokens <= field_tokens else 0.0
-        score = vector_score * 0.5 + lexical_score * 0.35 + phrase_score * 0.15
+        knowledge_priority = float(item.scores.get("knowledge_priority", 0.0) or 0.0)
+        score = (
+            vector_score * 0.5
+            + lexical_score * 0.35
+            + phrase_score * 0.15
+            + knowledge_priority * 0.4
+        )
         scored.append((score, item))
 
     scored.sort(key=lambda pair: pair[0], reverse=True)
