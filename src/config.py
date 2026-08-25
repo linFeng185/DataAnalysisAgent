@@ -94,6 +94,16 @@ def _default_api_access_policies() -> list[ApiAccessRouteConfig]:
             access_log="standard", description="认证状态探测",
         ),
         ApiAccessRouteConfig(
+            id="report_shared_get", path="/api/v1/report-workbench/shared/reports/{token}",
+            path_type="template", methods=["GET"], auth="optional", access_log="audit",
+            description="公开报表快照访问",
+        ),
+        ApiAccessRouteConfig(
+            id="report_shared_unlock", path="/api/v1/report-workbench/shared/reports/{token}/unlock",
+            path_type="template", methods=["POST"], auth="public", access_log="audit",
+            description="公开报表授权码解锁",
+        ),
+        ApiAccessRouteConfig(
             id="datasource_create", path="/api/v1/datasources", methods=["POST"],
             auth="jwt_or_admin_key", access_log="audit", description="创建数据源",
         ),
@@ -280,6 +290,20 @@ class Settings(BaseSettings):
     automation_email_from: str = ""
     automation_feishu_webhook_url: str = ""
     automation_slack_webhook_url: str = ""
+
+    # ---- 报表工作台 Phase 1/2 ----
+    report_workbench_enabled: bool = True
+    report_default_ttl_days: int = Field(default=7, ge=1, le=90)
+    report_max_ttl_days: int = Field(default=90, ge=1, le=3650)
+    report_default_timezone: str = "Asia/Shanghai"
+    report_max_units_per_run: int = Field(default=12, ge=1, le=12)
+    report_max_queries_per_run: int = Field(default=16, ge=1, le=16)
+    report_max_concurrency: int = Field(default=4, ge=1, le=100)
+    report_max_page_bytes: int = Field(default=2_097_152, ge=1024, le=50_000_000)
+    report_max_public_share_days: int = Field(default=30, ge=1, le=3650)
+    report_public_share_enabled: bool = True
+    report_retry_max_attempts: int = Field(default=3, ge=1, le=10)
+    report_run_timeout_seconds: int = Field(default=900, ge=1, le=86_400)
 
     # ---- 多租户与认证 ----
     multi_tenant: bool = False               # 是否启用多租户

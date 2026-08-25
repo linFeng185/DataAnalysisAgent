@@ -59,6 +59,19 @@ automation_email_from: ""
 automation_feishu_webhook_url: ""
 automation_slack_webhook_url: ""
 
+report_workbench_enabled: true
+report_default_ttl_days: 7
+report_max_ttl_days: 90
+report_default_timezone: Asia/Shanghai
+report_max_units_per_run: 12
+report_max_queries_per_run: 16
+report_max_concurrency: 4
+report_max_page_bytes: 2097152
+report_max_public_share_days: 30
+report_public_share_enabled: true
+report_retry_max_attempts: 3
+report_run_timeout_seconds: 900
+
 multi_tenant: false
 registration_enabled: false
 super_admin_username: admin
@@ -120,6 +133,20 @@ api_access:
       auth: optional
       access_log: standard
       description: 认证状态探测
+    - id: report_shared_get
+      path: /api/v1/report-workbench/shared/reports/{token}
+      path_type: template
+      methods: [GET]
+      auth: optional
+      access_log: audit
+      description: 公开报表快照访问
+    - id: report_shared_unlock
+      path: /api/v1/report-workbench/shared/reports/{token}/unlock
+      path_type: template
+      methods: [POST]
+      auth: public
+      access_log: audit
+      description: 公开报表授权码解锁
     - id: datasource_create
       path: /api/v1/datasources
       path_type: exact
