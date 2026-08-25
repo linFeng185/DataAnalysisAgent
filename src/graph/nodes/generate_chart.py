@@ -12,6 +12,42 @@ logger = get_logger(__name__)
 _NUMERIC_TYPES = (int, float, Decimal)
 
 
+# 方法作用：判断结果行是否具备至少一个维度和一个业务数值列。
+# Args: rows - 待检查的查询结果行。
+# Returns: 可形成确定性图表时返回 True，否则返回 False。
+def _has_chart_candidate(rows: list[dict]) -> bool:
+    """复用确定性资格规则，避免把单值或纯明细错误当成图表候选。"""
+    return bool(_deterministic_chart_type(rows))
+
+
+# 方法作用：在主查询和成功补查结果之间选择图表数据源。
+# Args: state - 当前分析状态；analysis - 当前分析结果。
+# Returns: 图表候选行和来源标识（primary/supplemental/none）。
+def _select_chart_rows(state: AnalysisState, analysis: dict) -> tuple[list[dict], str]:
+    """主查询优先；主查询仅为单值或不具备维度时才采用成功补查分组结果。"""
+    primary = list(state.get("query_result_sample", []) or [])
+    if _has_chart_candidate(primary):
+        return primary, "primary"
+    supplemental_candidates: list[tuple[list[dict], int]] = []
+    for index, item in enumerate(state.get("supplemental_evidence", []) or []):
+        if not isinstance(item, dict) or not item.get("success"):
+            continue
+        rows = list(item.get("data", []) or [])
+        if _has_chart_candidate(rows):
+            supplemental_candidates.append((rows, index))
+    if supplemental_candidates:
+        rows, index = supplemental_candidates[-1]
+        logger.info(
+            "图表候选切换到补查证据",
+            primary_rows=len(primary),
+            supplemental_candidate_count=len(supplemental_candidates),
+            selected_evidence_index=index,
+            selected_rows=len(rows),
+        )
+        return rows, "supplemental"
+    return primary, "primary" if primary else "none"
+
+
 # 方法作用：从结果行中寻找指定列首个非布尔数值。
 # Args: rows - 查询结果行；column - 待检查列名。
 # Returns: 首个数值；不存在时返回 None。
@@ -39,7 +75,14 @@ async def generate_chart_node(state: AnalysisState) -> dict:
     )
 
     analysis = state.get("analysis_result", {}) or {}
-    data = state.get("query_result_sample", []) or []
+    data, data_source = _select_chart_rows(state, analysis)
+    logger.info(
+        "图表候选选择完成",
+        primary_rows=len(state.get("query_result_sample", []) or []),
+        selected_rows=len(data),
+        data_source=data_source,
+        supplemental_count=len(state.get("supplemental_evidence", []) or []),
+    )
     attribution = analysis.get("attribution", {}) or {}
     if contexts.routing.intent in {"metadata", "chat"}:
         return {"chart_config": _no_chart("元数据或直接问答不生成图表")}
@@ -59,6 +102,7 @@ async def generate_chart_node(state: AnalysisState) -> dict:
             "option": option,
             "status": "success",
             "reason": "",
+            "data_source": "attribution",
         }}
     if not data:
         logger.info("节点完成（无数据）", node="generate_chart",
@@ -93,6 +137,7 @@ async def generate_chart_node(state: AnalysisState) -> dict:
         "option": option,
         "status": "success",
         "reason": "",
+        "data_source": data_source,
     }}
 
 

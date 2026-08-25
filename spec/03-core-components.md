@@ -1091,8 +1091,9 @@ LLM 驱动的多维度自动分析：
 - 归因数值必须由规则引擎按 `dimension/current_value/previous_value` 计算；贡献率使用总体净变化作分母，净变化为零时只输出绝对影响份额
 - LLM 处理开放性解释（关联指标、业务影响、待验证原因和条件化建议），不得改写归因数值或把相关性描述为因果性
 - 分析输出使用 `evidence_status=sufficient|supplementable|needs_user_input` 标记证据状态；只有结论会因缺口实质变化且当前授权 Schema 可以补齐时才允许 `supplementable`
-- `supplementable` 在单数据源普通分析路径进入 `supplemental_query`；每轮只执行一个未执行问题，最多两轮，每个问题最多两次 SQL 尝试，并完整复用 Schema 检索、SQL 生成、只读校验、EXPLAIN 和有界执行链
+- `supplementable` 在单数据源普通分析路径进入 `supplemental_query`；每轮只执行一个未执行补查任务，同一张表或同一结果粒度的缺口合并为一条 SQL 并保留来源问题，最多两轮，每个任务最多两次 SQL 尝试，并完整复用 Schema 检索、SQL 生成、只读校验、EXPLAIN 和有界执行链
 - 补查结果以独立证据回注 `analyze_result` 后重新分析；补查失败只增加限制说明，不得覆盖主查询 SQL、数据或统计结果；需要外部业务背景时必须使用 `needs_user_input`
+- 主查询不具备维度加数值的图表资格时，成功补查的分组结果可作为 `generate_chart` 候选；补查数据只用于图表和分析证据，不覆盖公开响应中的主查询 `data`
 
 #### 触点归因模型选择与计算
 

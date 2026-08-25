@@ -240,16 +240,19 @@ def after_analyze_result(state: AnalysisState) -> str:
     capability = str(contexts.routing.task_plan.get("capability", "") or "")
     analysis = state.get("analysis_result", {}) or {}
     from src.config import get_settings
-    from src.graph.nodes.supplemental_query import select_supplemental_question
+    from src.graph.nodes.supplemental_query import build_supplemental_request
 
     max_rounds = int(
         getattr(get_settings(), "max_supplemental_query_rounds", 2) or 0,
     )
     current_round = int(state.get("supplemental_query_round", 0) or 0)
-    new_question = select_supplemental_question(
+    supplemental_request = build_supplemental_request(
         analysis,
         state.get("supplemental_evidence", []) or [],
+        relevant_tables=state.get("relevant_tables", []) or [],
+        primary_sql=str(state.get("generated_sql", "") or ""),
     )
+    new_question = str(supplemental_request.get("question", "") or "")
     can_supplement = (
         analysis.get("evidence_status") == "supplementable"
         and bool(new_question)
@@ -266,6 +269,8 @@ def after_analyze_result(state: AnalysisState) -> str:
             current_round=current_round,
             max_rounds=max_rounds,
             question=new_question[:120],
+            source_question_count=len(supplemental_request.get("source_questions", []) or []),
+            table_names=supplemental_request.get("table_names", []) or [],
         )
         return "supplemental_query"
     target = {

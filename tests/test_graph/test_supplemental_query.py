@@ -9,6 +9,102 @@ from unittest.mock import AsyncMock
 class TestSupplementalQuery:
     """覆盖功能 4.8.11：补查选择、查询安全链、轮次预算和失败降级。"""
 
+    # 方法作用：验证同表补查问题被合并为单个任务。
+    # Args: self - pytest 测试类实例。
+    # Returns: 无返回值，断言合并任务契约。
+    def test_select_question_merges_same_table_requests(self) -> None:
+        """同一张表的多个证据缺口应合并为一次 SQL 补查并保留来源问题。"""
+        # Arrange
+        from src.graph.nodes.supplemental_query import (
+            build_supplemental_request,
+        )
+
+        analysis = {
+            "supplemental_questions": [
+                "users 表中共有多少用户？",
+                "各 vip_level 等级的用户数量分别是多少？",
+                "订单总数是多少？",
+            ],
+        }
+        evidence = []
+
+        # Act
+        request = build_supplemental_request(
+            analysis,
+            evidence,
+            relevant_tables=[
+                {"name": "users", "columns": []},
+                {"name": "orders", "columns": []},
+            ],
+            primary_sql="SELECT COUNT(*) AS total_users FROM users",
+        )
+
+        # Assert
+        assert len(request["source_questions"]) == 2
+        assert "users 表中共有多少用户？" in request["question"]
+        assert "各 vip_level 等级的用户数量分别是多少？" in request["question"]
+        assert "一条 SQL" in request["question"]
+        assert request["table_names"] == ["users"]
+
+    # 方法作用：验证不同表补查问题不会被错误合并。
+    # Args: self - pytest 测试类实例。
+    # Returns: 无返回值，断言问题来源列表保持独立。
+    def test_select_question_does_not_merge_different_tables(self) -> None:
+        """不同数据表的问题不得被错误合并，后续轮次仍可分别执行。"""
+        # Arrange
+        from src.graph.nodes.supplemental_query import build_supplemental_request
+
+        analysis = {
+            "supplemental_questions": [
+                "users 表中共有多少用户？",
+                "订单总数是多少？",
+            ],
+        }
+
+        # Act
+        request = build_supplemental_request(
+            analysis,
+            [],
+            relevant_tables=[
+                {"name": "users", "columns": []},
+                {"name": "orders", "columns": []},
+            ],
+            primary_sql="SELECT COUNT(*) FROM users",
+        )
+
+        # Assert
+        assert request["source_questions"] == ["users 表中共有多少用户？"]
+        assert "订单总数是多少？" not in request["question"]
+
+    # 方法作用：验证合并任务的来源问题会参与后续去重。
+    # Args: self - pytest 测试类实例。
+    # Returns: 无返回值，断言不再返回重复任务。
+    def test_select_question_skips_source_questions_from_merged_evidence(self) -> None:
+        """已执行合并任务中的原始问题再次出现时不得重复补查。"""
+        # Arrange
+        from src.graph.nodes.supplemental_query import select_supplemental_question
+
+        analysis = {
+            "supplemental_questions": [
+                "users 表中共有多少用户？",
+                "各 vip_level 等级的用户数量分别是多少？",
+            ],
+        }
+        evidence = [{
+            "question": "请使用一条 SQL 一次性返回所有补查所需结果",
+            "source_questions": [
+                "users 表中共有多少用户？",
+                "各 vip_level 等级的用户数量分别是多少？",
+            ],
+            "success": True,
+        }]
+
+        # Act
+        question = select_supplemental_question(analysis, evidence)
+
+        # Assert
+        assert question == ""
+
     def test_select_question_skips_normalized_duplicates(self) -> None:
         """已执行问题应忽略空白和大小写差异，选择下一条新问题。"""
         # Arrange

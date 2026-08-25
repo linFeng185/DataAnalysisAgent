@@ -61,19 +61,24 @@ def _build_sql_statements(state: AnalysisState) -> list[dict]:
                     "purpose": "primary",
                     "question": contexts.request.user_query,
                 }]
-        statements.extend(
-            {
+        for item in (state.get("supplemental_evidence", []) or []):
+            if not (
+                isinstance(item, dict)
+                and item.get("success")
+                and str(item.get("sql", "") or "").strip()
+            ):
+                continue
+            statement = {
                 "datasource": contexts.routing.datasource,
                 "dialect": str(item.get("dialect", "") or contexts.execution.dialect),
                 "sql": str(item.get("sql", "") or "").strip(),
                 "purpose": "supplemental",
                 "question": str(item.get("question", "") or ""),
             }
-            for item in (state.get("supplemental_evidence", []) or [])
-            if isinstance(item, dict)
-            and item.get("success")
-            and str(item.get("sql", "") or "").strip()
-        )
+            source_questions = list(item.get("source_questions", []) or [])
+            if source_questions:
+                statement["source_questions"] = source_questions
+            statements.append(statement)
         logger.info("最终 SQL 列表构建完成", statement_count=len(statements))
         return statements
     except Exception as exc:

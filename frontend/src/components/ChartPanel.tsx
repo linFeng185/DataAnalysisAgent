@@ -10,6 +10,7 @@ export interface ChartConfig {
   option?: Record<string, unknown>;
   status?: 'success' | 'failed' | 'not_applicable';
   reason?: string;
+  data_source?: 'primary' | 'supplemental' | 'attribution';
   core_value?: { label: string; value: unknown; column: string };
 }
 

@@ -14,6 +14,15 @@ from src.logging_config import get_logger
 
 logger = get_logger(__name__)
 
+_TABLE_HINTS: dict[str, tuple[str, ...]] = {
+    "user": ("用户", "user", "会员", "vip_level", "用户数", "用户数量"),
+    "customer": ("客户", "customer"),
+    "order": ("订单", "order", "下单", "交易"),
+    "product": ("商品", "产品", "product"),
+    "employee": ("员工", "雇员", "employee"),
+    "department": ("部门", "department"),
+}
+
 
 # 方法作用：规范化补查问题用于当前请求内去重。
 # Args: question - 模型提出的自然语言补查问题。
@@ -23,22 +32,195 @@ def _normalize_question(question: str) -> str:
     return re.sub(r"\s+", "", str(question or "")).lower()
 
 
-# 方法作用：选择尚未执行过的第一个补查问题。
-# Args: analysis - 当前分析结果；evidence - 已执行补查记录。
-# Returns: 待执行问题；没有新问题时返回空字符串。
-def select_supplemental_question(analysis: dict, evidence: list[dict]) -> str:
-    """每轮只执行一个问题，避免模型一次扩张成无界查询集合。"""
-    executed = {
-        _normalize_question(str(item.get("question", "") or ""))
-        for item in evidence
-        if isinstance(item, dict) and item.get("question")
+# 方法作用：从 SQL 中提取真实表名，供补查问题按表归并。
+# Args: sql - 待读取的只读 SQL；dialect - 可选 SQL 方言。
+# Returns: 去重后的表名列表；解析失败时返回正则回退结果。
+def _extract_sql_table_names(sql: str, dialect: str = "") -> list[str]:
+    """优先使用 sqlglot 区分表引用与列名，解析失败时仅保守读取 FROM/JOIN。"""
+    text = str(sql or "").strip()
+    if not text:
+        return []
+    names: list[str] = []
+    try:
+        import sqlglot
+        from sqlglot import exp
+
+        statements = sqlglot.parse(text, read=dialect or None)
+        for statement in statements:
+            for table in statement.find_all(exp.Table):
+                name = str(table.name or "").strip()
+                if name and name.lower() not in {item.lower() for item in names}:
+                    names.append(name)
+        if names:
+            return names
+    except Exception as exc:
+        logger.debug("补查 SQL 表名解析回退", error=str(exc)[:160])
+    for match in re.finditer(
+        r"\b(?:from|join)\s+([`\"\[]?[\w.-]+[`\"\]]?)",
+        text,
+        flags=re.IGNORECASE,
+    ):
+        name = match.group(1).strip("`\"[]")
+        base = name.rsplit(".", 1)[-1]
+        if base and base.lower() not in {item.lower() for item in names}:
+            names.append(base)
+    return names
+
+
+# 方法作用：从相关 Schema 中提取表名和字段名映射。
+# Args: relevant_tables - retrieve_schema 输出的表结构字典列表。
+# Returns: 小写表名到小写字段名集合的映射。
+def _schema_table_columns(relevant_tables: list[dict] | None) -> dict[str, set[str]]:
+    """兼容字典和轻量对象，避免补查选择器依赖具体 Schema 实现。"""
+    result: dict[str, set[str]] = {}
+    for table in relevant_tables or []:
+        if isinstance(table, dict):
+            table_name = str(table.get("name", "") or "").strip()
+            columns = table.get("columns", []) or []
+        else:
+            table_name = str(getattr(table, "name", "") or "").strip()
+            columns = getattr(table, "columns", []) or []
+        if not table_name:
+            continue
+        column_names: set[str] = set()
+        for column in columns:
+            if isinstance(column, dict):
+                name = str(column.get("name", "") or "").strip()
+            else:
+                name = str(getattr(column, "name", "") or "").strip()
+            if name:
+                column_names.add(name.lower())
+        result[table_name.lower()] = column_names
+    return result
+
+
+# 方法作用：判断一个补查问题最可能涉及的授权数据表。
+# Args: question - 待补查自然语言问题；table_columns - Schema 表字段映射。
+# Returns: 可确认的表名集合；无法确认时返回空集合。
+def _infer_question_tables(
+    question: str,
+    table_columns: dict[str, set[str]],
+) -> set[str]:
+    """只在有字段、表名或明确业务词证据时归属表，防止跨表误合并。"""
+    text = str(question or "").lower()
+    if not text:
+        return set()
+    matches: set[str] = set()
+    for table_name, columns in table_columns.items():
+        base = table_name.rsplit(".", 1)[-1]
+        if re.search(rf"(?<![\w]){re.escape(base)}(?![\w])", text):
+            matches.add(table_name)
+            continue
+        if any(
+            re.search(rf"(?<![\w]){re.escape(column)}(?![\w])", text)
+            for column in columns
+        ):
+            matches.add(table_name)
+            continue
+        stem = re.sub(r"s$", "", base)
+        hints = _TABLE_HINTS.get(stem, ())
+        if any(hint in text for hint in hints):
+            matches.add(table_name)
+    return matches
+
+
+# 方法作用：构造本轮唯一的补查任务并合并同表问题。
+# Args: analysis - 当前分析结果；evidence - 已执行补查记录；relevant_tables - 当前授权表结构；primary_sql - 主查询 SQL。
+# Returns: question/source_questions/table_names 三字段补查任务；无新问题时 question 为空。
+def build_supplemental_request(
+    analysis: dict,
+    evidence: list[dict],
+    relevant_tables: list[dict] | None = None,
+    primary_sql: str = "",
+) -> dict[str, Any]:
+    """每轮只返回一个问题；同表缺口要求 SQL 一次返回全部指标或分组结果。"""
+    table_columns = _schema_table_columns(relevant_tables)
+    primary_tables = {
+        name.lower() for name in _extract_sql_table_names(primary_sql)
     }
+    for item in evidence or []:
+        if isinstance(item, dict):
+            primary_tables.update(
+                name.lower()
+                for name in _extract_sql_table_names(str(item.get("sql", "") or ""))
+            )
+    known_tables = set(table_columns) | primary_tables
+    for table_name in known_tables:
+        table_columns.setdefault(table_name, set())
+
+    executed: set[str] = set()
+    for item in evidence or []:
+        if not isinstance(item, dict):
+            continue
+        values = [item.get("question", ""), *(item.get("source_questions", []) or [])]
+        executed.update(
+            normalized
+            for normalized in (_normalize_question(str(value or "")) for value in values)
+            if normalized
+        )
+
+    candidates: list[tuple[str, set[str]]] = []
     for value in analysis.get("supplemental_questions", []) or []:
         question = str(value or "").strip()
         normalized = _normalize_question(question)
-        if normalized and normalized not in executed:
-            return question
-    return ""
+        if not normalized or normalized in executed:
+            continue
+        tables = _infer_question_tables(question, table_columns)
+        candidates.append((question, tables))
+    if not candidates:
+        return {"question": "", "source_questions": [], "table_names": []}
+
+    first_question, first_tables = candidates[0]
+    selected = [first_question]
+    if first_tables:
+        for question, tables in candidates[1:]:
+            if tables and tables == first_tables:
+                selected.append(question)
+    table_names = sorted(first_tables)
+    if len(selected) == 1:
+        merged_question = first_question
+    else:
+        table_label = ", ".join(table_names) if table_names else "同一数据表"
+        details = "；".join(
+            f"{index}. {question}" for index, question in enumerate(selected, 1)
+        )
+        merged_question = (
+            f"请针对同一张表（{table_label}）使用一条 SQL，一次性返回以下补查所需的全部结果，"
+            f"保留每个问题要求的分组维度和指标，不要拆分成多次查询：{details}。"
+        )
+    logger.info(
+        "自主补查任务构造完成",
+        candidate_count=len(candidates),
+        selected_count=len(selected),
+        table_names=table_names,
+        merged=len(selected) > 1,
+    )
+    return {
+        "question": merged_question,
+        "source_questions": selected,
+        "table_names": table_names,
+    }
+
+
+# 方法作用：选择尚未执行过的第一个补查任务。
+# Args: analysis - 当前分析结果；evidence - 已执行补查记录；relevant_tables - 当前授权表结构；primary_sql - 主查询 SQL。
+# Returns: 待执行问题；没有新问题时返回空字符串。
+def select_supplemental_question(
+    analysis: dict,
+    evidence: list[dict],
+    relevant_tables: list[dict] | None = None,
+    primary_sql: str = "",
+) -> str:
+    """保持旧的字符串接口，同时复用同表问题合并和来源问题去重。"""
+    return str(
+        build_supplemental_request(
+            analysis,
+            evidence,
+            relevant_tables=relevant_tables,
+            primary_sql=primary_sql,
+        ).get("question", "")
+        or ""
+    )
 
 
 # 方法作用：构造只包含本轮可信身份、权限和补查问题的隔离 SQL 状态。
@@ -243,7 +425,13 @@ async def supplemental_query_node(
     started_at = time.monotonic()
     evidence = list(state.get("supplemental_evidence", []) or [])
     analysis = dict(state.get("analysis_result", {}) or {})
-    question = select_supplemental_question(analysis, evidence)
+    request = build_supplemental_request(
+        analysis,
+        evidence,
+        relevant_tables=state.get("relevant_tables", []) or [],
+        primary_sql=str(state.get("generated_sql", "") or ""),
+    )
+    question = str(request.get("question", "") or "")
     from src.config import get_settings
 
     max_rounds = int(getattr(get_settings(), "max_supplemental_query_rounds", 2) or 0)
@@ -267,6 +455,9 @@ async def supplemental_query_node(
         question=question[:120],
     )
     record = await _execute_supplemental_question(state, question, config)
+    source_questions = list(request.get("source_questions", []) or [])
+    if len(source_questions) > 1:
+        record = {**record, "source_questions": source_questions}
     evidence.append(record)
     logger.info(
         "自主补查完成",

@@ -17,7 +17,7 @@
 | [11-api.md](11-api.md) | 11. API 层 | 87 行 |
 | [12-security.md](12-security.md) | 12. 安全模块 | 47 行 |
 | [13-analytics.md](13-analytics.md) | 13. 数据分析引擎 | 27 行 |
-| [14-visualization.md](14-visualization.md) | 14. 可视化引擎 | 14 行 |
+| [14-visualization.md](14-visualization.md) | 14. 可视化引擎 | 15 行 |
 | [15-evaluation.md](15-evaluation.md) | 15. 评估与质量保障 | 12 行 |
 | [16-testing.md](16-testing.md) | 16. 测试 | 72 行 |
 | [17-ops.md](17-ops.md) | 17. 基础设施与运维 | 63 行 |

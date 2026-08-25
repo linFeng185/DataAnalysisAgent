@@ -22,7 +22,7 @@ class SanitizedText:
 
 
 # 方法作用：清理控制字符并标记文档中可能试图改变模型行为的指令片段。
-# Args: text - 来自文件、网页或知识库的外部文本；max_chars - 最大投喂字符数。
+# Args: text - 来自文件、网页或外部联网内容的文本；max_chars - 最大投喂字符数。
 # Returns: SanitizedText，保留正文但标记可疑片段。
 def sanitize_untrusted_text(text: str, max_chars: int = 6000) -> SanitizedText:
     logger.debug("不可信文本清理入口", text_size=len(text), max_chars=max_chars)

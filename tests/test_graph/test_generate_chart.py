@@ -110,6 +110,66 @@ class TestGenerateChartDecimal:
 class TestGenerateChartEligibility:
     """覆盖功能 4.9.7：确定性图表资格复核、核心数值和失败可见性。"""
 
+    # 方法作用：验证单值主查询可使用成功补查分组数据生成图表。
+    # Args: self - pytest 测试类实例。
+    # Returns: 无返回值，断言补查柱状图契约。
+    async def test_single_kpi_uses_successful_supplemental_group_rows(self) -> None:
+        """主查询只有单值时，成功补查的分组结果应进入图表候选。"""
+        # Arrange
+        state = {
+            "query_result_sample": [{"total_users": 42}],
+            "analysis_result": {"recommended_chart_type": "table"},
+            "supplemental_evidence": [{
+                "question": "各 vip_level 等级的用户数量分别是多少？",
+                "success": True,
+                "data": [
+                    {"vip_level": "普通", "user_count": 30},
+                    {"vip_level": "高级", "user_count": 12},
+                ],
+            }],
+        }
+
+        # Act
+        result = await generate_chart_node(state)
+
+        # Assert
+        chart = result["chart_config"]
+        assert chart["type"] == "bar"
+        assert chart["status"] == "success"
+        assert chart["data_source"] == "supplemental"
+        assert chart["option"]["series"][0]["data"] == [30.0, 12.0]
+
+    # 方法作用：验证主查询已有图表数据时优先使用主查询。
+    # Args: self - pytest 测试类实例。
+    # Returns: 无返回值，断言主查询图表数据源。
+    async def test_primary_chart_rows_take_precedence_over_supplemental_rows(self) -> None:
+        """主查询已有可视化分组结果时，应保持主查询作为图表数据源。"""
+        # Arrange
+        state = {
+            "query_result_sample": [
+                {"date": "2026-08-01", "order_count": 10},
+                {"date": "2026-08-02", "order_count": 12},
+            ],
+            "analysis_result": {"recommended_chart_type": "line"},
+            "supplemental_evidence": [{
+                "question": "按订单状态统计",
+                "success": True,
+                "data": [
+                    {"order_status": "已完成", "order_count": 100},
+                    {"order_status": "取消", "order_count": 2},
+                ],
+            }],
+        }
+
+        # Act
+        result = await generate_chart_node(state)
+
+        # Assert
+        chart = result["chart_config"]
+        assert chart["type"] == "line"
+        assert chart["data_source"] == "primary"
+        assert chart["option"]["xAxis"]["data"] == ["2026-08-01", "2026-08-02"]
+
     async def test_model_table_with_time_dimension_builds_line(self) -> None:
         """模型推荐表格时，两行以上的时间维度加数值仍应生成折线图。"""
         # Arrange

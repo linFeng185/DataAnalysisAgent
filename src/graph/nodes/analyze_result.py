@@ -550,6 +550,7 @@ def _format_supplemental_evidence(evidence: list[dict]) -> str:
     compact = [
         {
             "question": str(item.get("question", "") or ""),
+            "source_questions": list(item.get("source_questions", []) or []),
             "success": bool(item.get("success")),
             "sql": str(item.get("sql", "") or ""),
             "row_count": int(item.get("row_count", 0) or 0),
@@ -583,6 +584,7 @@ def _attach_supplemental_trace(result: dict, state: AnalysisState) -> dict:
     enriched["supplemental_evidence"] = [
         {
             "question": str(item.get("question", "") or ""),
+            "source_questions": list(item.get("source_questions", []) or []),
             "success": bool(item.get("success")),
             "row_count": int(item.get("row_count", 0) or 0),
             "error": str(item.get("error", "") or "")[:300],
