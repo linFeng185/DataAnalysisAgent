@@ -24,7 +24,7 @@
 | 18.2.9 | 数据源动态加载 | `ChatPage.tsx` | 从 GET /datasources 动态获取选项 | 开发完成 | P2 |
 | 18.2.10 | 分析结果稳定渲染 | `DataTable.tsx`、`ResultCard.tsx` | 所有行字段并集兜底、按数据源展示最终 SQL、table 结果不重复显示空图表；指标目录按主题展示，业务分析按关联指标/影响/原因/建议分区 | 单测完成 | P1 |
 | 18.2.11 | 并行模型流分组 | `useChat.ts` | 兼容识别 stream_id，避免原始中间响应进入聊天消息；多数据源结果按最终结构化事件归并 | 单测完成 | P1 |
-| 18.2.12 | 历史会话逐轮恢复 | `useChat.ts`、`ChatPage.tsx` | 每轮消费自己的 final_result，恢复 SQL、数据、分析、图表和推理；长会话向前分页 | 集成测试完成 | P1 |
+| 18.2.12 | 历史会话逐轮恢复 | `useChat.ts`、`ChatPage.tsx` | 每轮消费自己的 final_result，恢复 SQL、数据、分析、图表和推理；长会话向前分页；兼容 StrictMode 回放和路由切换后的状态保持 | 集成测试完成 | P1 |
 | 18.2.13 | 触点归因结果展示 | `ResultCard.tsx`、`types/index.ts` | 展示选中模型、选择来源、资格摘要和按触点归因值/占比，证据不足时展示缺口 | 单测完成 | P1 |
 
 ### 18.3 数据源管理页 (DatasourcePage)
@@ -67,7 +67,7 @@
 | # | 功能 | 文件 | 描述 | 状态 | 优先级 |
 |---|------|------|------|------|--------|
 | 18.7.1 | API 客户端 | `frontend/src/api/client.ts` | get/post/streamChat 封装 + SSE 解析；支持 AbortController 取消回调和 FastAPI detail 错误解析 | 单测完成 | P2 |
-| 18.7.2 | useChat Hook | `frontend/src/hooks/useChat.ts`、`chatStorage.ts` | 对话仅保留在内存，历史由授权 API 恢复；启动时清理旧版 sessionStorage 敏感缓存 | 单测完成 | P2 |
+| 18.7.2 | useChat Hook | `frontend/src/hooks/useChat.ts`、`chatStorage.ts` | 对话仅保留在内存，历史由授权 API 恢复；由 ChatProvider 在路由外层持有 SSE 与轮次状态；身份变化时清理旧状态；启动时清理旧版 sessionStorage 敏感缓存 | 单测完成 | P2 |
 | 18.7.3 | TypeScript 类型 | `frontend/src/types/index.ts` | SSEEvent / ChatResponse / DatasourceConfig / TableInfo / ColumnInfo，包含激活 Skill 和知识来源摘要 | 开发完成 | P2 |
 | 18.7.4 | 公共组件库 | `frontend/src/components/` | SqlPanel / DataTable / ChartPanel / ProgressBar / ReasoningPanel / ResultCard | 开发完成 | P2 |
 | 18.7.5 | ErrorBoundary | `frontend/src/components/ErrorBoundary.tsx` | React Error Boundary 包裹所有页面路由 | 开发完成 | P2 |

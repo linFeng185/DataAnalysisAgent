@@ -1,4 +1,13 @@
-import { useState, useRef, useCallback, useEffect } from 'react';
+import {
+  createContext,
+  createElement,
+  useCallback,
+  useContext,
+  useEffect,
+  useRef,
+  useState,
+  type ReactNode,
+} from 'react';
 import { streamChat, fetchSessionTurns } from '../api/client';
 import type { ChatAbortController } from '../api/client';
 import type { ActionRequestPayload, ChatTurnData } from '../types';
@@ -69,7 +78,7 @@ function turnFromData(d: ChatTurnData, datasource: string): ChatTurn {
 // 方法作用：管理对话轮次、SSE 事件、会话恢复以及模型和推理偏好透传。
 // Args: 无。
 // Returns: 对话状态、发送/取消/恢复操作及加载状态。
-export function useChat() {
+function useChatState() {
   const { user } = useAuth();
   const identityKey = user ? `${user.tenant_id}:${user.user_id}` : 'anonymous';
   const [turns, setTurns] = useState<ChatTurn[]>([]);
@@ -81,21 +90,35 @@ export function useChat() {
   const nextId = useRef(1);
   const aborterRef = useRef<ChatAbortController | null>(null);
   const streamingTurnIdRef = useRef<number | null>(null);
+  const previousIdentityKeyRef = useRef(identityKey);
 
-  // 方法作用：认证身份变化时终止旧请求并清空全部内存聊天状态。
+  // 方法作用：仅在认证身份真正变化时终止旧请求并清空内存聊天状态。
   // Args: identityKey - 当前租户与用户组成的身份键。
   // Returns: 无返回值。
   useEffect(() => {
+    // React.StrictMode 会重复执行 effect；相同身份不能重复清空刚恢复的会话。
+    if (previousIdentityKeyRef.current === identityKey) return;
+    previousIdentityKeyRef.current = identityKey;
     aborterRef.current?.abort();
     aborterRef.current = null;
+    streamingTurnIdRef.current = null;
     setTurns([]);
     setSessionId('');
     setHasMore(false);
     setLoading(false);
+    setLoadingMore(false);
     setRetryInfo(null);
     nextId.current = 1;
     clearChatStorage();
   }, [identityKey]);
+
+  // 方法作用：Provider 卸载时终止仍在运行的请求，避免退出认证会话后继续写入状态。
+  // Args: 无。
+  // Returns: 卸载清理函数。
+  useEffect(() => () => {
+    aborterRef.current?.abort();
+    aborterRef.current = null;
+  }, []);
 
   const send = useCallback((
     query: string,
@@ -341,4 +364,24 @@ export function useChat() {
   return { turns, loading, sessionId, send, cancel, clearSession,
            restoreTurns, loadMoreTurns, hasMore, loadingMore, checkHasMore,
            retryInfo };
+}
+
+type ChatContextValue = ReturnType<typeof useChatState>;
+const ChatContext = createContext<ChatContextValue | null>(null);
+
+// 方法作用：在路由生命周期之外持有聊天状态和 SSE 连接，保证切换菜单时结果继续接收。
+// Args: children - 需要共享聊天状态的应用内容。
+// Returns: 提供 ChatContext 的 React 节点。
+export function ChatProvider({ children }: { children: ReactNode }) {
+  const chat = useChatState();
+  return createElement(ChatContext.Provider, { value: chat }, children);
+}
+
+// 方法作用：读取全局聊天状态，避免每个 ChatPage 实例创建独立会话。
+// Args: 无。
+// Returns: 当前聊天状态、发送/取消/恢复操作及加载状态。
+export function useChat(): ChatContextValue {
+  const context = useContext(ChatContext);
+  if (!context) throw new Error('useChat must be used within ChatProvider');
+  return context;
 }

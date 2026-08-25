@@ -11,6 +11,7 @@ import {
 } from '@ant-design/icons';
 import { AuthProvider } from './hooks/AuthContext';
 import { useAuth } from './hooks/AuthContext';
+import { ChatProvider } from './hooks/useChat';
 import ErrorBoundary from './components/ErrorBoundary';
 import { get } from './api/client';
 import type { HealthResponse } from './types';
@@ -42,7 +43,7 @@ function ProtectedApp() {
   const { loading, authRequired, isAuthenticated } = useAuth();
   if (loading) return <Layout style={{ minHeight: '100vh' }} />;
   if (authRequired && !isAuthenticated) return <Navigate to="/login" replace />;
-  return <AppContent />;
+  return <ChatProvider><AppContent /></ChatProvider>;
 }
 
 // 方法作用：允许平台超级管理员或当前租户管理员进入角色化管理工作区。
