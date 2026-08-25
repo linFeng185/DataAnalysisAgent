@@ -195,7 +195,7 @@ async def prepare_turn_node(state: AnalysisState) -> dict:
     result.update(build_context_groups({**state, **result}))
     # 升级后首次请求顺手移除旧 checkpoint 中重复保存的富结果。
     history_items = list(state.get("conversation_history", []) or [])
-    if len(history_items) >= 50:
+    if history_items:
         from src.memory.session_archive import compact_turn_history
 
         history_items = await compact_turn_history(history_items)

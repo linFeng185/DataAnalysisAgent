@@ -1428,7 +1428,24 @@ Checkpointer 存储了所有 Node 的完整状态，**但不会直接喂给 LLM*
 
 ---
 
-**核心原则**：Checkpointer 存储 ≠ LLM 上下文。PostgreSQL 存多少都不限，但 Prompt 严格控制在模型上下文窗口的 30-50%。
+**核心原则**：Checkpointer 存储 ≠ LLM 上下文。PostgreSQL 可以保存完整会话，但每次 LLM 调用必须按当前模型的 `context_window` 动态计算输入预算，不能再使用固定 50K 或固定轮数作为唯一依据。
+
+**动态 Token 预算**：
+
+```text
+usable_input = context_window - prompt_reserve - output_reserve
+usable_input = min(usable_input, context_max_tokens)  # 仅当显式配置 > 0
+触发压缩:      usable_input × 0.80
+压缩目标:      usable_input × 0.55
+硬保护线:      usable_input × 0.92
+```
+
+- `prompt_reserve` 默认 12,000 Token，用于 System Prompt、Schema、业务规则和 grounding 证据。
+- `output_reserve` 默认 8,192 Token，并取模型 `max_tokens_limit` 与该值的较大者。
+- `context_max_tokens=0` 表示不设置绝对上限；大于 0 时只能进一步收紧模型真实窗口，不能放大窗口。
+- 80% 是压缩触发线，55% 是回落目标，二者形成滞回区，避免每轮在阈值附近反复压缩；92% 作为异常大单轮或估算偏差的硬保护线。
+- 模型能力解析顺序为：请求显式模型 → 当前租户模型目录 `capabilities.context_window` → 内置 ModelRegistry/Adapter → 128K 保守默认值。DeepSeek V4 Pro/Flash 的目录值为 1,000,000。
+- 没有 tokenizer 依赖时，中文按字符保守估算，拉丁字符按约四字符一个 Token；估算仅用于压缩和保护，不替代 Provider 返回的 usage 统计。
 
 ---
 
@@ -1438,14 +1455,14 @@ Checkpointer 存储了所有 Node 的完整状态，**但不会直接喂给 LLM*
 ┌──────────────────────────────────────────────────────────┐
 │ 层级        范围          注入方式        保留量           │
 ├──────────────────────────────────────────────────────────┤
-│ 热数据      最近3轮完整    直接注入 Prompt  完整 SQL +      │
+│ 热数据      最近N轮完整    直接注入 Prompt  完整 SQL +      │
 │ (热窗口)    对话                           分析摘要        │
 ├──────────────────────────────────────────────────────────┤
-│ 温数据      4-10轮对话     压缩摘要注入     每轮压缩为      │
-│ (近窗口)                                   1-2句概括       │
+│ 温数据      热窗口之外的   压缩摘要注入     每轮压缩为      │
+│ (近窗口)    近期轮次                       1-2句概括       │
 ├──────────────────────────────────────────────────────────┤
-│ 冷数据      10轮以上       ChromaDB        语义相似        │
-│ (长期记忆)  对话           向量检索召回     匹配 Top-3       │
+│ 冷数据      温窗口之外     ChromaDB        语义相似        │
+│ (长期记忆)  的历史         向量检索召回     匹配 Top-3       │
 └──────────────────────────────────────────────────────────┘
 ```
 
@@ -1460,24 +1477,28 @@ async def build_llm_context(state: AnalysisState, node_name: str) -> str:
     """
     history = state.get("conversation_history", [])
     parts = []
+    settings = get_settings()
 
-    # ---- 热数据: 最近3轮完整注入 ----
-    for turn in history[-3:]:
+    hot_window = settings.context_hot_turns
+    warm_window = settings.context_warm_turns
+
+    # ---- 热数据: 最近 N 轮完整注入，N 由 context_hot_turns 控制 ----
+    for turn in history[-hot_window:]:
         parts.append(f"用户: {turn.user_query}")
         if turn.generated_sql:
             parts.append(f"执行的SQL: {turn.generated_sql}")
         if turn.analysis_summary:
             parts.append(f"分析结论: {turn.analysis_summary}")
 
-    # ---- 温数据: 4-10轮压缩为摘要 ----
-    warm_turns = history[-10:-3]
-    if warm_turns and len(history) > 3:
+    # ---- 温数据: 热窗口之外的近期轮次压缩为摘要 ----
+    warm_turns = history[-warm_window:-hot_window]
+    if warm_turns and len(history) > hot_window:
         # 用 小模型/本地规则 生成摘要，而非塞原始对话
         summary = await _summarize_turns(warm_turns)
         parts.append(f"[前序对话摘要] {summary}")
 
-    # ---- 冷数据: 11轮以上走向量检索 ----
-    if len(history) > 10:
+    # ---- 冷数据: 超过温窗口或达到 Token 触发线时走向量检索 ----
+    if len(history) > warm_window:
         hits = await long_term_store.search(state["user_query"], top_k=3)
         if hits:
             parts.append(f"[历史相关经验] {[h.payload.get('question') for h in hits]}")

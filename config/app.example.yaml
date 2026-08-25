@@ -178,7 +178,14 @@ api_access:
       description: 模型连通性测试
 
 llm_fallback_chain: ""
-context_max_tokens: 50000
+context_max_tokens: 0
+context_default_window: 128000
+context_compression_trigger_ratio: 0.80
+context_compression_target_ratio: 0.55
+context_hard_limit_ratio: 0.92
+context_prompt_reserve_tokens: 12000
+context_output_reserve_tokens: 8192
+context_summary_reserve_tokens: 1024
 context_hot_turns: 5
 context_warm_turns: 20
 context_summary_model: ""

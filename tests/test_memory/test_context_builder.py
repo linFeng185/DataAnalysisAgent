@@ -103,3 +103,65 @@ class TestContextBuilder:
         assert module.estimate_tokens("") == 0
         assert module.estimate_tokens("测试 abc") > 0
         logger.info("test_token_budget_keeps_only_latest_turn 完成")
+
+    # 方法作用：验证动态预算读取模型窗口并扣除输入输出预留。
+    # Args: self - pytest 测试类实例；monkeypatch - pytest 补丁工具。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    def test_context_budget_uses_model_window_and_hysteresis(self, monkeypatch) -> None:
+        """DeepSeek 1M 窗口应按 80% 触发、55% 回落并保留输出空间。"""
+        # Arrange
+        import src.memory.context_builder as module
+
+        monkeypatch.setattr(module, "get_settings", lambda: SimpleNamespace(
+            context_max_tokens=0,
+            context_prompt_reserve_tokens=12_000,
+            context_output_reserve_tokens=8_192,
+            context_summary_reserve_tokens=1_024,
+            context_compression_trigger_ratio=0.80,
+            context_compression_target_ratio=0.55,
+            context_hard_limit_ratio=0.92,
+        ))
+
+        # Act
+        budget = module.get_context_budget(1_000_000, model_id="deepseek-v4-pro")
+
+        # Assert
+        assert budget.context_window == 1_000_000
+        assert budget.usable_input_tokens == 979_808
+        assert budget.trigger_tokens == 783_846
+        assert budget.target_tokens == 538_894
+        assert budget.hard_limit_tokens == 901_424
+
+    # 方法作用：验证模型注册表中的上下文能力可以作为动态预算来源。
+    # Args: self - pytest 测试类实例；monkeypatch - pytest 补丁工具。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    def test_context_budget_reads_registered_model_window(self, monkeypatch) -> None:
+        """未显式传窗口时，DeepSeek V4 Pro 应解析为 1M。"""
+        # Arrange
+        import src.memory.context_builder as module
+
+        monkeypatch.setattr(module, "get_settings", lambda: SimpleNamespace(
+            context_max_tokens=0,
+            context_default_window=128_000,
+            context_prompt_reserve_tokens=12_000,
+            context_output_reserve_tokens=8_192,
+            context_summary_reserve_tokens=1_024,
+            context_compression_trigger_ratio=0.80,
+            context_compression_target_ratio=0.55,
+            context_hard_limit_ratio=0.92,
+        ))
+        monkeypatch.setattr(
+            module,
+            "_resolve_model_identity",
+            lambda model_id=None, model=None: ("deepseek-v4-pro", {
+                "context_window": 1_000_000,
+                "max_tokens_limit": 8_192,
+            }),
+        )
+
+        # Act
+        budget = module.get_context_budget(model_id="deepseek-v4-pro")
+
+        # Assert
+        assert budget.context_window == 1_000_000
+        assert budget.model_id == "deepseek-v4-pro"

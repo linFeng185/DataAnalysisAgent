@@ -18,7 +18,7 @@
 | 7.2.2 | ConversationTurn dataclass | 同上 | turn_id / user_query / generated_sql / execution_success / analysis_summary / chart_type / timestamp | 开发完成 |
 | 7.2.3 | 会话恢复 | `src/memory/checkpointer.py`、`src/api/routes/session.py` | 通过 thread_id 恢复状态；存储故障向上报告，不伪装为空历史 | 单测完成 |
 | 7.2.4 | 超时归档 (30分钟) | `src/memory/session_archive.py` | 超过 30 分钟未活动的会话 → 摘要后移入 sessions_archive 表 | 单测完成 |
-| 7.2.5 | 轮次限制 (50轮) | 同上 | 单会话达到 50 轮时自动摘要前 20 轮并保留近期历史 | 单测完成 |
+| 7.2.5 | Token 上下文压缩 | 同上 | 按当前模型 `context_window` 动态计算输入预算；达到 80% 触发摘要，回落到 55%，92% 硬保护；50 轮仅作为无法估算旧 checkpoint 的兼容兜底 | 单测完成 |
 | 7.2.6 | on_session_start() | 同上、`src/graph/nodes/prepare_turn.py` | 轮次启动按认证身份加载用户偏好和相关长期记忆 | 单测完成 |
 | 7.2.7 | archive_sessions() | 同上 | 原子迁移超过 30 天的 inactive 会话到 sessions_archive | 单测完成 |
 | 7.2.8 | summarize_session() | `src/memory/context_builder.py` | 规则拼接摘要文本用于归档 | 开发完成 |
@@ -55,10 +55,10 @@
 
 | # | 功能 | 文件 | 描述 | 状态 |
 |---|------|------|------|------|
-| 7.5.1 | build_llm_context() | `src/memory/context_builder.py` | 统一上下文裁剪: 热数据(3轮完整) → 温数据(4-10轮摘要) → 冷数据(ChromaDB 检索) | 开发完成 |
-| 7.5.2 | _summarize_turns() | 同上 | 规则拼接摘要 (Phase 1)，Phase 2 切 LLM | 开发完成 |
+| 7.5.1 | build_llm_context() | `src/memory/context_builder.py` | 统一按模型 Token 预算裁剪：热数据完整保留 → 温数据摘要 → 冷数据检索；支持租户模型上下文窗口和最新轮次最低保留 | 单测完成 |
+| 7.5.2 | _summarize_turns() | 同上 | 受 Token 上限保护的 LLM 摘要优先，失败时规则拼接回退 | 单测完成 |
 | 7.5.3 | 各 Node 上下文裁剪集成 | 各 Node 文件 | generate_sql / analyze_result Node 调用 build_llm_context()（generate_chart 为桩实现无需集成） | 开发完成 |
-| 7.5.4 | Prompt token 预算检查 | `src/memory/context_builder.py` | 确保每次 LLM 调用 ≤ 7000 tokens | 开发完成 |
-| 7.5.5 | 异步预计算摘要 | `src/memory/context_builder.py` | LLM 优先生成摘要 (_summarize_turns_llm)，失败回退规则拼接。session_archive 同步支持 | 开发完成 |
+| 7.5.4 | 动态 Prompt token 预算检查 | `src/memory/context_builder.py` | 扣除 Prompt/输出预留后按模型窗口计算 80% 触发、55% 目标和 92% 硬保护；显式上限仅能收紧预算 | 单测完成 |
+| 7.5.5 | 异步预计算摘要 | `src/memory/context_builder.py` | LLM 优先生成摘要 (_summarize_turns_llm)，失败回退规则拼接；摘要输入自身受 Token 上限保护，session_archive 同步支持 | 单测完成 |
 
 ---

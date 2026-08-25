@@ -60,6 +60,44 @@ class TestSessionArchive:
         assert await summarize_old_turns(SimpleNamespace(conversation_history=[])) == ""
         logger.info("test_summarize_old_turns_uses_rule_fallback 完成")
 
+    # 方法作用：验证会话压缩依据模型 Token 阈值而不是固定轮次数。
+    # Args: self - pytest 测试类实例；monkeypatch - pytest 补丁工具。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    async def test_compact_turn_history_uses_dynamic_token_threshold(self, monkeypatch) -> None:
+        """短轮次超过旧 50 轮时不应机械摘要，超出小窗口时应摘要旧轮次。"""
+        # Arrange
+        import src.memory.context_builder as builder
+        import src.memory.session_archive as module
+
+        settings = SimpleNamespace(
+            context_max_tokens=0,
+            context_default_window=128_000,
+            context_prompt_reserve_tokens=100,
+            context_output_reserve_tokens=100,
+            context_summary_reserve_tokens=80,
+            context_compression_trigger_ratio=0.80,
+            context_compression_target_ratio=0.55,
+            context_hard_limit_ratio=0.92,
+            context_hot_turns=2,
+        )
+        monkeypatch.setattr(builder, "get_settings", lambda: settings)
+        monkeypatch.setattr(module, "get_settings", lambda: settings)
+        monkeypatch.setattr(module, "summarize_old_turns", AsyncMock(return_value="摘要"))
+        short_history = [{"turn_id": i, "user_query": f"问题{i}"} for i in range(60)]
+        long_history = [
+            {"turn_id": i, "user_query": "问题" * 80, "analysis_summary": "结论" * 40}
+            for i in range(8)
+        ]
+
+        # Act
+        short_result = await module.compact_turn_history(short_history, context_window=128_000)
+        long_result = await module.compact_turn_history(long_history, context_window=1_000)
+
+        # Assert
+        assert short_result == short_history
+        assert long_result[0]["is_summary"] is True
+        assert long_result[-1]["turn_id"] == 7
+
     # 方法作用：验证会话启动加载记忆成功和故障回退路径。
     # Args: self - pytest 测试类实例；monkeypatch - pytest 补丁工具。
     # Returns: 无返回值，断言失败时由 pytest 报告。

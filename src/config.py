@@ -301,10 +301,17 @@ class Settings(BaseSettings):
     llm_fallback_chain: str = ""             # 降级链 "gpt-4o,claude-sonnet-4-6"
 
     # ---- 会话上下文裁剪 ----
-    # DeepSeek V4 有 1M 上下文，默认 50K 足够 20+ 轮完整对话，且不浪费 Token 成本
-    context_max_tokens: int = 50000   # Token 预算上限（DeepSeek V4: 1M, 本地模型: 酌情降低）
-    context_hot_turns: int = 5        # 热窗口: 最近 N 轮完整保留
-    context_warm_turns: int = 20      # 温窗口: N+1~M 轮压缩为摘要
+    # 0 表示不设置绝对上限，实际预算从当前模型 context_window 动态计算。
+    context_max_tokens: int = Field(default=0, ge=0)
+    context_default_window: int = Field(default=128_000, ge=1_024, le=10_000_000)
+    context_compression_trigger_ratio: float = Field(default=0.80, gt=0.5, lt=0.95)
+    context_compression_target_ratio: float = Field(default=0.55, gt=0.1, lt=0.8)
+    context_hard_limit_ratio: float = Field(default=0.92, gt=0.8, lt=0.99)
+    context_prompt_reserve_tokens: int = Field(default=12_000, ge=0, le=2_000_000)
+    context_output_reserve_tokens: int = Field(default=8_192, ge=0, le=2_000_000)
+    context_summary_reserve_tokens: int = Field(default=1_024, ge=128, le=100_000)
+    context_hot_turns: int = Field(default=5, ge=1, le=100)
+    context_warm_turns: int = Field(default=20, ge=0, le=1_000)
     context_summary_model: str = ""   # 压缩摘要专用模型，空则复用 cheap_llm
 
     # ---- 分析器 ----

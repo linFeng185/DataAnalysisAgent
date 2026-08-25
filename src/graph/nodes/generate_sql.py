@@ -482,7 +482,10 @@ async def _llm_generate(
     if conversation_history:
         from src.memory.context_builder import build_llm_context
         context_text = await build_llm_context(
-            conversation_history, query, node_name="generate_sql",
+            conversation_history,
+            query,
+            node_name="generate_sql",
+            model=llm,
         )
 
     from datetime import datetime, timezone
