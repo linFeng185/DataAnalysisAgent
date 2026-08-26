@@ -68,11 +68,34 @@ async def report_resolve_units(state: ReportWorkbenchState) -> dict[str, Any]:
     plan = state["plan"]
     requested = list(plan.requested_datasources)
     authorized = state.get("authorized_datasources", {}) or {}
-    datasource = requested[0] if requested else next(iter(authorized), "")
-    units = [
-        {"unit_id": unit.unit_id, "question": unit.question, "datasource": datasource, "dimensions": list(unit.dimensions), "metrics": list(unit.metrics), "columns": list(dict.fromkeys(unit.dimensions + unit.metrics))}
-        for unit in plan.analysis_units
-    ]
+    # 运行器显式传入授权映射时，缺失数据源必须阻断，不能把空映射当作“全部可用”。
+    authorization_supplied = "authorized_datasources" in state
+    logger.info(
+        "报表分析单元授权边界探针",
+        authorization_supplied=authorization_supplied,
+        authorized_datasource_names=sorted(authorized.keys()) if isinstance(authorized, dict) else [],
+        requested_datasources=requested,
+    )
+    default_datasource = requested[0] if requested else next(iter(authorized), "")
+    units: list[dict[str, Any]] = []
+    for unit in plan.analysis_units:
+        datasource = unit.datasource or default_datasource
+        authorized_entry = authorized.get(datasource) if isinstance(authorized, dict) else None
+        is_authorized = not authorization_supplied or (bool(datasource) and authorized_entry is not None)
+        units.append({
+            "unit_id": unit.unit_id,
+            "question": unit.question,
+            "datasource": datasource,
+            "time_range": unit.time_range.model_dump(mode="json"),
+            "dimensions": list(unit.dimensions),
+            "metrics": list(unit.metrics),
+            "columns": list(dict.fromkeys(unit.dimensions + unit.metrics)),
+            "authorization_status": "authorized" if is_authorized else "denied",
+            "authorization_error": "分析单元数据源未通过当前用户授权" if not is_authorized else "",
+        })
+    denied_count = sum(item["authorization_status"] == "denied" for item in units)
+    if denied_count:
+        logger.warning("报表分析单元授权阻断", denied_count=denied_count, unit_count=len(units))
     await _log_step(state, "report_resolve_units", "succeeded")
     return {"resolved_units": units}
 
@@ -85,12 +108,20 @@ async def report_retrieve_schema(state: ReportWorkbenchState) -> dict[str, Any]:
     authorized = state.get("authorized_datasources", {}) or {}
     resolved: list[dict[str, Any]] = []
     for unit in state.get("resolved_units", []):
+        if unit.get("authorization_status") == "denied":
+            resolved.append({**unit, "columns": [], "dimensions": [], "metrics": []})
+            continue
         access = authorized.get(unit.get("datasource", ""), {}) if isinstance(authorized, dict) else {}
         allowed = list(access.get("allowed_columns", []) or [])
         columns = list(unit.get("columns", []) or [])
         if allowed:
             columns = [column for column in columns if column in allowed]
-        resolved.append({**unit, "columns": columns})
+        resolved.append({
+            **unit,
+            "columns": columns,
+            "dimensions": [column for column in unit.get("dimensions", []) if column in columns or not allowed],
+            "metrics": [column for column in unit.get("metrics", []) if column in columns or not allowed],
+        })
     await _log_step(state, "report_retrieve_schema", "succeeded")
     return {"resolved_units": resolved}
 
@@ -101,13 +132,33 @@ async def report_retrieve_schema(state: ReportWorkbenchState) -> dict[str, Any]:
 async def report_plan_queries(state: ReportWorkbenchState) -> dict[str, Any]:
     await _log_step(state, "report_plan_queries", "running")
     plans: list[dict[str, Any]] = []
-    signatures: set[tuple[str, tuple[str, ...], tuple[str, ...]]] = set()
+    grouped: dict[tuple[str, tuple[str, ...], tuple[str, ...], tuple[str, str]], dict[str, Any]] = {}
     for unit in state.get("resolved_units", [])[:16]:
-        signature = (str(unit.get("datasource", "")), tuple(unit.get("dimensions", []) or []), tuple(unit.get("metrics", []) or []))
-        if signature in signatures:
+        time_range = unit.get("time_range", {}) or {}
+        if hasattr(time_range, "model_dump"):
+            time_range = time_range.model_dump(mode="json")
+        time_signature = (str(time_range.get("kind", "relative")), str(time_range.get("value", "90d"))) if isinstance(time_range, dict) else ("relative", "90d")
+        signature = (
+            str(unit.get("datasource", "")),
+            tuple(unit.get("dimensions", []) or []),
+            tuple(unit.get("metrics", []) or []),
+            time_signature,
+        )
+        existing = grouped.get(signature)
+        if existing is not None:
+            # 同一取数粒度只执行一次，但保留所有业务单元，后续将结果复制回各单元。
+            existing.setdefault("unit_ids", []).append(str(unit["unit_id"]))
             continue
-        signatures.add(signature)
-        plans.append({"unit_id": unit["unit_id"], "datasource": unit.get("datasource", ""), "question": unit.get("question", ""), "query_kind": "readonly_aggregate", "max_rows": 1000})
+        query_plan = {
+            "unit_id": unit["unit_id"],
+            "unit_ids": [str(unit["unit_id"])],
+            "datasource": unit.get("datasource", ""),
+            "question": unit.get("question", ""),
+            "query_kind": "readonly_aggregate",
+            "max_rows": 1000,
+        }
+        grouped[signature] = query_plan
+        plans.append(query_plan)
     await _log_step(state, "report_plan_queries", "succeeded")
     return {"query_plans": plans}
 
@@ -119,12 +170,19 @@ async def report_execute_units(state: ReportWorkbenchState) -> dict[str, Any]:
     await _log_step(state, "report_execute_units", "running")
     plan = state["plan"]
     units_by_id = {unit.unit_id: unit for unit in plan.analysis_units}
+    resolved_by_id = {str(item.get("unit_id", "")): item for item in state.get("resolved_units", [])}
     executor = state.get("execute_unit")
 
-    async def execute_one(query_plan: dict[str, Any]) -> UnitResult:
+    async def execute_one(query_plan: dict[str, Any]) -> list[UnitResult]:
         unit = units_by_id[query_plan["unit_id"]]
+        unit_ids = [str(item) for item in query_plan.get("unit_ids", [unit.unit_id]) if str(item) in units_by_id]
+        if not unit_ids:
+            unit_ids = [unit.unit_id]
+        resolved = resolved_by_id.get(unit.unit_id, {})
+        if resolved.get("authorization_status") == "denied":
+            return [UnitResult(unit_id=item, datasource=query_plan.get("datasource", ""), status="failed", error_code="DATASOURCE_FORBIDDEN", user_error_message="该分析单元使用的数据源未授权，已阻止执行") for item in unit_ids]
         if executor is None:
-            return UnitResult(unit_id=unit.unit_id, datasource=query_plan.get("datasource", ""), status="partial", warnings=["首期执行器未绑定，等待现有 SQL 工作流注入"], user_error_message="当前报表暂时没有可用的查询执行器")
+            return [UnitResult(unit_id=item, datasource=query_plan.get("datasource", ""), status="partial", warnings=["首期执行器未绑定，等待现有 SQL 工作流注入"], user_error_message="当前报表暂时没有可用的查询执行器") for item in unit_ids]
         for attempt in range(1, 4):
             try:
                 result = executor(unit, state)
@@ -135,21 +193,24 @@ async def report_execute_units(state: ReportWorkbenchState) -> dict[str, Any]:
                     if normalized.status == "failed" and normalized.error_code in {"TRANSIENT_DATABASE", "LLM_TRANSIENT", "TIMEOUT"} and attempt < 3:
                         await _log_step(state, "report_execute_units", "retry", normalized.user_error_message)
                         continue
-                    return normalized
+                    return [normalized.model_copy(update={"unit_id": item}) for item in unit_ids]
                 if isinstance(result, dict):
-                    return UnitResult.model_validate({"unit_id": unit.unit_id, "datasource": query_plan.get("datasource", ""), **result})
+                    normalized = UnitResult.model_validate({"unit_id": unit.unit_id, "datasource": query_plan.get("datasource", ""), **result})
+                    return [normalized.model_copy(update={"unit_id": item}) for item in unit_ids]
                 raise TypeError("分析执行器返回类型无效")
             except Exception as exc:
                 if attempt < 3:
                     await _log_step(state, "report_execute_units", "retry", "分析单元遇到瞬态错误，准备重试")
                     continue
                 logger.error("报表分析单元执行失败", unit_id=unit.unit_id, error=str(exc), exc_info=True)
-                return UnitResult(unit_id=unit.unit_id, datasource=query_plan.get("datasource", ""), status="failed", error_code="UNIT_EXECUTION_FAILED", user_error_message="该分析单元执行失败，请查看运行日志后重试")
+                return [UnitResult(unit_id=item, datasource=query_plan.get("datasource", ""), status="failed", error_code="UNIT_EXECUTION_FAILED", user_error_message="该分析单元执行失败，请查看运行日志后重试") for item in unit_ids]
 
-    results = list(await asyncio.gather(*(execute_one(item) for item in state.get("query_plans", []))))
+    grouped_results = await asyncio.gather(*(execute_one(item) for item in state.get("query_plans", [])))
+    results = [result for group in grouped_results for result in group]
     success_count = sum(item.status == "success" and bool(item.rows) for item in results)
     failed_count = sum(item.status == "failed" for item in results)
-    run_status = "succeeded" if failed_count == 0 and success_count == len(results) else ("partial" if success_count > 0 or failed_count < len(results) else "failed")
+    expected_count = len(plan.analysis_units)
+    run_status = "succeeded" if expected_count > 0 and failed_count == 0 and success_count == expected_count else ("partial" if success_count > 0 or failed_count < max(1, expected_count) else "failed")
     await _log_step(state, "report_execute_units", "partial" if run_status == "partial" else ("succeeded" if run_status == "succeeded" else "failed"))
     return {"unit_results": results, "run_status": run_status}
 
@@ -176,7 +237,10 @@ async def report_profile_results(state: ReportWorkbenchState) -> dict[str, Any]:
 # Returns: RelationEvidence 列表。
 async def report_build_relations(state: ReportWorkbenchState) -> dict[str, Any]:
     await _log_step(state, "report_build_relations", "running")
-    relations = build_relations(list(state.get("resolved_units", [])))
+    relations = build_relations(
+        list(state.get("resolved_units", [])),
+        list(state.get("unit_results", [])),
+    )
     await _log_step(state, "report_build_relations", "succeeded")
     return {"relations": relations}
 
@@ -188,11 +252,11 @@ async def report_synthesize_insights(state: ReportWorkbenchState) -> dict[str, A
     await _log_step(state, "report_synthesize_insights", "running")
     relations = list(state.get("relations", []))
     verified = [item for item in relations if item.evidence_level == "verified_relation"]
-    blocked = [item for item in relations if item.evidence_level == "unsupported_cross_source"]
+    blocked = [item for item in relations if item.evidence_level in {"unsupported_cross_source", "blocked"}]
     analysis = {
         "facts": [f"已完成 {len(state.get('unit_results', []))} 个分析单元"],
         "verified_relations": [item.model_dump(mode="json") for item in verified],
-        "limitations": ["关系证据不代表因果关系"] + (["跨数据源联合分析已降级，等待 Phase 2 受控分析器"] if blocked else []),
+        "limitations": ["关系证据不代表因果关系"] + (["跨数据源关系证据不足或被安全边界阻断，已分别分析"] if blocked else []),
     }
     await _log_step(state, "report_synthesize_insights", "succeeded")
     return {"cross_business_analysis": analysis}

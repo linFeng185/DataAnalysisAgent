@@ -104,6 +104,15 @@ def _default_api_access_policies() -> list[ApiAccessRouteConfig]:
             description="公开报表授权码解锁",
         ),
         ApiAccessRouteConfig(
+            id="report_shared_drilldown", path="/api/v1/report-workbench/shared/reports/{token}/drilldowns/{drilldown_id}",
+            path_type="template", methods=["POST"], auth="optional", access_log="audit",
+            description="公开报表快照明细钻取",
+        ),
+        ApiAccessRouteConfig(
+            id="report_permissions_me", path="/api/v1/report-workbench/permissions/me",
+            methods=["GET"], auth="jwt", access_log="standard", description="当前用户报表能力",
+        ),
+        ApiAccessRouteConfig(
             id="datasource_create", path="/api/v1/datasources", methods=["POST"],
             auth="jwt_or_admin_key", access_log="audit", description="创建数据源",
         ),

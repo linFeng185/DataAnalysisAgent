@@ -75,28 +75,48 @@ class ReportPermissionService:
     # Returns: 无返回值。
     def __init__(self, store: Any | None = None) -> None:
         self._store = store
-        self._user_capabilities: dict[int, frozenset[str]] = {}
+        self._user_capabilities: dict[tuple[int, int], frozenset[str]] = {}
 
     # 方法作用：判断当前身份是否具备指定报表能力。
     # Args: identity - 当前租户身份；capability - report.* 能力键。
     # Returns: 具备能力返回 True，否则返回 False。
     async def has(self, identity: Any, capability: str) -> bool:
         user_id = int(getattr(identity, "user_id", 0) or 0)
+        tenant_id = int(getattr(identity, "tenant_id", 0) or 0)
         role = str(getattr(identity, "role", "") or "")
-        override = self._user_capabilities.get(user_id)
+        override = self._user_capabilities.get((tenant_id, user_id))
+        if override is None:
+            # 兼容旧测试和未迁移的进程内覆盖项，生产配置优先使用租户键。
+            override = self._user_capabilities.get((0, user_id))
         if override is None and self._store is not None and hasattr(self._store, "get_user_capabilities"):
-            override = await self._store.get_user_capabilities(int(getattr(identity, "tenant_id", 0) or 0), user_id)
+            override = await self._store.get_user_capabilities(tenant_id, user_id)
         allowed = capability in (override if override is not None else _ROLE_CAPABILITIES.get(role, frozenset()))
         logger.debug("报表能力判断完成", user_id=user_id, role=role, capability=capability, allowed=allowed)
         return allowed
 
+    # 方法作用：返回当前身份可见的完整报表能力集合，供菜单和路由守卫使用。
+    # Args: identity - 当前租户身份。
+    # Returns: 排序后的 report.* 能力列表。
+    async def capabilities(self, identity: Any) -> list[str]:
+        user_id = int(getattr(identity, "user_id", 0) or 0)
+        tenant_id = int(getattr(identity, "tenant_id", 0) or 0)
+        role = str(getattr(identity, "role", "") or "")
+        override = self._user_capabilities.get((tenant_id, user_id))
+        if override is None:
+            override = self._user_capabilities.get((0, user_id))
+        if override is None and self._store is not None and hasattr(self._store, "get_user_capabilities"):
+            override = await self._store.get_user_capabilities(tenant_id, user_id)
+        result = sorted(str(item) for item in (override if override is not None else _ROLE_CAPABILITIES.get(role, frozenset())))
+        logger.debug("报表能力集合读取完成", user_id=user_id, role=role, capability_count=len(result))
+        return result
+
     # 方法作用：保存管理员配置的用户能力覆盖，供测试和内存降级使用。
-    # Args: user_id - 目标用户；capabilities - report.* 能力键列表。
+    # Args: user_id - 目标用户；capabilities - report.* 能力键列表；tenant_id - 可选租户 ID。
     # Returns: 无返回值。
-    def set_user_capabilities(self, user_id: int, capabilities: list[str]) -> None:
+    def set_user_capabilities(self, user_id: int, capabilities: list[str], tenant_id: int = 0) -> None:
         normalized = frozenset(item.strip() for item in capabilities if item.strip().startswith("report."))
-        self._user_capabilities[int(user_id)] = normalized
-        logger.info("报表用户能力覆盖已更新", user_id=int(user_id), capability_count=len(normalized))
+        self._user_capabilities[(int(tenant_id), int(user_id))] = normalized
+        logger.info("报表用户能力覆盖已更新", tenant_id=int(tenant_id), user_id=int(user_id), capability_count=len(normalized))
 
 
 class QuotaManager:
@@ -204,6 +224,9 @@ class QuotaManager:
     async def release_concurrent(self, identity: Any, amount: int = 1, timezone_name: str = "Asia/Shanghai") -> None:
         period_start, _ = self.period_bounds(timezone_name)
         key = (int(getattr(identity, "tenant_id", 0) or 0), int(getattr(identity, "user_id", 0) or 0), period_start.isoformat())
+        if self._store is not None and not bool(getattr(self._store, "_memory", True)) and hasattr(self._store, "release_concurrent_quota"):
+            await self._store.release_concurrent_quota(identity, amount=amount, timezone_name=timezone_name)
+            return
         usage = self._usage.get(key)
         if usage is not None:
             usage.concurrent_runs = max(0, usage.concurrent_runs - max(0, int(amount)))

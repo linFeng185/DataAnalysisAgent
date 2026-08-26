@@ -1,0 +1,104 @@
+"""报表工作台与公开查看器前端契约测试。"""
+
+from pathlib import Path
+
+
+class TestReportWorkbenchFrontend:
+    """覆盖功能 23.9：工作台、动态页面、权限守卫和公开查看器。"""
+
+    # 方法作用：验证工作台提供自然语言计划预览、确认创建和运行轮询入口。
+    # Args: self - pytest 测试类实例。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    def test_workbench_has_plan_preview_and_job_polling(self) -> None:
+        """工作台必须调用报表计划、任务和运行接口，不能退回固定 SQL 表单。"""
+        # Arrange
+        page = Path("frontend/src/pages/ReportWorkbenchPage.tsx").read_text(encoding="utf-8")
+        api = Path("frontend/src/api/reportWorkbench.ts").read_text(encoding="utf-8")
+
+        # Act / Assert
+        assert "previewReportPlan" in page
+        assert "createReportJob" in page
+        assert "fetchReportJob" in page
+        assert "fetchReportRuns" in page
+        assert "fetchReportRun" in page
+        assert "runSteps" in page
+        assert "loadShares" in Path("frontend/src/pages/ReportViewerPage.tsx").read_text(encoding="utf-8")
+        assert "revokeReportShare" in Path("frontend/src/pages/ReportViewerPage.tsx").read_text(encoding="utf-8")
+        assert "setInterval" in page
+        assert "REPORT_BASE = '/report-workbench'" in api
+        assert "`${REPORT_BASE}/plans`" in api
+        assert "`${REPORT_BASE}/jobs`" in api
+
+    # 方法作用：验证动态文档只使用注册块和后端签发数据清单渲染。
+    # Args: self - pytest 测试类实例。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    def test_document_renderer_handles_chart_table_and_drilldown(self) -> None:
+        """报表渲染器必须支持图表、表格和 Drilldown，且不执行任意 HTML。"""
+        # Arrange
+        renderer = Path("frontend/src/components/report/ReportDocumentRenderer.tsx").read_text(encoding="utf-8")
+
+        # Act / Assert
+        assert "ReportBlockType" in Path("frontend/src/types/report.ts").read_text(encoding="utf-8")
+        assert "ReactECharts" in renderer
+        assert "dataManifest" in renderer
+        assert "onDrilldown" in renderer
+        assert "dangerouslySetInnerHTML" not in renderer
+
+    # 方法作用：验证公开查看器支持授权码解锁和服务端快照 Drilldown。
+    # Args: self - pytest 测试类实例。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    def test_shared_viewer_uses_short_lived_session(self) -> None:
+        """公开页面不能把授权码写入持久化存储，明细请求必须携带短时会话。"""
+        # Arrange
+        page = Path("frontend/src/pages/SharedReportPage.tsx").read_text(encoding="utf-8")
+        api = Path("frontend/src/api/reportWorkbench.ts").read_text(encoding="utf-8")
+
+        # Act / Assert
+        assert "unlockSharedReport" in page
+        assert "sessionToken" in page
+        assert "fetchSharedDrilldown" in page
+        assert "X-Report-Share-Session" in api
+        assert "localStorage" not in page
+
+    # 方法作用：验证应用路由包含受保护报表入口和无需登录的公开入口。
+    # Args: self - pytest 测试类实例。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    def test_app_routes_report_permissions_and_public_share(self) -> None:
+        """私有查看器需要能力守卫，公开分享路由不能被登录重定向拦截。"""
+        # Arrange
+        app = Path("frontend/src/App.tsx").read_text(encoding="utf-8")
+
+        # Act / Assert
+        assert "fetchReportPermissions" in app
+        assert "ReportRoute" in app
+        assert 'path="/report-workbench"' in app
+        assert 'path="/reports/:reportId"' in app
+        assert 'path="/shared/reports/:token"' in app
+
+    # 方法作用：验证报表权限探针异常时前端按默认拒绝处理，避免故障期间暴露入口。
+    # Args: self - pytest 测试类实例。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    def test_report_permission_probe_fails_closed(self) -> None:
+        """权限接口失败不能按用户角色放行菜单或路由。"""
+        # Arrange
+        app = Path("frontend/src/App.tsx").read_text(encoding="utf-8")
+
+        # Act / Assert
+        assert "setAllowed(false)" in app
+        assert "setReportMenuAllowed(false)" in app
+        assert "reportMenuAllowed === true" in app
+
+    # 方法作用：验证报表布局在桌面、平板和移动端使用稳定 Grid 断点。
+    # Args: self - pytest 测试类实例。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    def test_report_layout_has_responsive_grid_contract(self) -> None:
+        """动态块不能依赖固定单列布局或在窄屏发生横向溢出。"""
+        # Arrange
+        styles = Path("frontend/src/index.css").read_text(encoding="utf-8")
+
+        # Act / Assert
+        assert "report-section-grid" in styles
+        assert "--report-desktop-span" in styles
+        assert "--report-tablet-span" in styles
+        assert "--report-mobile-span" in styles
+        assert ".report-workbench-grid" in styles

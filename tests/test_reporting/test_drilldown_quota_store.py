@@ -97,9 +97,147 @@ class TestReportQuota:
         service.set_user_capabilities(8, ["report.menu", "report.create"])
         assert await service.has(SimpleNamespace(role="viewer", user_id=8, tenant_id=3), "report.create")
 
+    # 方法作用：验证 PostgreSQL 用量释放委托给持久化 Store，避免并发槽泄漏。
+    # Args: self - pytest 测试类实例。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    @pytest.mark.asyncio
+    async def test_persistent_concurrency_release_is_delegated(self) -> None:
+        """非内存 Store 应收到并发槽释放调用。"""
+        # Arrange
+        from src.reporting.quota import QuotaManager
+
+        class PersistentStore:
+            _memory = False
+
+            def __init__(self) -> None:
+                self.calls: list[tuple[int, str]] = []
+
+            # 方法作用：记录持久化并发槽释放请求。
+            # Args: identity - 当前身份；amount - 释放数量；timezone_name - 周期时区。
+            # Returns: 异步完成后无返回值。
+            async def release_concurrent_quota(self, identity, amount=1, timezone_name="Asia/Shanghai") -> None:
+                self.calls.append((amount, timezone_name))
+
+        store = PersistentStore()
+        manager = QuotaManager(store=store)
+        identity = SimpleNamespace(tenant_id=3, user_id=7, role="analyst")
+
+        # Act
+        await manager.release_concurrent(identity, amount=2, timezone_name="Asia/Shanghai")
+
+        # Assert
+        assert store.calls == [(2, "Asia/Shanghai")]
+
 
 class TestReportStore:
     """覆盖功能 23.2、23.7、23.10：内存 Store 的幂等、运行与审计。"""
+
+    # 方法作用：验证 SQLite 持久化模拟认领后会推进任务状态，避免重复认领同一任务。
+    # Args: self - pytest 测试类实例。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    @pytest.mark.asyncio
+    async def test_sqlite_claim_updates_status_with_application_lock(self) -> None:
+        """SQLite 方言不使用 SKIP LOCKED，但必须通过条件更新完成认领。"""
+        # Arrange
+        from src.reporting.models import AnalysisUnit, ReportPlan
+        from src.reporting.store import ReportStore
+
+        class FakeTransaction:
+            # 方法作用：提供连接事务上下文的测试替身。
+            # Args: self - 测试事务实例。
+            # Returns: 异步上下文管理器自身。
+            async def __aenter__(self):
+                return self
+
+            # 方法作用：结束测试事务上下文。
+            # Args: self - 测试事务实例；exc_type/exc/value - 异常信息。
+            # Returns: False 让异常继续传播。
+            async def __aexit__(self, exc_type, exc, value):
+                return False
+
+        class FakeConnection:
+            # 方法作用：初始化一个只含单条到期任务的 SQLite 连接替身。
+            # Args: self - 测试连接实例。
+            # Returns: 无返回值。
+            def __init__(self) -> None:
+                self.row = {
+                    "id": "job-1", "tenant_id": 3, "user_id": 7, "prompt": "销售报表",
+                    "plan_json": ReportPlan(analysis_units=[AnalysisUnit(question="销售")]).model_dump(mode="json"),
+                    "status": "queued", "runs_started": 0,
+                }
+                self.update_calls = 0
+
+            # 方法作用：接收 RLS 身份初始化语句，不执行真实数据库操作。
+            # Args: self - 测试连接；query - SQL；args - 参数。
+            # Returns: 无返回值。
+            async def execute(self, query, *args):
+                return "OK"
+
+            # 方法作用：返回当前仍处于 queued 且到期的任务。
+            # Args: self - 测试连接；query - SQL；args - 参数。
+            # Returns: 到期任务行列表。
+            async def fetch(self, query, *args):
+                return [dict(self.row)] if self.row["status"] == "queued" else []
+
+            # 方法作用：执行条件状态更新并返回成功认领的任务行。
+            # Args: self - 测试连接；query - SQL；args - 任务 ID。
+            # Returns: 更新后的任务行或 None。
+            async def fetchrow(self, query, *args):
+                self.update_calls += 1
+                if self.row["status"] != "queued":
+                    return None
+                self.row["status"] = "running"
+                return dict(self.row)
+
+            # 方法作用：提供事务上下文。
+            # Args: self - 测试连接实例。
+            # Returns: FakeTransaction。
+            def transaction(self):
+                return FakeTransaction()
+
+        class FakeAcquire:
+            # 方法作用：提供连接池 acquire 上下文。
+            # Args: connection - 测试连接。
+            # Returns: 无返回值。
+            def __init__(self, connection) -> None:
+                self.connection = connection
+
+            # 方法作用：进入连接池上下文。
+            # Args: self - acquire 上下文。
+            # Returns: 测试连接。
+            async def __aenter__(self):
+                return self.connection
+
+            # 方法作用：退出连接池上下文。
+            # Args: self - acquire 上下文；exc_type/exc/value - 异常信息。
+            # Returns: False 让异常继续传播。
+            async def __aexit__(self, exc_type, exc, value):
+                return False
+
+        class FakePool:
+            # 方法作用：初始化带单连接的测试连接池。
+            # Args: self - 测试连接池实例。
+            # Returns: 无返回值。
+            def __init__(self) -> None:
+                self.connection = FakeConnection()
+
+            # 方法作用：借出测试连接。
+            # Args: self - 测试连接池实例。
+            # Returns: acquire 上下文。
+            def acquire(self):
+                return FakeAcquire(self.connection)
+
+        pool = FakePool()
+        store = ReportStore(pg_pool=pool, dialect="sqlite", memory=False)
+
+        # Act
+        first = await store.claim_due_jobs()
+        second = await store.claim_due_jobs()
+
+        # Assert
+        assert [item.id for item in first] == ["job-1"]
+        assert second == []
+        assert pool.connection.update_calls == 1
 
     # 方法作用：验证同一幂等键不会重复创建报表任务。
     # Args: self - pytest 测试类实例。
@@ -127,3 +265,45 @@ class TestReportStore:
         assert len(steps) == 1
         assert steps[0]["user_error_message"] == "查询暂时失败"
         assert steps[0]["internal_error_message"] == "connection secret"
+
+    # 方法作用：验证任务可以读取其最新不可变报表版本，供前端运行完成后跳转。
+    # Args: self - pytest 测试类实例。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    @pytest.mark.asyncio
+    async def test_latest_version_lookup_by_job(self) -> None:
+        """同一任务有多个版本时应返回版本号最大的可见版本。"""
+        # Arrange
+        from src.reporting.models import AnalysisUnit, ReportPlan
+        from src.reporting.store import ReportStore
+
+        store = ReportStore()
+        identity = SimpleNamespace(tenant_id=3, user_id=7, role="analyst")
+        plan = ReportPlan(analysis_units=[AnalysisUnit(question="销售趋势")])
+        job = await store.create_job(identity, "生成销售报表", plan, "latest-version")
+        first_run = await store.create_run(job.id, identity)
+        second_run = await store.create_run(job.id, identity, attempt=2)
+        first = await store.persist_version(
+            job.id,
+            first_run.id,
+            identity,
+            {"report_id": "report-latest", "version": 1, "sections": []},
+            {},
+            None,
+        )
+        second = await store.persist_version(
+            job.id,
+            second_run.id,
+            identity,
+            {"report_id": "report-latest", "version": 2, "sections": []},
+            {},
+            None,
+        )
+
+        # Act
+        latest = await store.get_latest_version_for_job(job.id, identity)
+
+        # Assert
+        assert first.version == 1
+        assert second.version == 2
+        assert latest is not None
+        assert latest.version == 2

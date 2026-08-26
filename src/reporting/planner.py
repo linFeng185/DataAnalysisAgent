@@ -214,7 +214,16 @@ class ReportPlanner:
             if isinstance(result, dict) and isinstance(result.get("analysis_units"), list):
                 proposed = [AnalysisUnit.model_validate(item) for item in result["analysis_units"][:12]]
                 if proposed:
-                    plan.analysis_units = proposed
+                    allowed_datasources = set(plan.requested_datasources)
+                    if any(unit.datasource and unit.datasource not in allowed_datasources for unit in proposed):
+                        raise ValueError("结构化模型尝试使用未授权数据源")
+                    # 重新走完整计划校验，避免直接给 Pydantic 实例赋值绕过数据源和 unit_id 约束。
+                    candidate_data = plan.model_dump(mode="json")
+                    candidate_data["analysis_units"] = [unit.model_dump(mode="json") for unit in proposed]
+                    candidate = ReportPlan.model_validate(candidate_data)
+                    if set(candidate.requested_datasources) != allowed_datasources:
+                        raise ValueError("结构化模型改变了已授权数据源集合")
+                    plan = candidate
         except Exception as exc:
             logger.warning("报表结构化模型补充失败，回退规则计划", error_type=type(exc).__name__)
         return plan

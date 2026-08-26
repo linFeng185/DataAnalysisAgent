@@ -29,6 +29,7 @@ LLM 驱动的数据分析智能体。用自然语言提问，自动完成：轮�
 │   ├── optimization/     ⑨.1 确定性 SQL 优化建议核心，不执行 DDL
 │   ├── market/           ⑩ 行情 Provider 与 PostgreSQL 持久化（当前 Tushare/A 股）
 │   ├── actions/          ⑪ 受控外部动作（人工确认、幂等、审计）
+│   ├── reporting/        ⑧.1 报表工作台 — 自然语言计划、任务运行、关系证据、动态 DSL、分享与配额
 │   ├── security/         ⑫ 安全模块 — API/IP 策略 + SQL 统一执行 + 脱敏 + 限流 + 审计 + 出站策略
 │   ├── db/               ⑬ 状态库基础设施 — 版本化迁移 + URL 工具
 │   ├── mcp_client/       ⑭ MCP 集成 — 客户端管理 + 工具暴露
@@ -259,7 +260,11 @@ checksum。执行器同时兼容历史 LF/CRLF 登记值，避免 Git 跨平台�
 
 ## 前端
 
-`frontend/` — React 18 + TypeScript 5 + Ant Design 5 + ECharts。登录固定输入 `tenant_code + username + password`，不展示公开注册；登录后按角色展示业务菜单。`AdminPage` 对 super_admin 展示租户、厂商能力字段编辑器和可物理删除的平台模型目录，并以精确确认文本物理删除非默认租户；对 tenant_admin 展示当前租户用户、命名连接和默认模型。`ChatPage` 只提交当前租户可见的连接与模型，并按模型能力展示推理开关和深度。`AutomationPage` 提供任务说明、创建、暂停/恢复、立即运行、运行记录、删除和站内通知视图。
+`frontend/` — React 18 + TypeScript 5 + Ant Design 5 + ECharts。登录固定输入 `tenant_code + username + password`，不展示公开注册；登录后按角色展示业务菜单。`AdminPage` 对 super_admin 展示租户、厂商能力字段编辑器和可物理删除的平台模型目录，并以精确确认文本物理删除非默认租户；对 tenant_admin 展示当前租户用户、命名连接和默认模型。`ChatPage` 只提交当前租户可见的连接与模型，并按模型能力展示推理开关和深度。`AutomationPage` 提供兼容任务说明、创建、暂停/恢复、立即运行、运行记录、删除和站内通知视图。`ReportWorkbenchPage` 负责自然语言计划预览、任务排队和权限/配额提示；`ReportViewerPage` 展示版本化动态 DSL、快照 Drilldown、运行节点日志和分享治理；`SharedReportPage` 只读取脱敏快照并通过短时授权会话访问分享 Drilldown。
+
+### 报表工作台 — `src/reporting/`
+
+`planner.py` 将自然语言解析为可确认的 `ReportPlan`；`store.py` 持久化 Job/Run/Step/Version/Share、配额策略和访问审计，并按 PostgreSQL/SQLite 方言选择认领策略；`runner.py` 与 `src/graph/subgraphs/report_workbench.py` 执行单数据源多分析单元；`relations.py` 只消费授权投影和有界样本生成关系证据，阻断低匹配率或多对多膨胀；`document.py` 校验动态页面 DSL 和 ECharts 白名单；`drilldown.py` 仅允许服务端签发的快照过滤；`sharing.py` 负责 token、授权码和用户范围访问控制；`quota.py` 执行菜单能力、周期次数、并发、查询、Token 与分享限额。
 
 ## 快速上手
 

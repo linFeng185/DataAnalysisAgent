@@ -10,6 +10,34 @@ body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sa
 .automation-form-row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); width: 100%; gap: 16px; }
 .automation-form-row > .ant-space-item { min-width: 0; }
 .automation-notification-body { white-space: pre-wrap; overflow-wrap: anywhere; margin-bottom: 0 !important; }
+.report-workbench-page { width: min(1440px, 100%); margin: 0 auto; padding: 24px; box-sizing: border-box; }
+.report-workbench-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 20px; flex-wrap: wrap; }
+.report-workbench-grid { display: grid; grid-template-columns: minmax(280px, 0.8fr) minmax(0, 1.7fr); gap: 20px; align-items: start; }
+.report-workbench-panel { min-width: 0; }
+.report-plan-summary { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin: 16px 0; }
+.report-plan-unit { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.report-job-row { cursor: pointer; }
+.report-job-row:hover { background: #fafafa; }
+.report-status-line { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.report-document { width: min(1440px, 100%); margin: 0 auto; padding: 24px; box-sizing: border-box; }
+.report-document-header { border-bottom: 1px solid #f0f0f0; padding-bottom: 18px; margin-bottom: 22px; }
+.report-document-header .ant-typography { margin-bottom: 6px; }
+.report-document-limitations { margin-bottom: 22px; }
+.report-section { scroll-margin-top: 20px; margin: 0 0 30px; }
+.report-section-heading { margin-bottom: 12px; }
+.report-section-heading .ant-typography { margin: 0 0 4px; }
+.report-section-grid { display: grid; grid-template-columns: repeat(12, minmax(0, 1fr)); gap: 16px; align-items: start; }
+.report-block { grid-column: span var(--report-desktop-span, 12); min-width: 0; }
+.report-block .ant-card { height: 100%; overflow: hidden; }
+.report-block .ant-card-body { min-width: 0; }
+.report-relationship-content .ant-typography { margin-bottom: 6px; }
+.report-share-url { word-break: break-all; }
+
+@media (max-width: 1100px) {
+  .report-workbench-grid { grid-template-columns: minmax(0, 1fr); }
+  .report-section-grid { grid-template-columns: repeat(8, minmax(0, 1fr)); }
+  .report-block { grid-column: span var(--report-tablet-span, 8); }
+}
 
 @media (max-width: 767px) {
   .app-header { padding: 0 8px !important; }
@@ -44,4 +72,11 @@ body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sa
   .automation-page .ant-card-head { padding: 0 12px; }
   .automation-page .ant-card-body { padding: 12px; }
   .automation-form-row { grid-template-columns: minmax(0, 1fr); gap: 0; }
+  .report-workbench-page, .report-document { padding: 14px 10px; }
+  .report-workbench-toolbar { align-items: flex-start; }
+  .report-plan-summary { grid-template-columns: minmax(0, 1fr); }
+  .report-section-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; }
+  .report-block { grid-column: span var(--report-mobile-span, 4); }
+  .report-block .ant-card-head { padding: 0 12px; }
+  .report-block .ant-card-body { padding: 12px; }
 }

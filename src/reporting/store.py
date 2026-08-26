@@ -257,9 +257,9 @@ class ReportStore:
         return [self._to_run(row) for row in rows]
 
     # 方法作用：记录节点级运行日志并区分内部错误与用户可读错误。
-    # Args: run_id - 运行 ID；node - 节点名；status - 节点状态；attempt - 节点尝试次数；input_hash/output_ref - 非敏感引用；error_code/internal_error/user_error - 错误字段。
+    # Args: run_id - 运行 ID；node - 节点名；status - 节点状态；attempt - 节点尝试次数；input_hash/output_ref - 非敏感引用；error_code/internal_error/user_error - 错误字段；identity - 可选当前身份。
     # Returns: 无返回值。
-    async def append_step(self, run_id: str, node: str, status: str, *, attempt: int = 1, input_hash: str = "", output_ref: str = "", error_code: str = "", internal_error: str = "", user_error: str = "") -> None:
+    async def append_step(self, run_id: str, node: str, status: str, *, attempt: int = 1, input_hash: str = "", output_ref: str = "", error_code: str = "", internal_error: str = "", user_error: str = "", identity: Any | None = None) -> None:
         row = {"id": str(uuid4()), "run_id": str(run_id), "seq": len(self._steps.get(str(run_id), [])) + 1, "node": node, "status": status, "attempt": int(attempt), "input_hash": input_hash, "output_ref": output_ref, "error_code": error_code, "internal_error_message": internal_error[:2000], "user_error_message": user_error[:500], "started_at": datetime.now(timezone.utc), "finished_at": datetime.now(timezone.utc)}
         if self._memory:
             self._steps.setdefault(str(run_id), []).append(row)
@@ -268,7 +268,10 @@ class ReportStore:
         from src.memory.pg_pool import pg_pool_connection
 
         run = self._runs.get(str(run_id), {})
-        async with pg_pool_connection(pool, int(run.get("tenant_id", 0)), int(run.get("user_id", 0)), "super_admin") as connection:
+        tenant_id = int(getattr(identity, "tenant_id", run.get("tenant_id", 0)) or 0)
+        user_id = int(getattr(identity, "user_id", run.get("user_id", 0)) or 0)
+        role = str(getattr(identity, "role", "super_admin") or "super_admin")
+        async with pg_pool_connection(pool, tenant_id, user_id, role) as connection:
             await connection.execute(
                 "INSERT INTO report_run_steps (id,run_id,seq,node,status,attempt,input_hash,output_ref,error_code,internal_error_message,user_error_message,started_at,finished_at) VALUES ($1::uuid,$2::uuid,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)",
                 row["id"], run_id, row["seq"], node, status, int(attempt), input_hash, output_ref, error_code, internal_error[:2000], user_error[:500], row["started_at"], row["finished_at"],
@@ -334,6 +337,36 @@ class ReportStore:
         role = str(getattr(identity, "role", "") or "")
         async with pg_pool_connection(pool, tenant_id, user_id, role) as connection:
             row = await connection.fetchrow("SELECT v.* FROM report_versions v JOIN report_jobs j ON j.id=v.job_id WHERE v.report_id=$1::uuid AND v.tenant_id=$2 AND v.deleted_at IS NULL AND ($3 IN ('super_admin','tenant_admin') OR j.user_id=$4) ORDER BY v.is_latest DESC,v.version DESC LIMIT 1", str(report_id), tenant_id, role, user_id)
+        return self._to_version(row) if row else None
+
+    # 方法作用：按任务读取当前身份可访问的最新不可变报表版本。
+    # Args: job_id - 报表任务 ID；identity - 当前租户身份。
+    # Returns: 最新 ReportVersionRecord，不存在或越权时返回 None。
+    async def get_latest_version_for_job(self, job_id: str, identity: Any) -> ReportVersionRecord | None:
+        if self._memory:
+            rows = [
+                row
+                for row in self._versions.values()
+                if str(row.get("job_id")) == str(job_id)
+                and row.get("deleted_at") is None
+                and self._visible(row, identity)
+            ]
+            row = max(rows, key=lambda item: int(item.get("version", 0) or 0), default=None)
+            return self._to_version(row) if row else None
+        pool = await self._pool()
+        from src.memory.pg_pool import pg_pool_connection
+
+        tenant_id = int(getattr(identity, "tenant_id", 0) or 0)
+        user_id = int(getattr(identity, "user_id", 0) or 0)
+        role = str(getattr(identity, "role", "") or "")
+        async with pg_pool_connection(pool, tenant_id, user_id, role) as connection:
+            row = await connection.fetchrow(
+                "SELECT v.* FROM report_versions v JOIN report_jobs j ON j.id=v.job_id "
+                "WHERE v.job_id=$1::uuid AND v.tenant_id=$2 AND v.deleted_at IS NULL "
+                "AND ($3 IN ('super_admin','tenant_admin') OR j.user_id=$4) "
+                "ORDER BY v.version DESC LIMIT 1",
+                str(job_id), tenant_id, role, user_id,
+            )
         return self._to_version(row) if row else None
 
     # 方法作用：按版本 ID 读取公开分享引用的不可变页面。
@@ -446,10 +479,21 @@ class ReportStore:
     async def get_user_capabilities(self, tenant_id: int, user_id: int) -> list[str] | None:
         if self._memory:
             return self._capabilities.get((int(tenant_id), int(user_id)))
-        pool = await self._pool()
-        async with pool.acquire() as connection:
-            value = await connection.fetchval("SELECT capabilities FROM report_user_permissions WHERE tenant_id=$1 AND user_id=$2", tenant_id, user_id)
-        return list(value or []) if value is not None else None
+        try:
+            pool = await self._pool()
+            async with pool.acquire() as connection:
+                value = await connection.fetchval("SELECT capabilities FROM report_user_permissions WHERE tenant_id=$1 AND user_id=$2", tenant_id, user_id)
+            return list(value or []) if value is not None else None
+        except Exception as exc:
+            # 迁移尚未执行或数据库暂不可用时，能力服务回退到角色默认值，不阻断基础登录页面。
+            logger.warning(
+                "报表用户能力持久化读取失败，回退角色默认值",
+                tenant_id=int(tenant_id),
+                user_id=int(user_id),
+                error_type=type(exc).__name__,
+                exc_info=True,
+            )
+            return None
 
     # 方法作用：保存租户管理员配置的用户报表能力。
     # Args: tenant_id - 当前租户；user_id - 目标用户；capabilities - report.* 能力列表。
@@ -503,6 +547,46 @@ class ReportStore:
                 row = await connection.fetchrow("UPDATE report_quota_usage SET jobs_created=jobs_created+$3,runs_started=runs_started+$4,concurrent_runs=concurrent_runs+$5,analysis_units=analysis_units+$6,queries=queries+$7,rows=rows+$8,llm_tokens=llm_tokens+$9,share_links=share_links+$10 WHERE tenant_id=$1 AND user_id=$2 AND period_start=$11 AND jobs_created+$3 <= $12 AND runs_started+$4 <= $13 AND concurrent_runs+$5 <= $14 AND analysis_units+$6 <= $15 AND queries+$7 <= $16 AND rows+$8 <= $17 AND llm_tokens+$9 <= $18 AND share_links+$10 <= $19 RETURNING *", tenant_id, user_id, int(increments.get("jobs", 0)), int(increments.get("runs", 0)), int(increments.get("concurrent", 0)), int(increments.get("units", 0)), int(increments.get("queries", 0)), int(increments.get("rows", 0)), int(increments.get("tokens", 0)), int(increments.get("shares", 0)), period_start, fields.get("max_jobs_created", 20), fields.get("max_runs_started", 50), fields.get("max_concurrent_runs", 2), fields.get("max_analysis_units_per_run", 12), fields.get("max_queries_per_run", 16), fields.get("max_rows_per_query", 100000), fields.get("max_llm_tokens", 200000), fields.get("max_share_links", 20))
         return dict(row) if row else None
 
+    # 方法作用：释放 PostgreSQL 周期用量中的并发运行槽，避免失败或完成后永久占用。
+    # Args: identity - 当前租户身份；amount - 释放槽位数；timezone_name - 周期时区。
+    # Returns: 无返回值。
+    async def release_concurrent_quota(self, identity: Any, amount: int = 1, timezone_name: str = "Asia/Shanghai") -> None:
+        bounded = max(0, int(amount))
+        if bounded == 0:
+            return
+        if self._memory:
+            return
+        from src.memory.pg_pool import pg_pool_connection
+
+        period_start, _ = self._period_bounds(timezone_name)
+        tenant_id = int(getattr(identity, "tenant_id", 0) or 0)
+        user_id = int(getattr(identity, "user_id", 0) or 0)
+        pool = await self._pool()
+        async with pg_pool_connection(pool, tenant_id, user_id, str(getattr(identity, "role", "") or "")) as connection:
+            await connection.execute(
+                "UPDATE report_quota_usage SET concurrent_runs=GREATEST(0, concurrent_runs-$3) WHERE tenant_id=$1 AND user_id=$2 AND period_start=$4",
+                tenant_id,
+                user_id,
+                bounded,
+                period_start,
+            )
+
+    # 方法作用：按租户时区计算当前自然月周期起止时间，供持久化配额读写复用。
+    # Args: timezone_name - IANA 时区名称。
+    # Returns: UTC 周期起点和终点。
+    @staticmethod
+    def _period_bounds(timezone_name: str = "Asia/Shanghai") -> tuple[datetime, datetime]:
+        from zoneinfo import ZoneInfo
+
+        try:
+            zone = ZoneInfo(timezone_name)
+        except Exception:
+            zone = ZoneInfo("Asia/Shanghai")
+        local_now = datetime.now(timezone.utc).astimezone(zone)
+        start_local = local_now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        next_local = start_local.replace(year=start_local.year + 1, month=1) if start_local.month == 12 else start_local.replace(month=start_local.month + 1)
+        return start_local.astimezone(timezone.utc), next_local.astimezone(timezone.utc)
+
     # 方法作用：按数据库方言认领到期任务，PG 使用 SKIP LOCKED，SQLite 使用应用层锁。
     # Args: limit - 最大认领数量。
     # Returns: 本实例认领的任务摘要列表。
@@ -520,7 +604,20 @@ class ReportStore:
 
         async with pg_pool_connection(pool, 0, 0, "super_admin") as connection:
             if self.dialect in {"sqlite", "sqlite3"}:
-                rows = await connection.fetch("SELECT * FROM report_jobs WHERE status='queued' AND next_run_at<=CURRENT_TIMESTAMP ORDER BY next_run_at LIMIT $1", bounded)
+                # SQLite 没有 SKIP LOCKED；应用锁配合 queued 条件更新，确保同一进程内只认领一次。
+                async with self._claim_lock:
+                    candidates = await connection.fetch(
+                        "SELECT * FROM report_jobs WHERE status='queued' AND next_run_at<=CURRENT_TIMESTAMP ORDER BY next_run_at LIMIT $1",
+                        bounded,
+                    )
+                    rows = []
+                    for candidate in candidates:
+                        claimed = await connection.fetchrow(
+                            "UPDATE report_jobs SET status='running',updated_at=CURRENT_TIMESTAMP WHERE id=$1 AND status='queued' RETURNING *",
+                            candidate["id"],
+                        )
+                        if claimed is not None:
+                            rows.append(claimed)
             else:
                 rows = await connection.fetch("WITH due AS (SELECT id FROM report_jobs WHERE status='queued' AND next_run_at<=NOW() ORDER BY next_run_at FOR UPDATE SKIP LOCKED LIMIT $1) UPDATE report_jobs SET status='running',updated_at=NOW() FROM due WHERE report_jobs.id=due.id RETURNING report_jobs.*", bounded)
         return [self._to_job(row) for row in rows]

@@ -61,20 +61,32 @@ class ReportRunner:
             await self.store.update_job_status(job_id, identity, "running")
 
             async def step_logger(node: str, status: str, error: str = "") -> None:
-                await self.store.append_step(run.id, node, status, error_code="NODE_FAILED" if status == "failed" else "", user_error=error)
+                await self.store.append_step(run.id, node, status, error_code="NODE_FAILED" if status == "failed" else "", user_error=error, identity=identity)
                 await self.store.update_run(run.id, identity, last_node=node)
 
             from src.graph.subgraphs.report_workbench import build_report_workbench_subgraph
 
+            effective_authorized = authorized_datasources
+            if effective_authorized is None and hasattr(identity, "authorized_datasources"):
+                effective_authorized = identity.authorized_datasources
+            logger.info(
+                "报表子图授权参数写入",
+                job_id=job_id,
+                authorized_datasource_names=sorted((effective_authorized or {}).keys()),
+                authorized_datasources_is_none=effective_authorized is None,
+                injected_executor=self.execute_unit is not None,
+            )
             graph = build_report_workbench_subgraph()
-            result = await graph.ainvoke({
+            graph_state: dict[str, Any] = {
                 "plan": plan,
                 "identity": {"tenant_id": int(getattr(identity, "tenant_id", 0) or 0), "user_id": int(getattr(identity, "user_id", 0) or 0), "role": str(getattr(identity, "role", "") or "")},
-                "authorized_datasources": authorized_datasources or getattr(identity, "authorized_datasources", {}) or {},
                 "execute_unit": self.execute_unit or self._default_execute_unit,
                 "step_logger": step_logger,
                 "report_id": None,
-            })
+            }
+            if effective_authorized is not None:
+                graph_state["authorized_datasources"] = effective_authorized
+            result = await graph.ainvoke(graph_state)
             run_status = str(result.get("run_status", "failed"))
             unit_results = list(result.get("unit_results", []) or [])
             row_count = sum(len(item.rows) for item in unit_results if isinstance(item, UnitResult))
@@ -102,7 +114,7 @@ class ReportRunner:
         except Exception as exc:
             logger.error("报表运行失败", job_id=job_id, run_id=run.id, error=str(exc), exc_info=True)
             message = "报表生成失败，请查看运行日志后重试"
-            await self.store.append_step(run.id, "report_runner", "failed", error_code="INTERNAL_ERROR", internal_error=str(exc), user_error=message)
+            await self.store.append_step(run.id, "report_runner", "failed", error_code="INTERNAL_ERROR", internal_error=str(exc), user_error=message, identity=identity)
             await self.store.update_run(run.id, identity, status="failed", error_code="INTERNAL_ERROR", internal_error_message=str(exc), user_error_message=message, finished_at=datetime.now(timezone.utc))
             await self.store.update_job_status(job_id, identity, "failed")
             try:
@@ -115,7 +127,7 @@ class ReportRunner:
     # Args: unit - 分析单元；state - 报表子图状态和身份摘要。
     # Returns: UnitResult 或失败结果。
     async def _default_execute_unit(self, unit: Any, state: dict[str, Any]) -> UnitResult:
-        datasource = str((state.get("plan").requested_datasources or [""])[0])
+        datasource = str(unit.datasource or (state.get("plan").requested_datasources or [""])[0])
         from src.graph.workflow import app
 
         if app is None or not datasource:

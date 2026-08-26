@@ -38,6 +38,7 @@ class AnalysisUnit(BaseModel):
 
     unit_id: str = Field(default_factory=lambda: f"unit_{uuid4().hex[:10]}", max_length=64)
     question: str = Field(..., min_length=1, max_length=4000)
+    datasource: str = Field(default="", max_length=64)
     priority: Literal["primary", "secondary", "evidence"] = "primary"
     time_range: TimeRange = Field(default_factory=TimeRange)
     dimensions: list[str] = Field(default_factory=list, max_length=30)
@@ -50,6 +51,9 @@ class AnalysisUnit(BaseModel):
     def normalize_unit(self) -> "AnalysisUnit":
         if not _IDENTIFIER_RE.fullmatch(self.unit_id):
             raise ValueError("unit_id 只能包含字母、数字、下划线、点和短横线")
+        self.datasource = self.datasource.strip()
+        if self.datasource and not _IDENTIFIER_RE.fullmatch(self.datasource):
+            raise ValueError("分析单元数据源名称格式无效")
         self.dimensions = list(dict.fromkeys(item.strip() for item in self.dimensions if item.strip()))
         self.metrics = list(dict.fromkeys(item.strip() for item in self.metrics if item.strip()))
         return self
@@ -123,6 +127,9 @@ class ReportPlan(BaseModel):
         self.requested_datasources = list(dict.fromkeys(item.strip() for item in self.requested_datasources if item.strip()))
         if any(not _IDENTIFIER_RE.fullmatch(item) for item in self.requested_datasources):
             raise ValueError("数据源名称格式无效")
+        for unit in self.analysis_units:
+            if unit.datasource and unit.datasource not in self.requested_datasources:
+                self.requested_datasources.append(unit.datasource)
         unit_ids = [unit.unit_id for unit in self.analysis_units]
         if len(unit_ids) != len(set(unit_ids)):
             raise ValueError("分析单元 unit_id 不能重复")
@@ -197,6 +204,8 @@ class ReportShareCreateRequest(BaseModel):
         self.user_ids = list(dict.fromkeys(int(item) for item in self.user_ids if int(item) > 0))
         if self.require_code and len(self.authorization_code.strip()) < 6:
             raise ValueError("授权码至少需要 6 个字符")
+        if self.require_code and len(self.authorization_code.encode("utf-8")) > 72:
+            raise ValueError("授权码不能超过 72 字节")
         if self.scope == "user" and not self.user_ids:
             raise ValueError("指定用户分享必须提供 user_ids")
         if self.scope == "public" and self.user_ids:

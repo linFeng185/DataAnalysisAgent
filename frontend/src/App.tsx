@@ -14,6 +14,7 @@ import { useAuth } from './hooks/AuthContext';
 import { ChatProvider } from './hooks/useChat';
 import ErrorBoundary from './components/ErrorBoundary';
 import { get } from './api/client';
+import { fetchReportPermissions } from './api/reportWorkbench';
 import type { HealthResponse } from './types';
 import zhCN from 'antd/locale/zh_CN';
 
@@ -28,6 +29,9 @@ const KnowledgePage = lazy(() => import('./pages/KnowledgePage'));
 const McpPage = lazy(() => import('./pages/McpPage'));
 const AdminPage = lazy(() => import('./pages/AdminPage'));
 const AutomationPage = lazy(() => import('./pages/AutomationPage'));
+const ReportWorkbenchPage = lazy(() => import('./pages/ReportWorkbenchPage'));
+const ReportViewerPage = lazy(() => import('./pages/ReportViewerPage'));
+const SharedReportPage = lazy(() => import('./pages/SharedReportPage'));
 const LoginPage = lazy(() => import('./pages/LoginPage'));
 
 const pageFallback = (
@@ -58,6 +62,25 @@ function AdminRoute() {
   return result;
 }
 
+// 方法作用：在进入报表工作台前再次校验服务端菜单能力，防止仅靠前端隐藏绕过权限。
+// Args: 无，读取当前认证身份和报表能力接口。
+// Returns: 报表工作台、加载占位或首页重定向。
+function ReportRoute() {
+  const { user } = useAuth();
+  const [allowed, setAllowed] = useState<boolean | null>(null);
+
+  useEffect(() => {
+    let active = true;
+    fetchReportPermissions()
+      .then(result => { if (active) setAllowed(result.menu_allowed); })
+      .catch(() => { if (active) setAllowed(false); });
+    return () => { active = false; };
+  }, [user?.role]);
+
+  if (allowed === null) return pageFallback;
+  return allowed ? <ReportWorkbenchPage /> : <Navigate to="/" replace />;
+}
+
 // 方法作用：渲染桌面侧栏或移动抽屉导航及当前业务路由。
 // Args: 无。
 // Returns: 已认证应用工作台。
@@ -70,6 +93,7 @@ function AppContent() {
   const screens = Grid.useBreakpoint();
   const isCompact = screens.md === false;
   const { user, logout } = useAuth();
+  const [reportMenuAllowed, setReportMenuAllowed] = useState<boolean | null>(null);
 
   useEffect(() => {
     get<HealthResponse>('/health')
@@ -77,6 +101,14 @@ function AppContent() {
       .catch(() => setHealth(null))
       .finally(() => setHealthChecked(true));
   }, []);
+
+  useEffect(() => {
+    let active = true;
+    fetchReportPermissions()
+      .then(result => { if (active) setReportMenuAllowed(result.menu_allowed); })
+      .catch(() => { if (active) setReportMenuAllowed(false); });
+    return () => { active = false; };
+  }, [user?.role]);
 
   const menuKey = location.pathname === '/' ? 'chat' : location.pathname.replace('/', '') || 'chat';
   const navigationItems: MenuProps['items'] = [
@@ -93,6 +125,9 @@ function AppContent() {
       : null,
     user?.role !== 'viewer'
       ? { key: 'knowledge', icon: <ReadOutlined />, label: <NavLink to="/knowledge">知识库</NavLink> }
+      : null,
+    reportMenuAllowed === true
+      ? { key: 'report-workbench', icon: <ScheduleOutlined />, label: <NavLink to="/report-workbench">报表工作台</NavLink> }
       : null,
     user?.role !== 'viewer'
       ? { key: 'automation', icon: <ScheduleOutlined />, label: <NavLink to="/automation">自动化</NavLink> }
@@ -179,6 +214,8 @@ function AppContent() {
                 <Route path="/history" element={<HistoryPage />} />
                 <Route path="/skills" element={<SkillsPage />} />
                 <Route path="/knowledge" element={<KnowledgePage />} />
+                <Route path="/report-workbench" element={<ReportRoute />} />
+                <Route path="/reports/:reportId" element={<ReportViewerPage />} />
                 <Route path="/automation" element={<AutomationPage />} />
                 <Route path="/mcp" element={<McpPage />} />
                 <Route path="/admin" element={<AdminRoute />} />
@@ -199,9 +236,10 @@ export default function App() {
     <ConfigProvider locale={zhCN} theme={{ algorithm: theme.defaultAlgorithm }}>
       <BrowserRouter>
         <AuthProvider>
-          <Routes>
-            <Route path="/login" element={<Suspense fallback={pageFallback}><LoginPage /></Suspense>} />
-            <Route path="/*" element={<ProtectedApp />} />
+        <Routes>
+          <Route path="/login" element={<Suspense fallback={pageFallback}><LoginPage /></Suspense>} />
+          <Route path="/shared/reports/:token" element={<Suspense fallback={pageFallback}><SharedReportPage /></Suspense>} />
+          <Route path="/*" element={<ProtectedApp />} />
           </Routes>
         </AuthProvider>
       </BrowserRouter>

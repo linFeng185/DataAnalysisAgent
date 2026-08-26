@@ -46,6 +46,68 @@ _plan_cache: dict[tuple[int, int, str], ReportPlan] = {}
 _unlock_sessions: dict[str, tuple[str, datetime]] = {}
 
 
+# 方法作用：把数据库或内存分享记录中的用户范围统一转换为整数列表。
+# Args: share - 分享记录。
+# Returns: 去重后的用户 ID 列表。
+def _share_user_ids(share: dict[str, Any]) -> list[int]:
+    values = share.get("user_ids", []) or []
+    if isinstance(values, str):
+        try:
+            import json
+
+            values = json.loads(values)
+        except (TypeError, ValueError):
+            values = []
+    if not isinstance(values, list):
+        return []
+    return list(dict.fromkeys(int(item) for item in values if str(item).isdigit() and int(item) > 0))
+
+
+# 方法作用：校验指定用户分享的租户边界和用户授权范围。
+# Args: identity - 当前登录身份；share - 分享记录。
+# Returns: 当前身份允许访问返回 True。
+def _can_access_share_scope(identity: Any, share: dict[str, Any]) -> bool:
+    if str(share.get("scope", "public")) != "user":
+        return True
+    if int(getattr(identity, "tenant_id", 0) or 0) != int(share.get("tenant_id", 0) or 0):
+        return False
+    return can_access_user_scope(
+        identity,
+        int(share.get("created_by", 0) or 0),
+        "user",
+        _share_user_ids(share),
+    )
+
+
+# 方法作用：把数据库时间统一转换为带 UTC 时区的 datetime。
+# Args: value - 数据库或 API 时间值。
+# Returns: 规范化时间；无法解析时返回 None。
+def _as_utc_datetime(value: Any) -> datetime | None:
+    if value is None:
+        return None
+    normalized = value
+    if isinstance(normalized, str):
+        try:
+            normalized = datetime.fromisoformat(normalized.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    if not isinstance(normalized, datetime):
+        return None
+    return normalized.replace(tzinfo=timezone.utc) if normalized.tzinfo is None else normalized.astimezone(timezone.utc)
+
+
+# 方法作用：兼容数据库返回的带时区和不带时区过期时间。
+# Args: expires_at - 分享或页面过期时间。
+# Returns: 已过期返回 True。
+def _is_expired(expires_at: Any) -> bool:
+    value = _as_utc_datetime(expires_at)
+    if expires_at is not None and value is None:
+        return True
+    if value is None:
+        return False
+    return value <= datetime.now(timezone.utc)
+
+
 # 方法作用：获取当前应用上下文中的报表配额服务。
 # Args: 无。
 # Returns: QuotaManager 单例。
@@ -61,7 +123,10 @@ def get_report_quota_manager() -> QuotaManager:
 def get_report_permission_service() -> ReportPermissionService:
     from src.app_context import get_app_context
 
-    return get_app_context().get_or_create("report_permission_service", ReportPermissionService)
+    return get_app_context().get_or_create(
+        "report_permission_service",
+        lambda: ReportPermissionService(store=get_report_store()),
+    )
 
 
 # 方法作用：校验当前身份是否具备指定报表能力。
@@ -140,7 +205,20 @@ async def create_job(request: ReportJobCreateRequest) -> dict[str, Any]:
     identity = get_current_identity()
     await _require_capability(identity, "report.create")
     cache_key = (int(identity.tenant_id), int(identity.user_id), request.plan_hash)
-    plan = request.plan_override or _plan_cache.get(cache_key)
+    previewed_plan = _plan_cache.get(cache_key)
+    if request.plan_override is not None:
+        # 计划覆盖只能携带与当前身份预览缓存完全一致的哈希，不能由客户端自行签发执行范围。
+        if previewed_plan is None or previewed_plan.canonical_hash() != request.plan_hash:
+            logger.warning(
+                "报表计划覆盖未匹配预览缓存",
+                tenant_id=identity.tenant_id,
+                user_id=identity.user_id,
+                plan_hash=request.plan_hash,
+            )
+            raise HTTPException(409, "计划未经过当前身份预览确认，请重新生成预览")
+        plan = request.plan_override
+    else:
+        plan = previewed_plan
     if plan is None:
         raise HTTPException(409, "计划已过期，请重新生成预览")
     if plan.canonical_hash() != request.plan_hash:
@@ -191,7 +269,12 @@ async def get_job(job_id: str) -> dict[str, Any]:
     if job is None:
         raise HTTPException(404, "报表任务不存在")
     runs = await store.list_runs(job_id, identity, 1)
-    return {"job": job.model_dump(mode="json"), "latest_run": runs[0].model_dump(mode="json") if runs else None}
+    latest_version = await store.get_latest_version_for_job(job_id, identity)
+    return {
+        "job": job.model_dump(mode="json"),
+        "latest_run": runs[0].model_dump(mode="json") if runs else None,
+        "latest_report": latest_version.model_dump(mode="json", exclude={"document", "data_manifest"}) if latest_version else None,
+    }
 
 
 @router.post("/jobs/{job_id}/run", status_code=202)
@@ -236,7 +319,13 @@ async def get_run(run_id: str) -> dict[str, Any]:
     run = await store.get_run(run_id, identity)
     if run is None:
         raise HTTPException(404, "报表运行不存在")
-    return {"run": run.model_dump(mode="json"), "steps": await store.list_steps(run_id, identity)}
+    steps = await store.list_steps(run_id, identity)
+    # 内存 Store 也可能保留内部异常字段，API 边界统一剥离，避免把堆栈或连接细节暴露给普通用户。
+    safe_steps = [
+        {key: value for key, value in step.items() if key not in {"internal_error", "internal_error_message", "input_hash"}}
+        for step in steps
+    ]
+    return {"run": run.model_dump(mode="json"), "steps": safe_steps}
 
 
 @router.get("/reports/{report_id}")
@@ -249,7 +338,7 @@ async def get_report(report_id: str) -> dict[str, Any]:
     version = await get_report_store().get_report_version(report_id, identity)
     if version is None:
         raise HTTPException(404, "报表不存在或无权访问")
-    if version.expires_at is not None and version.expires_at <= datetime.now(timezone.utc):
+    if _is_expired(version.expires_at):
         raise HTTPException(410, "报表页面已过期")
     return {"report_id": version.report_id, "version": version.version, "document": version.document, "data_manifest": version.data_manifest}
 
@@ -274,13 +363,20 @@ async def create_share(report_id: str, request: ReportShareCreateRequest) -> dic
     version = await store.get_report_version(report_id, identity)
     if version is None:
         raise HTTPException(404, "报表不存在或无权访问")
+    version_expires_at = _as_utc_datetime(version.expires_at)
+    if version_expires_at is not None and version_expires_at <= datetime.now(timezone.utc):
+        raise HTTPException(410, "报表页面已过期，不能创建分享")
     if request.scope == "user" and not request.user_ids:
         raise HTTPException(422, "指定用户分享必须提供 user_ids")
+    try:
+        quota = await get_report_quota_manager().reserve(identity, shares=1)
+    except QuotaExceededError as exc:
+        raise HTTPException(429, "本周期分享链接配额已用尽") from exc
     token, token_hash = generate_share_token()
     code_hash = await hash_authorization_code(request.authorization_code) if request.require_code else ""
     expires_at = datetime.now(timezone.utc) + timedelta(days=request.expires_in_days)
-    if version.expires_at is not None:
-        expires_at = min(expires_at, version.expires_at)
+    if version_expires_at is not None:
+        expires_at = min(expires_at, version_expires_at)
     record = {
         "report_version_id": version.id,
         "report_id": version.report_id,
@@ -297,7 +393,7 @@ async def create_share(report_id: str, request: ReportShareCreateRequest) -> dic
     }
     share = await store.create_share(record, token_hash, code_hash)
     await store.record_audit({"tenant_id": identity.tenant_id, "user_id": identity.user_id, "share_id": share.id, "report_id": report_id, "action": "share_create", "result": "success", "metadata": {"scope": request.scope}})
-    return {"share_id": share.id, "scope": request.scope, "url": f"/api/v1/report-workbench/shared/reports/{token}", "expires_at": expires_at, "authorization_code_hint": "已设置授权码" if request.require_code else ""}
+    return {"share_id": share.id, "scope": request.scope, "url": f"/shared/reports/{token}", "expires_at": expires_at, "authorization_code_hint": "已设置授权码" if request.require_code else "", "quota": asdict(quota)}
 
 
 @router.get("/reports/{report_id}/shares")
@@ -360,6 +456,16 @@ async def get_my_quota() -> dict[str, Any]:
     return asdict(snapshot)
 
 
+@router.get("/permissions/me")
+# 方法作用：返回当前身份的报表能力，用于前端菜单和路由守卫，不授予额外权限。
+# Args: 无。
+# Returns: report.* 能力列表和菜单可见标记。
+async def get_my_permissions() -> dict[str, Any]:
+    identity = get_current_identity()
+    capabilities = await get_report_permission_service().capabilities(identity)
+    return {"capabilities": capabilities, "menu_allowed": "report.menu" in capabilities}
+
+
 @router.put("/admin/users/{user_id}/policy")
 # 方法作用：由租户管理员设置目标用户报表能力和周期配额。
 # Args: user_id - 目标用户；request - 能力与配额配置。
@@ -375,7 +481,7 @@ async def set_user_policy(user_id: int, request: QuotaPolicyRequest) -> dict[str
     quota = get_report_quota_manager()
     quota.set_policy(int(identity.tenant_id), int(user_id), policy)
     permissions = get_report_permission_service()
-    permissions.set_user_capabilities(int(user_id), request.capabilities)
+    permissions.set_user_capabilities(int(user_id), request.capabilities, tenant_id=int(identity.tenant_id))
     store = get_report_store()
     await store.set_quota_policy(int(identity.tenant_id), int(user_id), policy)
     await store.set_user_capabilities(int(identity.tenant_id), int(user_id), request.capabilities)
@@ -395,7 +501,7 @@ async def get_shared_report(token: str, share_session: str | None = Header(defau
         await store.record_audit({"action": "share_access", "result": "not_found"})
         raise HTTPException(404, "分享链接不存在或已撤销")
     expires_at = share.get("expires_at")
-    if expires_at is not None and expires_at <= datetime.now(timezone.utc):
+    if _is_expired(expires_at):
         await store.record_audit({"tenant_id": share.get("tenant_id"), "share_id": share.get("id"), "action": "share_access", "result": "expired"})
         raise HTTPException(410, "分享链接已过期")
     code_hash = str(share.get("code_hash", "") or "")
@@ -408,9 +514,12 @@ async def get_shared_report(token: str, share_session: str | None = Header(defau
     version = await store.get_version_by_id(str(share.get("report_version_id", "")))
     if version is None:
         raise HTTPException(404, "报表版本不存在")
+    if _is_expired(version.expires_at):
+        await store.record_audit({"tenant_id": share.get("tenant_id"), "share_id": share.get("id"), "action": "share_access", "result": "expired"})
+        raise HTTPException(410, "报表页面已过期")
     if str(share.get("scope", "public")) == "user":
         identity = get_current_identity()
-        if not can_access_user_scope(identity, int(share.get("created_by", 0) or 0), "user", [int(item) for item in share.get("user_ids", []) or []]):
+        if not _can_access_share_scope(identity, share):
             await store.record_audit({"tenant_id": share.get("tenant_id"), "share_id": share.get("id"), "action": "share_access", "result": "denied"})
             raise HTTPException(403, "当前用户不在分享授权范围内")
     document = dict(version.document)
@@ -419,6 +528,60 @@ async def get_shared_report(token: str, share_session: str | None = Header(defau
         document["permissions"] = {**document.get("permissions", {}), "drilldown": False}
     await store.record_audit({"tenant_id": share.get("tenant_id"), "share_id": share.get("id"), "report_id": version.report_id, "action": "share_access", "result": "success", "metadata": {"scope": share.get("scope", "public")}})
     return {"report_id": version.report_id, "version": version.version, "document": document, "data_manifest": version.data_manifest if bool(share.get("allow_drilldown", False)) else {}}
+
+
+@router.post("/shared/reports/{token}/drilldowns/{drilldown_id}")
+# 方法作用：执行公开分享允许的 snapshot Drilldown，并复用分享授权码与范围校验。
+# Args: token - 分享 token；drilldown_id - 页面签发的 Drilldown ID；request - 过滤和分页；share_session - 短时授权会话。
+# Returns: 当前分享版本允许字段的脱敏明细。
+async def shared_drilldown(
+    token: str,
+    drilldown_id: str,
+    request: DrilldownRequest,
+    share_session: str | None = Header(default=None, alias="X-Report-Share-Session"),
+) -> dict[str, Any]:
+    store = get_report_store()
+    token_hash = hash_share_token(token)
+    share = await store.get_share_by_token(token_hash)
+    if not share or share.get("revoked_at") is not None:
+        await store.record_audit({"action": "share_drilldown", "result": "not_found"})
+        raise HTTPException(404, "分享链接不存在或已撤销")
+    expires_at = share.get("expires_at")
+    if _is_expired(expires_at):
+        await store.record_audit({"tenant_id": share.get("tenant_id"), "share_id": share.get("id"), "action": "share_drilldown", "result": "expired"})
+        raise HTTPException(410, "分享链接已过期")
+    code_hash = str(share.get("code_hash", "") or "")
+    if code_hash:
+        session_data = _unlock_sessions.get(str(share_session or ""))
+        valid_session = bool(session_data and session_data[0] == str(share["id"]) and session_data[1] > datetime.now(timezone.utc))
+        if not valid_session:
+            await store.record_audit({"tenant_id": share.get("tenant_id"), "share_id": share.get("id"), "action": "share_drilldown", "result": "locked"})
+            raise HTTPException(401, "分享链接需要授权码解锁")
+    if not bool(share.get("allow_drilldown", False)):
+        await store.record_audit({"tenant_id": share.get("tenant_id"), "share_id": share.get("id"), "action": "share_drilldown", "result": "denied"})
+        raise HTTPException(403, "分享未授权明细钻取")
+    if str(share.get("scope", "public")) == "user":
+        identity = get_current_identity()
+        if not _can_access_share_scope(identity, share):
+            await store.record_audit({"tenant_id": share.get("tenant_id"), "share_id": share.get("id"), "action": "share_drilldown", "result": "denied"})
+            raise HTTPException(403, "当前用户不在分享授权范围内")
+    version = await store.get_version_by_id(str(share.get("report_version_id", "")))
+    if version is None:
+        raise HTTPException(404, "报表版本不存在")
+    if _is_expired(version.expires_at):
+        await store.record_audit({"tenant_id": share.get("tenant_id"), "share_id": share.get("id"), "action": "share_drilldown", "result": "expired"})
+        raise HTTPException(410, "报表页面已过期")
+    definition = find_drilldown(version.document, drilldown_id)
+    if definition is None or str(definition.get("mode", "snapshot")) != "snapshot":
+        await store.record_audit({"tenant_id": share.get("tenant_id"), "share_id": share.get("id"), "report_id": version.report_id, "action": "share_drilldown", "result": "invalid"})
+        raise HTTPException(422, "Drilldown 定义无效")
+    try:
+        result = execute_snapshot_drilldown(definition, version.data_manifest, request.filters, request.page, request.page_size)
+    except ValueError as exc:
+        await store.record_audit({"tenant_id": share.get("tenant_id"), "share_id": share.get("id"), "report_id": version.report_id, "action": "share_drilldown", "result": "invalid"})
+        raise HTTPException(422, str(exc)) from exc
+    await store.record_audit({"tenant_id": share.get("tenant_id"), "share_id": share.get("id"), "report_id": version.report_id, "action": "share_drilldown", "result": "success", "metadata": {"drilldown_id": drilldown_id, "row_count": len(result["rows"])}})
+    return result
 
 
 @router.post("/shared/reports/{token}/unlock")

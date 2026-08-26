@@ -81,6 +81,28 @@ class TestReportPlanner:
         with pytest.raises(ValueError, match="数据源"):
             await ReportPlanner().parse("生成销售报表", datasources=["sales;DROP"])
 
+    # 方法作用：验证结构化模型补充不能扩大计划阶段已授权的数据源集合。
+    # Args: self - pytest 测试类实例。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    async def test_structured_llm_cannot_expand_datasource_scope(self) -> None:
+        """模型返回未授权数据源时应回退到规则计划，而不是改变执行范围。"""
+        # Arrange
+        from src.reporting.planner import ReportPlanner
+
+        class FakePlanner:
+            # 方法作用：返回一个尝试绑定未授权数据源的结构化计划片段。
+            # Args: prompt - 规则解析后的用户文本。
+            # Returns: 含越权数据源的分析单元列表。
+            async def ainvoke(self, prompt: str) -> dict[str, object]:
+                return {"analysis_units": [{"unit_id": "sales", "question": prompt, "datasource": "crm"}]}
+
+        # Act
+        plan = await ReportPlanner(FakePlanner()).parse("生成销售报表", datasources=["sales"])
+
+        # Assert
+        assert plan.requested_datasources == ["sales"]
+        assert all(unit.datasource in {"", "sales"} for unit in plan.analysis_units)
+
 
 class TestReportDocument:
     """覆盖功能 23.5：动态页面 DSL 与 ECharts option 白名单。"""
@@ -184,3 +206,160 @@ class TestReportRelations:
         # Assert
         assert relations[0].evidence_level == "unsupported_cross_source"
         assert "受控分析器" in relations[0].limitations[0]
+
+    # 方法作用：验证跨数据源的授权样本可以生成匹配率和基数证据。
+    # Args: self - pytest 测试类实例。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    def test_cross_source_controlled_relation_is_verified(self) -> None:
+        """跨源共同实体和时间键匹配率达到阈值时应发布 verified_relation。"""
+        # Arrange
+        from src.reporting.models import UnitResult
+        from src.reporting.relations import RelationPolicy, build_relations
+
+        units = [
+            {
+                "unit_id": "sales",
+                "datasource": "sales_db",
+                "columns": ["customer_id", "week", "amount", "secret_column"],
+                "dimensions": ["customer_id", "week"],
+                "metrics": ["amount"],
+            },
+            {
+                "unit_id": "retention",
+                "datasource": "crm_db",
+                "columns": ["customer_id", "week", "amount"],
+                "dimensions": ["customer_id", "week"],
+                "metrics": ["amount"],
+            },
+        ]
+        results = [
+            UnitResult(
+                unit_id="sales",
+                datasource="sales_db",
+                columns=["customer_id", "week", "amount", "secret_column"],
+                rows=[
+                    {"customer_id": "c1", "week": "2026-08-01", "amount": 10, "secret_column": "hidden"},
+                    {"customer_id": "c2", "week": "2026-08-01", "amount": 20, "secret_column": "hidden"},
+                    {"customer_id": "c3", "week": "2026-08-01", "amount": 30, "secret_column": "hidden"},
+                ],
+            ),
+            UnitResult(
+                unit_id="retention",
+                datasource="crm_db",
+                columns=["customer_id", "week", "amount"],
+                rows=[
+                    {"customer_id": "c1", "week": "2026-08-01", "amount": 1},
+                    {"customer_id": "c2", "week": "2026-08-01", "amount": 2},
+                    {"customer_id": "other", "week": "2026-08-01", "amount": 3},
+                ],
+            ),
+        ]
+
+        # Act
+        relation = build_relations(units, results, RelationPolicy(min_match_rate=0.6))[0]
+
+        # Assert
+        assert relation.evidence_level == "verified_relation"
+        assert relation.join_keys == ["customer_id", "week"]
+        assert relation.match_rate == pytest.approx(2 / 3)
+        assert relation.cardinality == "one_to_one"
+        assert relation.estimated_join_rows == 2
+        assert "secret_column" not in relation.join_keys
+
+    # 方法作用：验证低匹配率的跨源关系不会被误发布为可联合证据。
+    # Args: self - pytest 测试类实例。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    def test_cross_source_low_match_rate_is_blocked(self) -> None:
+        """匹配率低于租户阈值时应标记 blocked 并给出降级限制。"""
+        # Arrange
+        from src.reporting.models import UnitResult
+        from src.reporting.relations import build_relations
+
+        units = [
+            {"unit_id": "left", "datasource": "a", "columns": ["customer_id"]},
+            {"unit_id": "right", "datasource": "b", "columns": ["customer_id"]},
+        ]
+        results = [
+            UnitResult(unit_id="left", rows=[{"customer_id": "c1"}, {"customer_id": "c2"}]),
+            UnitResult(unit_id="right", rows=[{"customer_id": "c1"}, {"customer_id": "c3"}]),
+        ]
+
+        # Act
+        relation = build_relations(units, results)[0]
+
+        # Assert
+        assert relation.evidence_level == "blocked"
+        assert relation.match_rate == pytest.approx(0.5)
+        assert any("匹配率" in item for item in relation.limitations)
+
+    # 方法作用：验证多对多关系和预计连接膨胀会被阻断。
+    # Args: self - pytest 测试类实例。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    def test_many_to_many_relation_is_blocked(self) -> None:
+        """双方重复键会造成重复计数，不能生成 verified_relation。"""
+        # Arrange
+        from src.reporting.models import UnitResult
+        from src.reporting.relations import RelationPolicy, build_relations
+
+        units = [
+            {"unit_id": "left", "datasource": "a", "columns": ["customer_id"]},
+            {"unit_id": "right", "datasource": "b", "columns": ["customer_id"]},
+        ]
+        results = [
+            UnitResult(unit_id="left", rows=[{"customer_id": "c1"}, {"customer_id": "c1"}]),
+            UnitResult(unit_id="right", rows=[{"customer_id": "c1"}, {"customer_id": "c1"}]),
+        ]
+
+        # Act
+        relation = build_relations(units, results, RelationPolicy(max_join_rows=3))[0]
+
+        # Assert
+        assert relation.evidence_level == "blocked"
+        assert relation.cardinality == "many_to_many"
+        assert relation.estimated_join_rows == 4
+        assert any("多对多" in item or "连接行数" in item for item in relation.limitations)
+
+    # 方法作用：验证共同字段类型不兼容时不会执行跨源联合。
+    # Args: self - pytest 测试类实例。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    def test_cross_source_incompatible_key_type_is_blocked(self) -> None:
+        """数字 ID 与文本 ID 不能直接比较，关系应被安全阻断。"""
+        # Arrange
+        from src.reporting.models import UnitResult
+        from src.reporting.relations import build_relations
+
+        units = [
+            {"unit_id": "left", "datasource": "a", "columns": ["customer_id"]},
+            {"unit_id": "right", "datasource": "b", "columns": ["customer_id"]},
+        ]
+        results = [
+            UnitResult(unit_id="left", rows=[{"customer_id": 1}, {"customer_id": 2}]),
+            UnitResult(unit_id="right", rows=[{"customer_id": "1"}, {"customer_id": "2"}]),
+        ]
+
+        # Act
+        relation = build_relations(units, results)[0]
+
+        # Assert
+        assert relation.evidence_level == "blocked"
+        assert any("类型不兼容" in item for item in relation.limitations)
+
+    # 方法作用：验证共同指标不会被误判为可连接的业务关系键。
+    # Args: self - pytest 测试类实例。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    def test_common_metric_is_not_join_key(self) -> None:
+        """双方只有 amount 共同字段时应分别分析，不生成伪关系。"""
+        # Arrange
+        from src.reporting.relations import build_relations
+
+        units = [
+            {"unit_id": "left", "datasource": "sales", "columns": ["amount"], "metrics": ["amount"]},
+            {"unit_id": "right", "datasource": "sales", "columns": ["amount"], "metrics": ["amount"]},
+        ]
+
+        # Act
+        relation = build_relations(units)[0]
+
+        # Assert
+        assert relation.evidence_level == "no_relation"
+        assert relation.join_keys == []
