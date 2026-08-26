@@ -117,6 +117,24 @@ class TestResultRendering:
             )
             raise
 
+    # 方法作用：验证聊天页紧凑展示去重后的可信知识来源，不渲染知识正文。
+    # Args: self - pytest 测试类实例。
+    # Returns: 无返回值，断言来源展示契约。
+    def test_chat_page_renders_compact_knowledge_sources(self) -> None:
+        """同一来源只显示一次，超过两个时汇总数量并可查看来源元数据。"""
+        # Arrange
+        page = Path("frontend/src/pages/ChatPage.tsx").read_text(encoding="utf-8")
+        types = Path("frontend/src/types/index.ts").read_text(encoding="utf-8")
+
+        # Act / Assert
+        assert "rawActiveKnowledge.reduce" in page
+        assert "new Map<string, Record<string, unknown>>()" in page
+        assert "activeKnowledge.slice(0, 2)" in page
+        assert "+{activeKnowledge.length - 2}" in page
+        assert "命中分块" in page
+        assert "item.content" not in page
+        assert "match_count?: number" in types
+
     # 方法作用：验证 SQL 高亮异常兜底在写入 innerHTML 前执行 HTML 转义。
     # Args: self - pytest 测试类实例。
     # Returns: 无返回值，断言失败时由 pytest 报告。

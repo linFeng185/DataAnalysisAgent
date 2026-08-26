@@ -142,6 +142,48 @@ class TestRetrieveSchemaContext:
         # Assert
         assert result["long_term_memories_text"].startswith("业务口径：VIP")
 
+    # 方法作用：验证同一知识文件的多个命中分块只生成一个前端来源摘要。
+    # Args: self - pytest 测试类实例。
+    # Returns: 无返回值，断言来源去重和命中数聚合。
+    def test_knowledge_source_summaries_are_deduplicated(self) -> None:
+        """知识正文可以使用多个 chunk，但结果卡片不得重复展示相同文件。"""
+        # Arrange
+        from src.graph.nodes.retrieve_schema import _deduplicate_knowledge_sources
+
+        sources = [
+            {
+                "source_id": "orders-1",
+                "source": "user_upload",
+                "source_file": "orders.md",
+                "category": "business_rule",
+                "relevance": 0.91,
+            },
+            {
+                "source_id": "orders-2",
+                "source": "user_upload",
+                "source_file": "orders.md",
+                "category": "business_rule",
+                "relevance": 0.86,
+            },
+            {
+                "source_id": "customers-1",
+                "source": "manual_doc",
+                "source_file": "customers.md",
+                "category": "metric",
+                "relevance": 0.80,
+            },
+        ]
+
+        # Act
+        result = _deduplicate_knowledge_sources(sources)
+
+        # Assert
+        assert [item["source_file"] for item in result] == ["orders.md", "customers.md"]
+        assert result[0]["match_count"] == 2
+        assert result[0]["relevance"] == 0.91
+        assert result[1]["match_count"] == 1
+        assert _deduplicate_knowledge_sources([]) == []
+
 
 class TestSQLPromptGrounding:
     """覆盖功能 4.4.16：SQL Prompt 证据上下文和约束。"""
@@ -251,6 +293,83 @@ class TestSQLPromptGrounding:
         assert len(rendered) <= 900 or len(selected) == 1
         assert all(table["name"] in whitelist for table in tables)
         logger.info("test_llm_generate_uses_real_dialect_and_strong_constraints 完成")
+
+    # 方法作用：验证详细 Schema 按列裁剪时保留业务相关列和 JOIN 安全列。
+    # Args: self - pytest 测试类实例。
+    # Returns: 无返回值，断言无关列被移除且关系字段保留。
+    def test_select_prompt_tables_prunes_irrelevant_columns(self) -> None:
+        """大表只向模型暴露相关列、主键和关系字段，降低 Prompt 延迟。"""
+        # Arrange
+        from src.graph.nodes.generate_sql import select_prompt_tables
+
+        orders = {
+            "name": "orders",
+            "description": "订单事实表",
+            "columns": [
+                {"name": "id", "type": "BIGINT", "is_primary_key": True},
+                {"name": "customer_id", "type": "BIGINT", "is_indexed": True},
+                {"name": "order_amount", "type": "DECIMAL", "comment": "订单金额"},
+                {"name": "order_status", "type": "VARCHAR", "comment": "订单状态"},
+                {"name": "internal_note", "type": "TEXT", "comment": "内部备注"},
+            ],
+            "relations": [{
+                "target_table": "customers",
+                "join_key": "orders.customer_id = customers.id",
+                "relation_type": "many_to_one",
+            }],
+        }
+
+        # Act
+        selected = select_prompt_tables(
+            [orders],
+            "统计订单金额",
+            dialect="mysql",
+            max_chars=1_000,
+        )
+        selected_columns = {item["name"] for item in selected[0]["columns"]}
+
+        # Assert
+        assert {"id", "customer_id", "order_amount"}.issubset(selected_columns)
+        assert "internal_note" not in selected_columns
+
+    # 方法作用：验证 SQL 生成入口采用较小的详细 Schema 预算，避免恢复到完整大 Prompt。
+    # Args: self - pytest 测试类实例。
+    # Returns: 无返回值，断言调用参数和结果状态。
+    async def test_generate_sql_uses_column_budget(self, monkeypatch) -> None:
+        """生成 SQL 时详细 Schema 上限应低于旧的 6000 字符预算。"""
+        # Arrange
+        import src.graph.nodes.generate_sql as generate_module
+
+        captured: dict[str, object] = {}
+
+        async def fake_llm(**kwargs):
+            captured.update(kwargs)
+            return "SELECT COUNT(*) FROM orders", "", "ok"
+
+        monkeypatch.setattr(generate_module, "is_llm_available", lambda: True)
+        monkeypatch.setattr(generate_module, "_llm_generate", fake_llm)
+        state = {
+            "user_query": "统计订单金额",
+            "datasource": "demo",
+            "dialect": "mysql",
+            "relevant_tables": [{
+                "name": "orders",
+                "columns": [
+                    {"name": "id", "type": "BIGINT", "is_primary_key": True},
+                    {"name": "order_amount", "type": "DECIMAL", "comment": "订单金额"},
+                    {"name": "internal_note", "type": "TEXT", "comment": "内部备注"},
+                ],
+            }],
+            "retry_count": 0,
+        }
+
+        # Act
+        result = await generate_module.generate_sql_node(state, {})
+
+        # Assert
+        assert result["generated_sql"] == "SELECT COUNT(*) FROM orders"
+        assert len(str(captured["schema_text"])) < 6_000
+        assert "internal_note" not in str(captured["schema_text"])
 
     # 方法作用：验证同步 LLM 工厂冷启动不会阻塞多数据源 worker 共用的事件循环。
     # Args: self - pytest 测试类实例；monkeypatch - pytest 补丁工具。

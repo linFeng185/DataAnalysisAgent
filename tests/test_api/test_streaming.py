@@ -139,6 +139,58 @@ class TestStreamIdentity:
 class TestStreamTerminalState:
     """覆盖 SSE 异常终态和非有限数值序列化。"""
 
+    # 方法作用：验证 SSE result 事件携带知识来源和技能命中信息。
+    # Args: self - pytest 测试类实例；monkeypatch - pytest 补丁工具。
+    # Returns: 无返回值，断言流式公开结果契约。
+    async def test_stream_result_exposes_activated_context(self, monkeypatch) -> None:
+        """流式结果不能丢失非流式响应已有的 activated 字段。"""
+        # Arrange
+        import src.api.background_tasks as background_tasks
+        import src.graph.workflow as workflow
+        from src.api.streaming import stream_analysis
+
+        class CompletedWorkflow:
+            """产生一个公开 build_response 事件的最小工作流替身。"""
+
+            # 方法作用：输出最终响应事件供 SSE 适配器处理。
+            # Args: self - 工作流替身；args/kwargs - 被测入口参数。
+            # Returns: 异步事件迭代器。
+            async def astream_events(self, *args, **kwargs):
+                del args, kwargs
+                yield {
+                    "event": "on_chain_end",
+                    "name": "build_response",
+                    "data": {"output": {"final_response": {
+                        "success": True,
+                        "activated_skills": ["sales-analysis"],
+                        "activated_knowledge": [{"source_file": "sales.md"}],
+                    }}},
+                    "metadata": {"langgraph_node": "build_response"},
+                }
+
+        def discard_background_task(coroutine, *args, **kwargs) -> None:
+            del args, kwargs
+            coroutine.close()
+
+        monkeypatch.setattr(workflow, "app", CompletedWorkflow())
+        monkeypatch.setattr(background_tasks, "create_background_task", discard_background_task)
+
+        # Act
+        events = [
+            json.loads(chunk.removeprefix("data: ").strip())
+            async for chunk in stream_analysis(
+                "统计销售额",
+                "demo",
+                session_id="session-activated",
+                datasource_access={"demo": {"allowed_columns": [], "row_filter_sql": ""}},
+            )
+        ]
+
+        # Assert
+        result = next(event for event in events if event.get("type") == "result")
+        assert result["activated_skills"] == ["sales-analysis"]
+        assert result["activated_knowledge"][0]["source_file"] == "sales.md"
+
     # 方法作用：验证工作流异常后终态明确标记失败，不能再宣告成功完成。
     # Args: self - pytest 测试类实例；monkeypatch - pytest 补丁工具。
     # Returns: 无返回值，断言失败时由 pytest 报告。

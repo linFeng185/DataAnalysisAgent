@@ -925,16 +925,17 @@ async def _llm_analyze(
             ),
         ]
 
+    # 分析输出允许使用独立预算，避免沿用 SQL 生成的长超时拖住补查回环。
+    from src.config import get_settings
+    settings = get_settings()
+    configured_timeout = getattr(settings, "analysis_llm_timeout", None)
+    if configured_timeout is None:
+        configured_timeout = getattr(settings, "llm_timeout", 60)
+    timeout_seconds = max(0.1, min(float(configured_timeout), 3600.0))
     try:
-        from src.config import get_settings
         from src.llm.adapters.registry import get_adapter
         from src.llm.invocation import prepare_invocation
-        settings = get_settings()
         llm = _get_analysis_llm(max_tokens=2048)
-        timeout_seconds = max(
-            0.1,
-            min(float(getattr(settings, "llm_timeout", 60)), 45.0),
-        )
         logger.info(
             "分析模型调用资源预算",
             timeout_seconds=timeout_seconds,

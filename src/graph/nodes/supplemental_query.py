@@ -67,29 +67,56 @@ def _extract_sql_table_names(sql: str, dialect: str = "") -> list[str]:
     return names
 
 
-# 方法作用：从相关 Schema 中提取表名和字段名映射。
+# 方法作用：从相关 Schema 中提取表名、字段名和业务别名映射。
 # Args: relevant_tables - retrieve_schema 输出的表结构字典列表。
-# Returns: 小写表名到小写字段名集合的映射。
+# Returns: 小写表名到可用于自然语言匹配的别名集合映射。
 def _schema_table_columns(relevant_tables: list[dict] | None) -> dict[str, set[str]]:
-    """兼容字典和轻量对象，避免补查选择器依赖具体 Schema 实现。"""
+    """兼容字典和轻量对象，并纳入列注释、表描述和显式别名。"""
     result: dict[str, set[str]] = {}
     for table in relevant_tables or []:
         if isinstance(table, dict):
             table_name = str(table.get("name", "") or "").strip()
             columns = table.get("columns", []) or []
+            table_description = str(table.get("description", "") or "").strip()
+            table_aliases = table.get("aliases", []) or table.get("tags", []) or []
         else:
             table_name = str(getattr(table, "name", "") or "").strip()
             columns = getattr(table, "columns", []) or []
+            table_description = str(getattr(table, "description", "") or "").strip()
+            table_aliases = getattr(table, "aliases", []) or getattr(table, "tags", []) or []
         if not table_name:
             continue
-        column_names: set[str] = set()
+        column_names: set[str] = {table_name.lower()}
+        if table_description:
+            column_names.add(table_description.lower())
+        if isinstance(table_aliases, (list, tuple, set)):
+            column_names.update(
+                str(alias).strip().lower()
+                for alias in table_aliases
+                if str(alias).strip()
+            )
         for column in columns:
             if isinstance(column, dict):
-                name = str(column.get("name", "") or "").strip()
+                aliases = [
+                    column.get("name", ""),
+                    column.get("comment", ""),
+                    column.get("description", ""),
+                    column.get("business_name", ""),
+                ]
+                aliases.extend(column.get("aliases", []) or [])
             else:
-                name = str(getattr(column, "name", "") or "").strip()
-            if name:
-                column_names.add(name.lower())
+                aliases = [
+                    getattr(column, "name", ""),
+                    getattr(column, "comment", ""),
+                    getattr(column, "description", ""),
+                    getattr(column, "business_name", ""),
+                    *(getattr(column, "aliases", []) or []),
+                ]
+            column_names.update(
+                str(alias).strip().lower()
+                for alias in aliases
+                if str(alias).strip()
+            )
         result[table_name.lower()] = column_names
     return result
 
@@ -106,15 +133,20 @@ def _infer_question_tables(
     if not text:
         return set()
     matches: set[str] = set()
+    # 中文业务别名使用子串匹配；ASCII 物理标识符仍要求词边界，避免 id 误命中。
+    def contains_alias(alias: str) -> bool:
+        if not alias:
+            return False
+        if any(ord(char) > 127 for char in alias):
+            return alias in text
+        return bool(re.search(rf"(?<![\w]){re.escape(alias)}(?![\w])", text))
+
     for table_name, columns in table_columns.items():
         base = table_name.rsplit(".", 1)[-1]
-        if re.search(rf"(?<![\w]){re.escape(base)}(?![\w])", text):
+        if contains_alias(base):
             matches.add(table_name)
             continue
-        if any(
-            re.search(rf"(?<![\w]){re.escape(column)}(?![\w])", text)
-            for column in columns
-        ):
+        if any(contains_alias(column) for column in columns):
             matches.add(table_name)
             continue
         stem = re.sub(r"s$", "", base)
@@ -166,6 +198,13 @@ def build_supplemental_request(
         if not normalized or normalized in executed:
             continue
         tables = _infer_question_tables(question, table_columns)
+        # 主查询只有一张真实表时，未命中物理字段的业务措辞仍安全地归属该表。
+        if not tables:
+            primary_candidates = {
+                table for table in primary_tables if table in table_columns
+            }
+            if len(primary_candidates) == 1:
+                tables = primary_candidates
         candidates.append((question, tables))
     if not candidates:
         return {"question": "", "source_questions": [], "table_names": []}
@@ -274,12 +313,13 @@ def _build_supplemental_state(state: AnalysisState, question: str) -> AnalysisSt
             "row_count": 0,
             "truncated": False,
         }).model_dump(),
-        "resolved_schema": None,
-        "relevant_tables": [],
-        "few_shot_examples": [],
-        "business_rules_text": "",
-        "enum_dictionary": {},
+        "resolved_schema": state.get("resolved_schema"),
+        "relevant_tables": list(state.get("relevant_tables", []) or []),
+        "few_shot_examples": list(state.get("few_shot_examples", []) or []),
+        "business_rules_text": str(state.get("business_rules_text", "") or ""),
+        "enum_dictionary": dict(state.get("enum_dictionary", {}) or {}),
         "long_term_memories_text": str(state.get("long_term_memories_text", "") or ""),
+        "activated_knowledge": list(state.get("activated_knowledge", []) or []),
         "conversation_history": [],
         "messages": [],
         "skill_prompt_override": str(state.get("skill_prompt_override", "") or ""),
@@ -326,7 +366,15 @@ async def _execute_supplemental_question(
     metadata.update({"node": "supplemental_query", "supplemental": True})
     nested_config["metadata"] = metadata
     try:
-        work = _merge(work, await retrieve_schema_node(work))
+        has_cached_schema = bool(work.get("relevant_tables")) or work.get("resolved_schema") is not None
+        if has_cached_schema:
+            logger.info(
+                "自主补查复用主查询上下文",
+                table_count=len(work.get("relevant_tables", []) or []),
+                knowledge_source_count=len(work.get("activated_knowledge", []) or []),
+            )
+        else:
+            work = _merge(work, await retrieve_schema_node(work))
         from src.config import get_settings
 
         attempts = max(1, min(2, int(get_settings().max_retry_count)))

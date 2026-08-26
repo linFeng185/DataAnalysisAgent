@@ -31,6 +31,24 @@ _BEARER_TOKEN_PATTERN = re.compile(
 _ANSI_ESCAPE_PATTERN = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 
 
+class _MilvusNoiseFilter(logging.Filter):
+    """精确过滤 Milvus 客户端已知的非故障 fallback 提示。"""
+
+    _LOGGER_PREFIX = "pymilvus"
+    _NOISE_MESSAGE = "failed to get mvccTs from milvus server, use client-side ts instead"
+
+    # 方法作用：判断日志记录是否为可忽略的 Milvus 客户端降级噪音。
+    # Args: self - 过滤器实例；record - 标准 logging 日志记录。
+    # Returns: 噪音返回 False，其余记录返回 True。
+    def filter(self, record: logging.LogRecord) -> bool:
+        logger_name = str(record.name or "")
+        message = record.getMessage()
+        return not (
+            logger_name.startswith(self._LOGGER_PREFIX)
+            and self._NOISE_MESSAGE in message
+        )
+
+
 # 方法作用：隐藏字符串中 URL userinfo 的密码部分。
 # Args: value - 可能包含认证 URL 的日志字符串。
 # Returns: 已隐藏 URL 密码的字符串。
@@ -234,6 +252,8 @@ def setup_logging() -> None:
 
     console_handler = logging.StreamHandler()
     console_handler.setFormatter(formatter)
+    milvus_noise_filter = _MilvusNoiseFilter()
+    console_handler.addFilter(milvus_noise_filter)
 
     log_path = Path(settings.log_file)
     log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -245,6 +265,7 @@ def setup_logging() -> None:
         encoding="utf-8",
     )
     file_handler.setFormatter(formatter)
+    file_handler.addFilter(_MilvusNoiseFilter())
 
     root_logger = logging.getLogger()
     for old_handler in root_logger.handlers:
@@ -256,6 +277,13 @@ def setup_logging() -> None:
 
     logging.getLogger("httpx").setLevel(logging.WARNING)
     logging.getLogger("chromadb").setLevel(logging.WARNING)
+    # 已知噪音来自该精确 logger；logger 级过滤同时覆盖其自带 handler。
+    milvus_logger = logging.getLogger("pymilvus.orm.iterator")
+    milvus_logger.filters = [
+        current for current in milvus_logger.filters
+        if not isinstance(current, _MilvusNoiseFilter)
+    ]
+    milvus_logger.addFilter(_MilvusNoiseFilter())
     logging.getLogger("sqlalchemy.engine").setLevel(logging.WARNING)
     # 移除 SQLAlchemy 自带的 handler，防止与 structlog handler 重复输出
     logging.getLogger("sqlalchemy.engine").handlers.clear()

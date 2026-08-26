@@ -22,6 +22,7 @@ generate_sql 节点 — LLM 生成 SQL，支持错误回注重试。
 from __future__ import annotations
 
 import asyncio
+import copy
 import json
 import re
 import time
@@ -36,6 +37,24 @@ from src.logging_config import get_logger
 from src.security.sql_execution import normalize_sql_dialect
 
 logger = get_logger(__name__)
+
+_PROMPT_SCHEMA_MAX_CHARS = 4400
+_COLUMN_SYNONYMS: dict[str, tuple[str, ...]] = {
+    "订单": ("order", "orders", "sale", "sales"),
+    "金额": ("amount", "amt", "price", "revenue", "sales", "total"),
+    "客单价": ("unit_price", "average_order_value", "aov", "price"),
+    "用户": ("user", "users", "customer", "customers", "member"),
+    "数量": ("count", "qty", "quantity", "number", "num"),
+    "状态": ("status", "state"),
+    "日期": ("date", "day", "time", "created", "updated"),
+    "时间": ("time", "date", "created", "updated"),
+    "产品": ("product", "sku", "item"),
+    "库存": ("stock", "inventory", "qty", "quantity"),
+}
+_INTERNAL_COLUMN_MARKERS = {
+    "internal", "remark", "remarks", "note", "notes", "debug", "trace",
+    "created_by", "updated_by", "deleted_by", "private", "secret",
+}
 
 
 # 方法作用：延迟检查指定 LLM 任务是否可用，避免工作流装配时加载模型依赖。
@@ -150,7 +169,12 @@ async def generate_sql_node(state: AnalysisState, config: RunnableConfig) -> dic
         }
 
     # 表结构 → Markdown 格式（用于 Prompt）；白名单使用完整授权表，详细 Schema 按问题裁剪。
-    prompt_tables = select_prompt_tables(tables, query, dialect=dialect, max_chars=6000)
+    prompt_tables = select_prompt_tables(
+        tables,
+        query,
+        dialect=dialect,
+        max_chars=_PROMPT_SCHEMA_MAX_CHARS,
+    )
     schema_text = format_schema_for_prompt(prompt_tables, dialect)
     table_whitelist = build_table_whitelist_context(tables)
     logger.info(
@@ -539,8 +563,8 @@ async def _llm_generate(
                 "schema",
                 f"## 数据库表结构\n{schema_text}",
                 priority=100,
-                min_chars=2500,
-                max_chars=6000,
+                min_chars=1800,
+                max_chars=_PROMPT_SCHEMA_MAX_CHARS,
             ),
             PromptSection(
                 "dialect",
@@ -948,21 +972,195 @@ def format_schema_for_prompt(tables: list[dict], dialect: str = "") -> str:
     return "\n".join(lines)
 
 
+# 方法作用：把文本切成可用于字段匹配的中英文标识符片段。
+# Args: value - 表名、列名或业务说明文本。
+# Returns: 去重后的低成本匹配片段集合。
+def _schema_match_tokens(value: Any) -> set[str]:
+    text = str(value or "").strip().lower()
+    if not text:
+        return set()
+    tokens = set(re.findall(r"[a-z0-9]+|[\u4e00-\u9fff]+", text))
+    for token in list(tokens):
+        if re.fullmatch(r"[a-z0-9]+", token):
+            tokens.update(part for part in token.split("_") if part)
+    return tokens
+
+
+# 方法作用：提取列的物理名称和业务别名，供问题相关性评分复用。
+# Args: column - Schema 中的列字典。
+# Returns: 小写别名集合。
+def _column_aliases(column: dict[str, Any]) -> set[str]:
+    aliases: list[Any] = [
+        column.get("name", ""),
+        column.get("comment", ""),
+        column.get("description", ""),
+        column.get("business_name", ""),
+    ]
+    raw_aliases = column.get("aliases", []) or []
+    aliases.extend(raw_aliases if isinstance(raw_aliases, (list, tuple, set)) else [raw_aliases])
+    return {
+        str(alias).strip().lower()
+        for alias in aliases
+        if str(alias or "").strip()
+    }
+
+
+# 方法作用：根据中英文业务词汇判断列是否与用户问题相关。
+# Args: query - 用户原始问题；column - 待评估列；table_name - 所属表名。
+# Returns: 大于零表示应优先保留，数值越大相关性越强。
+def _column_match_score(query: str, column: dict[str, Any], table_name: str = "") -> int:
+    query_text = str(query or "").strip().lower()
+    if not query_text:
+        return 0
+    aliases = _column_aliases(column)
+    score = 0
+    for alias in aliases:
+        if any(ord(char) > 127 for char in alias):
+            if alias in query_text:
+                score += 6
+        else:
+            alias_tokens = _schema_match_tokens(alias)
+            query_tokens = _schema_match_tokens(query_text)
+            if alias in query_tokens:
+                score += 8
+            score += min(3, len(alias_tokens & query_tokens))
+    # 常见中文业务词与物理列名之间没有显式注释时，使用受控同义词兜底。
+    name_text = " ".join(aliases)
+    name_tokens = _schema_match_tokens(name_text)
+    table_tokens = _schema_match_tokens(table_name)
+    for chinese, english_terms in _COLUMN_SYNONYMS.items():
+        matched_terms = name_tokens.intersection(english_terms)
+        # orders.order_status 中的 order 只是表级公共前缀，不能让所有列都被判为相关。
+        if chinese in query_text and matched_terms.difference(table_tokens):
+            score += 4
+    return score
+
+
+# 方法作用：从索引、主键和关系表达式中提取必须保留的列名。
+# Args: table - 单张表的授权 Schema 字典。
+# Returns: 小写物理列名集合。
+def _required_schema_columns(table: dict[str, Any]) -> set[str]:
+    required: set[str] = set()
+    columns = [
+        column for column in table.get("columns", []) or []
+        if isinstance(column, dict)
+    ]
+    known = {
+        str(column.get("name", "") or "").strip().lower()
+        for column in columns
+        if str(column.get("name", "") or "").strip()
+    }
+    for column in columns:
+        name = str(column.get("name", "") or "").strip().lower()
+        if name and (column.get("is_primary_key") or column.get("is_indexed")):
+            required.add(name)
+    for index in table.get("indexes", []) or []:
+        if not isinstance(index, dict):
+            continue
+        index_columns = index.get("columns", []) or []
+        if isinstance(index_columns, str):
+            index_columns = [index_columns]
+        required.update(
+            str(name).strip().lower()
+            for name in index_columns
+            if str(name or "").strip()
+        )
+    relation_texts = [
+        str(relation.get("join_key", "") or "")
+        for relation in table.get("relations", []) or []
+        if isinstance(relation, dict)
+    ]
+    relation_texts.append(str(table.get("partition_key", "") or ""))
+    for relation_text in relation_texts:
+        for identifier in re.findall(r"(?:[A-Za-z_][\w$]*\.)?([A-Za-z_][\w$]*)", relation_text):
+            normalized = identifier.strip().lower()
+            if normalized in known:
+                required.add(normalized)
+    return required
+
+
+# 方法作用：判断列名是否明显属于内部备注或审计字段。
+# Args: column - Schema 中的列字典。
+# Returns: 属于低价值内部字段时返回 True。
+def _is_internal_schema_column(column: dict[str, Any]) -> bool:
+    tokens = _schema_match_tokens(column.get("name", ""))
+    return bool(tokens & _INTERNAL_COLUMN_MARKERS)
+
+
+# 方法作用：复制并按问题相关性裁剪单张表的列，避免修改授权 Schema。
+# Args: table - 完整授权表；query - 用户问题。
+# Returns: 可安全放入 Prompt 的独立表字典。
+def _prune_prompt_table_columns(table: dict[str, Any], query: str) -> dict[str, Any]:
+    copied = copy.deepcopy(table)
+    columns = [
+        column for column in copied.get("columns", []) or []
+        if isinstance(column, dict) and str(column.get("name", "") or "").strip()
+    ]
+    if not columns:
+        copied["columns"] = []
+        return copied
+    table_name = str(copied.get("name", "") or "")
+    required = _required_schema_columns(copied)
+    scored = [
+        (_column_match_score(query, column, table_name), index, column)
+        for index, column in enumerate(columns)
+    ]
+    relevant = {
+        str(column.get("name", "") or "").strip().lower()
+        for score, _, column in scored
+        if score > 0
+    }
+    if relevant:
+        selected_names = required | relevant
+        # 相关列过多时仍保留稳定的高分顺序，防止大表重新撑爆 Prompt。
+        ranked_optional = sorted(
+            (
+                (
+                    score,
+                    -index,
+                    str(column.get("name", "") or "").strip().lower(),
+                )
+                for score, index, column in scored
+                if str(column.get("name", "") or "").strip().lower() not in required
+            ),
+            reverse=True,
+        )
+        if len(selected_names) > 32:
+            selected_names = required | {
+                name for _, _, name in ranked_optional[: max(0, 32 - len(required))]
+            }
+    else:
+        # 问题没有命中字段时保留可解释字段，明显内部备注除外；避免空 Schema 诱导模型编造列。
+        visible = [
+            column for column in columns
+            if not _is_internal_schema_column(column)
+        ]
+        selected_names = required | {
+            str(column.get("name", "") or "").strip().lower()
+            for column in visible[:32]
+        }
+    copied["columns"] = [
+        column for column in columns
+        if str(column.get("name", "") or "").strip().lower() in selected_names
+    ]
+    return copied
+
+
 # 方法作用：按用户问题相关性裁剪详细 Schema，同时保留至少一张可用表。
 # Args: tables - 完整授权表结构；query - 用户问题；dialect - 数据库方言；max_chars - 详细 Schema 上限。
-# Returns: 不超过字符预算的相关表列表；空输入返回空列表。
+# Returns: 不超过字符预算的独立表列表；空输入返回空列表。
 def select_prompt_tables(
     tables: list[dict],
     query: str,
     *,
     dialect: str = "",
-    max_chars: int = 6000,
+    max_chars: int = _PROMPT_SCHEMA_MAX_CHARS,
 ) -> list[dict]:
     if max_chars <= 0:
         raise ValueError("max_chars 必须大于零")
     if not tables:
         return []
-    query_tokens = set(re.findall(r"[A-Za-z0-9_]+|[\u4e00-\u9fff]", str(query or "").lower()))
+    query_tokens = _schema_match_tokens(query)
     ranked: list[tuple[int, int, dict]] = []
     for index, table in enumerate(tables):
         if not isinstance(table, dict):
@@ -971,13 +1169,19 @@ def select_prompt_tables(
             str(table.get("name", "") or ""),
             str(table.get("description", "") or ""),
             " ".join(
-                f"{column.get('name', '')} {column.get('comment', '')}"
+                " ".join(sorted(_column_aliases(column)))
                 for column in table.get("columns", []) or []
                 if isinstance(column, dict)
             ),
         ]).lower()
-        tokens = set(re.findall(r"[A-Za-z0-9_]+|[\u4e00-\u9fff]", searchable))
+        tokens = _schema_match_tokens(searchable)
         overlap = len(query_tokens & tokens) if query_tokens else 0
+        # 列级评分可以识别中文业务别名，作为表排序的补充信号。
+        overlap += sum(
+            min(3, _column_match_score(query, column, str(table.get("name", ""))))
+            for column in table.get("columns", []) or []
+            if isinstance(column, dict)
+        )
         ranked.append((overlap, -index, table))
     ranked.sort(reverse=True, key=lambda item: (item[0], item[1]))
     if not ranked:
@@ -985,17 +1189,20 @@ def select_prompt_tables(
 
     selected: list[dict] = []
     for _, _, table in ranked:
-        candidate = selected + [table]
+        prompt_table = _prune_prompt_table_columns(table, query)
+        candidate = selected + [prompt_table]
         rendered = format_schema_for_prompt(candidate, dialect)
         if len(rendered) <= max_chars or not selected:
-            selected.append(table)
+            selected.append(prompt_table)
         if selected and len(rendered) > max_chars and len(selected) > 1:
+            selected.pop()
             break
     logger.info(
-        "详细 Schema 按需裁剪完成",
+        "详细 Schema 按表按列裁剪完成",
         query=query[:80],
         total=len(tables),
         selected=len(selected),
+        selected_columns=sum(len(table.get("columns", []) or []) for table in selected),
         matched=[table.get("name", "") for _, _, table in ranked[:len(selected)]],
         max_chars=max_chars,
         rendered_chars=len(format_schema_for_prompt(selected, dialect)),

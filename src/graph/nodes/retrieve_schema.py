@@ -319,12 +319,13 @@ async def _load_knowledge_context(datasource: str, query: str) -> str:
                 knowledge_priority=evidence.scores.get("knowledge_priority", 0.0),
             )
 
+        display_sources = _deduplicate_knowledge_sources(source_summaries)
         if top_chunks:
             logger.info("知识库语义检索命中", datasource=datasource or "全部",
                         total=total, matched=len(relevant), top=len(top_chunks),
                         query=query[:60] if query else "",
-                        source_count=len(source_summaries))
-            return KnowledgeContext("\n\n---\n\n".join(top_chunks), source_summaries)
+                        source_count=len(display_sources))
+            return KnowledgeContext("\n\n---\n\n".join(top_chunks), display_sources)
         logger.info("知识库无匹配结果", datasource=datasource or "全部",
                     total=total, query=query[:60] if query else "")
         return ""
@@ -347,4 +348,41 @@ def _knowledge_source_summary(evidence: Any) -> dict[str, Any]:
         "locator": dict(evidence.locator or {}),
         "relevance": round(float(evidence.scores.get("rerank", evidence.scores.get("fused", 0.0)) or 0.0), 4),
         "trust_level": "trusted_knowledge",
+        "match_count": 1,
     }
+
+
+# 方法作用：按知识文件或结构化来源聚合前端摘要，正文检索结果保持不变。
+# Args: sources - 按相关性排序的知识来源摘要。
+# Returns: 保持首次出现顺序并附带命中分块数的唯一来源列表。
+def _deduplicate_knowledge_sources(sources: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    grouped: dict[tuple[str, ...], dict[str, Any]] = {}
+    for index, source in enumerate(sources):
+        if not isinstance(source, dict):
+            continue
+        normalized = dict(source)
+        source_type = str(normalized.get("source", "") or "")
+        source_file = str(normalized.get("source_file", "") or "")
+        table_name = str(normalized.get("table_name", "") or "")
+        category = str(normalized.get("category", "") or "")
+        source_id = str(normalized.get("source_id", "") or "")
+        if source_file:
+            key = ("file", source_type, source_file)
+        elif table_name:
+            key = ("table", source_type, table_name, category)
+        else:
+            key = ("id", source_id or str(index))
+        existing = grouped.get(key)
+        if existing is None:
+            normalized["match_count"] = max(1, int(normalized.get("match_count", 1) or 1))
+            grouped[key] = normalized
+            continue
+        existing["match_count"] = int(existing.get("match_count", 1) or 1) + max(
+            1,
+            int(normalized.get("match_count", 1) or 1),
+        )
+        existing["relevance"] = max(
+            float(existing.get("relevance", 0.0) or 0.0),
+            float(normalized.get("relevance", 0.0) or 0.0),
+        )
+    return list(grouped.values())

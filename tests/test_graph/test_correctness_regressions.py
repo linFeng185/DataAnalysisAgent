@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-import json
 import asyncio
+import json
+import time
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -87,6 +88,46 @@ class TestAnalyzeResultTimeout:
 
         # Assert
         assert "summary" in result
+
+    # 方法作用：验证分析任务使用独立超时配置，而不是把通用 LLM 超时硬编码截断。
+    # Args: self - pytest 测试类实例；monkeypatch - pytest 补丁工具。
+    # Returns: 无返回值，断言慢模型在配置阈值内回退。
+    async def test_analysis_timeout_uses_dedicated_setting(self, monkeypatch) -> None:
+        """分析节点应尊重 analysis_llm_timeout，避免补查链路长时间占用请求。"""
+        # Arrange
+        import src.config as config_module
+        import src.graph.nodes.analyze_result as analyze_module
+
+        async def slow_invoke(_messages):
+            await asyncio.sleep(0.2)
+            return SimpleNamespace(content="{}")
+
+        monkeypatch.setattr(config_module, "get_settings", lambda: SimpleNamespace(
+            llm_timeout=60,
+            analysis_llm_timeout=0.05,
+            llm_model="test",
+            analysis_data_max_chars=50_000,
+        ))
+        monkeypatch.setattr(
+            analyze_module,
+            "get_llm",
+            lambda temperature=0.3: SimpleNamespace(ainvoke=slow_invoke),
+        )
+        started = time.monotonic()
+
+        # Act
+        result = await analyze_module._llm_analyze(
+            [{"value": 1}],
+            "SELECT value FROM metrics",
+            {"columns": {}},
+            "",
+            "",
+            "",
+        )
+
+        # Assert
+        assert "summary" in result
+        assert time.monotonic() - started < 0.15
 
 class TestSQLiteIntrospection:
     """覆盖 SQLite 专用系统表和 PRAGMA 路由。"""

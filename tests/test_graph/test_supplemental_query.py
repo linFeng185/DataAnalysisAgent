@@ -76,6 +76,48 @@ class TestSupplementalQuery:
         assert request["source_questions"] == ["users 表中共有多少用户？"]
         assert "订单总数是多少？" not in request["question"]
 
+    # 方法作用：验证字段注释和业务别名能把自然语言补查归属到同一张表。
+    # Args: self - pytest 测试类实例。
+    # Returns: 无返回值，断言同表问题被合并。
+    def test_select_question_uses_column_comments_and_aliases(self) -> None:
+        """用户说业务别名而不是物理列名时，同表补查仍应合并。"""
+        # Arrange
+        from src.graph.nodes.supplemental_query import build_supplemental_request
+
+        analysis = {
+            "supplemental_questions": [
+                "订单金额总和是多少？",
+                "平均客单价是多少？",
+                "用户总数是多少？",
+            ],
+        }
+
+        # Act
+        request = build_supplemental_request(
+            analysis,
+            [],
+            relevant_tables=[
+                {
+                    "name": "orders",
+                    "description": "订单事实表",
+                    "columns": [
+                        {"name": "order_amount", "comment": "订单金额"},
+                        {"name": "customer_unit_price", "comment": "客单价"},
+                    ],
+                },
+                {"name": "users", "columns": [{"name": "user_id", "comment": "用户编号"}]},
+            ],
+            primary_sql="SELECT SUM(order_amount) FROM orders",
+        )
+
+        # Assert
+        assert request["table_names"] == ["orders"]
+        assert request["source_questions"] == [
+            "订单金额总和是多少？",
+            "平均客单价是多少？",
+        ]
+        assert "一条 SQL" in request["question"]
+
     # 方法作用：验证合并任务的来源问题会参与后续去重。
     # Args: self - pytest 测试类实例。
     # Returns: 无返回值，断言不再返回重复任务。
@@ -296,6 +338,66 @@ class TestSupplementalQuery:
             "data": [{"delivered_orders": 9}],
             "error": "",
         }
+
+    # 方法作用：验证补查复用主查询已授权上下文，避免重复 Schema 和知识库检索。
+    # Args: self - pytest 测试类实例；monkeypatch - pytest 补丁工具。
+    # Returns: 无返回值，断言检索节点未被重复调用且缓存字段继续传递。
+    async def test_execute_question_reuses_cached_schema_context(self, monkeypatch) -> None:
+        """同一请求的补查不应再次访问 Schema/向量检索。"""
+        # Arrange
+        import src.graph.nodes.execute_sql as execute_module
+        import src.graph.nodes.generate_sql as generate_module
+        import src.graph.nodes.layer3_validate as layer3_module
+        import src.graph.nodes.layer4_explain as layer4_module
+        import src.graph.nodes.retrieve_schema as retrieve_module
+        from src.graph.nodes.supplemental_query import _execute_supplemental_question
+
+        retrieve = AsyncMock(side_effect=AssertionError("补查不应重复检索 Schema"))
+        monkeypatch.setattr(retrieve_module, "retrieve_schema_node", retrieve)
+
+        async def generate_sql(state: dict, config: dict) -> dict:
+            del config
+            assert state["relevant_tables"][0]["name"] == "orders"
+            assert state["business_rules_text"] == "订单金额只统计 paid"
+            assert state["activated_knowledge"][0]["source_file"] == "orders.md"
+            return {"generated_sql": "SELECT COUNT(*) AS total FROM orders"}
+
+        async def validate_sql(state: dict) -> dict:
+            assert state["generated_sql"].startswith("SELECT")
+            return {"validation_errors": [], "sql_valid": True}
+
+        async def explain_sql(state: dict) -> dict:
+            return {"explain_errors": [], "sql_explain_checked": True}
+
+        async def execute_sql(state: dict) -> dict:
+            return {
+                "query_result_sample": [{"total": 3}],
+                "query_result_full_count": 1,
+                "execution_error": "",
+            }
+
+        monkeypatch.setattr(generate_module, "generate_sql_node", generate_sql)
+        monkeypatch.setattr(layer3_module, "layer3_validate_node", validate_sql)
+        monkeypatch.setattr(layer4_module, "layer4_explain_node", explain_sql)
+        monkeypatch.setattr(execute_module, "execute_sql_node", execute_sql)
+        state = {
+            "user_query": "统计订单数",
+            "datasource": "demo",
+            "selected_datasources": ["demo"],
+            "dialect": "mysql",
+            "resolved_schema": object(),
+            "relevant_tables": [{"name": "orders", "columns": []}],
+            "business_rules_text": "订单金额只统计 paid",
+            "activated_knowledge": [{"source_file": "orders.md"}],
+            "request_rate_limit_checked": True,
+        }
+
+        # Act
+        record = await _execute_supplemental_question(state, "统计订单数", {})
+
+        # Assert
+        assert record["success"] is True
+        retrieve.assert_not_awaited()
 
     async def test_node_appends_successful_evidence_and_requests_reanalysis(self, monkeypatch) -> None:
         """补查成功后应累计证据、增加轮次并清空旧分析触发重新分析。"""

@@ -525,11 +525,33 @@ function TurnBubble({ turn, onSendMessage, onConfirmAction }: {
   const isRestored = status === 'done' && !finalResult;
   const isLLMDirect = finalResult?.source === 'llm_direct';
   const activeSkills = (finalResult?.activated_skills as string[]) || [];
-  const activeKnowledge = Array.isArray(finalResult?.activated_knowledge)
+  const rawActiveKnowledge = Array.isArray(finalResult?.activated_knowledge)
     ? finalResult.activated_knowledge as Array<Record<string, unknown>>
     : finalResult?.activated_knowledge
       ? [{ source_file: String(finalResult.activated_knowledge), category: 'general' }]
       : [];
+  const activeKnowledge = Array.from(rawActiveKnowledge.reduce((sources, item, index) => {
+    const source = String(item.source || 'unknown');
+    const sourceFile = String(item.source_file || '');
+    const tableName = String(item.table_name || '');
+    const sourceId = String(item.source_id || index);
+    const key = sourceFile
+      ? `file:${source}:${sourceFile}`
+      : tableName
+        ? `table:${source}:${tableName}:${String(item.category || '')}`
+        : `id:${sourceId}`;
+    const existing = sources.get(key);
+    const matchCount = Math.max(1, Number(item.match_count) || 1);
+    if (!existing) {
+      sources.set(key, { ...item, match_count: matchCount });
+    } else {
+      sources.set(key, {
+        ...existing,
+        match_count: Math.max(1, Number(existing.match_count) || 1) + matchCount,
+      });
+    }
+    return sources;
+  }, new Map<string, Record<string, unknown>>()).values());
 
   return (
     <div style={{ marginBottom: 18 }}>
@@ -572,14 +594,36 @@ function TurnBubble({ turn, onSendMessage, onConfirmAction }: {
                 </span>
               )}
               {activeKnowledge.length > 0 && (
-                <span style={{ fontSize: 11 }}>
+                <span style={{ fontSize: 11, display: 'inline-flex', alignItems: 'center', minWidth: 0 }}
+                  title={`命中 ${activeKnowledge.length} 个可信知识来源`}>
                   <ReadOutlined style={{ color: '#722ed1', marginRight: 3 }} />
-                  {activeKnowledge.slice(0, 2).map((item, index) => (
-                    <Tag key={`${String(item.source_id || item.source_file || index)}`} color="purple"
-                      style={{ marginLeft: 2, fontSize: 10, lineHeight: '18px' }}>
-                      {String(item.source_file || item.category || item.source_id || '知识库')}
+                  {activeKnowledge.slice(0, 2).map((item, index) => {
+                    const label = String(
+                      item.source_file || item.table_name || item.category || item.source_id || '知识库',
+                    );
+                    const details = [
+                      item.category ? `类别：${String(item.category)}` : '',
+                      item.table_name ? `表：${String(item.table_name)}` : '',
+                      Number(item.match_count) > 1 ? `命中分块：${Number(item.match_count)}` : '',
+                    ].filter(Boolean).join('；');
+                    return (
+                      <Tooltip key={`${String(item.source_id || item.source_file || index)}`}
+                        title={details || label}>
+                        <Tag color="purple" style={{
+                          marginLeft: 2, marginInlineEnd: 2, maxWidth: 150,
+                          overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                          fontSize: 10, lineHeight: '18px', verticalAlign: 'middle',
+                        }}>
+                          {label}
+                        </Tag>
+                      </Tooltip>
+                    );
+                  })}
+                  {activeKnowledge.length > 2 && (
+                    <Tag color="purple" style={{ marginInlineEnd: 0, fontSize: 10, lineHeight: '18px' }}>
+                      +{activeKnowledge.length - 2}
                     </Tag>
-                  ))}
+                  )}
                 </span>
               )}
             </div>

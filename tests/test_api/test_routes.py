@@ -271,6 +271,43 @@ class TestEndpoints:
         r = await client.post("/api/v1/chat", json={"query": "test", "datasource": "ch"})
         assert r.status_code == 200
 
+    # 方法作用：验证非流式聊天公开命中知识和技能的结构化字段。
+    # Args: self - pytest 测试类实例；client - 携带认证的异步客户端；monkeypatch - 补丁工具。
+    # Returns: 无返回值，断言响应契约。
+    async def test_chat_exposes_activated_knowledge_and_skills(self, client, monkeypatch) -> None:
+        """顶层 ChatResponse 必须透出知识来源摘要和激活技能。"""
+        # Arrange
+        from types import SimpleNamespace
+        from unittest.mock import AsyncMock
+
+        import src.api.routes as routes
+
+        workflow = SimpleNamespace(ainvoke=AsyncMock(return_value={
+            "final_response": {
+                "success": True,
+                "activated_skills": ["sales-analysis"],
+                "activated_knowledge": [{
+                    "source_id": "kb-1",
+                    "source_file": "sales.md",
+                    "category": "business_rule",
+                    "trust_level": "trusted_knowledge",
+                }],
+            },
+        }))
+        monkeypatch.setattr(routes, "_app", lambda: workflow)
+
+        # Act
+        response = await client.post(
+            "/api/v1/chat",
+            json={"query": "统计销售额", "datasource": "ch", "stream": False},
+        )
+
+        # Assert
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["activated_skills"] == ["sales-analysis"]
+        assert payload["activated_knowledge"][0]["source_file"] == "sales.md"
+
     # 方法作用：验证聊天限流在工作流和授权解析之前执行。
     # Args: self - pytest 测试类实例；client - ASGI 客户端；monkeypatch - pytest 补丁工具。
     # Returns: 无返回值，断言失败时由 pytest 报告。

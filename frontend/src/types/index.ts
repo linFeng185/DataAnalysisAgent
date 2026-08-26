@@ -119,6 +119,7 @@ export interface ChatResponse {
     locator?: Record<string, unknown>;
     relevance?: number;
     trust_level?: string;
+    match_count?: number;
   }> | string;
 }
 

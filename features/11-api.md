@@ -65,7 +65,7 @@
 | # | 功能 | 文件 | 描述 | 状态 |
 |---|------|------|------|------|
 | 11.2.1 | ChatRequest | `src/api/schemas.py` | query / session_id / datasource | 单测完成 | P0 |
-| 11.2.2 | ChatResponse | 同上 | success / sql / sql_statements / data / analysis / chart / row_count / truncated | 单测完成 | P0 |
+| 11.2.2 | ChatResponse | 同上 | success / sql / sql_statements / data / analysis / chart / row_count / truncated，并在非流式与 SSE 最终结果一致透出 activated_skills / activated_knowledge 来源摘要 | 单测完成 | P0 |
 | 11.2.5 | DataSourceCreateRequest | 同上 | name / dialect / host / ... | 单测完成 | P0 |
 | 11.2.7 | HealthResponse | 同上 | status / version / uptime_seconds | 单测完成 | P0 |
 | 11.2.8 | ModelTestRequest | 同上 | model_id 长度与字符集校验，模型测试固定单 token | 单测完成 | P0 |

@@ -12,6 +12,7 @@ llm_model: gpt-4o
 llm_temperature: 0.0
 llm_max_tokens: 4096
 llm_timeout: 60
+analysis_llm_timeout: 30
 llm_stream_chunk_timeout: 30
 cheap_llm_model: gpt-4o-mini
 local_llm_model: ""
