@@ -35,10 +35,13 @@ def build_knowledge_filters(
         source=source,
         owner_only=owner_only,
     )
-    filters: dict[str, Any] = {"visibility": "tenant"}
+    from src.api.auth import get_current_role
+
+    platform = get_current_role() == "super_admin"
+    filters: dict[str, Any] = {"visibility": "system" if platform else "tenant"}
     policy = get_tenant_policy()
     effective_tenant_id = tenant_id if tenant_id is not None else get_current_tenant_id()
-    if policy.tenant_filter(effective_tenant_id, explicit=tenant_id is not None):
+    if not platform and policy.tenant_filter(effective_tenant_id, explicit=tenant_id is not None):
         filters["tenant_id"] = effective_tenant_id
         if owner_only:
             filters["owner_user_id"] = get_current_user_id()
@@ -89,6 +92,10 @@ def build_accessible_knowledge_filters(
         shared["source"] = source
 
     filters: list[dict[str, Any]] = [{"visibility": "system", **shared}]
+    from src.api.auth import get_current_role
+
+    if get_current_role() == "super_admin":
+        return filters
     tenant_filter: dict[str, Any] = {"visibility": "tenant", **shared}
     private_filter: dict[str, Any] = {"visibility": "private", **shared}
     if policy.tenant_filter(current_tenant_id, explicit=tenant_id is not None):

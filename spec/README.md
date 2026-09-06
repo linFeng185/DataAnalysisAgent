@@ -27,3 +27,11 @@
 | [27-container-deployment.md](27-container-deployment.md) | Linux 前后端分离容器部署 | 动态 |
 | [28-tenant-identity-and-llm-governance.md](28-tenant-identity-and-llm-governance.md) | 租户身份、用户自治与 LLM 治理 | 动态 |
 | [29-selected-phase4-features.md](29-selected-phase4-features.md) | Phase 4 选定能力设计 | 动态 |
+| [30-report-workbench.md](30-report-workbench.md) | 报表工作台与自然语言自动化设计 | 动态 |
+| [31-secret-custody.md](31-secret-custody.md) | 密钥托管、启动注入与离线凭证轮换 | 动态 |
+| [32-metric-catalog.md](32-metric-catalog.md) | 租户指标目录、版本审核与生效口径引用 | 动态 |
+| [33-image-assets.md](33-image-assets.md) | 有界图片资产、视觉模型与证据链路 | 动态 |
+| [34-report-phase2-implementation.md](34-report-phase2-implementation.md) | 报表持久化调度、实时钻取与生命周期实现约束 | 动态 |
+| [35-platform-tenant-governance.md](35-platform-tenant-governance.md) | 平台报表分权、共享查询额度、知识应急授权与 MCP 安全停用 | 动态 |
+| [37-runtime-platform-and-ui.md](37-runtime-platform-and-ui.md) | 平台动态配置、连接器热插拔、双语界面与表结构同步 | 动态 |
+| [36-large-test-datasets.md](36-large-test-datasets.md) | 每源 125 表、五业务域与千万级中文模拟数据 | 动态 |

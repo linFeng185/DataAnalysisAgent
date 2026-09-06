@@ -1,6 +1,6 @@
 # 报表工作台与自然语言自动化设计
 
-> 状态：Phase 1 基础闭环已实现；23.4 受控关系分析基础已实现，定时调度、实时 Drilldown 和更完整的跨源聚合按后续 Phase 演进。
+> 状态：Phase 1 基础闭环及 Phase 2 本轮编号能力已实现并进入回归验收；真实 PostgreSQL 多 Worker/RLS 和外部模型仍需独立验收。接口与运行约束见 `34-report-phase2-implementation.md`。
 > 适用版本：Phase 3 生产化增强，首批实现建议拆分为 P1；依赖现有数据源 ACL、SQL 安全执行、LangGraph、分析引擎、可视化引擎和租户管理。
 
 ## 1. 背景与问题
@@ -730,3 +730,35 @@ report_default_monthly_tokens=200000
 | 公开链接泄漏业务数据 | 固定脱敏快照、可选授权码、短期 token、限流和撤销；公开禁用实时钻取。 |
 | 旧自动化迁移造成行为变化 | 旧表/接口保留兼容层，新工作台独立存储和权限键，显式升级而非隐式迁移。 |
 | 页面到期但分享缓存仍可访问 | 分享和版本都校验 `expires_at/revoked_at`，响应 `no-store`，清理任务只做补偿。 |
+
+## 21. 租户额度管理接口与可靠性落实（2026-09-06）
+
+本节落实 §10 已定义的租户管理员职责，不把平台超级管理员作为租户日常业务额度的配置入口。当前统计周期仍为自然月，而不是自然周；任务创建次数和实际运行次数分别展示。
+
+| 方法 | 路径 | 契约 |
+|---|---|---|
+| GET | `/api/v1/report-workbench/admin/users/{user_id}/policy` | 仅 tenant_admin；返回目标用户有效策略、能力、自然月标识和余额；目标必须属于当前租户 |
+| PUT | `/api/v1/report-workbench/admin/users/{user_id}/policy` | 仅 tenant_admin；完整替换目标策略与能力；数据库事务成功后更新运行缓存，不清空已用量 |
+
+PUT 请求示例：
+
+```json
+{
+  "capabilities": ["report.menu", "report.create"],
+  "max_jobs_created": 30,
+  "max_runs_started": 50,
+  "max_concurrent_runs": 2,
+  "max_analysis_units_per_run": 12,
+  "max_queries_per_run": 16,
+  "max_rows_per_query": 100000,
+  "max_llm_tokens": 200000,
+  "max_page_bytes": 2097152,
+  "max_share_links": 20
+}
+```
+
+响应包含 `user_id`、`capabilities` 和 `policy`，GET 另含 `quota` 与 `period="calendar_month"`。缺少租户管理员角色返回 403；目标不存在或跨租户返回 404；非法用户 ID 或配额值返回 422。PUT 未提供的字段使用模型默认值，不是局部 PATCH。
+
+创建任务采用同一身份、同一幂等键的事务锁；事务内完成去重、月度任务额度预占和 Job 写入，只有首次创建才入队。单次单元、查询和行数限制不再与月度累计用量比较。取消通过 CancelledError 传播并落库，最终清理只释放当前运行实际取得的槽位，跨月时使用预占周期。每个报表运行与分析单元使用独立线程标识。
+
+本节不表示 §18 的定时调度、实时钻取、页面延期和生产恢复扫描已经实现，完成度以 `features/23-report-workbench.md` 的独立条目为准。

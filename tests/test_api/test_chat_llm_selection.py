@@ -167,7 +167,7 @@ class TestChatLLMContext:
             del args, kwargs
             coroutine.close()
 
-        monkeypatch.setattr(chat_routes, "_enforce_chat_request_quota", lambda req: None)
+        monkeypatch.setattr(chat_routes, "_enforce_chat_request_quota", AsyncMock(return_value=None))
         monkeypatch.setattr(chat_routes, "_validated_skill_ids", lambda req: [])
         monkeypatch.setattr(
             chat_routes,

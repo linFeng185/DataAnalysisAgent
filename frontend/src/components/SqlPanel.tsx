@@ -1,3 +1,4 @@
+import { t, useLanguage } from '../i18n';
 import { useEffect, useRef } from 'react';
 import { Button } from 'antd';
 import { CopyOutlined } from '@ant-design/icons';
@@ -43,6 +44,7 @@ function formatAndHighlight(code: string): string {
 // Args: sqlCode - 待展示和复制的 SQL。
 // Returns: SQL 面板 React 节点。
 export default function SqlPanel({ sqlCode }: { sqlCode: string }) {
+  useLanguage();
   const codeRef = useRef<HTMLElement>(null);
 
   useEffect(() => {
@@ -53,7 +55,7 @@ export default function SqlPanel({ sqlCode }: { sqlCode: string }) {
     <div style={{ position: 'relative' }}>
       <div style={{ position: 'absolute', top: 4, right: 4, zIndex: 1 }}>
         <Button size="small" icon={<CopyOutlined />}
-          onClick={() => navigator.clipboard.writeText(sqlCode)}>复制</Button>
+          onClick={() => navigator.clipboard.writeText(sqlCode)}>{t("复制")}</Button>
       </div>
       <pre className="sql-block" style={{ margin: 0, paddingTop: 40, overflow: 'auto' }}>
         <code ref={codeRef} className="hljs" />

@@ -71,7 +71,12 @@ async def execute_sql_node(state: AnalysisState) -> dict:
 
     def complete(update: dict) -> dict:
         """同步当前节点增量和轻量执行上下文。"""
+        if rate_limit_checked:
+            update["request_rate_limit_checked"] = True
+            update["request_context"] = {**contexts.request.model_dump(), "request_rate_limit_checked": True}
         return with_execution_context(state, update)
+
+    rate_limit_checked = contexts.request.request_rate_limit_checked
 
     # LLM 返回空 SQL（如问题无法用现有数据回答）时直接跳过执行
     if not sql:
@@ -85,7 +90,7 @@ async def execute_sql_node(state: AnalysisState) -> dict:
     # 12.2.1 非 API 调用保留节点级兜底，API 请求不得重复计数。
     if not contexts.request.request_rate_limit_checked:
         from src.security.data_masker import check_rate_limit
-        if not check_rate_limit(contexts.request.user_id):
+        if not await check_rate_limit(contexts.request.user_id, tenant_id=effective_tenant_id):
             logger.warning("SQL 执行节点频率超限", user_id=contexts.request.user_id)
             await _record_query_audit(
                 state, ds_name, sql, _start, success=False, error_message="rate_limit",
@@ -96,6 +101,8 @@ async def execute_sql_node(state: AnalysisState) -> dict:
                              "query_result_statistics": {"row_count": 0}})
     else:
         logger.info("SQL 执行节点复用入口配额检查", user_id=contexts.request.user_id)
+
+    rate_limit_checked = True
 
     # 行列级权限（多租户时生效）
     if get_tenant_policy().datasource_isolation_enabled:
@@ -151,11 +158,11 @@ async def execute_sql_node(state: AnalysisState) -> dict:
             truncated = execution.truncated
             elapsed = round((time.monotonic() - _start) * 1000)
             # 12.3.3 在返回前持久化审计，避免任务在请求结束时被取消。
-            from src.security.data_masker import mask_sensitive_data
+            from src.security.data_masker import mask_sensitive_data_with_metadata
             await _record_query_audit(
                 state, ds_name, sql, _start, success=True, row_count=len(rows),
             )
-            masked_rows = mask_sensitive_data(rows)
+            masked_rows, masking = mask_sensitive_data_with_metadata(rows)
             settings = get_settings()
             collect_attribution_rows = (
                 contexts.routing.intent == "attribution"
@@ -172,7 +179,7 @@ async def execute_sql_node(state: AnalysisState) -> dict:
                 "attribution_candidate_rows": attribution_rows,
                 "query_result_full_count": len(masked_rows),
                 "query_result_truncated": truncated,
-                "query_result_statistics": {"row_count": len(masked_rows), "truncated": truncated},
+                "query_result_statistics": {"row_count": len(masked_rows), "truncated": truncated, "masking": masking},
                 "execution_error": "",
                 "execution_error_type": "",
                 "execution_retry_count": 0,

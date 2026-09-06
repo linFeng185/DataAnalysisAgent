@@ -13,6 +13,11 @@
 ### 7.2 数据安全
 
 - 查询结果自动脱敏（手机号、身份证号、邮箱等字段）
+- 18.8.1 可视化契约：SQL 执行返回 `query_result_statistics.masking`，最终响应提供
+  `masking={applied, fields:[{column, categories, masked_count}]}`；统计来自实际脱敏事件，
+  不含原始值。多源合并按列聚合，补查独立返回 `supplemental_masking`，历史从
+  `query_history.final_result` 恢复。前端显示结果摘要和表头标识，不根据星号推断，
+  也不提供明文恢复按钮；缺少元数据的旧结果不标记为已脱敏。
 - 敏感表/字段可配置访问白名单
 - 查询日志完整记录（谁、什么时候、查了什么）
 

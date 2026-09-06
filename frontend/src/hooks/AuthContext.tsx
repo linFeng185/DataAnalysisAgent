@@ -1,3 +1,4 @@
+import { t, useLanguage } from '../i18n';
 import { createContext, useContext, useState, useCallback, useEffect, type ReactNode } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { message } from 'antd';
@@ -31,6 +32,7 @@ const AuthContext = createContext<AuthState | null>(null);
 // Args: children - 需要访问认证 Context 的 React 子节点。
 // Returns: 包裹认证状态的 React Provider。
 export function AuthProvider({ children }: { children: ReactNode }) {
+  useLanguage();
   const [user, setUser] = useState<User | null>(null);
   const [authRequired, setAuthRequired] = useState(true);
   const [loading, setLoading] = useState(true);
@@ -71,8 +73,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       body: JSON.stringify({ tenant_code: tenantCode, username, password }),
     });
     if (!response.ok) {
-      const error = await response.json().catch(() => ({ detail: '登录失败' }));
-      throw new Error(error.detail || '登录失败');
+      const error = await response.json().catch(() => ({ detail: t("登录失败") }));
+      throw new Error(error.detail || t("登录失败"));
     }
     const data = await response.json();
     setAuthRequired(true);
@@ -99,7 +101,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       navigate('/login');
     } catch (error) {
       console.error('退出登录失败', error);
-      message.error('退出登录失败');
+      message.error(t("退出登录失败"));
     }
   }, [navigate]);
 

@@ -9,7 +9,7 @@ export default defineConfig({
       output: {
         manualChunks: {
           antd: ['antd', '@ant-design/icons'],
-          charts: ['echarts', 'echarts-for-react'],
+          charts: ['echarts/core', 'echarts-for-react/lib/core'],
           sql: ['highlight.js', 'sql-formatter'],
         },
       },

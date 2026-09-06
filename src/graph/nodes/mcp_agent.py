@@ -82,11 +82,14 @@ def _build_attachment_tools(state: AnalysisState) -> list[Any]:
     if not allowed_ids:
         return []
     logger.info("构建请求级附件工具", file_ids=sorted(allowed_ids))
+    image_results: dict[int, tuple[str, dict]] = {}
+    image_attempts = 0
 
     # 方法作用：读取一个已在本次请求白名单中的私有附件并返回受限预览。
     # Args: file_id - ChatRequest.file_ids 中的正整数文件 ID。
     # Returns: 结构化 profile 或受长度限制的文档正文，并携带真实 citation。
     async def read_attached_file(file_id: int) -> dict[str, Any]:
+        nonlocal image_attempts
         logger.info("附件工具读取入口", file_id=file_id, allowed=file_id in allowed_ids)
         if file_id not in allowed_ids:
             logger.warning("附件工具请求白名单拒绝", file_id=file_id)
@@ -108,7 +111,32 @@ def _build_attachment_tools(state: AnalysisState) -> list[Any]:
             "source_id": f"file:{file_id}",
             "locator": {"file_id": file_id, "filename": filename},
         }
-        if extension in {".csv", ".xlsx", ".xls", ".parquet"}:
+        if extension in {".png", ".jpg", ".jpeg", ".webp"}:
+            import hashlib
+
+            from src.graph.context import read_contexts
+            from src.knowledge.image_assets import MAX_REQUEST_IMAGES, analyze_image_bytes
+
+            identity = read_contexts(state).request
+            if int(stored.get("tenant_id", 0)) != identity.tenant_id or (
+                stored.get("scope", "private") == "private"
+                and int(stored.get("owner_user_id", 0)) != identity.user_id
+            ):
+                raise PermissionError("图片不属于当前请求的授权身份")
+            fingerprint = hashlib.sha256(content).hexdigest()
+            cached = image_results.get(file_id)
+            if cached and cached[0] == fingerprint:
+                return cached[1]
+            if image_attempts >= MAX_REQUEST_IMAGES:
+                raise ValueError("当前请求的图片分析数量超过限制")
+            image_attempts += 1
+            result = await analyze_image_bytes(
+                file_id, filename, content, identity.user_query,
+                tenant_id=identity.tenant_id, user_id=identity.user_id,
+                owner_id=int(stored.get("owner_user_id", identity.user_id)),
+            )
+            image_results[file_id] = (fingerprint, result)
+        elif extension in {".csv", ".xlsx", ".xls", ".parquet"}:
             from src.knowledge.structured_assets import StructuredAssetAdapter
 
             adapter = StructuredAssetAdapter(
@@ -142,6 +170,20 @@ def _build_attachment_tools(state: AnalysisState) -> list[Any]:
         else:
             logger.warning("附件工具格式拒绝", file_id=file_id, extension=extension)
             raise ValueError(f"不支持的附件格式: {extension or filename}")
+        if "asset" not in result and int(stored.get("tenant_id", 0) or 0) > 0:
+            import hashlib
+
+            from src.knowledge.asset_models import DataAsset
+
+            asset = DataAsset(
+                id=f"file:{stored['tenant_id']}:{file_id}",
+                kind="table_file" if result["kind"] == "structured" else "document",
+                uri=f"file:{file_id}", tenant_id=int(stored["tenant_id"]),
+                owner_id=int(stored.get("owner_user_id", 0)),
+                fingerprint=hashlib.sha256(content).hexdigest(),
+                provenance={"file_id": file_id, "filename": filename},
+            )
+            result["asset"] = asset.model_dump(by_alias=True)
         logger.info(
             "附件工具读取完成",
             file_id=file_id,

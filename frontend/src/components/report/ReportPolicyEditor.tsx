@@ -1,0 +1,76 @@
+import { t, useLanguage } from '../../i18n';
+import { useEffect, useState } from 'react';
+import { Alert, Checkbox, Form, InputNumber, Modal, Spin, message } from 'antd';
+import { get, put } from '../../api/client';
+
+const fields = [
+  ['max_jobs_created', t("每月可创建任务数"), 0, 100000],
+  ['max_runs_started', t("每月可运行次数"), 0, 100000],
+  ['max_concurrent_runs', t("同时运行上限"), 0, 100],
+  ['max_analysis_units_per_run', t("单次分析单元上限"), 1, 12],
+  ['max_queries_per_run', t("单次查询上限"), 1, 16],
+  ['max_rows_per_query', t("单次查询行数上限"), 1, 10000000],
+  ['max_llm_tokens', t("每月 Token 预算"), 0, 10000000],
+  ['max_page_bytes', t("单页大小上限（字节）"), 1024, 50000000],
+  ['max_share_links', t("每月分享链接上限"), 0, 100000],
+] as const;
+
+const capabilities = [
+  ['report.menu', t("工作台菜单")], ['report.create', t("创建报表")], ['report.schedule', t("定时任务")],
+  ['report.share', t("分享报表")], ['report.extend', t("页面延期")], ['report.permanent', t("永久保存")],
+  ['report.live_drilldown', t("实时钻取")], ['report.view_all', t("查看租户报表")], ['report.download', t("下载")],
+].map(([value, label]) => ({ value, label }));
+
+interface PolicyResponse { policy: Record<string, number>; capabilities: string[]; }
+interface Props { user: { id: number; username: string }; onClose: () => void; }
+
+// 方法作用：供租户管理员维护本租户用户的报表能力与自然月额度。
+// Args: user - 当前租户目标用户；onClose - 关闭弹窗回调。
+// Returns: 策略编辑弹窗。
+export default function ReportPolicyEditor({ user, onClose }: Props) {
+  useLanguage();
+  const [form] = Form.useForm();
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState('');
+  useEffect(() => {
+    let active = true;
+    setLoading(true);
+    get<PolicyResponse>(`/report-workbench/admin/users/${user.id}/policy`)
+      .then(result => { if (active) form.setFieldsValue({ ...result.policy, capabilities: result.capabilities }); })
+      .catch(failure => { if (active) setError(failure instanceof Error ? failure.message : t("策略读取失败")); })
+      .finally(() => { if (active) setLoading(false); });
+    return () => { active = false; };
+  }, [user.id, form]);
+
+  // 方法作用：验证输入并保存策略，失败时保留表单以便重试。
+  // Args: 无。
+  // Returns: 保存结束后无返回值。
+  const save = async (): Promise<void> => {
+    if (saving || loading || error) return;
+    setSaving(true);
+    try {
+      const values = await form.validateFields();
+      await put(`/report-workbench/admin/users/${user.id}/policy`, values);
+      message.success(t("报表额度已保存"));
+      onClose();
+    } catch (failure) {
+      if (failure instanceof Error) message.error(failure.message);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return <Modal open title={t("报表额度 · {value0}", { value0: user.username })} onCancel={onClose}
+    onOk={() => void save()} confirmLoading={saving} okText={t("保存额度")} okButtonProps={{ disabled: loading || Boolean(error) }}>
+    <Alert type="info" showIcon message={t("当前按自然月统计（Asia/Shanghai），修改上限不清空已用量。业务额度由租户管理员管理。")} style={{ marginBottom: 16 }} />
+    {error ? <Alert type="error" message={error} /> : <Spin spinning={loading}>
+      <Form form={form} layout="vertical">
+        <Form.Item name="capabilities" label={t("报表能力")}><Checkbox.Group options={capabilities} /></Form.Item>
+        {fields.map(([key, label, minimum, maximum]) => <Form.Item key={key} name={key} label={label} rules={[{ required: true }]}>
+          <InputNumber min={minimum} max={maximum} precision={0} style={{ width: '100%' }} />
+        </Form.Item>)}
+      </Form>
+    </Spin>}
+  </Modal>;
+}

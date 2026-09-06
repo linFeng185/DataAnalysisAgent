@@ -7,9 +7,10 @@ from __future__ import annotations
 
 import hashlib
 import re
-import threading
-import time
 from datetime import datetime
+from typing import Any
+
+from pydantic import BaseModel, ConfigDict, Field
 
 from src.config import get_settings
 from src.logging_config import get_logger
@@ -24,28 +25,80 @@ _PII_PATTERNS: list[tuple[re.Pattern, str]] = [
 _SENSITIVE_COLS = {
     'password','passwd','secret','token','api_key','credit_card','phone','mobile','email',
 }
-_rate_limits: dict[str, list[float]] = {}
-_rate_limit_lock = threading.Lock()
 
 
+class MaskingField(BaseModel):
+    """不包含原值和行身份的字段脱敏摘要。"""
+
+    model_config = ConfigDict(extra="forbid")
+    column: str
+    categories: list[str] = Field(default_factory=list)
+    masked_count: int = Field(ge=0)
+
+
+class MaskingMetadata(BaseModel):
+    """与响应、历史、多源结果共用的脱敏展示契约。"""
+
+    model_config = ConfigDict(extra="forbid")
+    applied: bool = False
+    fields: list[MaskingField] = Field(default_factory=list)
+
+
+# 方法作用：在脱敏的同一次遍历中记录处理字段，禁止从掩码内容反推。
+# Args: rows - 原始查询行。
+# Returns: 脱敏后的新行和不包含原值的字段级元数据。
+def mask_sensitive_data_with_metadata(rows: list[dict]) -> tuple[list[dict], dict[str, Any]]:
+    """沿用已有脱敏策略，只为实际处理的单元格聚合类别和数量。"""
+    masked: list[dict] = []
+    fields: dict[str, MaskingField] = {}
+    for row in rows:
+        new: dict = {}
+        for column, value in row.items():
+            categories = []
+            if isinstance(value, str):
+                if column.lower() in _SENSITIVE_COLS or any(
+                    word in column.lower() for word in ('phone', 'mobile', 'idcard', 'email', 'password')
+                ):
+                    categories.append("敏感字段")
+                categories.extend(label for pattern, label in _PII_PATTERNS if pattern.search(value))
+            if categories:
+                new[column] = _mask(value)
+                field = fields.setdefault(column, MaskingField(column=column, masked_count=0))
+                field.masked_count += 1
+                field.categories = sorted(set(field.categories).union(categories))
+            else:
+                new[column] = value
+        masked.append(new)
+    metadata = MaskingMetadata(applied=bool(fields), fields=list(fields.values()))
+    return masked, metadata.model_dump()
+
+
+# 方法作用：保留只返回脱敏行的旧接口，避免影响自动化报告等调用方。
+# Args: rows - 原始查询行。
+# Returns: 脱敏后的新行。
 def mask_sensitive_data(rows: list[dict]) -> list[dict]:
     """12.3.1 自动脱敏手机号、身份证号、邮箱。"""
-    masked = []
-    for row in rows:
-        new = {}
-        for k, v in row.items():
-            if isinstance(v, str) and (
-                k.lower() in _SENSITIVE_COLS or
-                any(w in k.lower() for w in ('phone','mobile','idcard','email','password'))
-                or any(p.search(v) for p, _ in _PII_PATTERNS)
-            ):
-                new[k] = _mask(v)
-            else:
-                new[k] = v
-        masked.append(new)
-    return masked
+    return mask_sensitive_data_with_metadata(rows)[0]
 
 
+# 方法作用：合并多个来源的可信字段摘要，不再次处理数据值。
+# Args: items - 来源脱敏元数据集合。
+# Returns: 按列聚合的脱敏元数据。
+def merge_masking_metadata(items: list[dict]) -> dict[str, Any]:
+    """用于多数据源合并，只汇总元数据且不携带原始行。"""
+    fields: dict[str, MaskingField] = {}
+    for item in items:
+        metadata = MaskingMetadata.model_validate(item)
+        for source in metadata.fields:
+            field = fields.setdefault(source.column, MaskingField(column=source.column, masked_count=0))
+            field.masked_count += source.masked_count
+            field.categories = sorted(set(field.categories).union(source.categories))
+    return MaskingMetadata(applied=bool(fields), fields=list(fields.values())).model_dump()
+
+
+# 方法作用：使用已有规则生成不可在页面恢复的掩码文本。
+# Args: val - 待处理字符串。
+# Returns: 掩码字符串。
 def _mask(val: str) -> str:
     for p, label in _PII_PATTERNS:
         m = p.search(val)
@@ -60,41 +113,20 @@ def _mask(val: str) -> str:
     return val[:2] + '***' + val[-2:] if len(val) > 4 else '****'
 
 
-def check_rate_limit(user_id: str | int | None = None) -> bool:
-    """按当前用户执行内存滑动窗口限流。
+# 方法作用：将所有查询入口统一委托给数据库共享额度服务。
+# Args: user_id - 当前用户；tenant_id - 显式后台租户，缺省从请求读取。
+# Returns: 未超限返回 True；存储失败由共享服务抛出 503。
+async def check_rate_limit(user_id: str | int | None = None, *, tenant_id: int | None = None) -> bool:
+    """不再保留进程内降级计数，防止多 Worker 分别放行。"""
+    from src.api.auth import get_current_tenant_id, get_current_user_id
+    from src.security.query_quota import consume_query_quota
 
-    Args:
-        user_id: 可选用户 ID；未传时从认证上下文读取。
-
-    Returns:
-        未超限返回 True，否则返回 False。
-    """
-    if user_id is None:
-        try:
-            from src.api.auth import get_current_user_id
-            user_id = get_current_user_id()
-        except Exception:
-            user_id = "anonymous"
-    user_key = str(user_id)
-    logger.debug("限流检查入口", user_id=user_key)
-    max_rph = get_settings().max_queries_per_hour
-    now = time.monotonic()
-    window = now - 3600
-    key = f"rate:{user_key}"
-    with _rate_limit_lock:
-        for stale_key in [
-            candidate for candidate, timestamps in _rate_limits.items()
-            if not any(timestamp > window for timestamp in timestamps)
-        ]:
-            del _rate_limits[stale_key]
-        _rate_limits.setdefault(key, [])
-        _rate_limits[key] = [t for t in _rate_limits[key] if t > window]
-        if len(_rate_limits[key]) < max_rph:
-            _rate_limits[key].append(now)
-            logger.info("限流检查通过", user_id=user_key, used=len(_rate_limits[key]), limit=max_rph)
-            return True
-    logger.warning("频率限制触发", user_id=user_key)
-    return False
+    try:
+        effective_user = int(user_id) if user_id is not None else get_current_user_id()
+        effective_tenant = tenant_id if tenant_id is not None else get_current_tenant_id()
+    except (ValueError, TypeError):
+        return False
+    return await consume_query_quota(effective_tenant, effective_user)
 
 
 def build_audit_entry(

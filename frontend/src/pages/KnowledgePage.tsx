@@ -1,3 +1,4 @@
+import { t, useLanguage } from '../i18n';
 import { useState, useEffect, useRef, useMemo, type ReactNode } from 'react';
 import { Card, Table, Tag, Tabs, Typography, Empty, message, Input, Button, Space, Select, InputNumber, Modal, notification, Popconfirm, Descriptions, Segmented, Switch, Tooltip } from 'antd';
 import { UploadOutlined, FileTextOutlined, DatabaseOutlined, LoadingOutlined, DeleteOutlined, GlobalOutlined, TeamOutlined, UserOutlined, TagsOutlined, PlusOutlined } from '@ant-design/icons';
@@ -6,30 +7,32 @@ import type { KnowledgeEntry, KnowledgeDoc, KnowledgeScope, KnowledgeTag } from 
 import { useAuth } from '../hooks/AuthContext';
 import dayjs from 'dayjs';
 import DOMPurify from 'dompurify';
+import EmergencyKnowledgePanel from '../components/EmergencyKnowledgePanel';
 
 const STRATEGY_OPTIONS = [
-  { value: 'auto', label: '自动检测', desc: '根据文档内容自动选择最佳策略（推荐）' },
-  { value: 'sql_ddl', label: '按 DDL 语句', desc: '每个 CREATE TABLE/VIEW/INDEX 独立成块，适合 .sql 建表文件' },
-  { value: 'reference', label: '按函数签名', desc: '按 #### 标题或 **函数名()** 切分，适合 MySQL/官方技术文档' },
-  { value: 'table', label: '按数据字典表', desc: '按 ### 表: 表名 标记切分，适合项目数据字典 Markdown' },
-  { value: 'heading', label: '按标题', desc: '按 Markdown 标题层级 (# ## ###) 切分，适合结构化文档' },
-  { value: 'paragraph', label: '按段落', desc: '按空行分段后合并到 chunk_size，适合纯文本' },
-  { value: 'fixed', label: '固定长度', desc: '固定大小滑动窗口切分，无结构文档兜底' },
+  { value: 'auto', get label() { return t("自动检测"); }, get desc() { return t("根据文档内容自动选择最佳策略（推荐）"); } },
+  { value: 'sql_ddl', get label() { return t("按 DDL 语句"); }, get desc() { return t("每个 CREATE TABLE/VIEW/INDEX 独立成块，适合 .sql 建表文件"); } },
+  { value: 'reference', get label() { return t("按函数签名"); }, get desc() { return t("按 #### 标题或 **函数名()** 切分，适合 MySQL/官方技术文档"); } },
+  { value: 'table', get label() { return t("按数据字典表"); }, get desc() { return t("按 ### 表: 表名 标记切分，适合项目数据字典 Markdown"); } },
+  { value: 'heading', get label() { return t("按标题"); }, get desc() { return t("按 Markdown 标题层级 (# ## ###) 切分，适合结构化文档"); } },
+  { value: 'paragraph', get label() { return t("按段落"); }, get desc() { return t("按空行分段后合并到 chunk_size，适合纯文本"); } },
+  { value: 'fixed', get label() { return t("固定长度"); }, get desc() { return t("固定大小滑动窗口切分，无结构文档兜底"); } },
 ];
 const CAT_COLORS = ['blue', 'green', 'orange', 'purple', 'cyan', 'magenta', 'gold', 'lime', 'geekblue', 'volcano'];
 const SCOPE_META: Record<KnowledgeScope, { label: string; color: string; icon: ReactNode }> = {
-  system: { label: '系统知识', color: 'gold', icon: <GlobalOutlined /> },
-  tenant: { label: '租户公共', color: 'blue', icon: <TeamOutlined /> },
-  private: { label: '个人知识', color: 'green', icon: <UserOutlined /> },
+  system: { get label() { return t("系统知识"); }, color: 'gold', icon: <GlobalOutlined /> },
+  tenant: { get label() { return t("租户公共"); }, color: 'blue', icon: <TeamOutlined /> },
+  private: { get label() { return t("个人知识"); }, color: 'green', icon: <UserOutlined /> },
 };
 const TAG_GROUP_OPTIONS = [
-  { value: 'knowledge_type', label: '知识类型' },
-  { value: 'technology', label: '技术平台' },
-  { value: 'business_domain', label: '业务领域' },
-  { value: 'custom', label: '其他' },
+  { value: 'knowledge_type', get label() { return t("知识类型"); } },
+  { value: 'technology', get label() { return t("技术平台"); } },
+  { value: 'business_domain', get label() { return t("业务领域"); } },
+  { value: 'custom', get label() { return t("其他"); } },
 ];
 
 export default function KnowledgePage() {
+  const language = useLanguage();
   const { user, authRequired } = useAuth();
   const role = user?.role || 'anonymous';
   const [entries, setEntries] = useState<KnowledgeEntry[]>([]);
@@ -47,7 +50,7 @@ export default function KnowledgePage() {
   const [uploadCfg, setUploadCfg] = useState<{
     strategy: string; chunkSize: number; chunkOverlap: number; category: string;
     scope: KnowledgeScope; tagIds: number[]; datasource: string;
-  }>({ strategy: 'auto', chunkSize: 800, chunkOverlap: 100, category: '', scope: 'private', tagIds: [], datasource: '' });
+  }>({ strategy: 'auto', chunkSize: 800, chunkOverlap: 100, category: '', scope: role === 'super_admin' ? 'system' : 'private', tagIds: [], datasource: '' });
   const [cfgOpen, setCfgOpen] = useState(false);
   const [pendingFiles, setPendingFiles] = useState<File[]>([]);
   const [taskIds, setTaskIds] = useState<string[]>([]);
@@ -70,13 +73,13 @@ export default function KnowledgePage() {
 
   const uploadScopeOptions = useMemo(() => {
     const scopes: KnowledgeScope[] = role === 'super_admin'
-      ? ['system', 'tenant', 'private']
+      ? ['system']
       : role === 'tenant_admin' ? ['tenant', 'private'] : ['private'];
     return scopes.map(scope => ({
       value: scope,
       label: <Space size={6}>{SCOPE_META[scope].icon}{SCOPE_META[scope].label}</Space>,
     }));
-  }, [role]);
+  }, [role, language]);
 
   const selectableTags = useMemo(() => tags.filter(tag => (
     tag.is_active && (uploadCfg.scope === 'private' || tag.scope === 'global')
@@ -113,7 +116,7 @@ export default function KnowledgePage() {
       const data = await get<{ entries: KnowledgeEntry[]; total: number; page: number; page_size: number }>(`/knowledge?${params.toString()}`);
       setEntries(data.entries || []);
       setTotal(data.total || 0);
-    } catch { message.error('加载知识库失败'); }
+    } catch { message.error(t("加载知识库失败")); }
     setLoading(false);
   };
 
@@ -131,7 +134,7 @@ export default function KnowledgePage() {
       if (includeInactive) params.set('include_inactive', 'true');
       const data = await get<{ tags: KnowledgeTag[] }>(`/knowledge/tags?${params.toString()}`);
       setTags(data.tags || []);
-    } catch { message.error('加载标签失败'); }
+    } catch { message.error(t("加载标签失败")); }
     setTagLoading(false);
   };
 
@@ -144,8 +147,8 @@ export default function KnowledgePage() {
     const response = await fetch(`/api/v1/knowledge/${encodeURIComponent(id)}`, {
       method: 'DELETE', credentials: 'include',
     });
-    if (!response.ok) { message.error('删除失败'); return; }
-    message.success('已删除'); void loadEntries();
+    if (!response.ok) { message.error(t("删除失败")); return; }
+    message.success(t("已删除")); void loadEntries();
   };
 
   const handleDeleteDoc = async (doc: KnowledgeDoc) => {
@@ -153,12 +156,12 @@ export default function KnowledgePage() {
     const response = await fetch(`/api/v1/knowledge/docs/${encodeURIComponent(doc.name)}?${params.toString()}`, {
       method: 'DELETE', credentials: 'include',
     });
-    if (!response.ok) { message.error('删除失败'); return; }
-    message.success(`${doc.name} 已删除`); void reloadAll();
+    if (!response.ok) { message.error(t("删除失败")); return; }
+    message.success(t("{value0} 已删除", { value0: doc.name })); void reloadAll();
   };
 
   const openDocDetail = async (d: KnowledgeDoc) => {
-    setDocDetail(d); setDocContent('加载中...'); setDocLoading(true);
+    setDocDetail(d); setDocContent(t("加载中...")); setDocLoading(true);
     setDocType('text'); setDocRawUrl('');
     try {
       const params = new URLSearchParams({ knowledge_scope: d.scope });
@@ -170,8 +173,8 @@ export default function KnowledgePage() {
         setDocContent(data.content || '');
         setDocType(data.type || 'text');
         setDocRawUrl(data.raw_url || '');
-      } else { setDocContent('无法读取文件内容'); }
-    } catch { setDocContent('读取失败'); }
+      } else { setDocContent(t("无法读取文件内容")); }
+    } catch { setDocContent(t("读取失败")); }
     setDocLoading(false);
   };
 
@@ -189,7 +192,7 @@ export default function KnowledgePage() {
         if (taskIds.every(id => doneStatuses.has(states[id]?.status))) {
           const doneCount = taskIds.filter(id => states[id]?.status === 'done').length;
           notification[taskIds.length - doneCount === 0 ? 'success' : 'warning']({
-            message: '文档处理完成', description: `${doneCount} 成功, ${taskIds.length - doneCount} 失败`,
+            message: t("文档处理完成"), description: t("{value0} 成功, {value1} 失败", { value0: doneCount, value1: taskIds.length - doneCount }),
           });
           setTaskIds([]); reloadAll();
         }
@@ -212,14 +215,14 @@ export default function KnowledgePage() {
         method: 'POST', body: form, credentials: 'include',
       });
       const data = await res.json();
-      if (!res.ok) throw new Error(data.detail || '上传失败');
+      if (!res.ok) throw new Error(data.detail || t("上传失败"));
       if (data.tasks?.length > 0) {
         setTaskIds(data.tasks.map((t: { task_id: string }) => t.task_id));
-        message.info(`已接收 ${data.tasks.length} 个文件，后台处理中`);
+        message.info(t("已接收 {value0} 个文件，后台处理中", { value0: data.tasks.length }));
       }
       data.errors?.forEach((e: { file: string; error: string }) => message.error(`${e.file}: ${e.error}`));
       setPendingFiles([]);
-    } catch (error) { message.error(error instanceof Error ? error.message : '上传失败'); }
+    } catch (error) { message.error(error instanceof Error ? error.message : t("上传失败")); }
     setUploading(false);
   };
 
@@ -248,8 +251,8 @@ export default function KnowledgePage() {
       setTags(current => [tag, ...current.filter(item => item.id !== tag.id)]);
       setUploadCfg(current => ({ ...current, tagIds: [...new Set([...current.tagIds, tag.id])] }));
       setPersonalTagName('');
-      message.success('个人标签已创建');
-    } catch { message.error('创建个人标签失败'); }
+      message.success(t("个人标签已创建"));
+    } catch { message.error(t("创建个人标签失败")); }
   };
 
   const createGlobalTag = async () => {
@@ -259,23 +262,15 @@ export default function KnowledgePage() {
       await post<KnowledgeTag>('/knowledge/tags/global', { name, tag_group: globalTagGroup });
       setGlobalTagName('');
       await loadTags('', true);
-      message.success('全局标签已创建');
-    } catch { message.error('创建全局标签失败'); }
-  };
-
-  const promoteTag = async (tagId: number) => {
-    try {
-      await post<KnowledgeTag>(`/knowledge/tags/${tagId}/promote`, {});
-      await loadTags('', true);
-      message.success('已提升为全局标签');
-    } catch { message.error('提升标签失败'); }
+      message.success(t("全局标签已创建"));
+    } catch { message.error(t("创建全局标签失败")); }
   };
 
   const updateTagStatus = async (tagId: number, isActive: boolean) => {
     try {
       await patch<{ status: string }>(`/knowledge/tags/${tagId}`, { is_active: isActive });
       setTags(current => current.map(tag => tag.id === tagId ? { ...tag, is_active: isActive } : tag));
-    } catch { message.error('更新标签状态失败'); }
+    } catch { message.error(t("更新标签状态失败")); }
   };
 
   const processingTasks = taskIds.filter(id => {
@@ -288,45 +283,45 @@ export default function KnowledgePage() {
       value={scopeFilter}
       onChange={handleScopeFilterChange}
       options={[
-        { value: 'all', label: '全部' },
-        { value: 'system', label: <Space size={4}><GlobalOutlined />系统</Space> },
-        { value: 'tenant', label: <Space size={4}><TeamOutlined />租户</Space> },
-        { value: 'private', label: <Space size={4}><UserOutlined />个人</Space> },
+        { value: 'all', label: t("全部") },
+        { value: 'system', label: <Space size={4}><GlobalOutlined />{t("系统")}</Space> },
+        { value: 'tenant', label: <Space size={4}><TeamOutlined />{t("租户")}</Space> },
+        { value: 'private', label: <Space size={4}><UserOutlined />{t("个人")}</Space> },
       ]}
     />
   );
 
   const tabItems = [
     {
-      key: 'entries', label: '知识条目',
+      key: 'entries', label: t("知识条目"),
       children: (
         <div>
           <Space wrap style={{ marginBottom: 12 }}>
             {scopeFilterControl}
             <Select style={{ width: 130 }} value={catFilter} onChange={v => { setCatFilter(v); setPage(1); loadEntries(1); }}
-              allowClear placeholder="全部类别" options={allCategories.map(c => ({ value: c, label: c }))} />
-            <Input.Search placeholder="搜索内容" value={search}
+              allowClear placeholder={t("全部类别")} options={allCategories.map(c => ({ value: c, label: c }))} />
+            <Input.Search placeholder={t("搜索内容")} value={search}
               onChange={e => setSearch(e.target.value)} onSearch={() => { setPage(1); loadEntries(1); }} style={{ width: 200 }} />
           </Space>
           <Table<KnowledgeEntry> dataSource={entries} rowKey="id" loading={loading}
-            locale={{ emptyText: <Empty description="暂无知识条目" /> }}
+            locale={{ emptyText: <Empty description={t("暂无知识条目")} /> }}
             size="small" onRow={r => ({ onClick: () => setEntryDetail(r), style: { cursor: 'pointer' } })}
-            pagination={{ current: page, pageSize, total, showSizeChanger: true, showTotal: t => `共 ${t} 条`,
+            pagination={{ current: page, pageSize, total, showSizeChanger: true, showTotal: count => t("共 {value0} 条", { value0: count }),
               onChange: (p, ps) => { setPage(p); setPageSize(ps); loadEntries(p, ps); } }}
             columns={[
-              { title: '范围', dataIndex: 'scope', width: 105,
+              { title: t("范围"), dataIndex: 'scope', width: 105,
                 render: (scope: KnowledgeScope) => {
                   const meta = SCOPE_META[scope] || SCOPE_META.private;
                   return <Tag color={meta.color} icon={meta.icon}>{meta.label}</Tag>;
                 } },
-              { title: '类别', dataIndex: 'category', width: 90,
+              { title: t("类别"), dataIndex: 'category', width: 90,
                 render: v => v ? <Tag color={catColorMap[v] || 'default'}>{v}</Tag> : '-' },
-              { title: '源文件', dataIndex: 'source_file', width: 140, ellipsis: true },
-              { title: '内容', dataIndex: 'content', ellipsis: true,
+              { title: t("源文件"), dataIndex: 'source_file', width: 140, ellipsis: true },
+              { title: t("内容"), dataIndex: 'content', ellipsis: true,
                 render: v => <Typography.Text style={{ fontSize: 13 }}>{v?.slice(0, 60) || '—'}</Typography.Text> },
-              { title: '来源', dataIndex: 'source', width: 80,
+              { title: t("来源"), dataIndex: 'source', width: 80,
                 render: v => <Tag color={v === 'user_upload' ? 'orange' : 'green'}>{v || '-'}</Tag> },
-              { title: '标签', dataIndex: 'tags', width: 150,
+              { title: t("标签"), dataIndex: 'tags', width: 150,
                 render: (values: string[]) => {
                   const cleanValues = (values || []).map(value => String(value).trim()).filter(Boolean);
                   return cleanValues.length
@@ -336,12 +331,12 @@ export default function KnowledgePage() {
               { title: '', key: 'actions', width: 36,
                 render: (_: unknown, r: KnowledgeEntry) => (
                   !r.can_delete ? (
-                    <Tooltip title="无删除权限">
+                    <Tooltip title={t("无删除权限")}>
                       <Button size="small" danger disabled icon={<DeleteOutlined />}
                         onClick={e => e.stopPropagation()} />
                     </Tooltip>
                   ) : (
-                    <Popconfirm title="确定删除？" onConfirm={() => handleDeleteEntry(r.id)}
+                    <Popconfirm title={t("确定删除？")} onConfirm={() => handleDeleteEntry(r.id)}
                       onPopupClick={e => e.stopPropagation()}>
                       <Button size="small" danger icon={<DeleteOutlined />}
                         onClick={e => e.stopPropagation()} />
@@ -353,7 +348,7 @@ export default function KnowledgePage() {
       ),
     },
     {
-      key: 'docs', label: '已索引文档',
+      key: 'docs', label: t("已索引文档"),
       children: (
         <div>
           <div style={{ marginBottom: 12 }}>
@@ -363,47 +358,47 @@ export default function KnowledgePage() {
                 style={{ display: 'none' }} onChange={e => handleFileSelect(e.target.files)} />
               <Button icon={<UploadOutlined />} loading={uploading}
                 disabled={authRequired && !user}
-                onClick={() => fileRef.current?.click()}>上传文档</Button>
+                onClick={() => fileRef.current?.click()}>{t("上传文档")}</Button>
               {processingTasks.length > 0 && (
                 <Space><LoadingOutlined style={{ color: '#1677ff' }} />
                   <Typography.Text type="secondary">
-                    {processingTasks.filter(id => taskStates[id]?.status === 'processing').length} 个处理中
+                    {processingTasks.filter(id => taskStates[id]?.status === 'processing').length} {t("个处理中")}
                   </Typography.Text>
                 </Space>
               )}
             </Space>
           </div>
           <Table<KnowledgeDoc> dataSource={visibleDocs} rowKey={record => `${record.scope}:${record.name}`} size="small"
-            locale={{ emptyText: <Empty description="文档目录为空" /> }}
+            locale={{ emptyText: <Empty description={t("文档目录为空")} /> }}
             onRow={r => ({ onClick: () => openDocDetail(r), style: { cursor: 'pointer' } })}
             columns={[
-              { title: '文件名', dataIndex: 'name',
+              { title: t("文件名"), dataIndex: 'name',
                 render: (v: string) => <Space><FileTextOutlined /><span>{v}</span></Space> },
-              { title: '范围', dataIndex: 'scope', width: 105,
+              { title: t("范围"), dataIndex: 'scope', width: 105,
                 render: (scope: KnowledgeScope) => {
                   const meta = SCOPE_META[scope] || SCOPE_META.private;
                   return <Tag color={meta.color} icon={meta.icon}>{meta.label}</Tag>;
                 } },
-              { title: '标签', dataIndex: 'tag_ids', width: 160,
+              { title: t("标签"), dataIndex: 'tag_ids', width: 160,
                 render: (ids: number[]) => {
                   const names = (ids || []).map(id => tags.find(tag => tag.id === id)?.name).filter(Boolean);
                   return names.length
                     ? <Space size={[0, 4]} wrap>{names.slice(0, 3).map(name => <Tag key={name}>{name}</Tag>)}</Space>
                     : '-';
                 } },
-              { title: '大小', dataIndex: 'size', width: 80,
+              { title: t("大小"), dataIndex: 'size', width: 80,
                 render: v => `${(v / 1024).toFixed(1)} KB` },
-              { title: '修改时间', dataIndex: 'modified', width: 140,
+              { title: t("修改时间"), dataIndex: 'modified', width: 140,
                 render: v => v ? dayjs.unix(v).format('YYYY-MM-DD HH:mm') : '-' },
               { title: '', key: 'actions', width: 36,
                 render: (_: unknown, r: KnowledgeDoc) => (
                   !r.can_delete ? (
-                    <Tooltip title="无删除权限">
+                    <Tooltip title={t("无删除权限")}>
                       <Button size="small" danger disabled icon={<DeleteOutlined />}
                         onClick={e => e.stopPropagation()} />
                     </Tooltip>
                   ) : (
-                    <Popconfirm title="确定删除？" onConfirm={() => handleDeleteDoc(r)}
+                    <Popconfirm title={t("确定删除？")} onConfirm={() => handleDeleteDoc(r)}
                       onPopupClick={e => e.stopPropagation()}>
                       <Button size="small" danger icon={<DeleteOutlined />}
                         onClick={e => e.stopPropagation()} />
@@ -415,43 +410,39 @@ export default function KnowledgePage() {
       ),
     },
     ...(role === 'super_admin' ? [{
-      key: 'tags', label: <Space><TagsOutlined />标签治理</Space>,
+      key: 'tags', label: <Space><TagsOutlined />{t("标签治理")}</Space>,
       children: (
         <div>
           <Space wrap style={{ marginBottom: 12 }}>
-            <Input value={globalTagName} placeholder="标签名称" maxLength={128}
+            <Input value={globalTagName} placeholder={t("标签名称")} maxLength={128}
               onChange={event => setGlobalTagName(event.target.value)}
               onPressEnter={() => { void createGlobalTag(); }} style={{ width: 180 }} />
             <Select value={globalTagGroup} onChange={setGlobalTagGroup}
               options={TAG_GROUP_OPTIONS} style={{ width: 130 }} />
             <Button type="primary" icon={<PlusOutlined />} onClick={() => { void createGlobalTag(); }}>
-              新建全局标签
+              {t("新建全局标签")}
             </Button>
-            <Input.Search placeholder="搜索标签" onSearch={value => { void loadTags(value, true); }}
+            <Input.Search placeholder={t("搜索标签")} onSearch={value => { void loadTags(value, true); }}
               style={{ width: 200 }} allowClear />
           </Space>
           <Table<KnowledgeTag> dataSource={tags} rowKey="id" size="small" loading={tagLoading}
-            locale={{ emptyText: <Empty description="暂无标签" /> }} pagination={{ pageSize: 20 }}
+            locale={{ emptyText: <Empty description={t("暂无标签")} /> }} pagination={{ pageSize: 20 }}
             columns={[
-              { title: '名称', dataIndex: 'name', width: 180,
+              { title: t("名称"), dataIndex: 'name', width: 180,
                 render: (value: string, tag: KnowledgeTag) => <Space>
                   <Tag color={tag.scope === 'global' ? 'blue' : 'green'}>{value}</Tag>
-                  {tag.is_seed && <Tag>预置</Tag>}
+                  {tag.is_seed && <Tag>{t("预置")}</Tag>}
                 </Space> },
-              { title: '范围', dataIndex: 'scope', width: 90,
-                render: (value: string) => value === 'global' ? '全局' : '个人' },
-              { title: '分组', dataIndex: 'tag_group', width: 120,
+              { title: t("范围"), dataIndex: 'scope', width: 90,
+                render: (value: string) => value === 'global' ? t("全局") : t("个人") },
+              { title: t("分组"), dataIndex: 'tag_group', width: 120,
                 render: (value: string) => TAG_GROUP_OPTIONS.find(item => item.value === value)?.label || value },
-              { title: '说明', dataIndex: 'description', ellipsis: true, render: (value: string) => value || '-' },
-              { title: '状态', dataIndex: 'is_active', width: 80,
+              { title: t("说明"), dataIndex: 'description', ellipsis: true, render: (value: string) => value || '-' },
+              { title: t("状态"), dataIndex: 'is_active', width: 80,
                 render: (active: boolean, tag: KnowledgeTag) => (
                   <Switch size="small" checked={active}
                     onChange={checked => { void updateTagStatus(tag.id, checked); }} />
                 ) },
-              { title: '', key: 'actions', width: 100,
-                render: (_: unknown, tag: KnowledgeTag) => tag.scope === 'private' ? (
-                  <Button size="small" onClick={() => { void promoteTag(tag.id); }}>提升为全局</Button>
-                ) : null },
             ]} />
         </div>
       ),
@@ -460,31 +451,31 @@ export default function KnowledgePage() {
 
   return (
     <div style={{ maxWidth: 1000, margin: '0 auto' }}>
-      <Card title={<Space><DatabaseOutlined />知识库</Space>}
-        extra={<Typography.Text type="secondary">{total} 条, {docs.length} 份文档</Typography.Text>}>
-        <Tabs items={tabItems} />
+      <Card title={<Space><DatabaseOutlined />{t("知识库")}</Space>}
+        extra={<Typography.Text type="secondary">{total} {t("条,")} {docs.length} {t("份文档")}</Typography.Text>}>
+        <Tabs items={[...tabItems, { key: 'emergency', label: t("应急授权"), children: <EmergencyKnowledgePanel docs={docs} platform={role === 'super_admin'} /> }]} />
       </Card>
 
       {/* 知识条目详情 */}
-      <Modal title="知识条目详情" open={!!entryDetail}
+      <Modal title={t("知识条目详情")} open={!!entryDetail}
         onCancel={() => setEntryDetail(null)} footer={null} width={600} maskClosable>
         {entryDetail && (<>
           <Descriptions column={1} size="small" bordered style={{ marginBottom: 16 }}>
-            <Descriptions.Item label="范围">
+            <Descriptions.Item label={t("范围")}>
               <Tag color={SCOPE_META[entryDetail.scope]?.color} icon={SCOPE_META[entryDetail.scope]?.icon}>
                 {SCOPE_META[entryDetail.scope]?.label || entryDetail.scope}
               </Tag>
             </Descriptions.Item>
-            <Descriptions.Item label="类别"><Tag color={catColorMap[entryDetail.category] || 'default'}>{entryDetail.category || '—'}</Tag></Descriptions.Item>
-            <Descriptions.Item label="源文件">{entryDetail.source_file || '—'}</Descriptions.Item>
-            <Descriptions.Item label="来源"><Tag color={entryDetail.source === 'user_upload' ? 'orange' : 'green'}>{entryDetail.source || '—'}</Tag></Descriptions.Item>
-            <Descriptions.Item label="标签">
+            <Descriptions.Item label={t("类别")}><Tag color={catColorMap[entryDetail.category] || 'default'}>{entryDetail.category || '—'}</Tag></Descriptions.Item>
+            <Descriptions.Item label={t("源文件")}>{entryDetail.source_file || '—'}</Descriptions.Item>
+            <Descriptions.Item label={t("来源")}><Tag color={entryDetail.source === 'user_upload' ? 'orange' : 'green'}>{entryDetail.source || '—'}</Tag></Descriptions.Item>
+            <Descriptions.Item label={t("标签")}>
               {entryDetail.tags?.map(value => String(value).trim()).filter(Boolean).length
                 ? entryDetail.tags.map(value => String(value).trim()).filter(Boolean).map(value => <Tag key={value}>{value}</Tag>)
                 : '—'}
             </Descriptions.Item>
           </Descriptions>
-          <Typography.Title level={5}>内容</Typography.Title>
+          <Typography.Title level={5}>{t("内容")}</Typography.Title>
           <div style={{ whiteSpace: 'pre-wrap', maxHeight: 400, overflow: 'auto', fontSize: 13, lineHeight: 1.7, background: '#fafafa', padding: 12, borderRadius: 6 }}>
             {entryDetail.content || '—'}
           </div>
@@ -492,26 +483,26 @@ export default function KnowledgePage() {
       </Modal>
 
       {/* 文档详情 — 展示完整内容 */}
-      <Modal title={`文档: ${docDetail?.name || ''}`} open={!!docDetail}
+      <Modal title={t("文档: {value0}", { value0: docDetail?.name || '' })} open={!!docDetail}
         onCancel={() => setDocDetail(null)} footer={null} width={700} maskClosable>
         {docDetail && (
           <>
             <Descriptions column={2} size="small" bordered style={{ marginBottom: 16 }}>
-              <Descriptions.Item label="范围">
+              <Descriptions.Item label={t("范围")}>
                 <Tag color={SCOPE_META[docDetail.scope]?.color} icon={SCOPE_META[docDetail.scope]?.icon}>
                   {SCOPE_META[docDetail.scope]?.label || docDetail.scope}
                 </Tag>
               </Descriptions.Item>
-              <Descriptions.Item label="大小">{(docDetail.size / 1024).toFixed(1)} KB</Descriptions.Item>
-              <Descriptions.Item label="修改时间">{docDetail.modified ? dayjs.unix(docDetail.modified).format('YYYY-MM-DD HH:mm') : '—'}</Descriptions.Item>
-              <Descriptions.Item label="标签">
+              <Descriptions.Item label={t("大小")}>{(docDetail.size / 1024).toFixed(1)} KB</Descriptions.Item>
+              <Descriptions.Item label={t("修改时间")}>{docDetail.modified ? dayjs.unix(docDetail.modified).format('YYYY-MM-DD HH:mm') : '—'}</Descriptions.Item>
+              <Descriptions.Item label={t("标签")}>
                 {(docDetail.tag_ids || []).map(id => {
                   const name = tags.find(tag => tag.id === id)?.name;
                   return name ? <Tag key={id}>{name}</Tag> : null;
                 })}
               </Descriptions.Item>
             </Descriptions>
-            <Typography.Title level={5}>文件内容</Typography.Title>
+            <Typography.Title level={5}>{t("文件内容")}</Typography.Title>
             {docLoading ? (
               <div style={{ textAlign: 'center', padding: 32 }}><LoadingOutlined style={{ fontSize: 24 }} /></div>
             ) : docType === 'pdf' ? (
@@ -519,7 +510,7 @@ export default function KnowledgePage() {
                 <iframe src={docRawUrl} style={{ width: '100%', height: 500, border: '1px solid #d9d9d9', borderRadius: 6 }}
                   title={docDetail.name} sandbox="" referrerPolicy="no-referrer" />
               ) : (
-                <div style={{ padding: 16, color: '#999' }}>无法加载 PDF</div>
+                <div style={{ padding: 16, color: '#999' }}>{t("无法加载 PDF")}</div>
               )
             ) : docType === 'word' ? (
               <div style={{ maxHeight: 450, overflow: 'auto', background: '#fafafa', padding: 12, borderRadius: 6 }}
@@ -527,7 +518,7 @@ export default function KnowledgePage() {
             ) : (
               <div style={{ whiteSpace: 'pre-wrap', maxHeight: 450, overflow: 'auto', fontSize: 13,
                 lineHeight: 1.7, background: '#fafafa', padding: 12, borderRadius: 6 }}>
-                {docContent || '无法提取文本内容'}
+                {docContent || t("无法提取文本内容")}
               </div>
             )}
           </>
@@ -535,15 +526,15 @@ export default function KnowledgePage() {
       </Modal>
 
       {/* 上传配置 */}
-      <Modal title="上传文档" open={cfgOpen} onOk={startUpload}
+      <Modal title={t("上传文档")} open={cfgOpen} onOk={startUpload}
         onCancel={() => { setCfgOpen(false); setPendingFiles([]); }}
-        okText="开始处理" cancelText="取消" width={500}>
+        okText={t("开始处理")} cancelText={t("取消")} width={500}>
         <div style={{ marginBottom: 16 }}>
-          <Typography.Text type="secondary">即将处理 {pendingFiles.length} 个文件</Typography.Text>
+          <Typography.Text type="secondary">{t("即将处理")} {pendingFiles.length} {t("个文件")}</Typography.Text>
           {pendingFiles.map((f, i) => <Tag key={i} style={{ margin: 2 }}>{f.name}</Tag>)}
         </div>
         <Space direction="vertical" style={{ width: '100%' }}>
-          <div><Typography.Text strong>知识范围</Typography.Text>
+          <div><Typography.Text strong>{t("知识范围")}</Typography.Text>
             <Select style={{ width: '100%' }} value={uploadCfg.scope} options={uploadScopeOptions}
               onChange={(scope: KnowledgeScope) => setUploadCfg(current => ({
                 ...current,
@@ -552,30 +543,30 @@ export default function KnowledgePage() {
                   scope === 'private' || tags.find(tag => tag.id === id)?.scope === 'global'
                 )),
               }))} /></div>
-          <div><Typography.Text strong>数据源</Typography.Text>
-            <Input placeholder="可选数据源名称" value={uploadCfg.datasource}
+          <div><Typography.Text strong>{t("数据源")}</Typography.Text>
+            <Input placeholder={t("可选数据源名称")} value={uploadCfg.datasource}
               onChange={event => setUploadCfg(current => ({ ...current, datasource: event.target.value }))} /></div>
-          <div><Typography.Text strong>标签</Typography.Text>
+          <div><Typography.Text strong>{t("标签")}</Typography.Text>
             <Select mode="multiple" style={{ width: '100%' }} value={uploadCfg.tagIds}
               loading={tagLoading} showSearch filterOption={false} onSearch={handleTagSearch}
               onFocus={() => { void loadTags(); }}
               onChange={(tagIds: number[]) => setUploadCfg(current => ({ ...current, tagIds }))}
               options={selectableTags.map(tag => ({
                 value: tag.id,
-                label: `${tag.name}${tag.scope === 'private' ? ' · 个人' : ''}`,
-              }))} placeholder="搜索并选择标签" /></div>
+                label: `${tag.name}${tag.scope === 'private' ? t(" · 个人") : ''}`,
+              }))} placeholder={t("搜索并选择标签")} /></div>
           <Space.Compact style={{ width: '100%' }}>
-            <Input value={personalTagName} maxLength={128} placeholder="新建个人标签"
+            <Input value={personalTagName} maxLength={128} placeholder={t("新建个人标签")}
               disabled={!user}
               onChange={event => setPersonalTagName(event.target.value)}
               onPressEnter={() => { void createPersonalTag(); }} />
             <Button icon={<PlusOutlined />} disabled={!user || !personalTagName.trim()}
-              onClick={() => { void createPersonalTag(); }}>新建</Button>
+              onClick={() => { void createPersonalTag(); }}>{t("新建")}</Button>
           </Space.Compact>
-          <div><Typography.Text strong>知识类别</Typography.Text>
-            <Input placeholder="如 sales_metrics" value={uploadCfg.category}
+          <div><Typography.Text strong>{t("知识类别")}</Typography.Text>
+            <Input placeholder={t("如 sales_metrics")} value={uploadCfg.category}
               onChange={e => setUploadCfg(p => ({ ...p, category: e.target.value }))} /></div>
-          <div><Typography.Text strong>分割策略</Typography.Text>
+          <div><Typography.Text strong>{t("分割策略")}</Typography.Text>
             <Select style={{ width: '100%' }} value={uploadCfg.strategy}
               onChange={v => setUploadCfg(p => ({ ...p, strategy: v }))}
               options={STRATEGY_OPTIONS}
@@ -588,10 +579,10 @@ export default function KnowledgePage() {
                 </div>
               )}
             /></div>
-          <div><Typography.Text strong>块大小</Typography.Text>
+          <div><Typography.Text strong>{t("块大小")}</Typography.Text>
             <InputNumber style={{ width: '100%' }} min={200} max={4000} value={uploadCfg.chunkSize}
               onChange={v => setUploadCfg(p => ({ ...p, chunkSize: v || 800 }))} /></div>
-          <div><Typography.Text strong>重叠</Typography.Text>
+          <div><Typography.Text strong>{t("重叠")}</Typography.Text>
             <InputNumber style={{ width: '100%' }} min={0} max={500} value={uploadCfg.chunkOverlap}
               onChange={v => setUploadCfg(p => ({ ...p, chunkOverlap: v || 100 }))} /></div>
         </Space>

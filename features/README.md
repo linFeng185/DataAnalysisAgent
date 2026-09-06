@@ -26,4 +26,7 @@
 | [20-architecture-remediation.md](20-architecture-remediation.md) | 20. 架构整改 | 动态 |
 | [21-platform-admin.md](21-platform-admin.md) | 21. 平台管理与强制认证 | 动态 |
 | [22-api-access-policy.md](22-api-access-policy.md) | 22. API 访问策略与 IP 控制 | 动态 |
+| [23-report-workbench.md](23-report-workbench.md) | 23. 报表工作台 | 动态 |
+| [24-tenant-governance-audit.md](24-tenant-governance-audit.md) | 平台与租户职责治理及部署验收边界 | 动态 |
+| [25-runtime-platform-and-ui.md](25-runtime-platform-and-ui.md) | 平台运行时配置、动态数据库类型、双语界面与同步任务 | 动态 |
 | [99-summary.md](99-summary.md) | 附录 | 145 行 |

@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
-"""测试数据导入脚本 —— 合并版本。支持全部5种数据库 + 文件导出。
+"""中文多业务域测试数据入口：每源 125 表、总计 625 表、每源两百万行和分级知识资料。
 
 使用方式:
-    python tests/import_test_data.py --db all --scale 200000
-    python tests/import_test_data.py --db clickhouse --scale 200000
+    python tests/import_test_data.py --db all --scale 1000000
+    python tests/import_test_data.py --db clickhouse --scale 1000000
     python tests/import_test_data.py --db all --file-only --format csv
     python tests/import_test_data.py --db all --ddl-only
-    python tests/import_test_data.py --verify-only
+    python tests/import_test_data.py --verify-only --output-dir data/generated/某次产物
+    python tests/import_test_data.py --import-db --confirm-test-database --extend-from data/generated/旧产物
 
-依赖: pip install faker pymysql psycopg2-binary clickhouse-connect pymssql oracledb
+默认只导出；真实入库须 --import-db --confirm-test-database 和 TESTDATA_* 配置。
+下方旧函数只为历史测试保留；命令入口委托 src.testdata.cli。
 """
 
 from __future__ import annotations
@@ -707,7 +709,10 @@ def verify_data(database: str, tables: dict):
 # CLI 入口
 # ================================================================
 
-def main():
+# 保留历史共享表命令实现，仅用于回看旧流程，不作为默认入口。
+# Args: 无，读取历史命令行参数。
+# Returns: 无返回值。
+def _legacy_main():
     parser = argparse.ArgumentParser(description="测试数据导入脚本（合并版）")
     parser.add_argument("--db", default="all", choices=["all"] + ALL_DBS)
     parser.add_argument("--scale", type=int, default=200000)
@@ -787,5 +792,15 @@ def main():
     print(f"  {'─' * 32}\n  总计: {grand_total:,} 行\n  耗时: {elapsed:.1f}s ({elapsed/60:.1f}min)")
 
 
+# 通过原脚本公开入口启动新的中文多业务域造数流程。
+# Args: argv - 可选命令行参数。
+# Returns: 命令退出码。
+def main(argv: list[str] | None = None) -> int:
+    """保留原脚本路径，默认只生成文件和分级知识资料。"""
+    from src.testdata.cli import main as multidomain_main
+
+    return multidomain_main(argv)
+
+
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

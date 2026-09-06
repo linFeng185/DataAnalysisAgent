@@ -1,3 +1,4 @@
+import { t, useLanguage } from '../i18n';
 import { useEffect, useState } from 'react';
 import {
   Alert, Button, Card, Checkbox, Empty, Form, Input, InputNumber, List, message,
@@ -16,16 +17,16 @@ import type {
 } from '../types';
 
 const FREQUENCY_OPTIONS = [
-  { value: 'hourly', label: '每小时' },
-  { value: 'daily', label: '每天' },
-  { value: 'weekly', label: '每周' },
-  { value: 'monthly', label: '每月' },
+  { value: 'hourly', get label() { return t("每小时"); } },
+  { value: 'daily', get label() { return t("每天"); } },
+  { value: 'weekly', get label() { return t("每周"); } },
+  { value: 'monthly', get label() { return t("每月"); } },
 ];
 
 const CHANNEL_OPTIONS = [
-  { value: 'in_app', label: '站内' },
-  { value: 'email', label: '邮件' },
-  { value: 'feishu', label: '飞书' },
+  { value: 'in_app', get label() { return t("站内"); } },
+  { value: 'email', get label() { return t("邮件"); } },
+  { value: 'feishu', get label() { return t("飞书"); } },
   { value: 'slack', label: 'Slack' },
 ];
 
@@ -37,6 +38,7 @@ const FREQUENCY_LABELS = Object.fromEntries(
 // Args: 无。
 // Returns: 主动洞察与定时报告管理页面。
 export default function AutomationPage() {
+  useLanguage();
   const [schedules, setSchedules] = useState<AutomationSchedule[]>([]);
   const [notifications, setNotifications] = useState<AutomationNotification[]>([]);
   const [datasources, setDatasources] = useState<DatasourceConfig[]>([]);
@@ -65,7 +67,7 @@ export default function AutomationPage() {
       setSchedules(scheduleData.schedules || []);
       setDatasources(datasourceData.datasources || []);
     } catch (error) {
-      message.error(error instanceof Error ? error.message : '自动化任务加载失败');
+      message.error(error instanceof Error ? error.message : t("自动化任务加载失败"));
     } finally {
       setLoading(false);
     }
@@ -82,7 +84,7 @@ export default function AutomationPage() {
       );
       setNotifications(data.notifications || []);
     } catch (error) {
-      message.error(error instanceof Error ? error.message : '通知加载失败');
+      message.error(error instanceof Error ? error.message : t("通知加载失败"));
     } finally {
       setNotificationLoading(false);
     }
@@ -111,12 +113,12 @@ export default function AutomationPage() {
       const values = await form.validateFields();
       setSaving(true);
       await post('/automation/schedules', values);
-      message.success('自动化任务已创建');
+      message.success(t("自动化任务已创建"));
       setOpen(false);
       form.resetFields();
       await loadSchedules();
     } catch (error) {
-      if (error instanceof Error) message.error(error.message || '创建失败');
+      if (error instanceof Error) message.error(error.message || t("创建失败"));
     } finally {
       setSaving(false);
     }
@@ -132,11 +134,11 @@ export default function AutomationPage() {
         `/automation/schedules/${scheduleId}/run`,
         {},
       );
-      if (!result.success) throw new Error(result.error || '任务执行失败');
-      message.success('任务执行完成');
+      if (!result.success) throw new Error(result.error || t("任务执行失败"));
+      message.success(t("任务执行完成"));
       await Promise.all([loadSchedules(), loadNotifications()]);
     } catch (error) {
-      message.error(error instanceof Error ? error.message : '任务执行失败');
+      message.error(error instanceof Error ? error.message : t("任务执行失败"));
     } finally {
       setRunningId('');
     }
@@ -148,10 +150,10 @@ export default function AutomationPage() {
   const deleteSchedule = async (scheduleId: string): Promise<void> => {
     try {
       await del(`/automation/schedules/${scheduleId}`);
-      message.success('自动化任务已删除');
+      message.success(t("自动化任务已删除"));
       await Promise.all([loadSchedules(), loadNotifications()]);
     } catch (error) {
-      message.error(error instanceof Error ? error.message : '删除失败');
+      message.error(error instanceof Error ? error.message : t("删除失败"));
     }
   };
 
@@ -161,10 +163,10 @@ export default function AutomationPage() {
   const toggleSchedule = async (scheduleId: string, enabled: boolean): Promise<void> => {
     try {
       await patch(`/automation/schedules/${scheduleId}`, { enabled });
-      message.success(enabled ? '任务已恢复' : '任务已暂停');
+      message.success(enabled ? t("任务已恢复") : t("任务已暂停"));
       await loadSchedules();
     } catch (error) {
-      message.error(error instanceof Error ? error.message : '任务状态更新失败');
+      message.error(error instanceof Error ? error.message : t("任务状态更新失败"));
     }
   };
 
@@ -181,7 +183,7 @@ export default function AutomationPage() {
       );
       setRuns(data.runs || []);
     } catch (error) {
-      message.error(error instanceof Error ? error.message : '运行记录加载失败');
+      message.error(error instanceof Error ? error.message : t("运行记录加载失败"));
       setRuns([]);
     } finally {
       setRunsLoading(false);
@@ -191,15 +193,15 @@ export default function AutomationPage() {
   return (
     <div className="automation-page" style={{ maxWidth: 1180, margin: '0 auto' }}>
       <Card
-        title="自动化"
+        title={t("自动化")}
         extra={(
           <Space>
-            <Tooltip title="刷新">
-              <Button aria-label="刷新自动化数据" icon={<ReloadOutlined />}
+            <Tooltip title={t("刷新")}>
+              <Button aria-label={t("刷新自动化数据")} icon={<ReloadOutlined />}
                 onClick={() => void Promise.all([loadSchedules(), loadNotifications()])} />
             </Tooltip>
             <Button type="primary" icon={<PlusOutlined />} onClick={openCreate}>
-              创建自动化任务
+              {t("创建自动化任务")}
             </Button>
           </Space>
         )}
@@ -207,15 +209,15 @@ export default function AutomationPage() {
         <Alert
           type="info"
           showIcon
-          message="自动化 = 按计划执行只读 SQL，并在数据变化或报告生成后通知你"
-          description="主动洞察会比较本次与上次成功结果，只有变化超过阈值才通知；定时报告会按频率生成 Markdown 摘要。任务会在执行时重新校验数据源权限，可随时暂停。"
+          message={t("自动化 = 按计划执行只读 SQL，并在数据变化或报告生成后通知你")}
+          description={t("主动洞察会比较本次与上次成功结果，只有变化超过阈值才通知；定时报告会按频率生成 Markdown 摘要。任务会在执行时重新校验数据源权限，可随时暂停。")}
           style={{ marginBottom: 16 }}
         />
         <Tabs
           items={[
             {
               key: 'schedules',
-              label: '任务',
+              label: t("任务"),
               children: (
                 <Table<AutomationSchedule>
                   dataSource={schedules}
@@ -223,48 +225,48 @@ export default function AutomationPage() {
                   loading={loading}
                   size="small"
                   scroll={{ x: 980 }}
-                  locale={{ emptyText: <Empty description="暂无自动化任务" /> }}
+                  locale={{ emptyText: <Empty description={t("暂无自动化任务")} /> }}
                   columns={[
-                    { title: '名称', dataIndex: 'name', width: 160, fixed: 'left', ellipsis: true },
-                    { title: '类型', dataIndex: 'kind', width: 90,
+                    { title: t("名称"), dataIndex: 'name', width: 160, fixed: 'left', ellipsis: true },
+                    { title: t("类型"), dataIndex: 'kind', width: 90,
                       render: value => <Tag color={value === 'insight' ? 'blue' : 'green'}>
-                        {value === 'insight' ? '主动洞察' : '定时报告'}
+                        {value === 'insight' ? t("主动洞察") : t("定时报告")}
                       </Tag> },
-                    { title: '数据源', dataIndex: 'datasource', width: 130, ellipsis: true },
-                    { title: '频率', dataIndex: 'frequency', width: 90,
+                    { title: t("数据源"), dataIndex: 'datasource', width: 130, ellipsis: true },
+                    { title: t("频率"), dataIndex: 'frequency', width: 90,
                       render: value => FREQUENCY_LABELS[value] || value },
-                    { title: '渠道', dataIndex: 'channels', width: 170,
+                    { title: t("渠道"), dataIndex: 'channels', width: 170,
                       render: (values: AutomationChannel[]) => values.map(value => (
                         <Tag key={value}>{CHANNEL_OPTIONS.find(item => item.value === value)?.label || value}</Tag>
                       )) },
-                    { title: '下次运行', dataIndex: 'next_run_at', width: 156,
+                    { title: t("下次运行"), dataIndex: 'next_run_at', width: 156,
                       render: value => value ? dayjs(value).format('YYYY-MM-DD HH:mm') : '-' },
-                    { title: '上次运行', dataIndex: 'last_run_at', width: 156,
+                    { title: t("上次运行"), dataIndex: 'last_run_at', width: 156,
                       render: value => value ? dayjs(value).format('YYYY-MM-DD HH:mm') : '-' },
-                    { title: '调度', dataIndex: 'enabled', width: 80,
+                    { title: t("调度"), dataIndex: 'enabled', width: 80,
                       render: (value: boolean, schedule: AutomationSchedule) => (
-                        <Tooltip title={value ? '点击暂停任务' : '点击恢复任务'}>
+                        <Tooltip title={value ? t("点击暂停任务") : t("点击恢复任务")}>
                           <Switch checked={value} size="small"
                             onChange={next => void toggleSchedule(schedule.id, next)} />
                         </Tooltip>
                       ) },
-                    { title: '操作', key: 'actions', width: 132, fixed: 'right',
+                    { title: t("操作"), key: 'actions', width: 132, fixed: 'right',
                       render: (_, schedule) => (
                         <Space size={4}>
-                          <Tooltip title="运行记录">
-                            <Button aria-label={`查看运行记录 ${schedule.name}`} size="small"
+                          <Tooltip title={t("运行记录")}>
+                            <Button aria-label={t("查看运行记录 {value0}", { value0: schedule.name })} size="small"
                               icon={<HistoryOutlined />} onClick={() => void showRuns(schedule)} />
                           </Tooltip>
-                          <Tooltip title="立即运行">
-                            <Button aria-label={`立即运行 ${schedule.name}`} size="small"
+                          <Tooltip title={t("立即运行")}>
+                            <Button aria-label={t("立即运行 {value0}", { value0: schedule.name })} size="small"
                               icon={<PlayCircleOutlined />} loading={runningId === schedule.id}
                               onClick={() => void runSchedule(schedule.id)} />
                           </Tooltip>
-                          <Popconfirm title="确定删除此任务？"
+                          <Popconfirm title={t("确定删除此任务？")}
                             onConfirm={() => void deleteSchedule(schedule.id)}>
                             <span>
-                              <Tooltip title="删除">
-                                <Button aria-label={`删除 ${schedule.name}`} size="small" danger
+                              <Tooltip title={t("删除")}>
+                                <Button aria-label={t("删除 {value0}", { value0: schedule.name })} size="small" danger
                                   icon={<DeleteOutlined />} />
                               </Tooltip>
                             </span>
@@ -277,18 +279,18 @@ export default function AutomationPage() {
             },
             {
               key: 'notifications',
-              label: <span><BellOutlined /> 站内通知</span>,
+              label: <span><BellOutlined /> {t("站内通知")}</span>,
               children: (
                 <List<AutomationNotification>
                   loading={notificationLoading}
                   dataSource={notifications}
-                  locale={{ emptyText: <Empty description="暂无通知" /> }}
+                  locale={{ emptyText: <Empty description={t("暂无通知")} /> }}
                   renderItem={notification => (
                     <List.Item>
                       <List.Item.Meta
                         title={<Space wrap>
                           <Tag color={notification.kind === 'insight' ? 'blue' : 'green'}>
-                            {notification.kind === 'insight' ? '洞察' : '报告'}
+                            {notification.kind === 'insight' ? t("洞察") : t("报告")}
                           </Tag>
                           <Typography.Text strong>{notification.title}</Typography.Text>
                           <Typography.Text type="secondary">
@@ -296,7 +298,7 @@ export default function AutomationPage() {
                           </Typography.Text>
                         </Space>}
                         description={<Typography.Paragraph className="automation-notification-body"
-                          ellipsis={{ rows: 8, expandable: true, symbol: '展开' }}>
+                          ellipsis={{ rows: 8, expandable: true, symbol: t("展开") }}>
                           {notification.body}
                         </Typography.Paragraph>}
                       />
@@ -310,7 +312,7 @@ export default function AutomationPage() {
       </Card>
 
       <Modal
-        title={runsSchedule ? `运行记录: ${runsSchedule.name}` : '运行记录'}
+        title={runsSchedule ? t("运行记录: {value0}", { value0: runsSchedule.name }) : t("运行记录")}
         open={runsOpen}
         onCancel={() => { setRunsOpen(false); setRunsSchedule(null); }}
         footer={null}
@@ -321,17 +323,17 @@ export default function AutomationPage() {
           loading={runsLoading}
           dataSource={runs}
           size="small"
-          locale={{ emptyText: <Empty description="暂无运行记录" /> }}
+          locale={{ emptyText: <Empty description={t("暂无运行记录")} /> }}
           columns={[
-            { title: '开始时间', dataIndex: 'started_at', width: 170,
+            { title: t("开始时间"), dataIndex: 'started_at', width: 170,
               render: value => value ? dayjs(value).format('YYYY-MM-DD HH:mm:ss') : '-' },
-            { title: '结束时间', dataIndex: 'finished_at', width: 170,
+            { title: t("结束时间"), dataIndex: 'finished_at', width: 170,
               render: value => value ? dayjs(value).format('YYYY-MM-DD HH:mm:ss') : '-' },
-            { title: '状态', dataIndex: 'status', width: 90,
+            { title: t("状态"), dataIndex: 'status', width: 90,
               render: value => <Tag color={value === 'success' ? 'green' : 'red'}>
-                {value === 'success' ? '成功' : '失败'}
+                {value === 'success' ? t("成功") : t("失败")}
               </Tag> },
-            { title: '错误或摘要', key: 'summary', ellipsis: true,
+            { title: t("错误或摘要"), key: 'summary', ellipsis: true,
               render: (_: unknown, run: AutomationRun) => run.error_message
                 || String(run.result_payload?.summary || run.result_payload?.message || '-') },
           ]}
@@ -339,48 +341,48 @@ export default function AutomationPage() {
       </Modal>
 
       <Modal
-        title="创建自动化任务"
+        title={t("创建自动化任务")}
         open={open}
         onCancel={() => setOpen(false)}
         onOk={() => void createSchedule()}
-        okText="创建"
+        okText={t("创建")}
         confirmLoading={saving}
         width={680}
         destroyOnHidden
       >
         <Form form={form} layout="vertical" requiredMark={false}>
-          <Form.Item name="kind" label="任务类型" rules={[{ required: true }]}>
+          <Form.Item name="kind" label={t("任务类型")} rules={[{ required: true }]}>
             <Segmented block options={[
-              { value: 'insight', label: '主动洞察' },
-              { value: 'report', label: '定时报告' },
+              { value: 'insight', label: t("主动洞察") },
+              { value: 'report', label: t("定时报告") },
             ]} />
           </Form.Item>
-          <Form.Item name="name" label="名称" rules={[{ required: true, max: 128 }]}>
-            <Input placeholder="销售日报" />
+          <Form.Item name="name" label={t("名称")} rules={[{ required: true, max: 128 }]}>
+            <Input placeholder={t("销售日报")} />
           </Form.Item>
           <Space className="automation-form-row" align="start">
-            <Form.Item name="datasource" label="数据源" rules={[{ required: true }]}>
-              <Select showSearch optionFilterProp="label" placeholder="选择数据源" style={{ width: '100%' }}
+            <Form.Item name="datasource" label={t("数据源")} rules={[{ required: true }]}>
+              <Select showSearch optionFilterProp="label" placeholder={t("选择数据源")} style={{ width: '100%' }}
                 options={datasources.map(item => ({ value: item.name, label: item.name }))} />
             </Form.Item>
-            <Form.Item name="frequency" label="执行频率" rules={[{ required: true }]}>
+            <Form.Item name="frequency" label={t("执行频率")} rules={[{ required: true }]}>
               <Select options={FREQUENCY_OPTIONS} style={{ width: '100%' }} />
             </Form.Item>
           </Space>
-          <Form.Item name="sql" label="只读 SQL" rules={[{ required: true, max: 20000 }]}>
+          <Form.Item name="sql" label={t("只读 SQL")} rules={[{ required: true, max: 20000 }]}>
             <Input.TextArea autoSize={{ minRows: 5, maxRows: 12 }}
               placeholder="SELECT day, SUM(amount) AS sales FROM orders GROUP BY day" />
           </Form.Item>
-          <Form.Item name="threshold_pct" label="洞察变化阈值（%）"
-            tooltip="仅主动洞察使用；定时报告会忽略此项"
+          <Form.Item name="threshold_pct" label={t("洞察变化阈值（%）")}
+            tooltip={t("仅主动洞察使用；定时报告会忽略此项")}
             rules={[{ required: true, type: 'number', min: 0, max: 10000 }]}>
             <InputNumber min={0} max={10000} precision={2} style={{ width: 180 }} />
           </Form.Item>
-          <Form.Item name="channels" label="通知渠道" rules={[{ required: true }]}>
+          <Form.Item name="channels" label={t("通知渠道")} rules={[{ required: true }]}>
             <Checkbox.Group options={CHANNEL_OPTIONS} />
           </Form.Item>
           {channels.includes('email') && (
-            <Form.Item name="recipient_email" label="收件邮箱"
+            <Form.Item name="recipient_email" label={t("收件邮箱")}
               rules={[{ required: true, type: 'email', max: 320 }]}>
               <Input type="email" placeholder="owner@example.com" />
             </Form.Item>

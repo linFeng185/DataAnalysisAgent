@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from typing import Any, Literal, TypeVar
+from typing import Annotated, Any, Literal, TypeVar
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -136,6 +136,15 @@ class TextAnswerOutput(StrictOutputModel):
     """直接回答或工具 Agent 的文本输出。"""
 
     answer: str = ""
+
+
+class ImageAnalysisOutput(StrictOutputModel):
+    """视觉识别只输出有界文字观察，不生成可执行动作。"""
+
+    summary: str = Field(min_length=1, max_length=2000)
+    observations: list[Annotated[str, Field(max_length=500)]] = Field(default_factory=list, max_length=20)
+    extracted_text: str = Field(default="", max_length=8000)
+    limitations: list[Annotated[str, Field(max_length=500)]] = Field(default_factory=list, max_length=10)
 
 
 T = TypeVar("T", bound=BaseModel)

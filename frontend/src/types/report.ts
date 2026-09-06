@@ -69,6 +69,8 @@ export interface ReportJob {
   plan: ReportPlan;
   status: ReportJobStatus;
   runs_started: number;
+  next_run_at?: string | null;
+  is_paused?: boolean;
   created_at: string | null;
   updated_at: string | null;
 }

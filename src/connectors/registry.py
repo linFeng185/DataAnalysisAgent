@@ -75,12 +75,15 @@ def create_connector(datasource: DataSourceConfig) -> ConnectorBase:
     """创建连接器，不包含任何具体方言条件分支。"""
     _load_default_connectors()
     dialect = datasource.dialect.strip().lower()
+    from src.connectors.plugins import protect_connector, require_plugin
+    require_plugin(dialect)
     logger.debug("创建连接器入口", datasource=datasource.name, dialect=dialect)
     connector_class = _registry.get(dialect)
     if connector_class is None:
         logger.error("创建连接器失败", datasource=datasource.name, dialect=dialect)
         raise ValueError(f"不支持的方言: {dialect}")
     connector = connector_class(datasource)
+    protect_connector(connector, dialect)
     logger.info(
         "创建连接器完成",
         datasource=datasource.name,

@@ -89,6 +89,21 @@ class SchemaManager:
         )
         tenant_kwargs = {"tenant_id": int(tenant_id)} if tenant_id is not None else {}
         datasource = await self._resolve_datasource(datasource_name, **tenant_kwargs)
+        from src.app_context import get_app_context
+        sync_service = get_app_context().get_resource("schema_sync")
+        if sync_service is not None and datasource is not None:
+            published = await sync_service.apply_snapshot(datasource)
+            if published is not None:
+                logger.info("Schema 已发布快照读取边界", datasource=datasource_name, tenant_id=tenant_id, table_count=len(published.tables))
+                doc_entries = self._load_from_docs(datasource_name)
+                if doc_entries:
+                    # 文档覆盖只作用于当前请求，不写回其他 Worker 共用的规范快照。
+                    automatic = self._snapshot_to_entries(datasource_name, published, **tenant_kwargs)
+                    published = self._build_snapshot(self._merge_entries(doc_entries, automatic))
+                logger.debug("Schema 已发布快照文档合并完成", datasource=datasource_name, document_count=len(doc_entries))
+                if user_query:
+                    published = await self._filter_relevant_tables(published, user_query, datasource_name, **tenant_kwargs)
+                return published
         fingerprint = ""
         if datasource is not None:
             from src.knowledge.datasource_cache import build_connection_fingerprint
@@ -593,6 +608,7 @@ class SchemaManager:
             from src.knowledge.datasource_cache import build_connection_fingerprint
 
             fingerprint = build_connection_fingerprint(datasource)
+        entries = await self._introspect_from_db(datasource_name, tenant_id=tenant_id)
         await self._delete_shared_cache(fingerprint)
         try:
             from src.memory.vector_store import get_vector_store
@@ -604,7 +620,6 @@ class SchemaManager:
         except Exception as exc:
             logger.warning("Schema 旧缓存清理失败，继续内省", datasource=datasource_name, error=str(exc))
 
-        entries = await self._introspect_from_db(datasource_name, tenant_id=tenant_id)
         if entries:
             await self._upsert_to_cache(entries)
             await self._write_shared_cache(fingerprint, entries)
@@ -807,11 +822,25 @@ class SchemaManager:
                 async with datasource_config.engine.connect() as connection:
                     result = await connection.execute(sa.text(sql), params)
                     return [dict(row._mapping) for row in result]
-            with datasource_config.engine.connect() as connection:
-                result = connection.execute(sa.text(sql), params)
-                return [dict(row._mapping) for row in result]
+            import asyncio
+            from src.knowledge.schema_sync import settle
 
-        snapshot = await introspect_database(datasource, executor)
+            # 在线程中执行同步驱动，取消时等待驱动实际退出再释放同步互斥。
+            # Args: 无，使用外层明确的数据源和查询参数。
+            # Returns: 字典行列表。
+            def query_sync() -> list[dict]:
+                with datasource_config.engine.connect() as connection:
+                    result = connection.execute(sa.text(sql), params)
+                    return [dict(row._mapping) for row in result]
+
+            task = asyncio.create_task(asyncio.to_thread(query_sync))
+            try:
+                return await asyncio.shield(task)
+            except asyncio.CancelledError:
+                await settle(asyncio.gather(task, return_exceptions=True))
+                raise
+
+        snapshot = await introspect_database(datasource, executor, strict=True)
         logger.info(
             "实时 Schema 内省完成",
             datasource=datasource_name,

@@ -214,7 +214,7 @@ class KnowledgeTagStore:
                     ORDER BY CASE scope WHEN 'global' THEN 0 ELSE 1 END, name
                     LIMIT $6
                     """,
-                    tenant_id, user_id, include_all_private, include_inactive, pattern,
+                    tenant_id, user_id, False, include_inactive, pattern,
                     min(max(limit, 1), 100),
                 )
                 result = [self._to_tag(row) for row in rows]
@@ -356,45 +356,9 @@ class KnowledgeTagStore:
     # Args: tag_id - 待提升的个人标签 ID；actor_role - 操作者角色。
     # Returns: 提升后的全局标签。
     async def promote_to_global(self, tag_id: int, *, actor_role: str) -> KnowledgeTag:
-        logger.debug("提升知识标签为全局入口", tag_id=tag_id, actor_role=actor_role)
-        if not is_super_admin(actor_role):
-            logger.warning("提升知识标签为全局拒绝", tag_id=tag_id, actor_role=actor_role)
-            raise PermissionError("只有超级管理员可以提升全局标签")
-        try:
-            async with self._connect() as conn:
-                source = await conn.fetchrow(
-                    "SELECT name, tag_group, aliases, description FROM knowledge_tags "
-                    "WHERE id = $1 AND scope = 'private'",
-                    tag_id,
-                )
-                if source is None:
-                    logger.warning("提升知识标签为全局失败", tag_id=tag_id, reason="个人标签不存在")
-                    raise ValueError("待提升的个人标签不存在")
-                row = await conn.fetchrow(
-                    """
-                    INSERT INTO knowledge_tags (
-                        name, slug, tag_group, aliases, description, scope, is_active
-                    ) VALUES ($1, $2, $3, $4, $5, 'global', TRUE)
-                    ON CONFLICT (slug) WHERE scope = 'global'
-                    DO UPDATE SET name = EXCLUDED.name, tag_group = EXCLUDED.tag_group,
-                                  aliases = EXCLUDED.aliases, description = EXCLUDED.description,
-                                  is_active = TRUE, updated_at = NOW()
-                    RETURNING id, name, slug, tag_group, aliases, description, scope,
-                              tenant_id, owner_user_id, is_active, is_seed
-                    """,
-                    source["name"], normalize_tag_slug(source["name"]), source["tag_group"],
-                    source["aliases"], source["description"],
-                )
-                await conn.execute(
-                    "UPDATE knowledge_tags SET is_active = FALSE, updated_at = NOW() WHERE id = $1",
-                    tag_id,
-                )
-                result = self._to_tag(row)
-                logger.info("提升知识标签为全局完成", source_tag_id=tag_id, global_tag_id=result.id)
-                return result
-        except Exception as exc:
-            logger.error("提升知识标签为全局失败", tag_id=tag_id, error=str(exc), exc_info=True)
-            raise
+        """旧跨所有者提升入口停用，平台可独立创建全局标签。"""
+        logger.warning("个人标签提升入口停用", tag_id=tag_id, actor_role=actor_role)
+        raise PermissionError("不允许平台读取并提升个人标签，请独立创建全局标签")
 
     # 启用或停用全局标签或本人个人标签。
     # Args: tag_id - 标签 ID；is_active - 目标状态；actor_role - 操作者角色；
@@ -416,7 +380,7 @@ class KnowledgeTagStore:
             async with self._connect() as conn:
                 if is_super_admin(actor_role):
                     status = await conn.execute(
-                        "UPDATE knowledge_tags SET is_active = $2, updated_at = NOW() WHERE id = $1",
+                        "UPDATE knowledge_tags SET is_active = $2, updated_at = NOW() WHERE id = $1 AND scope = 'global'",
                         tag_id, is_active,
                     )
                 else:

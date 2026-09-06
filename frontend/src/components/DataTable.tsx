@@ -1,18 +1,25 @@
-import { Table, Empty } from 'antd';
+import { t, useLanguage } from '../i18n';
+import { Table, Empty, Tag, Tooltip } from 'antd';
+import type { MaskingMetadata } from '../types';
 
-export default function DataTable({ data, maxRows = 100, pageSize = 20 }: {
-  data: Record<string, unknown>[]; maxRows?: number; pageSize?: number;
+// 方法作用：按后端脱敏元数据展示表头标识，不从掩码内容推断。
+// Args: data - 展示数据；masking - 脱敏元数据；maxRows/pageSize - 展示上限。
+// Returns: 只读结果表格。
+export default function DataTable({ data, masking, maxRows = 100, pageSize = 20 }: {
+  data: Record<string, unknown>[]; masking?: MaskingMetadata; maxRows?: number; pageSize?: number;
 }) {
-  if (!data || data.length === 0) return <Empty description="无数据" />;
+  useLanguage();
+  if (!data || data.length === 0) return <Empty description={t("无数据")} />;
   const sliced = data.slice(0, maxRows);
   const seen = new Set<string>();
   for (const row of sliced) {
     for (const key of Object.keys(row)) seen.add(key);
   }
-  const columns = Array.from(seen).map(k => ({
-    title: k,
-    dataIndex: k,
-    key: k,
+  const maskedFields = new Map((masking?.fields || []).map(field => [field.column, field]));
+  const columns = Array.from(seen).map(column => ({
+    title: <>{column}{maskedFields.has(column) && <Tooltip title={t("已脱敏：{value0}", { value0: maskedFields.get(column)?.categories.join('、') })}><Tag color="gold" style={{ marginLeft: 6 }}>{t("已脱敏")}</Tag></Tooltip>}</>,
+    dataIndex: column,
+    key: column,
     ellipsis: true,
     render: (value: unknown) => value === null || value === undefined ? '—' : String(value),
   }));

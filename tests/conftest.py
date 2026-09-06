@@ -14,6 +14,18 @@ from tests.fixtures.mock_llm import make_fake_llm
 from tests.fixtures.mock_mcp import StaticMCPTestServer
 
 
+# 隔离单元测试的共享限流数据库依赖，具体限流语义由服务契约测试覆盖。
+# Args: monkeypatch - pytest 替身工具；request - 当前用例。
+# Returns: 无返回值。
+@pytest.fixture(autouse=True)
+def mock_query_quota_boundary(monkeypatch, request) -> None:
+    if "test_query_quota" in str(request.fspath) or "test_data_masker_limits" in str(request.fspath):
+        return
+    from unittest.mock import AsyncMock
+
+    monkeypatch.setattr("src.security.data_masker.check_rate_limit", AsyncMock(return_value=True))
+
+
 # 方法作用：提供创建顺序响应 Fake LLM 的工厂。
 # Args: 无。
 # Returns: 接收响应序列并返回 FakeListChatModel 的函数。

@@ -1,23 +1,20 @@
-"""查询限流内存回收回归测试。"""
+"""G24.2 旧限流门面迁移到共享服务的回归测试。"""
 
-from __future__ import annotations
-
-import time
-from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 
 class TestDataMaskerLimits:
-    """覆盖滑动窗口过期 key 的回收。"""
+    """验证不再使用用户字符串或进程内缓存进行跨租户计数。"""
 
-    # 验证新请求会清理已过期用户的限流记录，避免字典无限增长。
-    # Args: self - 测试类实例；monkeypatch - pytest 补丁工具。
-    # Returns: 无返回值，断言失败时由 pytest 报告。
-    def test_rate_limit_removes_stale_user_keys(self, monkeypatch) -> None:
-        import src.security.data_masker as masker
+    # 验证门面将独立租户和用户传递给异步共享服务。
+    # Args: self - 测试实例；monkeypatch - 服务替身。
+    # Returns: 无返回值。
+    async def test_rate_limit_delegates_identity(self, monkeypatch) -> None:
+        """入口不拼接身份，不吞掉存储异常。"""
+        from src.security.data_masker import check_rate_limit
 
-        monkeypatch.setattr(masker, "get_settings", lambda: SimpleNamespace(max_queries_per_hour=10))
-        masker._rate_limits.clear()  # noqa: SLF001
-        masker._rate_limits["rate:stale"] = [time.monotonic() - 3601]  # noqa: SLF001
-
-        assert masker.check_rate_limit("active") is True
-        assert "rate:stale" not in masker._rate_limits  # noqa: SLF001
+        consume = AsyncMock(return_value=True)
+        monkeypatch.setattr("src.security.query_quota.consume_query_quota", consume)
+        assert await check_rate_limit(3, tenant_id=2)
+        consume.assert_awaited_once_with(2, 3)
+        assert not await check_rate_limit("invalid", tenant_id=2)

@@ -10,9 +10,32 @@ from fastapi import APIRouter, HTTPException
 from src.api.routes._helpers import _authorize_extension_scope
 from src.api.schemas import MCPServerCreate
 from src.logging_config import get_logger
+from src.security.mcp_safety import (
+    MCPSecurityBlockRequest,
+    list_mcp_security_blocks,
+    set_mcp_security_block,
+)
 
 logger = get_logger(__name__)
 router = APIRouter()
+
+
+# 读取不含租户连接配置的平台安全状态。
+# Args: 无。
+# Returns: 安全阻断元数据。
+@router.get("/mcp/security-blocks")
+async def list_security_blocks() -> dict:
+    """平台安全操作与租户日常管理分离。"""
+    return {"items": await list_mcp_security_blocks()}
+
+
+# 设置独立安全阻断，不修改租户连接启用状态。
+# Args: request - 明确资源、理由和阻断状态。
+# Returns: 更新后的安全状态。
+@router.post("/mcp/security-blocks")
+async def set_security_block(request: MCPSecurityBlockRequest) -> dict:
+    """安全解除不等同于租户启用。"""
+    return await set_mcp_security_block(request)
 # 方法作用：把作用域和当前身份转换为 MCP 数据库存储所有者字段。
 # Args: scope - 已规范化作用域；tenant_id - 当前租户；user_id - 当前用户。
 # Returns: 数据库 tenant_id 与 owner_user_id。
@@ -59,7 +82,7 @@ def _validate_managed_mcp_request(req: MCPServerCreate, scope: str, role: str) -
     if scope == "system" and not is_super_admin(role):
         logger.warning("受管 MCP 请求拒绝", reason="system 需要超级管理员", role=role)
         raise HTTPException(403, "system MCP 需要超级管理员权限")
-    if scope in {"tenant", "private"} and not (is_super_admin(role) or is_tenant_admin(role)):
+    if scope in {"tenant", "private"} and not is_tenant_admin(role):
         logger.warning("受管 MCP 请求拒绝", reason="需要租户管理员", role=role)
         raise HTTPException(403, "受管 MCP 需要租户管理员权限")
     if str(req.transport or "").strip().lower() != "sse":
@@ -146,7 +169,7 @@ async def list_mcp_servers(scope: str | None = None):
             if platform_admin:
                 rows = await conn.fetch(
                     "SELECT name, scope, tenant_id, owner_user_id, transport, command, args, "
-                    "url, description, is_builtin, enabled FROM mcp_servers "
+                    "url, description, is_builtin, enabled FROM mcp_servers WHERE scope='system' "
                     "ORDER BY scope, name",
                 )
             else:
@@ -275,7 +298,8 @@ async def delete_mcp_server(name: str, scope: str | None = None):
                 "SELECT id, scope, tenant_id, owner_user_id, is_builtin FROM mcp_servers "
                 "WHERE name=$1 AND ($2::text IS NULL OR scope=$2) AND "
                 "(scope='system' OR (scope='tenant' AND tenant_id=$3) OR "
-                "(scope='private' AND tenant_id=$3 AND owner_user_id=$4) OR $5='super_admin') "
+                "(scope='private' AND tenant_id=$3 AND owner_user_id=$4)) AND "
+                "($5<>'super_admin' OR scope='system') "
                 "ORDER BY CASE scope WHEN 'private' THEN 3 WHEN 'tenant' THEN 2 ELSE 1 END DESC "
                 "LIMIT 1",
                 name, normalized_scope, tenant_id, user_id, role,
@@ -330,6 +354,7 @@ async def test_mcp_server(name: str, scope: str | None = None):
         if resolved is None:
             raise HTTPException(404, f"MCP Server '{name}' 未找到")
         internal_name, resolved_scope = resolved
+        await mgr.authorize_runtime_server(internal_name)
         ok = await mgr.test_connection(internal_name)
         result = {"name": name, "scope": resolved_scope, "ok": ok}
         logger.info("测试 MCP Server API 完成", name=name, ok=ok)

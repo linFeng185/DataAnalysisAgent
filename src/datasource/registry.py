@@ -451,6 +451,9 @@ class DataSourceRegistry:
         cache_key = (effective_tenant, name)
         cached = self._cache.get(cache_key)
         if cached is not None:
+            from src.connectors.plugins import require_plugin
+            require_plugin(cached.dialect)
+            await self._apply_published_schema(cached)
             logger.info("解析数据源命中缓存", datasource=name)
             return cached
 
@@ -461,16 +464,21 @@ class DataSourceRegistry:
                 while True:
                     cached = self._cache.get(cache_key)
                     if cached is not None:
+                        from src.connectors.plugins import require_plugin
+                        require_plugin(cached.dialect)
+                        await self._apply_published_schema(cached)
                         logger.info("解析数据源等待后命中缓存", datasource=name)
                         return cached
                     generation = self._resolution_generations.get(cache_key, 0)
                     try:
-                        return await self._resolve_uncached(
+                        resolved = await self._resolve_uncached(
                             name,
                             effective_tenant,
                             cache_key,
                             generation,
                         )
+                        await self._apply_published_schema(resolved)
+                        return resolved
                     except _StaleResolution:
                         logger.info(
                             "解析数据源检测到失效代次，重新解析",
@@ -479,6 +487,15 @@ class DataSourceRegistry:
                         )
         finally:
             self._cleanup_resolution_state(cache_key)
+
+    # 应用跨 Worker 的已发布结构，不关闭共享引擎或修改在途任务。
+    # Args: self - 实例；source - 已解析数据源。
+    # Returns: 无返回值。
+    async def _apply_published_schema(self, source: DataSourceConfig) -> None:
+        from src.app_context import get_app_context
+        service = get_app_context().get_resource("schema_sync")
+        if service is not None:
+            await service.apply_snapshot(source)
 
     # 方法作用：在解析锁内查找 Provider、创建引擎并写入复合键缓存。
     # Args: self - Registry 实例；name - 数据源名称；tenant_id - 有效租户；cache_key - 租户和名称复合键。

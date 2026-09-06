@@ -50,6 +50,7 @@ skill_require_signatures: true
 skill_trusted_public_keys: '{}'
 
 automation_enabled: true
+report_scheduler_enabled: true
 automation_poll_interval_seconds: 60
 automation_smtp_host: ""
 automation_smtp_port: 587
@@ -82,6 +83,18 @@ jwt_access_token_expire_hours: 24
 jwt_refresh_token_expire_days: 7
 admin_api_key: ""
 credential_encryption_key: ""
+credential_key_id: ""
+credential_previous_keys: {}
+secret_provider: environment
+secret_file: ""
+vault_addr: ""
+vault_mount: secret
+vault_secret_path: ""
+vault_token_file: ""
+vault_namespace: ""
+vault_ca_file: ""
+vault_secret_version: 0
+vault_timeout_seconds: 10
 
 cors_allowed_origins: ""
 security_hsts_seconds: 31536000

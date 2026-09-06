@@ -44,7 +44,7 @@ def test_chat_page_validates_selected_datasource() -> None:
 def test_schema_refresh_checks_http_status() -> None:
     """非 2xx 刷新响应不得显示成功。"""
     logger.debug("test_schema_refresh_checks_http_status 入口")
-    _assert_source_contains("pages/SchemaPage.tsx", "await post(", "Schema 已刷新")
+    _assert_source_contains("pages/SchemaPage.tsx", "await post<SyncStatus>(", "/schema/sync?datasource=", "表结构同步已启动", "catch (error)")
     logger.info("test_schema_refresh_checks_http_status 完成")
 
 

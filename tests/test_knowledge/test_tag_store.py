@@ -213,11 +213,11 @@ class TestKnowledgeTagStore:
             )
             raise
 
-    # 验证超级管理员搜索可以覆盖所有个人标签以执行治理。
+    # 验证旧全量开关不能突破当前身份的私有标签隔离。
     # Args: self - pytest 测试类实例；monkeypatch - pytest 补丁工具。
     # Returns: 无返回值，断言失败时由 pytest 报告。
-    async def test_super_admin_search_can_include_all_private_tags(self, monkeypatch) -> None:
-        """平台管理员治理视图不应受当前租户和当前用户过滤。"""
+    async def test_super_admin_search_cannot_include_all_private_tags(self, monkeypatch) -> None:
+        """即使旧调用者传入 True，也不再允许跨拥有者查询。"""
         logger.debug("test_super_admin_search_can_include_all_private_tags 入口")
         try:
             # Arrange：模拟空搜索结果并捕获查询参数。
@@ -234,9 +234,9 @@ class TestKnowledgeTagStore:
                 "", tenant_id=7, user_id=9, include_all_private=True, include_inactive=True,
             )
 
-            # Assert：第三个 SQL 参数明确启用跨所有者查询。
+            # Assert：旧全量参数被强制关闭。
             assert result == []
-            assert conn.fetch.await_args.args[3] is True
+            assert conn.fetch.await_args.args[3] is False
             logger.info("test_super_admin_search_can_include_all_private_tags 完成")
         except Exception as exc:
             logger.error(

@@ -22,7 +22,14 @@ LLM 驱动的数据分析智能体。用自然语言提问，自动完成：轮�
 │   ├── datasource/       ④ 数据源管理 — 注册/发现/Schema/凭证加密
 │   │   └── providers/        数据源提供者
 │   ├── connectors/       ⑤ 数据库连接器 — 自注册方言与统一运行时策略
+│   │   ├── plugins.py       可信 entry point 热发现、目录元数据与新执行撤权
+│   │   ├── seed_writer.py   显式测试库预检、分批事务写入、增量扩容与拒绝覆盖保护
+│   │   └── seed_verifier.py 只读核验 625 张表的计数、指标、关联键和中文样本
+│   ├── testdata/            五源各 125 表中文造数、五方言 DDL、强弱关联与分级知识资料
+│   │   └── expanded_catalog.py 50 个业务主题的 500 张新增专属表，旧表使用独立计数池保持兼容
 │   ├── knowledge/        ⑥ 知识库 — 三范围治理 + 标签 + 连接级缓存 + 文档摄取
+│   │   └── schema_sync.py   跨 Worker 同步任务、取消清理和规范结构快照
+│   ├── runtime/            平台热配置 — 启动默认值、数据库覆盖、版本审计与跨 Worker 刷新
 │   ├── memory/           ⑦ 记忆系统 — 会话持久化 + 上下文裁剪 + 历史 + 成功 SQL 自进化
 │   ├── automation/       ⑧ 主动洞察与定时报告 — PG 调度 + 重授权执行 + 通知分发
 │   ├── tools/            ⑨ 分析工具 — 统计、预测与跨资产分析
@@ -43,6 +50,7 @@ LLM 驱动的数据分析智能体。用自然语言提问，自动完成：轮�
 │   ├── skill_runtime.py      Skill 契约、资源和隔离执行入口
 │   └── skill_worker.py       非内置 Skill 子进程 Worker
 ├── frontend/                 React SPA (Vite + Ant Design + ECharts)
+│   ├── src/i18n/                中文默认、英文词典与可订阅语言状态
 │   ├── Dockerfile               Node builder + Nginx runtime
 │   └── nginx.conf               SPA、API 代理和 SSE 配置
 ├── skills/                   三十三个 system 内置 Skills（质量/报告 + 底座、治理与 SQL 优化）
@@ -147,12 +155,19 @@ POST /api/v1/chat {"query": "本月 GMV 排名？", "stream": true}
 
 6 种方言通过 `connectors/registry.py` 自注册：ClickHouse / MySQL / PostgreSQL / SQLite / Oracle / MSSQL。超时、EXPLAIN、探针和 Engine 参数由各 Connector 封装；ClickHouse 在网络调用前校验全部解析地址并固定使用已验证 IP；非 SQLite 连接 URL 通过 SQLAlchemy `URL.create()` 保存，字符串展示默认隐藏密码。
 
+`plugins.py` 把内置类型和 `data_analysis_agent.connectors` entry point 扩展放入同一目录，数据源表单从 `/datasource-types` 取得类型及连接字段，指标方言从服务端数据源带出。平台发现/启停状态持久化到运行时配置表；缓存连接器的执行入口每次检查撤权。新增驱动先通过部署侧安装到所有 Worker，再在后台发现；不允许 HTTP 上传代码或在线 pip。改换已加载模块/原生驱动版本仍应滚动部署。
+
+### ⑤.1 `src/runtime/` — 平台动态配置
+
+`settings.py` 以 `LIVE_FIELDS` 显式限制可热改范围，环境/YAML 为启动默认值，PostgreSQL 覆盖优先。后台支持完整类型/范围校验、乐观锁冲突、恢复默认与审计；各 Worker 每两秒刷新，故障保留最后有效版本。主数据库、密钥、认证模式、存储后端等启动依赖不进入热改白名单。接口与部署边界见 `spec/37-runtime-platform-and-ui.md`。
+
 ### ⑥ `src/knowledge/` — 知识库
 
 | 文件 | 职责 |
 |------|------|
 | `datasource_cache.py` | 按连接指纹共享数据库元数据，支持本地 JSON / Redis 配置切换 |
 | `schema_manager.py` | 连接级精确缓存 + VectorStore 语义索引 + 文档/DB 内省回退；精确命中不重复向量化 |
+| `schema_sync.py` | PostgreSQL 会话锁互斥、持久化任务状态、取消清理、规范快照发布和跨 Worker 读取 |
 | `asset_models.py` | `DataAsset` / `Evidence` / `AnalysisPlan` / `AnalysisArtifact` 统一数据契约 |
 | `retrieval.py` | 知识租户/可见性/数据源过滤、VectorStore 检索和 Citation 转换 |
 | `content_safety.py` | 外部文档注入检测、证据分隔渲染和工具指令隔离 |
@@ -266,6 +281,10 @@ checksum。执行器同时兼容历史 LF/CRLF 登记值，避免 Git 跨平台�
 
 `planner.py` 将自然语言解析为可确认的 `ReportPlan`；`store.py` 持久化 Job/Run/Step/Version/Share、配额策略和访问审计，并按 PostgreSQL/SQLite 方言选择认领策略；`runner.py` 与 `src/graph/subgraphs/report_workbench.py` 执行单数据源多分析单元；`relations.py` 只消费授权投影和有界样本生成关系证据，阻断低匹配率或多对多膨胀；`document.py` 校验动态页面 DSL 和 ECharts 白名单；`drilldown.py` 仅允许服务端签发的快照过滤；`sharing.py` 负责 token、授权码和用户范围访问控制；`quota.py` 执行菜单能力、周期次数、并发、查询、Token 与分享限额。
 
+任务创建通过 `ReportStore.create_job_with_quota()` 将幂等检查、配额预占和写入纳入同一事务，仅首次创建才入队。运行线程包含显式租户、用户和运行 ID；取消落库后在统一清理路径释放原周期并发槽。单次资源上限不与月度累计量混用。生产权限以持久化记录为准，权限库异常失败关闭，不能被 Worker 内旧授权覆盖遮蔽。存量任务的完整调度与恢复仍见功能清单中的待开发项，不由内存 asyncio.Task 替代。
+
+`frontend/src/components/report/ReportPolicyEditor.tsx` 提供租户管理员的用户额度编辑入口；平台管理界面不展示该业务配置。`frontend/src/components/EChartsView.tsx` 统一注册项目支持的图表类型并由聊天图表和报表渲染器延迟加载。浏览器行为测试位于 `tests/test_frontend/test_report_browser.py`，安装 `.[browser]` 后使用 `RUN_BROWSER_TESTS=1` 显式运行；测试启动独立 Vite 进程并拦截业务 API，不访问生产后端。
+
 ## 快速上手
 
 1. `src/main.py` → `src/bootstrap.py` → `src/api/routes/` — 启动与 API 入口
@@ -334,3 +353,16 @@ checksum。执行器同时兼容历史 LF/CRLF 登记值，避免 Git 跨平台�
 - **统一任务计划与分析产物**：路由节点写回 `task_plan`；最终响应同时提供兼容旧字段和 `artifact`，产物使用 `AnalysisArtifact`、证据和复现信息。
 - **统一结构化 Prompt 调用**：新增能力必须注册 `PromptDefinition` 与输出模型，节点通过 `src/llm/invocation.py` 统一预算、模型调用和 Pydantic 解析。
 - **固定评测门禁**：`tests/fixtures/graph_benchmark.json` 离线覆盖路由、安全和 Artifact；真实本地 SQLite 双源验收默认运行，外部数据源与 LangSmith 仅在显式开关下运行。
+- **启动托管密钥**：`datasource/secret_provider.py` 在生命周期启动前读取 Vault KV v2/只读 JSON，只允许敏感字段注入；失败关闭，不降级到环境旧密钥。默认 environment 模式保持兼容。
+- **存储凭证轮换**：`datasource/credential_manager.py` 写入带 key_id 的 v3 密文并兼容 v2；`python -m src.datasource.rotate_credentials` 默认核验，停机后 `--apply --offline-confirmed` 才在单事务中更新数据源和租户模型凭证。部署契约见 `spec/31-secret-custody.md`。
+- **指标治理**：`knowledge/metric_catalog.py` 管理租户指标的不可变版本、审核及未来生效；API `/metric-catalog` 与前端 `MetricsPage.tsx` 仅给租户管理员业务写权限。显式 `@metric(code@version)` 在 Schema 节点解析为已批准知识证据，未命中失败关闭；迁移 `019_metric_catalog.sql`。
+- **脱敏可视化**：`security/data_masker.py` 在实际脱敏时产出 `masking` 字段摘要；单源、多源与补查保留它，`build_response` 和 HistoryStore 传递它，`DataTable`/`ResultCard` 只使用该元数据展示标识。
+- **图片资产**：`knowledge/image_assets.py` 校验真实图像、移除元数据并限制像素/字节，`mcp_agent` 重验附件拥有者后通过统一 LLM 工厂调用显式支持视觉的租户模型；工具结果与 `AnalysisArtifact` 仅传递资产和证据，不传图片字节。
+- **报表调度**：`reporting/scheduler.py` 接入 bootstrap，认领与心跳依赖数据库，实际运行使用任务专属 PostgreSQL 会话锁；发布复用持锁连接并重新校验权限。`store.py` 将运行配额租约与预占事务化，恢复时只释放原周期并发槽。
+- **实时钻取**：`reporting/live_drilldown.py` 只处理私有表 `report_live_queries` 中的服务端模板；公开 DSL 只携带随机引用，分享响应移除 live 定义。SQL 执行前当前 ACL、字面量参数和预算校验，执行后投影脱敏。
+- **跨源样本聚合**：`reporting/aggregation.py` 以明确共同维度分别统计来源，禁止原始行连接膨胀，结果作为独立表格进入页面；不把样本或非可加业务指标伪装为全量总额。
+- **页面管理**：查看器通过生命周期摘要管理已过期页面，延期/永久能力由租户授权；不会自动扩大分享期限。新迁移 020～022 覆盖私有查询、调度恢复字段和租户 RLS 边界；审计清单见 `features/24-tenant-governance-audit.md`。
+- **平台与业务分权**：平台 `super_admin` 不再拥有报表业务能力，旧覆盖不能恢复；仅无请求的后台 `(tenant_id=0,user_id=0)` 保留基础设施通道，实际报表执行仍绑定业务拥有者。迁移 024 统一报表、知识和 MCP 的 RLS 边界。
+- **共享查询额度**：`security/query_quota.py` 使用 PostgreSQL UTC 小时窗口和租户事务锁同时消费用户/租户额度；`data_masker.check_rate_limit` 为异步门面。`api/routes/query_quota.py` 与 `QueryQuotaEditor.tsx` 管理租户软额度，平台硬上限来自统一 Settings，数据库故障失败关闭。
+- **知识应急访问**：`security/emergency_access.py` 与 `api/routes/emergency_access.py` 提供单文件、指定超管、限时只读授权及撤销；`EmergencyKnowledgePanel.tsx` 为拥有者与平台提供不同操作。普通检索不使用授权，读取前必须验证当前归属并提交审计。
+- **MCP 安全停用**：`security/mcp_safety.py` 只维护独立阻断表，不读改租户连接；`MCPSecurityPanel.tsx` 仅在平台工作区提供。`client_manager.py` 名称解析绑定当前身份，工具调用每次重验共享状态，阻断不可用同名重建绕过。

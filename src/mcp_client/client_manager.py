@@ -217,8 +217,9 @@ class MCPClientManager:
             tenant_id=tenant_id,
             owner_user_id=owner_user_id,
         )
-        from mcp import ClientSession, StdioServerParameters
         from mcp.client.stdio import stdio_client
+
+        from mcp import ClientSession, StdioServerParameters
 
         transport = config.get("transport", "stdio")
         if transport == "stdio":
@@ -296,6 +297,7 @@ class MCPClientManager:
         async def _call(**kwargs) -> str:
             logger.debug("调用 MCP Tool 入口", namespace=namespace, tool=mcp_tool.name)
             try:
+                await self.authorize_runtime_server(namespace)
                 result = await session.call_tool(mcp_tool.name, arguments=kwargs)
                 text = result.content[0].text if result.content else ""
                 logger.info(
@@ -360,6 +362,9 @@ class MCPClientManager:
             "获取 MCP 工具入口", tenant_id=tenant_id, user_id=user_id,
             total=len(self.langchain_tools),
         )
+        from src.api.auth import get_current_role
+
+        platform = get_current_role() == "super_admin"
         tools: list[BaseTool] = []
         for key, tool in self.langchain_tools.items():
             server_name = key.rsplit("__", 1)[0]
@@ -379,7 +384,7 @@ class MCPClientManager:
                     and owner_user == user_id
                 )
             )
-            if visible:
+            if visible and (not platform or scope == "system"):
                 tools.append(tool)
         logger.info(
             "获取 MCP 工具完成", tenant_id=tenant_id, user_id=user_id, count=len(tools),
@@ -420,11 +425,20 @@ class MCPClientManager:
         scope: str | None = None,
     ) -> tuple[str, str] | None:
         logger.debug("解析已加载 MCP Server 入口", name=name, scope=scope or "")
+        from src.api.auth import get_current_role, get_current_tenant_id, get_current_user_id
+
+        tenant_id, user_id = get_current_tenant_id(), get_current_user_id()
+        platform = get_current_role() == "super_admin"
         priority = {"private": 3, "tenant": 2, "system": 1}
         candidates = [
             (internal_name, self._server_scopes.get(internal_name, "system"))
             for internal_name in self.sessions
-            if (internal_name.endswith(f"_{name}") or internal_name == name)
+            if self._server_scopes.get(internal_name, "system") == "system" or (
+                not platform
+                and self._server_tenants.get(internal_name) == tenant_id
+                and (self._server_scopes.get(internal_name) == "tenant" or self._server_owners.get(internal_name) == user_id)
+            )
+            if (internal_name == self.scoped_server_name(name, self._server_scopes.get(internal_name, "system"), self._server_tenants.get(internal_name, 0), self._server_owners.get(internal_name, 0)) or internal_name == name)
             and (
                 not scope
                 or self._server_scopes.get(internal_name, "system") == scope
@@ -444,6 +458,38 @@ class MCPClientManager:
         return result
 
     # ── 8.1.8 健康检查 ───────────────────────────────
+
+    # 方法作用：在远程调用前重新验证当前身份、连接状态和共享安全阻断。
+    # Args: name - 已加载连接的内部名称。
+    # Returns: 授权成功无返回值，拒绝或数据库失效不调用远端。
+    async def authorize_runtime_server(self, name: str) -> None:
+        """工具缓存不构成永久授权，跨 Worker 安全状态每次查库。"""
+        from src.api.auth import get_current_role, get_current_tenant_id, get_current_user_id
+        from src.memory.pg_pool import pg_connection
+
+        scope = self._server_scopes.get(name, "system")
+        tenant_id, user_id, role = get_current_tenant_id(), get_current_user_id(), get_current_role()
+        owner_tenant, owner_user = self._server_tenants.get(name, 0), self._server_owners.get(name, 0)
+        if scope != "system" and (role == "super_admin" or tenant_id != owner_tenant or (scope == "private" and user_id != owner_user)):
+            logger.warning("MCP 运行时身份阻断", scope=scope, tenant_id=tenant_id, user_id=user_id)
+            raise PermissionError("无权调用该 MCP 连接")
+        if name in self._configured_system_servers:
+            return
+        if name not in self._server_configs:
+            raise PermissionError("MCP 连接未注册")
+        public_name = name.removeprefix(f"{scope}_{owner_tenant}_{owner_user}_")
+        async with pg_connection(tenant_id=tenant_id, user_id=user_id, role=role) as connection:
+            row = await connection.fetchrow(
+                "SELECT url,enabled FROM mcp_servers WHERE name=$1 AND scope=$2 AND COALESCE(tenant_id,0)=$3 AND owner_user_id=$4",
+                public_name, scope, owner_tenant, owner_user,
+            )
+            blocked = await connection.fetchval(
+                "SELECT blocked FROM mcp_security_blocks WHERE name=$1 AND scope=$2 AND tenant_id=$3 AND owner_user_id=$4",
+                public_name, scope, owner_tenant, owner_user,
+            )
+        if not row or not row["enabled"] or blocked or row["url"] != self._server_configs[name].get("url", ""):
+            logger.warning("MCP 运行时安全阻断", server=name, blocked=bool(blocked))
+            raise PermissionError("MCP 连接已停用、删除或配置已变更，请重新加载")
 
     # 方法作用：对全部已连接 MCP Server 执行 ping 并触发断线重连。
     # Args: 无。
@@ -611,12 +657,14 @@ class MCPClientManager:
                 if tenant_id is None:
                     rows = await conn.fetch(
                         "SELECT name, scope, tenant_id, owner_user_id, transport, command, args, "
-                        "url, env_vars FROM mcp_servers WHERE enabled=TRUE",
+                        "url, env_vars FROM mcp_servers WHERE enabled=TRUE AND scope='system'",
                     )
                 else:
                     rows = await conn.fetch(
                         "SELECT name, scope, tenant_id, owner_user_id, transport, command, args, "
-                        "url, env_vars FROM mcp_servers WHERE enabled=TRUE AND "
+                        "url, env_vars FROM mcp_servers WHERE enabled=TRUE AND NOT EXISTS ("
+                        "SELECT 1 FROM mcp_security_blocks b WHERE b.tenant_id=mcp_servers.tenant_id AND b.scope=mcp_servers.scope "
+                        "AND b.owner_user_id=mcp_servers.owner_user_id AND b.name=mcp_servers.name AND b.blocked) AND "
                         "(scope='system' OR (scope='tenant' AND tenant_id=$1) OR "
                         "(scope='private' AND tenant_id=$1 AND owner_user_id=$2))",
                         tenant_id, user_id or 0,
@@ -704,6 +752,10 @@ class MCPClientManager:
         logger.debug(
             "确保身份 MCP 已加载入口", tenant_id=tenant_id, user_id=user_id, force=force,
         )
+        from src.api.auth import get_current_role
+
+        if get_current_role() == "super_admin":
+            tenant_id, user_id = 0, 0
         identity = (tenant_id, user_id)
         if identity in self._loaded_identities and not force:
             logger.info("确保身份 MCP 已加载完成", tenant_id=tenant_id, user_id=user_id, cached=True)

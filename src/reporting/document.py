@@ -268,6 +268,8 @@ def build_report_document(
                 "data_ref": data_ref,
             }
             drilldowns.append(drilldown)
+            if result.live_query_id:
+                drilldowns.append({**drilldown, "drilldown_id": f"live-{result.live_query_id}", "mode": "live", "query_ref": result.live_query_id})
             blocks.append(ReportBlock(
                 id=f"chart_{section_id}",
                 section_id=section_id,

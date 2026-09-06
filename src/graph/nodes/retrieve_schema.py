@@ -144,6 +144,17 @@ async def retrieve_schema_node(state: AnalysisState) -> dict:
     ) if should_load else ""
     knowledge_text = str(knowledge_result or "")
     knowledge_sources = list(getattr(knowledge_result, "sources", []) or [])
+    if "@metric(" in contexts.request.user_query:
+        from src.knowledge.metric_catalog import resolve_metric_references
+        from src.security.tenant_policy import RequestIdentity
+
+        effective_tenant, effective_user = resolve_request_identity(state)
+        metric_text, metric_sources = await resolve_metric_references(
+            contexts.request.user_query, datasource_name,
+            RequestIdentity(tenant_id=effective_tenant, user_id=effective_user, role=contexts.request.user_role),
+        )
+        knowledge_text = "\n".join(section for section in (knowledge_text, metric_text) if section)
+        knowledge_sources.extend(metric_sources)
     if not should_load:
         logger.debug("知识库跳过（chat 意图无需 SQL）", datasource=datasource_name)
 

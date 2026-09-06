@@ -124,7 +124,7 @@ def can_manage_knowledge_resource(
     )
     normalized = normalize_knowledge_scope(scope)
     if is_super_admin(role):
-        result = True
+        result = normalized is KnowledgeScope.SYSTEM
     elif normalized is KnowledgeScope.SYSTEM:
         result = False
     elif resource_tenant_id != current_tenant_id:

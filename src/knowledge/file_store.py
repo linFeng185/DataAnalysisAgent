@@ -15,8 +15,10 @@ logger = get_logger(__name__)
 
 _VISIBLE_FILES_SQL = """
     knowledge_scope = 'system'
-    OR (knowledge_scope = 'tenant' AND tenant_id = {tenant_param})
-    OR (knowledge_scope = 'private' AND tenant_id = {tenant_param} AND user_id = {user_param})
+    OR (current_setting('app.current_role', true) <> 'super_admin' AND (
+        (knowledge_scope = 'tenant' AND tenant_id = {tenant_param})
+        OR (knowledge_scope = 'private' AND tenant_id = {tenant_param} AND user_id = {user_param})
+    ))
 """
 
 
@@ -392,8 +394,8 @@ class FileStore:
                 status = await conn.execute(
                     "DELETE FROM knowledge_files WHERE filename = $1 AND ("
                     "($4 = 'super_admin' AND knowledge_scope = 'system') OR "
-                    "(($4 IN ('super_admin', 'tenant_admin')) AND knowledge_scope = 'tenant' AND tenant_id = $2) OR "
-                    "(knowledge_scope = 'private' AND tenant_id = $2 AND user_id = $3)"
+                    "(($4 = 'tenant_admin') AND knowledge_scope = 'tenant' AND tenant_id = $2) OR "
+                    "($4 <> 'super_admin' AND knowledge_scope = 'private' AND tenant_id = $2 AND user_id = $3)"
                     ") AND ($5 = '' OR knowledge_scope = $5)",
                     filename, tenant_id, user_id, role, knowledge_scope,
                 )
@@ -434,9 +436,9 @@ class FileStore:
                 status = await conn.execute(
                     "DELETE FROM knowledge_files WHERE id = $1 AND ("
                     "($4 = 'super_admin' AND knowledge_scope = 'system') OR "
-                    "(($4 IN ('super_admin', 'tenant_admin')) AND "
+                    "(($4 = 'tenant_admin') AND "
                     "knowledge_scope = 'tenant' AND tenant_id = $2) OR "
-                    "(knowledge_scope = 'private' AND tenant_id = $2 AND user_id = $3)"
+                    "($4 <> 'super_admin' AND knowledge_scope = 'private' AND tenant_id = $2 AND user_id = $3)"
                     ") AND ($5 = '' OR knowledge_scope = $5)",
                     int(file_id), tenant_id, user_id, role, knowledge_scope,
                 )

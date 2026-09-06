@@ -410,6 +410,24 @@ class CacheRefreshService:
     # Args: self - 服务。
     # Returns: 过期删除数、检查数和变更数摘要。
     async def run_once(self) -> dict[str, int]:
+        from src.app_context import get_app_context
+        service = get_app_context().get_resource("schema_sync")
+        if service is not None:
+            from fastapi import HTTPException
+            checked, changed = 0, 0
+            for tenant_id in await self._registry.list_tenant_ids():
+                for item in await self._registry.list_all(tenant_id=tenant_id):
+                    if self._stop_event.is_set():
+                        break
+                    checked += 1
+                    try:
+                        result = await service.start(tenant_id, item["name"], wait=True)
+                        changed += int(result["status"] == "succeeded")
+                    except HTTPException as exc:
+                        if exc.status_code != 409:
+                            raise
+                        logger.info("周期同步跳过已有任务", tenant_id=tenant_id, datasource=item["name"])
+            return {"deleted": 0, "checked": checked, "changed": changed}
         deleted = await self._refresher.refresh_expired()
         tenant_ids = await self._registry.list_tenant_ids()
         changed = 0

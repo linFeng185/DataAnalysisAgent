@@ -16,6 +16,7 @@ from src.graph.outcome import (
 )
 from src.graph.state import AnalysisState
 from src.logging_config import get_logger
+from src.security.data_masker import MaskingMetadata
 
 logger = get_logger(__name__)
 
@@ -288,6 +289,21 @@ async def build_response_node(state: AnalysisState) -> dict:
             final_result["error_message"] = public_error_message("MULTI_SOURCE_PARTIAL")
 
     final_result.setdefault("sql_statements", sql_statements)
+    statistics = state.get("query_result_statistics", {}) or {}
+    final_result["masking"] = MaskingMetadata.model_validate(statistics.get("masking", {})).model_dump()
+    final_result["supplemental_masking"] = [
+        MaskingMetadata.model_validate(item).model_dump()
+        for item in statistics.get("supplemental_masking", []) or []
+    ] + [
+        MaskingMetadata.model_validate(item.get("masking", {})).model_dump()
+        for item in state.get("supplemental_evidence", []) or []
+        if item.get("success") and (item.get("masking", {}) or {}).get("applied")
+    ]
+    logger.info(
+        "响应脱敏元数据边界",
+        primary_fields=len(final_result["masking"]["fields"]),
+        supplemental_groups=len(final_result["supplemental_masking"]),
+    )
     if not final_result.get("sql") and sql_statements:
         final_result["sql"] = sql
 

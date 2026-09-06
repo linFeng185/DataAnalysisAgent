@@ -1,3 +1,4 @@
+import { t, useLanguage } from '../i18n';
 import { useState, useRef, useEffect, useCallback } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { Input, Select, Tag, Typography, Space, Tooltip, message, Card, Button, Spin, Switch } from 'antd';
@@ -19,9 +20,9 @@ import SqlPanel from '../components/SqlPanel';
 import SessionDrawer from '../components/SessionDrawer';
 
 const SUGGESTIONS = [
-  { icon: <BarChartOutlined />, text: '本月各产品的销售额排名是怎样的？', color: '#1677ff' },
-  { icon: <RiseOutlined />, text: '最近一周活跃用户数变化趋势如何？', color: '#52c41a' },
-  { icon: <BulbOutlined />, text: '上个月订单量和金额对比去年同期？', color: '#722ed1' },
+  { icon: <BarChartOutlined />, get text() { return t("本月各产品的销售额排名是怎样的？"); }, color: '#1677ff' },
+  { icon: <RiseOutlined />, get text() { return t("最近一周活跃用户数变化趋势如何？"); }, color: '#52c41a' },
+  { icon: <BulbOutlined />, get text() { return t("上个月订单量和金额对比去年同期？"); }, color: '#722ed1' },
 ];
 
 const DS_STORAGE_KEY = 'selected_datasource';
@@ -59,6 +60,7 @@ function saveDs(name: string): void {
 // Args: 无。
 // Returns: 对话分析页面。
 export default function ChatPage() {
+  useLanguage();
   const location = useLocation();
   const navigate = useNavigate();
   const [query, setQuery] = useState('');
@@ -97,7 +99,7 @@ export default function ChatPage() {
           setDs([]);
         }
       })
-      .catch(() => message.warning('无法加载数据源列表'));
+      .catch(() => message.warning(t("无法加载数据源列表")));
     get<{models: ModelOption[]; default: string | { connection_id?: number; model_id?: string }}>('/models')
       .then(data => {
         const connectedModels = (data.models || []).filter(item => Number(item.connection_id) > 0);
@@ -121,10 +123,10 @@ export default function ChatPage() {
             : '');
         }
       })
-      .catch(() => message.warning('无法加载模型列表'));
+      .catch(() => message.warning(t("无法加载模型列表")));
     get<{skills:SkillInfo[]}>('/skills')
       .then(data => setSkills((data.skills || []).filter(skill => skill.enabled)))
-      .catch(() => message.warning('无法加载 Skill 列表'));
+      .catch(() => message.warning(t("无法加载 Skill 列表")));
   }, []);
 
   // 新消息时自动滚到底部
@@ -166,7 +168,7 @@ export default function ChatPage() {
       saveDs(replay.session.datasource);
     }
     navigate('/', { replace: true, state: null });
-    message.success('已恢复历史会话');
+    message.success(t("已恢复历史会话"));
   }, [location.state, navigate, restoreTurns]);
 
   // 方法作用：校验当前输入并携带数据源、模型、Skill 和附件发起流式分析。
@@ -178,7 +180,7 @@ export default function ChatPage() {
     if (fileIds.length === 0 && (
       ds.length === 0 || !datasources.some(item => item.name === ds[0])
     )) {
-      message.warning('请选择有效的数据源');
+      message.warning(t("请选择有效的数据源"));
       return;
     }
     send(query, ds[0] || '', ds.length > 1 ? ds : undefined, modelId || undefined,
@@ -194,7 +196,7 @@ export default function ChatPage() {
     if (!files || files.length === 0) return;
     const selected = Array.from(files);
     if (attachments.length + selected.length > 10) {
-      message.warning('单次消息最多附加 10 个文件');
+      message.warning(t("单次消息最多附加 10 个文件"));
       return;
     }
     setUploadingFiles(true);
@@ -204,9 +206,9 @@ export default function ChatPage() {
         const existing = new Set(current.map(item => item.file_id));
         return [...current, ...uploaded.filter(item => !existing.has(item.file_id))];
       });
-      message.success(`已上传 ${uploaded.length} 个附件`);
+      message.success(t("已上传 {value0} 个附件", { value0: uploaded.length }));
     } catch (error) {
-      message.error(error instanceof Error ? error.message : '附件上传失败');
+      message.error(error instanceof Error ? error.message : t("附件上传失败"));
     } finally {
       setUploadingFiles(false);
       if (fileInputRef.current) fileInputRef.current.value = '';
@@ -236,9 +238,9 @@ export default function ChatPage() {
       const detail = await fetchSession(session.session_id);
       restoreTurns(detail.turns, session.session_id, session.datasource, detail.has_more);
       setDs([session.datasource]);
-      message.success('已恢复会话');
+      message.success(t("已恢复会话"));
     } catch {
-      message.error('恢复会话失败');
+      message.error(t("恢复会话失败"));
     }
   };
 
@@ -256,7 +258,7 @@ export default function ChatPage() {
         {/* 重试状态提示 */}
         {retryInfo && (
           <div style={{ textAlign: 'center', padding: '4px 0' }}>
-            <Tag color="orange">第 {retryInfo.current}/{retryInfo.max} 次重试 — 自动修正 SQL 中...</Tag>
+            <Tag color="orange">{t("第")} {retryInfo.current}/{retryInfo.max} {t("次重试 — 自动修正 SQL 中...")}</Tag>
           </div>
         )}
         {/* 加载更多指示器 */}
@@ -264,7 +266,7 @@ export default function ChatPage() {
           <div style={{ textAlign: 'center', padding: '8px 0' }}>
             <Spin size="small" />
             <Typography.Text type="secondary" style={{ marginLeft: 8, fontSize: 12 }}>
-              加载更早的对话...
+              {t("加载更早的对话...")}
             </Typography.Text>
           </div>
         )}
@@ -284,10 +286,10 @@ export default function ChatPage() {
               <RobotOutlined style={{ fontSize: 36, color: '#fff' }} />
             </div>
             <Typography.Title level={3} style={{ marginBottom: 4, fontWeight: 700 }}>
-              数据分析智能体
+              {t("数据分析智能体")}
             </Typography.Title>
             <Typography.Text type="secondary" style={{ fontSize: 15, marginBottom: 36 }}>
-              用自然语言提问，自动生成 SQL 并完成数据洞察
+              {t("用自然语言提问，自动生成 SQL 并完成数据洞察")}
             </Typography.Text>
 
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))', gap: 12, width: '100%', maxWidth: 600 }}>
@@ -306,7 +308,7 @@ export default function ChatPage() {
             </div>
 
             <Typography.Text type="secondary" style={{ marginTop: 40, fontSize: 12 }}>
-              在下方输入框中选择数据源并输入问题即可开始分析
+              {t("在下方输入框中选择数据源并输入问题即可开始分析")}
             </Typography.Text>
           </div>
         ) : (
@@ -358,7 +360,7 @@ export default function ChatPage() {
             className="chat-query-input"
             value={query} onChange={e => setQuery(e.target.value)}
             onPressEnter={e => { if (!e.shiftKey) { e.preventDefault(); handleSend(); } }}
-            placeholder="输入分析问题，Shift+Enter 换行"
+            placeholder={t("输入分析问题，Shift+Enter 换行")}
             autoSize={{ minRows: 1, maxRows: 5 }}
             disabled={loading}
             style={{
@@ -379,12 +381,12 @@ export default function ChatPage() {
               type="file"
               multiple
               hidden
-              accept=".csv,.xlsx,.xls,.parquet,.pdf,.docx,.txt,.md,.markdown"
+              accept=".csv,.xlsx,.xls,.parquet,.pdf,.docx,.txt,.md,.markdown,.png,.jpg,.jpeg,.webp"
               onChange={event => void handleAttachmentUpload(event.target.files)}
             />
-            <Tooltip title="上传附件">
+            <Tooltip title={t("上传附件；图片将交由当前所选视觉模型分析，单张最多 5 MiB，一次最多 3 张")}>
               <Button
-                aria-label="上传附件"
+                aria-label={t("上传附件")}
                 size="small"
                 icon={<UploadOutlined />}
                 loading={uploadingFiles}
@@ -393,12 +395,12 @@ export default function ChatPage() {
               />
             </Tooltip>
             {loading ? (
-              <Button size="small" onClick={cancel} style={{ borderRadius: 10 }}>取消</Button>
+              <Button size="small" onClick={cancel} style={{ borderRadius: 10 }}>{t("取消")}</Button>
             ) : null}
             <Button type="primary" icon={<SendOutlined />} onClick={handleSend} loading={loading}
               disabled={!query.trim()}
               style={{ borderRadius: 10, minWidth: 40, boxShadow: loading ? 'none' : '0 2px 8px rgba(22,119,255,0.3)' }}>
-              {!loading && '发送'}
+              {!loading && t("发送")}
             </Button>
           </Space>
         </div>
@@ -411,7 +413,7 @@ export default function ChatPage() {
           <Space className="chat-toolbar-controls" size={[8, 6]} wrap>
             {sessionId && (
               <Typography.Text type="secondary" style={{ fontSize: 11 }}>
-                会话: {sessionId.slice(-8)}
+                {t("会话:")} {sessionId.slice(-8)}
               </Typography.Text>
             )}
             {models.length > 0 && (
@@ -431,7 +433,7 @@ export default function ChatPage() {
                     ? String(capabilities.reasoning_default_effort || '')
                     : '');
                 }}
-                options={models.map(m => ({ value: modelOptionValue(m), label: `${m.connection_name || '连接'} / ${m.name}` }))}
+                options={models.map(m => ({ value: modelOptionValue(m), label: `${m.connection_name || t("连接")} / ${m.name}` }))}
                 style={{ width: 240, maxWidth: '100%' }} dropdownMatchSelectWidth={false} />
             )}
             {models.length > 0 && (() => {
@@ -442,10 +444,10 @@ export default function ChatPage() {
                 ? capabilities.reasoning_efforts.map(String)
                 : [];
               return <>
-                <Tooltip title={supported ? '控制当前对话是否启用模型推理' : '当前模型不支持推理'}>
+                <Tooltip title={supported ? t("控制当前对话是否启用模型推理") : t("当前模型不支持推理")}>
                   <span className="chat-reasoning-toggle">
                     <Space size={4}>
-                      <Typography.Text type="secondary" style={{ fontSize: 12 }}>推理</Typography.Text>
+                      <Typography.Text type="secondary" style={{ fontSize: 12 }}>{t("推理")}</Typography.Text>
                       <Switch size="small" checked={reasoningEnabled} disabled={!supported}
                         onChange={enabled => {
                           setReasoningEnabled(enabled);
@@ -457,8 +459,8 @@ export default function ChatPage() {
                   </span>
                 </Tooltip>
                 {supported && reasoningEnabled && reasoningEfforts.length > 0 && <Select className="chat-depth-select" size="small"
-                  aria-label="推理深度" value={reasoningEffort || undefined}
-                  onChange={setReasoningEffort} placeholder="推理深度"
+                  aria-label={t("推理深度")} value={reasoningEffort || undefined}
+                  onChange={setReasoningEffort} placeholder={t("推理深度")}
                   options={reasoningEfforts.map(effort => ({ value: effort, label: effort }))}
                   style={{ width: 100 }} dropdownMatchSelectWidth={false} />}
               </>;
@@ -466,7 +468,7 @@ export default function ChatPage() {
             {skills.length > 0 && (
               <Select
                 className="chat-skills-select"
-                aria-label="选择 Skills"
+                aria-label={t("选择 Skills")}
                 mode="multiple"
                 size="small"
                 value={selectedSkillIds}
@@ -485,15 +487,15 @@ export default function ChatPage() {
             )}
           </Space>
           <Space size={4}>
-            <Tooltip title="历史会话列表">
+            <Tooltip title={t("历史会话列表")}>
               <Button size="small" icon={<HistoryOutlined />}
                 onClick={() => setDrawerOpen(true)}
-                style={{ fontSize: 12 }}>历史会话</Button>
+                style={{ fontSize: 12 }}>{t("历史会话")}</Button>
             </Tooltip>
-            <Tooltip title="清空会话，开始新对话">
+            <Tooltip title={t("清空会话，开始新对话")}>
               <Button size="small" type="text" icon={<ClearOutlined />}
                 onClick={clearSession} disabled={loading}
-                style={{ fontSize: 12, color: '#999' }}>清空</Button>
+                style={{ fontSize: 12, color: '#999' }}>{t("清空")}</Button>
             </Tooltip>
           </Space>
         </div>
@@ -517,6 +519,7 @@ function TurnBubble({ turn, onSendMessage, onConfirmAction }: {
   onSendMessage?: (msg: string) => void;
   onConfirmAction?: (request: ActionRequestPayload) => void;
 }) {
+  useLanguage();
   const { userQuery, assistant, finalResult, status } = turn;
   const hasResult = status === 'done' && !!finalResult;
   const hasError = status === 'error';
@@ -595,16 +598,16 @@ function TurnBubble({ turn, onSendMessage, onConfirmAction }: {
               )}
               {activeKnowledge.length > 0 && (
                 <span style={{ fontSize: 11, display: 'inline-flex', alignItems: 'center', minWidth: 0 }}
-                  title={`命中 ${activeKnowledge.length} 个可信知识来源`}>
+                  title={t("命中 {value0} 个可信知识来源", { value0: activeKnowledge.length })}>
                   <ReadOutlined style={{ color: '#722ed1', marginRight: 3 }} />
                   {activeKnowledge.slice(0, 2).map((item, index) => {
                     const label = String(
-                      item.source_file || item.table_name || item.category || item.source_id || '知识库',
+                      item.source_file || item.table_name || item.category || item.source_id || t("知识库"),
                     );
                     const details = [
-                      item.category ? `类别：${String(item.category)}` : '',
-                      item.table_name ? `表：${String(item.table_name)}` : '',
-                      Number(item.match_count) > 1 ? `命中分块：${Number(item.match_count)}` : '',
+                      item.category ? t("类别：{value0}", { value0: String(item.category) }) : '',
+                      item.table_name ? t("表：{value0}", { value0: String(item.table_name) }) : '',
+                      Number(item.match_count) > 1 ? t("命中分块：{value0}", { value0: Number(item.match_count) }) : '',
                     ].filter(Boolean).join('；');
                     return (
                       <Tooltip key={`${String(item.source_id || item.source_file || index)}`}
@@ -637,20 +640,20 @@ function TurnBubble({ turn, onSendMessage, onConfirmAction }: {
 
           {isCancelled && (
             <Card size="small" style={{ background: '#fafafa', borderRadius: 12 }}>
-              <Typography.Text type="secondary">本轮分析已取消，可重新发送问题。</Typography.Text>
+              <Typography.Text type="secondary">{t("本轮分析已取消，可重新发送问题。")}</Typography.Text>
             </Card>
           )}
 
           {isStreaming && !assistant.decisionSummary && !assistant.tokens
             && Object.keys(assistant.progressNodes).length === 0 && (
             <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '10px 16px', color: '#999', fontSize: 13 }}>
-              <LoadingOutlined style={{ color: '#1677ff' }} /> 正在连接分析服务...
+              <LoadingOutlined style={{ color: '#1677ff' }} /> {t("正在连接分析服务...")}
             </div>
           )}
 
           {hasResult && isLLMDirect ? (
             <Card size="small" style={{ background: '#f6ffed', borderRadius: 12, border: '1px solid #b7eb8f' }}>
-              <Space><Tag color="green">直接回答</Tag><Typography.Text type="secondary" style={{ fontSize: 11 }}>不涉及数据库查询</Typography.Text></Space>
+              <Space><Tag color="green">{t("直接回答")}</Tag><Typography.Text type="secondary" style={{ fontSize: 11 }}>{t("不涉及数据库查询")}</Typography.Text></Space>
               <Typography.Paragraph style={{ marginTop: 8, fontSize: 14, whiteSpace: 'pre-wrap' }}>
                 {(finalResult?.analysis as Record<string,unknown>)?.summary as string || assistant.tokens}
               </Typography.Paragraph>
@@ -675,7 +678,7 @@ function TurnBubble({ turn, onSendMessage, onConfirmAction }: {
                 <SqlPanel sqlCode={assistant.sql} />
               )}
               {!assistant.tokens && !assistant.sql && (
-                <Typography.Text type="secondary" style={{ fontSize: 12 }}>（历史对话记录）</Typography.Text>
+                <Typography.Text type="secondary" style={{ fontSize: 12 }}>{t("（历史对话记录）")}</Typography.Text>
               )}
             </Card>
           )}
@@ -685,7 +688,7 @@ function TurnBubble({ turn, onSendMessage, onConfirmAction }: {
               background: '#fff2f0', borderColor: '#ffccc7', borderRadius: 12,
             }}>
               <Typography.Text type="danger" style={{ fontSize: 13 }}>
-                错误: {turn.errorMessage}
+                {t("错误:")} {turn.errorMessage}
               </Typography.Text>
             </Card>
           )}

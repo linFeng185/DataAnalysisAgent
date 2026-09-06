@@ -136,5 +136,5 @@ class TestP3Experience:
         source = Path("frontend/src/pages/KnowledgePage.tsx").read_text(encoding="utf-8")
 
         # Act / Assert
-        assert "{total} 条" in source
-        assert "{entries.length} 条" not in source
+        assert '{total} {t("条,")}' in source
+        assert '{entries.length} {t("条,")}' not in source

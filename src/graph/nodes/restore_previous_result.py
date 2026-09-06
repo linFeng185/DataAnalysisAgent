@@ -99,7 +99,11 @@ async def restore_previous_result_node(state: AnalysisState) -> dict:
                 "truncated", snapshot.get("query_result_truncated", False),
             )
         ),
-        "query_result_statistics": deepcopy(snapshot.get("query_result_statistics", {}) or {}),
+        "query_result_statistics": {
+            **deepcopy(snapshot.get("query_result_statistics", {}) or {}),
+            "masking": deepcopy(rich_result.get("masking", {}) or {}),
+            "supplemental_masking": deepcopy(rich_result.get("supplemental_masking", []) or []),
+        },
         "multi_source_results": [
             {
                 "success": True,
@@ -116,6 +120,8 @@ async def restore_previous_result_node(state: AnalysisState) -> dict:
         rows=len(result["query_result_sample"]),
         full_count=result["query_result_full_count"],
         has_sql=bool(result["generated_sql"]),
+        stored_supplemental_masking=len(rich_result.get("supplemental_masking", []) or []),
+        restored_supplemental_masking=len(result["query_result_statistics"].get("supplemental_masking", []) or []),
     )
     return result
 

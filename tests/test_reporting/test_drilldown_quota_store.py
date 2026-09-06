@@ -115,7 +115,7 @@ class TestReportQuota:
             # 方法作用：记录持久化并发槽释放请求。
             # Args: identity - 当前身份；amount - 释放数量；timezone_name - 周期时区。
             # Returns: 异步完成后无返回值。
-            async def release_concurrent_quota(self, identity, amount=1, timezone_name="Asia/Shanghai") -> None:
+            async def release_concurrent_quota(self, identity, amount=1, timezone_name="Asia/Shanghai", period_start=None) -> None:
                 self.calls.append((amount, timezone_name))
 
         store = PersistentStore()

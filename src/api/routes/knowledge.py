@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
+import ast
 import html
 import io
 import json
 import os
 import time
-import ast
 
 from fastapi import APIRouter, File, HTTPException, Query, UploadFile
 
@@ -510,7 +510,7 @@ async def search_knowledge_tags(
             user_id=get_current_user_id(),
             limit=limit,
             include_inactive=effective_include_inactive,
-            include_all_private=is_super_admin(role),
+            include_all_private=False,
         )
         result = {"tags": [tag.model_dump() for tag in tags], "total": len(tags)}
         logger.info("知识标签搜索 API 完成", count=len(tags), role=role)
@@ -523,11 +523,13 @@ async def search_knowledge_tags(
 @router.post("/knowledge/tags", status_code=201)
 async def create_knowledge_tag(request: KnowledgeTagCreateRequest):
     """为当前用户创建默认仅本人可见的自定义标签。"""
-    from src.api.auth import get_current_tenant_id, get_current_user_id
+    from src.api.auth import get_current_role, get_current_tenant_id, get_current_user_id
     from src.knowledge.tag_store import get_knowledge_tag_store
 
     tenant_id = get_current_tenant_id()
     user_id = get_current_user_id()
+    if get_current_role() == "super_admin":
+        raise HTTPException(403, "平台账号仅创建全局标签，不创建租户个人标签")
     logger.debug("创建个人知识标签 API 入口", name=request.name, tenant_id=tenant_id, user_id=user_id)
     try:
         tag = await get_knowledge_tag_store().create_personal(
@@ -575,28 +577,14 @@ async def create_global_knowledge_tag(request: KnowledgeTagCreateRequest):
         raise HTTPException(500, "创建全局标签失败") from exc
 
 
-@router.post("/knowledge/tags/{tag_id}/promote")
+@router.post("/knowledge/tags/{tag_id}/promote", deprecated=True)
+# 方法作用：关闭未经拥有者授权的私有标签提升，保留明确兼容响应。
+# Args: tag_id - 旧客户端请求的标签 ID。
+# Returns: HTTP 410，提示独立创建全局标签。
 async def promote_knowledge_tag(tag_id: int):
-    """由超级管理员把个人标签提升为平台全局标签。"""
-    from src.api.auth import get_current_role, require_super_admin
-    from src.knowledge.tag_store import get_knowledge_tag_store
-
-    logger.debug("提升知识标签 API 入口", tag_id=tag_id, role=get_current_role())
-    require_super_admin()
-    try:
-        tag = await get_knowledge_tag_store().promote_to_global(
-            tag_id,
-            actor_role=get_current_role(),
-        )
-        result = tag.model_dump()
-        logger.info("提升知识标签 API 完成", source_tag_id=tag_id, global_tag_id=result["id"])
-        return result
-    except ValueError as exc:
-        logger.warning("提升知识标签 API 未命中", tag_id=tag_id, error=str(exc))
-        raise HTTPException(404, str(exc)) from exc
-    except Exception as exc:
-        logger.error("提升知识标签 API 失败", tag_id=tag_id, error=str(exc), exc_info=True)
-        raise HTTPException(500, "提升标签失败") from exc
+    """平台不再读取并复制个人标签。"""
+    logger.info("旧个人标签提升入口已停用", tag_id=tag_id)
+    raise HTTPException(410, "个人标签提升入口已停用，请独立创建全局标签")
 
 
 @router.patch("/knowledge/tags/{tag_id}")

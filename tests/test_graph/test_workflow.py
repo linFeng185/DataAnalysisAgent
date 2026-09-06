@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
@@ -183,10 +184,25 @@ class TestIntentClassification:
 class TestNodes:
     """4.3-4.10"""
 
-    def test_retrieve_schema_empty(self):
-        from src.graph.nodes.retrieve_schema import retrieve_schema_node
-        r = asyncio.run(retrieve_schema_node({}))
-        assert r["relevant_tables"] == []
+    # 方法作用：验证空 Schema 的回退契约，禁止访问开发环境的数据源和向量库。
+    # Args: self - 测试实例；monkeypatch - 外部边界替换 fixture。
+    # Returns: 无返回值。
+    def test_retrieve_schema_empty(self, monkeypatch) -> None:
+        """Schema 和 Registry 均未命中时返回空表列表，使用固定知识结果。"""
+        import src.datasource.registry as registry_module
+        import src.graph.nodes.retrieve_schema as schema_node
+        import src.knowledge.schema_manager as manager_module
+
+        manager = SimpleNamespace(get_or_fetch_schema=AsyncMock(return_value=None))
+        registry = SimpleNamespace(resolve_or_none=AsyncMock(return_value=None))
+        monkeypatch.setattr(manager_module, "get_schema_manager", lambda: manager)
+        monkeypatch.setattr(registry_module, "get_registry", lambda: registry)
+        monkeypatch.setattr(schema_node, "_load_knowledge_context", AsyncMock(return_value=""))
+        monkeypatch.setattr(schema_node, "_load_enum_dictionary", AsyncMock(return_value={}))
+        result = asyncio.run(schema_node.retrieve_schema_node({}))
+        assert result["relevant_tables"] == []
+        manager.get_or_fetch_schema.assert_awaited_once()
+        assert registry.resolve_or_none.await_count == 2
 
     def test_generate_sql(self, monkeypatch):
         monkeypatch.setenv("OPENAI_API_KEY", "")  # 使用模板回退，避免真实 API 调用

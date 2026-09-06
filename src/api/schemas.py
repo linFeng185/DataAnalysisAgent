@@ -6,6 +6,8 @@ from typing import Any, Literal, Self
 
 from pydantic import BaseModel, Field, PositiveInt, model_validator
 
+from src.security.data_masker import MaskingMetadata
+
 
 class ActionRequestInput(BaseModel):
     """Chat API 接收的结构化外部动作请求。"""
@@ -111,6 +113,8 @@ class ChatResponse(BaseModel):
     data: list[dict] | dict[str, Any] = Field(default_factory=list)
     row_count: int = 0
     truncated: bool = False
+    masking: MaskingMetadata = Field(default_factory=MaskingMetadata)
+    supplemental_masking: list[MaskingMetadata] = Field(default_factory=list)
     analysis: dict = Field(default_factory=dict)
     chart: dict = Field(default_factory=dict)
     decision_summary: str = ""
@@ -130,7 +134,7 @@ class ErrorResponse(BaseModel):
 
 class DataSourceCreateRequest(BaseModel):
     name: str = Field(..., min_length=1, max_length=64)
-    dialect: str = Field(..., pattern="^(clickhouse|mysql|postgres|oracle|mssql|sqlite)$")
+    dialect: str = Field(..., pattern="^[a-z][a-z0-9_]{0,63}$")
     host: str = "localhost"
     port: int = 0
     database: str = ""
@@ -146,11 +150,21 @@ class DataSourceCreateRequest(BaseModel):
     tags: list[str] = Field(default_factory=list)
     extra_params: dict[str, Any] = Field(default_factory=dict)
 
+    # 方法作用：只允许当前部署已发现且启用的数据库插件进入业务边界。
+    # Args: self - 待校验数据源请求。
+    # Returns: 原请求；插件不存在或停用时抛出校验异常。
+    @model_validator(mode="after")
+    def validate_dialect_plugin(self) -> "DataSourceCreateRequest":
+        """保留动态插件能力，同时拒绝未安装的类型。"""
+        from src.connectors.plugins import require_plugin
+        require_plugin(self.dialect)
+        return self
+
 
 class DataSourceUpdateRequest(BaseModel):
     """数据源更新请求，空密码表示沿用原凭证。"""
 
-    dialect: str = Field(..., pattern="^(clickhouse|mysql|postgres|oracle|mssql|sqlite)$")
+    dialect: str = Field(..., pattern="^[a-z][a-z0-9_]{0,63}$")
     host: str = "localhost"
     port: int = 0
     database: str = ""
@@ -165,6 +179,16 @@ class DataSourceUpdateRequest(BaseModel):
     file_path: str = ""
     tags: list[str] = Field(default_factory=list)
     extra_params: dict[str, Any] = Field(default_factory=dict)
+
+    # 方法作用：验证更新目标方言确实有可用连接器。
+    # Args: self - 待校验更新请求。
+    # Returns: 原请求；插件不可用时抛出校验异常。
+    @model_validator(mode="after")
+    def validate_dialect_plugin(self) -> "DataSourceUpdateRequest":
+        """禁止通过更新接口绕过平台插件停用策略。"""
+        from src.connectors.plugins import require_plugin
+        require_plugin(self.dialect)
+        return self
 
 
 class ColumnCommentRequest(BaseModel):

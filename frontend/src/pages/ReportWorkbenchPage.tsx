@@ -1,4 +1,5 @@
-import { useEffect, useMemo, useState } from 'react';
+import { t, useLanguage } from '../i18n';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Alert, Button, Card, Drawer, Empty, Input, List, message, Select, Space, Statistic, Table, Tag, Typography } from 'antd';
 import {
   ClockCircleOutlined,
@@ -19,6 +20,7 @@ import {
   fetchReportQuota,
   fetchReportRuns,
   previewReportPlan,
+  setReportJobPaused,
 } from '../api/reportWorkbench';
 import type { DatasourceConfig } from '../types';
 import type {
@@ -50,9 +52,9 @@ function statusColor(status: string): string {
 // Returns: 中文状态文本。
 function statusLabel(status: string): string {
   const labels: Record<string, string> = {
-    draft: '草稿', planning: '规划中', queued: '排队中', running: '运行中',
-    succeeded: '已完成', partial: '部分完成', failed: '失败', cancelled: '已取消',
-    expired: '已过期', deleted: '已删除',
+    draft: t("草稿"), planning: t("规划中"), queued: t("排队中"), running: t("运行中"),
+    succeeded: t("已完成"), partial: t("部分完成"), failed: t("失败"), cancelled: t("已取消"),
+    expired: t("已过期"), deleted: t("已删除"),
   };
   return labels[status] || status;
 }
@@ -82,7 +84,7 @@ function stepStatusColor(status: string): string {
 // Returns: 中文状态文本。
 function stepStatusLabel(status: string): string {
   const labels: Record<string, string> = {
-    running: '执行中', succeeded: '完成', failed: '失败', retry: '重试', partial: '部分完成',
+    running: t("执行中"), succeeded: t("完成"), failed: t("失败"), retry: t("重试"), partial: t("部分完成"),
   };
   return labels[status] || status;
 }
@@ -91,6 +93,7 @@ function stepStatusLabel(status: string): string {
 // Args: 无。
 // Returns: 报表工作台页面。
 export default function ReportWorkbenchPage() {
+  const language = useLanguage();
   const navigate = useNavigate();
   const [prompt, setPrompt] = useState('');
   const [datasources, setDatasources] = useState<DatasourceConfig[]>([]);
@@ -107,6 +110,8 @@ export default function ReportWorkbenchPage() {
   const [previewing, setPreviewing] = useState(false);
   const [creating, setCreating] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
+  const creationKey = useRef('');
+  const creationInFlight = useRef(false);
 
   // 方法作用：加载数据源、任务和周期配额，初始化工作台状态。
   // Args: 无。
@@ -126,7 +131,7 @@ export default function ReportWorkbenchPage() {
         setSelectedDatasources([datasourceResult.datasources[0].name]);
       }
     } catch (error) {
-      message.error(error instanceof Error ? error.message : '报表工作台加载失败');
+      message.error(error instanceof Error ? error.message : t("报表工作台加载失败"));
     } finally {
       setLoading(false);
     }
@@ -144,7 +149,7 @@ export default function ReportWorkbenchPage() {
       setJobs(jobResult.jobs || []);
       setQuota(quotaResult);
     } catch (error) {
-      message.error(error instanceof Error ? error.message : '刷新报表任务失败');
+      message.error(error instanceof Error ? error.message : t("刷新报表任务失败"));
     } finally {
       setRefreshing(false);
     }
@@ -155,25 +160,41 @@ export default function ReportWorkbenchPage() {
   // Returns: 预览完成后无返回值。
   const previewPlan = async (): Promise<void> => {
     if (!prompt.trim()) {
-      message.warning('请输入报表描述');
+      message.warning(t("请输入报表描述"));
       return;
     }
     setPreviewing(true);
     try {
       const result = await previewReportPlan(prompt.trim(), selectedDatasources);
       setPreview(result);
+      creationKey.current = crypto.randomUUID();
     } catch (error) {
-      message.error(error instanceof Error ? error.message : '计划解析失败');
+      message.error(error instanceof Error ? error.message : t("计划解析失败"));
     } finally {
       setPreviewing(false);
     }
   };
 
-  // 方法作用：按预览计划创建立即报表任务并刷新任务状态。
+  // 方法作用：切换调度暂停状态，错误时保留原任务状态。
+  // Args: job - 当前任务。
+  // Returns: 异步更新完成后无返回值。
+  const toggleSchedule = async (job: ReportJob): Promise<void> => {
+    try {
+      await setReportJobPaused(job.id, !job.is_paused);
+      await selectJob(job.id);
+      await refreshWorkspace();
+      message.success(job.is_paused ? t("调度已恢复") : t("调度已暂停"));
+    } catch (error) {
+      message.error(error instanceof Error ? error.message : t("调度状态更新失败"));
+    }
+  };
+
+  // 方法作用：按预览计划创建报表任务并刷新任务状态。
   // Args: 无。
   // Returns: 创建完成后无返回值。
   const createJob = async (): Promise<void> => {
-    if (!preview) return;
+    if (!preview || creationInFlight.current) return;
+    creationInFlight.current = true;
     setCreating(true);
     try {
       const result = await createReportJob(
@@ -181,16 +202,18 @@ export default function ReportWorkbenchPage() {
         preview.plan_hash,
         null,
         true,
-        `report-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+        creationKey.current || (creationKey.current = crypto.randomUUID()),
       );
       const jobId = typeof result.job_id === 'string' ? result.job_id : '';
       setPreview(null);
+      creationKey.current = '';
       await refreshWorkspace();
       if (jobId) await selectJob(jobId);
-      message.success('报表任务已排队');
+      message.success(t("报表任务已排队"));
     } catch (error) {
-      message.error(error instanceof Error ? error.message : '创建报表任务失败');
+      message.error(error instanceof Error ? error.message : t("创建报表任务失败"));
     } finally {
+      creationInFlight.current = false;
       setCreating(false);
     }
   };
@@ -221,7 +244,7 @@ export default function ReportWorkbenchPage() {
       const latestRun = runResult.runs?.[0] || detail.latest_run;
       if (latestRun) await loadRunDetails(latestRun.id);
     } catch (error) {
-      message.error(error instanceof Error ? error.message : '报表任务详情加载失败');
+      message.error(error instanceof Error ? error.message : t("报表任务详情加载失败"));
     }
   };
 
@@ -251,7 +274,7 @@ export default function ReportWorkbenchPage() {
 
   const jobColumns = useMemo(() => [
     {
-      title: '报表任务',
+      title: t("报表任务"),
       dataIndex: 'prompt',
       key: 'prompt',
       ellipsis: true,
@@ -261,34 +284,34 @@ export default function ReportWorkbenchPage() {
       </div>,
     },
     {
-      title: '状态',
+      title: t("状态"),
       dataIndex: 'status',
       key: 'status',
       width: 110,
       render: (value: string) => <Tag color={statusColor(value)}>{statusLabel(value)}</Tag>,
     },
-    { title: '运行次数', dataIndex: 'runs_started', key: 'runs_started', width: 90 },
-  ], []);
+    { title: t("运行次数"), dataIndex: 'runs_started', key: 'runs_started', width: 90 },
+  ], [language]);
 
   return <div className="report-workbench-page">
     <div className="report-workbench-toolbar">
       <div>
-        <Typography.Title level={2} style={{ margin: 0 }}>报表工作台</Typography.Title>
-        <Typography.Text type="secondary">自然语言报表任务</Typography.Text>
+        <Typography.Title level={2} style={{ margin: 0 }}>{t("报表工作台")}</Typography.Title>
+        <Typography.Text type="secondary">{t("自然语言报表任务")}</Typography.Text>
       </div>
       <Space wrap>
-        {quota && <Tag icon={<ClockCircleOutlined />}>本周期剩余 {quota.jobs_remaining} 次</Tag>}
-        <Button icon={<ReloadOutlined />} loading={refreshing} onClick={() => void refreshWorkspace}>刷新</Button>
+        {quota && <Tag icon={<ClockCircleOutlined />}>{t("本月任务剩余")} {quota.jobs_remaining} {t("次 · 运行剩余")} {quota.runs_remaining} {t("次")}</Tag>}
+        <Button icon={<ReloadOutlined />} loading={refreshing} onClick={() => void refreshWorkspace()}>{t("刷新")}</Button>
       </Space>
     </div>
 
     <div className="report-workbench-grid">
       <div className="report-workbench-panel">
-        <Card title={<Space><FileTextOutlined />创建报表</Space>} loading={loading}>
+        <Card title={<Space><FileTextOutlined />{t("创建报表")}</Space>} loading={loading}>
           <Input.TextArea
             value={prompt}
-            onChange={event => setPrompt(event.target.value)}
-            placeholder="输入要分析的业务内容"
+            onChange={event => { setPrompt(event.target.value); setPreview(null); }}
+            placeholder={t("输入要分析的业务内容")}
             autoSize={{ minRows: 5, maxRows: 10 }}
             maxLength={20000}
             showCount
@@ -297,43 +320,43 @@ export default function ReportWorkbenchPage() {
             mode="multiple"
             allowClear
             value={selectedDatasources}
-            onChange={setSelectedDatasources}
-            placeholder="选择数据源"
+            onChange={values => { setSelectedDatasources(values); setPreview(null); }}
+            placeholder={t("选择数据源")}
             options={datasources.map(item => ({ value: item.name, label: item.name }))}
             style={{ width: '100%', marginTop: 12 }}
           />
-          <Button type="primary" block icon={<SearchOutlined />} loading={previewing} onClick={() => void previewPlan} style={{ marginTop: 12 }}>
-            生成计划
+          <Button type="primary" block icon={<SearchOutlined />} loading={previewing} onClick={() => void previewPlan()} style={{ marginTop: 12 }}>
+            {t("生成计划")}
           </Button>
-          {preview && <Card size="small" title="计划预览" style={{ marginTop: 16 }}>
+          {preview && <Card size="small" title={t("计划预览")} style={{ marginTop: 16 }}>
             <div className="report-plan-summary">
-              <Statistic title="执行方式" value={preview.plan.execution_mode === 'immediate' ? '立即一次' : '定时'} />
-              <Statistic title="分析单元" value={preview.plan.analysis_units.length} />
-              <Statistic title="预计查询" value={preview.estimated.query_count} />
+              <Statistic title={t("执行方式")} value={preview.plan.execution_mode === 'immediate' ? t("立即一次") : t("定时")} />
+              <Statistic title={t("分析单元")} value={preview.plan.analysis_units.length} />
+              <Statistic title={t("预计查询")} value={preview.estimated.query_count} />
             </div>
-            <Typography.Paragraph type="secondary">页面有效期：{preview.plan.permanent ? '永久' : `${preview.plan.page_ttl_days} 天`}</Typography.Paragraph>
-            {preview.plan.execution_mode === 'scheduled' && <Alert type="info" showIcon message="定时任务将在 Phase 2 开放，当前可预览计划但不能立即创建" style={{ marginBottom: 12 }} />}
+            <Typography.Paragraph type="secondary">{t("页面有效期：")}{preview.plan.permanent ? t("永久") : t("{value0} 天", { value0: preview.plan.page_ttl_days })}</Typography.Paragraph>
+            {preview.plan.execution_mode === 'scheduled' && <Alert type="info" showIcon message={t("定时频率：{value0}；次数：{value1}；时区：{value2}", { value0: preview.plan.frequency || t("待明确"), value1: preview.plan.max_runs ?? t("持续执行（受配额限制）"), value2: preview.plan.timezone })} description={t("首次执行：{value0}。服务端持久化调度，每次重新校验权限。", { value0: preview.plan.run_at ? new Date(preview.plan.run_at).toLocaleString() : t("确认后执行") })} style={{ marginBottom: 12 }} />}
             {preview.plan.warnings.length > 0 && <Alert type="warning" showIcon message={<List size="small" dataSource={preview.plan.warnings} renderItem={item => <List.Item>{item}</List.Item>} />} />}
             <List
               size="small"
-              header="分析单元"
+              header={t("分析单元")}
               dataSource={preview.plan.analysis_units}
               renderItem={unit => <List.Item className="report-plan-unit">
                 <Typography.Text strong>{unit.unit_id}</Typography.Text>
                 <Typography.Text>{unit.question}</Typography.Text>
-                <Typography.Text type="secondary">数据源：{unit.datasource || preview.plan.requested_datasources[0] || '待绑定'}</Typography.Text>
+                <Typography.Text type="secondary">{t("数据源：")}{unit.datasource || preview.plan.requested_datasources[0] || t("待绑定")}</Typography.Text>
               </List.Item>}
             />
-            <Button type="primary" icon={<PlayCircleOutlined />} loading={creating} disabled={preview.plan.execution_mode !== 'immediate'} onClick={() => void createJob} style={{ marginTop: 12 }}>
-              确认并立即生成
+            <Button type="primary" icon={<PlayCircleOutlined />} loading={creating} disabled={preview.plan.execution_mode === 'scheduled' && !preview.plan.frequency} onClick={() => void createJob()} style={{ marginTop: 12 }}>
+              {preview.plan.execution_mode === 'scheduled' ? t("确认定时任务") : t("确认并立即生成")}
             </Button>
           </Card>}
         </Card>
       </div>
 
       <div className="report-workbench-panel">
-        <Card title="我的报表任务" extra={<Typography.Text type="secondary">{jobs.length} 项</Typography.Text>}>
-          {jobs.length === 0 ? <Empty description="暂无报表任务" /> : <Table<ReportJob>
+        <Card title={t("我的报表任务")} extra={<Typography.Text type="secondary">{jobs.length} {t("项")}</Typography.Text>}>
+          {jobs.length === 0 ? <Empty description={t("暂无报表任务")} /> : <Table<ReportJob>
             size="small"
             rowKey="id"
             dataSource={jobs}
@@ -341,35 +364,36 @@ export default function ReportWorkbenchPage() {
             pagination={{ pageSize: 8, hideOnSinglePage: true }}
             onRow={item => ({ onClick: () => void selectJob(item.id), className: 'report-job-row' })}
           />}
-          {jobDetail && <Card size="small" title="运行详情" style={{ marginTop: 16 }} extra={<Space>
-            {jobDetail.latest_report && <Button type="link" icon={<EyeOutlined />} onClick={() => navigate(`/reports/${encodeURIComponent(jobDetail.latest_report?.report_id || '')}`)}>查看报表</Button>}
+          {jobDetail && <Card size="small" title={t("运行详情")} style={{ marginTop: 16 }} extra={<Space>
+            {jobDetail.job.plan.execution_mode === 'scheduled' && <Button onClick={() => void toggleSchedule(jobDetail.job)}>{jobDetail.job.is_paused ? t("恢复调度") : t("暂停调度")}</Button>}
+            {jobDetail.latest_report && <Button type="link" icon={<EyeOutlined />} onClick={() => navigate(`/reports/${encodeURIComponent(jobDetail.latest_report?.report_id || '')}`)}>{t("查看报表")}</Button>}
             <Tag color={statusColor(jobDetail.job.status)}>{statusLabel(jobDetail.job.status)}</Tag>
           </Space>}>
             <Typography.Paragraph ellipsis={{ rows: 2 }}>{jobDetail.job.prompt}</Typography.Paragraph>
             {jobDetail.latest_run && <div className="report-status-line">
               <Tag color={statusColor(jobDetail.latest_run.status)}>{statusLabel(jobDetail.latest_run.status)}</Tag>
-              <Typography.Text type="secondary">节点：{jobDetail.latest_run.last_node || '—'}</Typography.Text>
-              <Typography.Text type="secondary">更新时间：{formatTime(jobDetail.latest_run.finished_at || jobDetail.latest_run.started_at)}</Typography.Text>
-              <Button type="link" size="small" icon={<BarsOutlined />} onClick={() => setLogOpen(true)}>运行日志</Button>
+              <Typography.Text type="secondary">{t("节点：")}{jobDetail.latest_run.last_node || '—'}</Typography.Text>
+              <Typography.Text type="secondary">{t("更新时间：")}{formatTime(jobDetail.latest_run.finished_at || jobDetail.latest_run.started_at)}</Typography.Text>
+              <Button type="link" size="small" icon={<BarsOutlined />} onClick={() => setLogOpen(true)}>{t("运行日志")}</Button>
             </div>}
             {jobDetail.latest_run?.user_error_message && <Alert type="error" showIcon message={jobDetail.latest_run.user_error_message} style={{ marginTop: 12 }} />}
-            {runs.length > 0 && <List size="small" header="运行记录" dataSource={runs.slice(0, 5)} renderItem={run => <List.Item>
+            {runs.length > 0 && <List size="small" header={t("运行记录")} dataSource={runs.slice(0, 5)} renderItem={run => <List.Item>
               <Space wrap><Tag color={statusColor(run.status)}>{statusLabel(run.status)}</Tag><Typography.Text type="secondary">{formatTime(run.started_at)}</Typography.Text>{run.user_error_message && <Typography.Text type="danger">{run.user_error_message}</Typography.Text>}</Space>
             </List.Item>} />}
           </Card>}
         </Card>
       </div>
     </div>
-    <Drawer title="节点运行日志" open={logOpen} onClose={() => setLogOpen(false)} width={440}>
-      {runSteps.length === 0 ? <Empty description="暂无节点日志" /> : <List
+    <Drawer title={t("节点运行日志")} open={logOpen} onClose={() => setLogOpen(false)} width={440}>
+      {runSteps.length === 0 ? <Empty description={t("暂无节点日志")} /> : <List
         size="small"
         dataSource={runSteps}
         renderItem={(step) => <List.Item>
           <List.Item.Meta
-            title={<Space wrap><Typography.Text strong>{step.seq}. {step.node}</Typography.Text><Tag color={stepStatusColor(step.status)}>{stepStatusLabel(step.status)}</Tag>{step.attempt > 1 && <Tag>第 {step.attempt} 次</Tag>}</Space>}
+            title={<Space wrap><Typography.Text strong>{step.seq}. {step.node}</Typography.Text><Tag color={stepStatusColor(step.status)}>{stepStatusLabel(step.status)}</Tag>{step.attempt > 1 && <Tag>{t("第")} {step.attempt} {t("次")}</Tag>}</Space>}
             description={<Space direction="vertical" size={2}>
-              <Typography.Text type="secondary">开始：{formatTime(step.started_at)}</Typography.Text>
-              {step.duration_ms !== null && step.duration_ms !== undefined && <Typography.Text type="secondary">耗时：{step.duration_ms} ms</Typography.Text>}
+              <Typography.Text type="secondary">{t("开始：")}{formatTime(step.started_at)}</Typography.Text>
+              {step.duration_ms !== null && step.duration_ms !== undefined && <Typography.Text type="secondary">{t("耗时：")}{step.duration_ms} ms</Typography.Text>}
               {step.user_error_message && <Typography.Text type="danger">{step.user_error_message}</Typography.Text>}
             </Space>}
           />

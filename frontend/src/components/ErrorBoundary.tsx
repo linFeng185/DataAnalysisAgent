@@ -1,3 +1,4 @@
+import { t, useLanguage } from '../i18n';
 import { Component, ReactNode } from 'react';
 import { Result, Button } from 'antd';
 
@@ -14,9 +15,9 @@ export default class ErrorBoundary extends Component<Props, State> {
   render() {
     if (this.state.hasError) {
       return (
-        <Result status="error" title="页面出错"
-          subTitle={this.state.error?.message || '未知错误'}
-          extra={<Button type="primary" onClick={() => this.setState({ hasError: false, error: null })}>重试</Button>}
+        <Result status="error" title={t("页面出错")}
+          subTitle={this.state.error?.message || t("未知错误")}
+          extra={<Button type="primary" onClick={() => this.setState({ hasError: false, error: null })}>{t("重试")}</Button>}
         />
       );
     }

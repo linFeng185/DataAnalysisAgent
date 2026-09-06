@@ -18,6 +18,7 @@ logger = get_logger(__name__)
 _BOOTSTRAP_STEPS: tuple[tuple[str, str], ...] = (
     ("_run_migrations", "数据库迁移"),
     ("_ensure_super_admin", "平台超级管理员"),
+    ("_start_runtime_controls", "平台运行时配置"),
     ("_load_api_access_policies", "API 访问策略"),
     ("_configure_observability", "可观测性"),
     ("_init_workflow", "LangGraph 工作流"),
@@ -29,12 +30,14 @@ _BOOTSTRAP_STEPS: tuple[tuple[str, str], ...] = (
     ("_load_skills", "Skills 加载"),
     ("_connect_mcp_servers", "MCP 连接"),
     ("_load_external_datasources", "外部数据源加载"),
+    ("_start_schema_sync", "表结构同步任务"),
     ("_start_schema_cache_refresh", "Schema 缓存刷新服务"),
     ("_start_automation", "主动洞察与定时报告服务"),
+    ("_start_report_scheduler", "报表持久化调度与恢复"),
 )
 
 _REQUIRED_BOOTSTRAP_STEPS = {
-    "_run_migrations", "_ensure_super_admin", "_load_api_access_policies",
+    "_run_migrations", "_ensure_super_admin", "_start_runtime_controls", "_load_api_access_policies",
 }
 
 
@@ -50,6 +53,33 @@ async def _run_migrations(settings: Settings) -> None:
 
     applied = await run_migrations(settings.database_url)
     logger.info("_run_migrations 完成", applied_count=len(applied))
+
+
+# 方法作用：加载数据库配置覆盖及插件，再启动跨 Worker 刷新任务。
+# Args: settings - 启动默认值。
+# Returns: 无返回值。
+async def _start_runtime_controls(settings: Settings) -> None:
+    from src.app_context import get_app_context
+    from src.connectors.plugins import discover_plugins
+    from src.runtime.settings import RuntimeSettingsService
+
+    service = RuntimeSettingsService(settings)
+    discover_plugins()
+    await service.refresh()
+    get_app_context().set_resource("runtime_settings", service, closer=RuntimeSettingsService.close)
+    service.task = asyncio.create_task(service.run(), name="runtime-settings")
+
+
+# 启动应用级表结构同步协调器，退出时先等待任务清理。
+# Args: settings - 已加载的平台设置。
+# Returns: 无返回值。
+async def _start_schema_sync(settings: Settings) -> None:
+    from src.app_context import get_app_context
+    from src.knowledge.schema_sync import SchemaSyncService
+    logger.debug("表结构同步服务启动入口")
+    service = SchemaSyncService()
+    get_app_context().set_resource("schema_sync", service, closer=SchemaSyncService.close)
+    logger.info("表结构同步服务已启动")
 
 
 # 方法作用：幂等创建或校验固定 id=1 的平台超级管理员。
@@ -444,6 +474,29 @@ async def bootstrap_all(
     logger.info("bootstrap_all 完成", env=settings.env, context_bound=False)
 
 
+# 方法作用：启动报表持久化调度，缺少数据库时不伪装为可恢复服务。
+# Args: settings - 当前应用配置。
+# Returns: 无返回值。
+async def _start_report_scheduler(settings: Settings) -> None:
+    """数据库迁移和工作流启动后再认领任务。"""
+    if not settings.report_scheduler_enabled or not settings.database_url:
+        logger.info("报表调度服务未启用", enabled=settings.report_scheduler_enabled, database_configured=bool(settings.database_url))
+        return
+    from src.app_context import get_app_context
+    from src.reporting.runner import get_report_runner
+    from src.reporting.scheduler import ReportScheduler
+    from src.reporting.store import get_report_store
+
+    store = get_report_store()
+    pool = await store._pool()
+    async with pool.acquire() as connection:
+        await connection.execute("SELECT is_paused FROM report_jobs LIMIT 0")
+        await connection.execute("SELECT quota_period_start,quota_held FROM report_runs LIMIT 0")
+    service = ReportScheduler(store, get_report_runner())
+    get_app_context().set_resource("report_scheduler", service, closer=ReportScheduler.close)
+    await service.start()
+
+
 # 方法作用：执行启动阶段并应用生产阻断、非生产降级策略。
 # Args: settings - 当前应用配置。
 # Returns: 无返回值。
@@ -454,6 +507,11 @@ async def _run_bootstrap_steps(settings: Settings) -> None:
         logger.debug("启动阶段开始", step=name, description=description)
         try:
             await step(settings)
+            if name == "_start_runtime_controls":
+                from src.app_context import get_app_context
+                service = get_app_context().get_resource("runtime_settings")
+                if service is not None:
+                    settings = get_app_context().settings
         except Exception:
             logger.error("启动阶段失败", step=name, description=description, exc_info=True)
             if settings.env == "prod" or name in _REQUIRED_BOOTSTRAP_STEPS:

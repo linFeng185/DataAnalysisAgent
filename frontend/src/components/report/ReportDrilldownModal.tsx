@@ -1,3 +1,4 @@
+import { t, useLanguage } from '../../i18n';
 import { useEffect, useMemo } from 'react';
 import { Empty, Modal, Table, Typography } from 'antd';
 import type { ReportDrilldownResponse } from '../../types/report';
@@ -15,6 +16,7 @@ interface ReportDrilldownModalProps {
 // Args: props - 弹窗开关、加载状态、结果和分页回调。
 // Returns: Drilldown 明细弹窗。
 export default function ReportDrilldownModal({ open, loading, title, result, error, onClose, onPageChange }: ReportDrilldownModalProps) {
+  useLanguage();
   const columns = useMemo(() => (result?.columns || []).map(column => ({
     title: column,
     dataIndex: column,
@@ -46,6 +48,6 @@ export default function ReportDrilldownModal({ open, loading, title, result, err
         showSizeChanger: true,
         onChange: (page, pageSize) => onPageChange?.(page, pageSize),
       }}
-    /> : !error && <Empty description={loading ? '明细加载中' : '暂无符合条件的明细'} />}
+    /> : !error && <Empty description={loading ? t("明细加载中") : t("暂无符合条件的明细")} />}
   </Modal>;
 }

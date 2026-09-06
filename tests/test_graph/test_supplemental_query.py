@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -321,6 +322,7 @@ class TestSupplementalQuery:
         )
 
         # Assert
+        logging.getLogger(__name__).info("补查契约探针 fields=%s masking=%s", sorted(record), record.get("masking"))
         assert calls == [
             "retrieve_schema",
             "generate_sql",
@@ -336,6 +338,7 @@ class TestSupplementalQuery:
             "row_count": 1,
             "complete": True,
             "data": [{"delivered_orders": 9}],
+            "masking": {},
             "error": "",
         }
 

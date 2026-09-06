@@ -124,9 +124,12 @@ class SQLExecutionResult(BaseModel):
 def normalize_sql_dialect(dialect: str) -> str:
     logger.debug("规范化 SQL 方言入口", dialect=dialect)
     normalized = (dialect or "").strip().lower()
+    from src.connectors.plugins import plugin_catalog
+    mappings = {item["dialect"]: item["sqlglot_dialect"] for item in plugin_catalog() if item["sqlglot_dialect"]}
     result = {
         "mssql": "tsql",
         "postgresql": "postgres",
+        **mappings,
     }.get(normalized, normalized)
     logger.info("规范化 SQL 方言完成", source=normalized, target=result)
     return result

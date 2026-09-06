@@ -66,7 +66,7 @@ class TestAdminFrontend:
         source = Path("frontend/src/pages/AdminPage.tsx").read_text(encoding="utf-8")
 
         # Act
-        tenant_code_column = "{ title: '租户编码', dataIndex: 'code'"
+        tenant_code_column = '''{ title: t("租户编码"), dataIndex: 'code' '''.rstrip()
         list_endpoint = "`/admin/tenants/${tenantId}/admins?page_size=100`"
         reset_endpoint = (
             "`/admin/tenants/${targetTenantId}/admins/"
@@ -81,7 +81,7 @@ class TestAdminFrontend:
         assert list_endpoint in source
         assert reset_endpoint in source
         assert "租户管理员列表加载失败" in source
-        assert ">重试</Button>" in source
+        assert '{t("重试")}</Button>' in source
         assert "暂无租户管理员" in source
         logger.info("test_tenant_rows_expand_admins_and_reset_password 完成")
 

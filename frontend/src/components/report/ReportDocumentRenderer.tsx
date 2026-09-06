@@ -1,9 +1,10 @@
+import { t, useLanguage } from '../../i18n';
 import { lazy, Suspense, type CSSProperties, type ReactNode } from 'react';
-import { Alert, Card, Empty, List, Statistic, Table, Tag, Typography } from 'antd';
+import { Alert, Button, Card, Empty, List, Statistic, Table, Tag, Typography } from 'antd';
 import type { EChartsOption } from 'echarts';
 import type { ReportBlock, ReportDocument, ReportDrilldownDefinition } from '../../types/report';
 
-const ReactECharts = lazy(() => import('echarts-for-react'));
+const ReactECharts = lazy(() => import('../EChartsView'));
 
 interface ReportDocumentRendererProps {
   document: ReportDocument;
@@ -83,6 +84,7 @@ function renderBlock(
   const rows = rowsForBlock(block, manifest);
   const content = block.content || {};
   const definition = document.drilldowns.find(item => item.drilldown_id === content.drilldown_id);
+  const liveDefinition = document.drilldowns.find(item => item.mode === 'live' && item.source_block_id === block.id);
   let body: ReactNode;
   switch (block.type) {
     case 'kpi':
@@ -90,7 +92,7 @@ function renderBlock(
       break;
     case 'chart':
       body = block.echarts_option ? (
-        <Suspense fallback={<Typography.Text type="secondary">图表加载中...</Typography.Text>}>
+        <Suspense fallback={<Typography.Text type="secondary">{t("图表加载中...")}</Typography.Text>}>
           <ReactECharts
             option={block.echarts_option as EChartsOption}
             notMerge
@@ -100,7 +102,7 @@ function renderBlock(
             } : undefined}
           />
         </Suspense>
-      ) : <Empty description="暂无图表配置" />;
+      ) : <Empty description={t("暂无图表配置")} />;
       break;
     case 'table': {
       const columns = tableColumns(block, rows);
@@ -113,21 +115,21 @@ function renderBlock(
           scroll={{ x: 'max-content' }}
           rowKey={(_, index) => String(index)}
         />
-      ) : <Empty description="暂无明细数据" />;
+      ) : <Empty description={t("暂无明细数据")} />;
       break;
     }
     case 'insight_list': {
       const items = Array.isArray(content.items) ? content.items : [];
-      body = items.length > 0 ? <List size="small" dataSource={items} renderItem={item => <List.Item>{displayText(item)}</List.Item>} /> : <Empty description="暂无洞察" />;
+      body = items.length > 0 ? <List size="small" dataSource={items} renderItem={item => <List.Item>{displayText(item)}</List.Item>} /> : <Empty description={t("暂无洞察")} />;
       break;
     }
     case 'relationship':
       body = <div className="report-relationship-content">
         <Tag color={content.evidence_level === 'verified_relation' ? 'green' : 'gold'}>{displayText(content.evidence_level)}</Tag>
-        <Typography.Paragraph>关系类型：{displayText(content.relation_type)}</Typography.Paragraph>
-        <Typography.Paragraph>连接字段：{displayText(content.join_keys)}</Typography.Paragraph>
-        <Typography.Paragraph>匹配率：{content.match_rate === null || content.match_rate === undefined ? '—' : `${(Number(content.match_rate) * 100).toFixed(1)}%`}</Typography.Paragraph>
-        <Typography.Paragraph type="secondary">限制：{displayText(content.limitations)}</Typography.Paragraph>
+        <Typography.Paragraph>{t("关系类型：")}{displayText(content.relation_type)}</Typography.Paragraph>
+        <Typography.Paragraph>{t("连接字段：")}{displayText(content.join_keys)}</Typography.Paragraph>
+        <Typography.Paragraph>{t("匹配率：")}{content.match_rate === null || content.match_rate === undefined ? '—' : `${(Number(content.match_rate) * 100).toFixed(1)}%`}</Typography.Paragraph>
+        <Typography.Paragraph type="secondary">{t("限制：")}{displayText(content.limitations)}</Typography.Paragraph>
       </div>;
       break;
     case 'quality':
@@ -147,6 +149,7 @@ function renderBlock(
   return <div key={block.id} className={`report-block report-block-${block.type}`} style={blockStyle(block)}>
     <Card size="small" title={block.title || undefined} bordered>
       {body}
+      {liveDefinition && onDrilldown && <Button type="link" onClick={() => onDrilldown(liveDefinition, {})}>{t("实时明细（重新查询）")}</Button>}
     </Card>
   </div>;
 }
@@ -155,15 +158,16 @@ function renderBlock(
 // Args: document - 已通过后端 DSL 校验的报表文档；dataManifest - 脱敏数据清单；onDrilldown - 可选 Drilldown 回调。
 // Returns: 报表页面 React 节点。
 export default function ReportDocumentRenderer({ document, dataManifest, onDrilldown }: ReportDocumentRendererProps) {
+  useLanguage();
   return <div className="report-document">
     <header className="report-document-header">
       <Typography.Title level={2}>{document.title}</Typography.Title>
       {document.subtitle && <Typography.Paragraph type="secondary">{document.subtitle}</Typography.Paragraph>}
       <Typography.Text type="secondary">
-        生成于 {new Date(document.generated_at).toLocaleString()} · 版本 {document.version}
+        {t("生成于")} {new Date(document.generated_at).toLocaleString()} {t("· 版本")} {document.version}
       </Typography.Text>
     </header>
-    {document.limitations.length > 0 && <Alert className="report-document-limitations" type="warning" showIcon message="报表限制" description={<List size="small" dataSource={document.limitations} renderItem={item => <List.Item>{item}</List.Item>} />} />}
+    {document.limitations.length > 0 && <Alert className="report-document-limitations" type="warning" showIcon message={t("报表限制")} description={<List size="small" dataSource={document.limitations} renderItem={item => <List.Item>{item}</List.Item>} />} />}
     {document.sections.map(section => <section key={section.id} id={`report-section-${section.id}`} className="report-section">
       <div className="report-section-heading">
         <Typography.Title level={3}>{section.title}</Typography.Title>

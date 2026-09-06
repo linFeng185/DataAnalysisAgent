@@ -14,7 +14,7 @@ class DataAsset(BaseModel):
 
     id: str = Field(min_length=1)
     kind: Literal[
-        "database", "table_file", "document", "timeseries", "api", "stream",
+        "database", "table_file", "document", "image", "timeseries", "api", "stream",
     ]
     uri: str = Field(min_length=1)
     tenant_id: int = Field(ge=1)

@@ -48,7 +48,7 @@
 |---|------|------|------|------|
 | 2.4.1 | CredentialManager | `src/datasource/credential_manager.py` | 每次加密生成随机 salt，保存 `v2:salt:token` 并兼容历史固定 salt token | 单测完成 | P0 |
 | 2.4.2 | 环境变量凭证引用 | 同上 | resolve_env_ref() — 解析 ${VAR_NAME} 占位符 | 单测完成 | P0 |
-| 2.4.3 | KMS 集成 (远期) | 同上 | 对接 Vault / AWS KMS / Azure Key Vault | 待开发[^4] | P3 |
+| 2.4.3 | 密钥托管与轮换 | `src/datasource/secret_provider.py`、`rotate_credentials.py` | Vault KV v2/只读文件注入；版本化 Fernet；离线事务轮换两个凭证表；不是不可导出 HSM 模式 | 单测完成 | P3 |
 
 ### 2.5 DB 内省
 
@@ -79,10 +79,14 @@
 
 ### 模块收尾
 
-模块功能点共 47 项，已完成 46 项，待开发 1 项。
+模块功能点共 47 项，已完成 47 项，待开发 0 项。
 
 | 功能点 | 不开发原因 | 可开发条件 | 预计开发时机 |
 |--------|------------|------------|--------------|
-| 2.4.3 KMS 集成 | 当前 PBKDF2 + Fernet 已满足本地部署，外部 Vault/KMS 需要额外运维依赖 | 确定生产密钥托管平台和轮换流程 | Phase 3，生产密钥治理批次 |
+| 无 | 本模块代码功能均已实现 | Vault 实例和真实 PG 多租户轮换仍需部署验收 | 生产上线前 |
+
+2026-09-06：2.4.3 经开发完成后通过 41 条凭证相关测试（MockTransport、文件读取、
+启动注入、版本兼容、轮换回滚与幂等）。实现及配置见 `spec/31-secret-custody.md`。
+未连接真实 Vault，未对用户现有数据库执行轮换；不把外部环境验收计为完成。
 
 ---

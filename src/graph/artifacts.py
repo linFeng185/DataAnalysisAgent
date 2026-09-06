@@ -72,6 +72,22 @@ def build_analysis_artifact(
     limitations = [
         "产物仅基于当前请求返回的数据和已验证证据。",
     ]
+    evidence_items = [evidence]
+    for citation in (analysis.get("citations", []) or [])[:10]:
+        if not isinstance(citation, dict):
+            continue
+        citation_source = str(citation.get("source_id", ""))
+        locator = citation.get("locator", {})
+        if not citation_source.startswith("file:") or not isinstance(locator, dict) or not locator.get("file_id"):
+            continue
+        safe_locator = {key: locator[key] for key in ("file_id", "filename", "fingerprint", "kind") if key in locator}
+        evidence_items.append(Evidence(
+            content=f"附件分析来源：{citation_source}", source_id=citation_source,
+            version=str(locator.get("fingerprint") or version), locator=safe_locator,
+        ))
+        if locator.get("kind") == "image":
+            limitations.append("图片视觉识别可能存在文字和数值误差，重要结论需要核对原图。")
+    logger.debug("附件产物引用边界", citation_count=len(analysis.get("citations", []) or []), evidence_count=len(evidence_items))
     if response.get("truncated"):
         limitations.append("结果受到行数上限限制，不能直接代表完整数据集。")
     if status == "partial":
@@ -95,7 +111,7 @@ def build_analysis_artifact(
             "insights": analysis.get("insights", []) or [],
             "chart_type": chart_type,
         },
-        evidence=[evidence],
+        evidence=evidence_items,
         limitations=limitations,
         confidence=confidence,
         reproducibility=reproducibility,

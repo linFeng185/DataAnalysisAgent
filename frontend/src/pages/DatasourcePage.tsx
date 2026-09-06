@@ -1,3 +1,4 @@
+import { t, useLanguage } from '../i18n';
 import { useEffect, useState } from 'react';
 import {
   Button, Card, Form, Input, message, Modal, Popconfirm, Select, Space,
@@ -7,15 +8,8 @@ import { ApiOutlined, DeleteOutlined, EditOutlined, PlusOutlined } from '@ant-de
 import { del, get, post, put } from '../api/client';
 import type { DatasourceConfig, DatasourceConnectionResult } from '../types';
 import { useAuth } from '../hooks/AuthContext';
+import type { ConnectorPlugin } from '../components/RuntimeControlsPanel';
 
-const DIALECTS = [
-  { value: 'mysql', label: 'MySQL' },
-  { value: 'postgres', label: 'PostgreSQL' },
-  { value: 'clickhouse', label: 'ClickHouse' },
-  { value: 'oracle', label: 'Oracle' },
-  { value: 'mssql', label: 'SQL Server' },
-  { value: 'sqlite', label: 'SQLite' },
-];
 
 const VERSIONS: Record<string, string[]> = {
   mysql: ['5.7', '8.0', '8.1', '8.4'],
@@ -26,23 +20,11 @@ const VERSIONS: Record<string, string[]> = {
   sqlite: [],
 };
 
-// 方法作用：按数据库方言返回需要展示的连接字段。
-// Args: dialect - 当前选择的数据库方言。
-// Returns: 表单字段名列表。
-function dialectFields(dialect: string): string[] {
-  switch (dialect) {
-    case 'oracle': return ['host', 'port', 'service_name', 'tablespace', 'username', 'password'];
-    case 'mssql': return ['host', 'port', 'instance', 'database', 'schema', 'username', 'password'];
-    case 'postgres': return ['host', 'port', 'database', 'schema', 'username', 'password'];
-    case 'sqlite': return ['file_path'];
-    default: return ['host', 'port', 'database', 'username', 'password'];
-  }
-}
 
 const LABELS: Record<string, string> = {
-  host: '主机', port: '端口', database: '数据库名', username: '用户名',
-  password: '密码', schema: 'Schema', tablespace: '表空间',
-  service_name: '服务名/SID', instance: '实例名', file_path: '文件路径',
+  get host() { return t("主机"); }, get port() { return t("端口"); }, get database() { return t("数据库名"); }, get username() { return t("用户名"); },
+  get password() { return t("密码"); }, schema: 'Schema', get tablespace() { return t("表空间"); },
+  get service_name() { return t("服务名/SID"); }, get instance() { return t("实例名"); }, get file_path() { return t("文件路径"); },
 };
 
 const PLACEHOLDERS: Record<string, Record<string, string>> = {
@@ -83,6 +65,7 @@ function normalizePayload(
 // Args: 无。
 // Returns: 数据源管理页面。
 export default function DatasourcePage() {
+  useLanguage();
   const { user } = useAuth();
   const canManage = ['super_admin', 'tenant_admin'].includes(user?.role || '');
   const [datasources, setDatasources] = useState<DatasourceConfig[]>([]);
@@ -93,6 +76,21 @@ export default function DatasourcePage() {
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [testing, setTesting] = useState(false);
+  const [plugins, setPlugins] = useState<ConnectorPlugin[]>([]);
+  const selectedPlugin = plugins.find(plugin => plugin.dialect === dialect);
+
+  // 方法作用：每次打开表单刷新插件目录，不使用前端硬编码数据库枚举。
+  // Args: 无。
+  // Returns: 丢弃已关闭弹窗的旧响应。
+  useEffect(() => {
+    if (!open) return;
+    let active = true;
+    setPlugins([]);
+    get<{ items: ConnectorPlugin[] }>('/datasource-types')
+      .then(result => { if (active) setPlugins(result.items || []); })
+      .catch(() => { if (active) message.error(t("数据库插件目录加载失败")); });
+    return () => { active = false; };
+  }, [open]);
 
   // 方法作用：加载当前身份可见的数据源列表。
   // Args: 无。
@@ -103,7 +101,7 @@ export default function DatasourcePage() {
       const data = await get<{ datasources: DatasourceConfig[] }>('/datasources');
       setDatasources(data.datasources || []);
     } catch {
-      message.error('加载失败');
+      message.error(t("加载失败"));
     } finally {
       setLoading(false);
     }
@@ -156,15 +154,16 @@ export default function DatasourcePage() {
   // Args: 无。
   // Returns: 请求完成后无返回值。
   const handleTest = async (): Promise<void> => {
+    if (!selectedPlugin) { message.error(t("请选择已启用的数据库类型")); return; }
     try {
       const values = await form.validateFields();
       const payload = normalizePayload(values, dialect, editing?.name || 'connection-test');
       setTesting(true);
       const result = await post<DatasourceConnectionResult>('/datasources/test', payload);
-      if (result.success) message.success(result.message || '连接成功');
-      else message.error(result.message || '连接失败');
+      if (result.success) message.success(result.message || t("连接成功"));
+      else message.error(result.message || t("连接失败"));
     } catch (error) {
-      if (error instanceof Error) message.error(error.message || '连接测试失败');
+      if (error instanceof Error) message.error(error.message || t("连接测试失败"));
     } finally {
       setTesting(false);
     }
@@ -174,21 +173,22 @@ export default function DatasourcePage() {
   // Args: 无。
   // Returns: 请求完成后无返回值。
   const handleSave = async (): Promise<void> => {
+    if (!selectedPlugin) { message.error(t("请选择已启用的数据库类型")); return; }
     try {
       const values = await form.validateFields();
       const payload = normalizePayload(values, dialect, editing?.name);
       setSaving(true);
       if (editing) {
         await put(`/datasources/${encodeURIComponent(editing.name)}`, payload);
-        message.success('数据源已更新');
+        message.success(t("数据源已更新"));
       } else {
         await post('/datasources', payload);
-        message.success('数据源已添加');
+        message.success(t("数据源已添加"));
       }
       closeModal();
       await load();
     } catch (error) {
-      if (error instanceof Error) message.error(error.message || '保存失败');
+      if (error instanceof Error) message.error(error.message || t("保存失败"));
     } finally {
       setSaving(false);
     }
@@ -200,18 +200,18 @@ export default function DatasourcePage() {
   const handleDelete = async (name: string): Promise<void> => {
     try {
       await del(`/datasources/${encodeURIComponent(name)}`);
-      message.success('已删除');
+      message.success(t("已删除"));
       await load();
     } catch {
-      message.error('删除失败');
+      message.error(t("删除失败"));
     }
   };
 
   return (
     <div style={{ maxWidth: 1120, margin: '0 auto' }}>
-      <Card title="数据源管理" extra={
+      <Card title={t("数据源管理")} extra={
         canManage
-          ? <Button type="primary" icon={<PlusOutlined />} onClick={openCreate}>添加</Button>
+          ? <Button type="primary" icon={<PlusOutlined />} onClick={openCreate}>{t("添加")}</Button>
           : null
       }>
         <Table
@@ -220,35 +220,35 @@ export default function DatasourcePage() {
           loading={loading}
           scroll={{ x: 1040 }}
           columns={[
-            { title: '名称', dataIndex: 'name', key: 'name', width: 120, fixed: 'left' },
-            { title: '数据库类型', dataIndex: 'dialect', key: 'dialect', width: 110,
-              render: (value: string) => DIALECTS.find(option => option.value === value)?.label || value },
-            { title: '版本', dataIndex: 'version', key: 'version', width: 80,
+            { title: t("名称"), dataIndex: 'name', key: 'name', width: 120, fixed: 'left' },
+            { title: t("数据库类型"), dataIndex: 'dialect', key: 'dialect', width: 110,
+              render: (value: string) => plugins.find(option => option.dialect === value)?.label || value },
+            { title: t("版本"), dataIndex: 'version', key: 'version', width: 80,
               render: (value: string) => value
                 ? <Tag>{value}</Tag>
                 : <Typography.Text type="secondary">-</Typography.Text> },
-            { title: '主机', dataIndex: 'host', key: 'host', width: 150, ellipsis: true },
-            { title: '端口', dataIndex: 'port', key: 'port', width: 80 },
-            { title: '数据库', dataIndex: 'database', key: 'database', width: 130, ellipsis: true },
-            { title: '用户', dataIndex: 'username', key: 'username', width: 110, ellipsis: true },
-            { title: '描述', dataIndex: 'description', key: 'description', width: 180, ellipsis: true },
+            { title: t("主机"), dataIndex: 'host', key: 'host', width: 150, ellipsis: true },
+            { title: t("端口"), dataIndex: 'port', key: 'port', width: 80 },
+            { title: t("数据库"), dataIndex: 'database', key: 'database', width: 130, ellipsis: true },
+            { title: t("用户"), dataIndex: 'username', key: 'username', width: 110, ellipsis: true },
+            { title: t("描述"), dataIndex: 'description', key: 'description', width: 180, ellipsis: true },
             ...(canManage ? [{
-              title: '操作', key: 'action', width: 96, fixed: 'right' as const,
+              title: t("操作"), key: 'action', width: 96, fixed: 'right' as const,
               render: (_: unknown, datasource: DatasourceConfig) => (
                 <Space size={4}>
-                  <Tooltip title="编辑">
+                  <Tooltip title={t("编辑")}>
                     <Button
-                      aria-label={`编辑 ${datasource.name}`}
+                      aria-label={t("编辑 {value0}", { value0: datasource.name })}
                       icon={<EditOutlined />}
                       size="small"
                       onClick={() => openEdit(datasource)}
                     />
                   </Tooltip>
-                  <Popconfirm title="确定删除?" onConfirm={() => handleDelete(datasource.name)}>
+                  <Popconfirm title={t("确定删除?")} onConfirm={() => handleDelete(datasource.name)}>
                     <span>
-                      <Tooltip title="删除">
+                      <Tooltip title={t("删除")}>
                         <Button
-                          aria-label={`删除 ${datasource.name}`}
+                          aria-label={t("删除 {value0}", { value0: datasource.name })}
                           danger
                           icon={<DeleteOutlined />}
                           size="small"
@@ -264,27 +264,27 @@ export default function DatasourcePage() {
       </Card>
 
       <Modal
-        title={editing ? `编辑数据源：${editing.name}` : '添加数据源'}
+        title={editing ? t("编辑数据源：{value0}", { value0: editing.name }) : t("添加数据源")}
         open={open}
         onCancel={closeModal}
         width={560}
         destroyOnHidden
         footer={[
-          <Button key="test" icon={<ApiOutlined />} loading={testing} onClick={handleTest}>测试连接</Button>,
-          <Button key="cancel" onClick={closeModal}>取消</Button>,
+          <Button key="test" icon={<ApiOutlined />} loading={testing} onClick={handleTest}>{t("测试连接")}</Button>,
+          <Button key="cancel" onClick={closeModal}>{t("取消")}</Button>,
           <Button key="save" type="primary" loading={saving} onClick={handleSave}>
-            {editing ? '保存' : '添加'}
+            {editing ? t("保存") : t("添加")}
           </Button>,
         ]}
       >
         <Form form={form} layout="vertical">
           {!editing && (
-            <Form.Item name="name" label="名称" rules={[{ required: true }]}>
-              <Input placeholder="如 mysql_prod" />
+            <Form.Item name="name" label={t("名称")} rules={[{ required: true }]}>
+              <Input placeholder={t("如 mysql_prod")} />
             </Form.Item>
           )}
 
-          <Form.Item label="数据库类型" required>
+          <Form.Item label={t("数据库类型")} required>
             <Select
               value={dialect}
               onChange={(value) => {
@@ -294,14 +294,14 @@ export default function DatasourcePage() {
                   'tablespace', 'service_name', 'instance', 'file_path',
                 ]);
               }}
-              options={DIALECTS}
+              options={plugins.map(plugin => ({ value: plugin.dialect, label: plugin.label }))}
             />
           </Form.Item>
 
-          <Form.Item name="version" label="版本">
+          <Form.Item name="version" label={t("版本")}>
             <Select
               allowClear
-              placeholder="选择或输入版本号"
+              placeholder={t("选择或输入版本号")}
               showSearch
               mode="tags"
               maxCount={1}
@@ -309,15 +309,15 @@ export default function DatasourcePage() {
             />
           </Form.Item>
 
-          {dialectFields(dialect).map(field => (
+          {(selectedPlugin?.fields || []).map(field => (
             <Form.Item
               key={field}
-              name={field}
+              name={field in LABELS ? field : ['extra_params', field]}
               label={LABELS[field] || field}
-              extra={editing && field === 'password' ? '留空表示沿用当前凭证' : undefined}
+              extra={editing && field === 'password' ? t("留空表示沿用当前凭证") : undefined}
               rules={['password', 'schema', 'tablespace', 'instance'].includes(field)
                 ? []
-                : [{ required: dialect !== 'sqlite', message: '必填' }]}
+                : [{ required: dialect !== 'sqlite', message: t("必填") }]}
             >
               {field === 'password'
                 ? <Input.Password placeholder={placeholder(field, dialect)} />
@@ -325,8 +325,8 @@ export default function DatasourcePage() {
             </Form.Item>
           ))}
 
-          <Form.Item name="description" label="描述">
-            <Input.TextArea placeholder="用途说明（可选）" rows={2} />
+          <Form.Item name="description" label={t("描述")}>
+            <Input.TextArea placeholder={t("用途说明（可选）")} rows={2} />
           </Form.Item>
         </Form>
       </Modal>

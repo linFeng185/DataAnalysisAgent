@@ -5,11 +5,12 @@ from __future__ import annotations
 import secrets
 from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 from typing import Any
 
 from fastapi import APIRouter, Header, HTTPException, Query
 
-from src.api.auth import get_current_identity, require_tenant_admin
+from src.api.auth import get_current_identity
 from src.api.routes._helpers import _call_with_optional_tenant
 from src.app_context import get_tenant_policy
 from src.datasource.registry import get_registry
@@ -18,6 +19,7 @@ from src.reporting.drilldown import execute_snapshot_drilldown, find_drilldown
 from src.reporting.models import (
     AuthorizationCodeRequest,
     DrilldownRequest,
+    PageLifecycleRequest,
     QuotaPolicyRequest,
     ReportJobCreateRequest,
     ReportPlan,
@@ -225,25 +227,36 @@ async def create_job(request: ReportJobCreateRequest) -> dict[str, Any]:
         raise HTTPException(409, "计划哈希不匹配，请重新确认计划")
     if plan.needs_confirmation and not request.confirm:
         raise HTTPException(409, "该计划需要用户确认后才能执行")
-    if plan.execution_mode != "immediate":
-        raise HTTPException(422, "定时调度将在 Phase 2 开放，请先使用立即执行")
+    if plan.execution_mode == "scheduled":
+        await _require_capability(identity, "report.schedule")
+        if not plan.frequency:
+            raise HTTPException(422, "定时任务必须明确每小时、每天、每周或每月频率")
+        from src.app_context import get_app_context
+
+        scheduler = get_app_context().get_resource("report_scheduler")
+        if scheduler is None or not scheduler.running:
+            raise HTTPException(503, "持久化报表调度服务尚未启动，请联系平台管理员")
+        if plan.schedule_end_at is not None and _is_expired(plan.schedule_end_at):
+            raise HTTPException(422, "调度结束时间必须在未来")
     if plan.permanent:
         await _require_capability(identity, "report.permanent")
     if plan.share.enabled:
         await _require_capability(identity, "report.share")
     access = await _resolve_plan_access(identity, plan)
     quota_manager = get_report_quota_manager()
+    store = get_report_store()
     try:
-        quota = await quota_manager.reserve(identity, jobs=1, units=0, tokens=0, timezone_name=plan.timezone)
+        job, created, quota = await store.create_job_with_quota(identity, request.prompt, plan, request.idempotency_key, quota_manager)
     except QuotaExceededError as exc:
         raise HTTPException(429, "本周期报表任务配额已用尽") from exc
-    store = get_report_store()
-    job = await store.create_job(identity, request.prompt, plan, request.idempotency_key)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
     from src.reporting.runner import get_report_runner
 
-    get_report_runner().enqueue(job.id, identity, authorized_datasources=access)
+    if created and plan.execution_mode == "immediate":
+        get_report_runner().enqueue(job.id, identity, authorized_datasources=access)
     logger.info("报表任务创建并排队完成", job_id=job.id, tenant_id=identity.tenant_id, user_id=identity.user_id)
-    return {"job_id": job.id, "status": "queued", "execution_mode": plan.execution_mode, "run_id": None, "report_id": None, "estimated": plan.estimated.model_dump(mode="json"), "quota": asdict(quota)}
+    return {"job_id": job.id, "status": job.status, "execution_mode": plan.execution_mode, "run_id": None, "report_id": None, "estimated": plan.estimated.model_dump(mode="json"), "quota": asdict(quota)}
 
 
 @router.get("/jobs")
@@ -282,17 +295,55 @@ async def get_job(job_id: str) -> dict[str, Any]:
 # Args: job_id - 报表任务 ID。
 # Returns: 排队状态。
 async def run_job_now(job_id: str) -> dict[str, Any]:
+    logger.info("手动重跑授权入口探针", job_id=job_id)
     identity = get_current_identity()
     await _require_capability(identity, "report.create")
     job = await get_report_store().get_job(job_id, identity)
     if job is None:
         raise HTTPException(404, "报表任务不存在")
-    if job.plan.execution_mode != "immediate":
-        raise HTTPException(422, "定时任务将在 Phase 2 执行")
+    if job.plan.execution_mode == "scheduled":
+        await _require_capability(identity, "report.schedule")
+    if job.is_paused:
+        raise HTTPException(409, "任务已暂停，请先恢复")
+    if job.user_id != identity.user_id:
+        raise HTTPException(403, "只能以任务创建者身份重新运行，不能用管理员权限替代业务用户")
+    access = await _resolve_plan_access(identity, job.plan)
     from src.reporting.runner import get_report_runner
 
-    get_report_runner().enqueue(job_id, identity)
+    get_report_runner().enqueue(job_id, identity, authorized_datasources=access, force=True)
     return {"job_id": job_id, "status": "queued"}
+
+
+@router.post("/jobs/{job_id}/pause")
+# 方法作用：暂停租户内可管理的任务，正在运行的任务在心跳或发布边界停止。
+# Args: job_id - 任务标识。
+# Returns: 暂停状态。
+async def pause_job(job_id: str) -> dict[str, Any]:
+    """不删除既有页面，也不增加任何剩余次数。"""
+    identity = get_current_identity()
+    await _require_capability(identity, "report.schedule")
+    if not await get_report_store().set_job_paused(job_id, identity, True):
+        raise HTTPException(404, "任务不存在或无权访问")
+    return {"job_id": job_id, "is_paused": True}
+
+
+@router.post("/jobs/{job_id}/resume")
+# 方法作用：恢复未耗尽次数且仍有效的任务，后续执行仍重建原业务身份。
+# Args: job_id - 任务标识。
+# Returns: 恢复状态。
+async def resume_job(job_id: str) -> dict[str, Any]:
+    """失败暂停必须显式恢复，不能无限重试认证或配置错误。"""
+    identity = get_current_identity()
+    await _require_capability(identity, "report.schedule")
+    store = get_report_store()
+    job = await store.get_job(job_id, identity)
+    if job is None:
+        raise HTTPException(404, "任务不存在或无权访问")
+    if job.plan.max_runs is not None and job.runs_started >= job.plan.max_runs or job.plan.schedule_end_at is not None and _is_expired(job.plan.schedule_end_at):
+        raise HTTPException(409, "任务次数或调度期限已耗尽，请创建新任务")
+    await store.set_job_paused(job_id, identity, False)
+    await store.update_dispatch(job_id, identity, status="queued", next_run_at=job.next_run_at or datetime.now(timezone.utc))
+    return {"job_id": job_id, "is_paused": False}
 
 
 @router.get("/jobs/{job_id}/runs")
@@ -340,7 +391,62 @@ async def get_report(report_id: str) -> dict[str, Any]:
         raise HTTPException(404, "报表不存在或无权访问")
     if _is_expired(version.expires_at):
         raise HTTPException(410, "报表页面已过期")
-    return {"report_id": version.report_id, "version": version.version, "document": version.document, "data_manifest": version.data_manifest}
+    document = dict(version.document)
+    if not await get_report_permission_service().has(identity, "report.live_drilldown"):
+        document["drilldowns"] = [item for item in document.get("drilldowns", []) if item.get("mode", "snapshot") == "snapshot"]
+    return {"report_id": version.report_id, "version": version.version, "document": document, "data_manifest": version.data_manifest}
+
+
+@router.get("/reports/{report_id}/lifecycle")
+# 方法作用：返回页面生命周期摘要，让已过期页面可管理而不泄露正文。
+# Args: report_id - 页面标识。
+# Returns: 有效期和当前用户可执行的生命周期能力。
+async def get_page_lifecycle(report_id: str) -> dict[str, Any]:
+    """已清理页面不可恢复，过期但仍保留的页面只返回管理元数据。"""
+    identity = get_current_identity()
+    await _require_capability(identity, "report.menu")
+    version = await get_report_store().get_report_version(report_id, identity)
+    if version is None:
+        raise HTTPException(404, "报表不存在或无权访问")
+    permissions = await get_report_permission_service().capabilities(identity)
+    return {"report_id": report_id, "expires_at": version.expires_at, "expired": _is_expired(version.expires_at), "can_extend": "report.extend" in permissions, "can_permanent": "report.permanent" in permissions}
+
+
+@router.put("/reports/{report_id}/lifecycle")
+# 方法作用：按租户能力显式延期或永久保留已有页面。
+# Args: report_id - 页面标识；request - 延期或永久操作。
+# Returns: 更新后的生命周期摘要。
+async def update_page_lifecycle(report_id: str, request: PageLifecycleRequest) -> dict[str, Any]:
+    """不会自动延长、恢复或新建任何旧分享授权。"""
+    identity = get_current_identity()
+    logger.debug("页面生命周期 API 入口", report_id=report_id, user_id=identity.user_id)
+    await _require_capability(identity, "report.permanent" if request.permanent else "report.extend")
+    store = get_report_store()
+    version = await store.update_page_lifecycle(report_id, identity, **request.model_dump())
+    if version is None:
+        raise HTTPException(404, "报表不存在或无权访问")
+    await store.record_audit({"tenant_id": identity.tenant_id, "user_id": identity.user_id, "report_id": report_id, "action": "page_lifecycle", "result": "success", "metadata": request.model_dump()})
+    return {"report_id": report_id, "expires_at": version.expires_at, "permanent": version.expires_at is None}
+
+
+@router.post("/reports/{report_id}/extend")
+# 方法作用：提供设计约定的页面延期入口，最多延长三十天。
+# Args: report_id - 页面标识；request - 延期天数，默认七天。
+# Returns: 更新后的生命周期摘要。
+async def extend_page(report_id: str, request: PageLifecycleRequest = PageLifecycleRequest(days=7)) -> dict[str, Any]:
+    """延期入口不接受永久操作。"""
+    if request.permanent:
+        raise HTTPException(422, "请使用永久保留接口")
+    return await update_page_lifecycle(report_id, request)
+
+
+@router.post("/reports/{report_id}/permanent")
+# 方法作用：提供设计约定的永久保留入口，单独检查租户业务能力。
+# Args: report_id - 页面标识。
+# Returns: 永久保留后的生命周期摘要。
+async def make_page_permanent(report_id: str) -> dict[str, Any]:
+    """永久页面的旧分享仍保持原到期时间。"""
+    return await update_page_lifecycle(report_id, PageLifecycleRequest(permanent=True))
 
 
 @router.get("/reports/{report_id}/versions")
@@ -433,16 +539,59 @@ async def drilldown(report_id: str, drilldown_id: str, request: DrilldownRequest
     if version is None:
         raise HTTPException(404, "报表不存在或无权访问")
     definition = find_drilldown(version.document, drilldown_id)
+    logger.info("私有钻取生命周期探针", report_id=report_id, expired=_is_expired(version.expires_at), definition_found=definition is not None)
+    if _is_expired(version.expires_at):
+        await store.record_audit({"tenant_id": identity.tenant_id, "user_id": identity.user_id, "report_id": report_id, "action": "drilldown", "result": "expired"})
+        raise HTTPException(410, "报表页面已过期")
     if definition is None or not bool(version.document.get("permissions", {}).get("drilldown", False)):
         await store.record_audit({"tenant_id": identity.tenant_id, "user_id": identity.user_id, "report_id": report_id, "action": "drilldown", "result": "denied"})
         raise HTTPException(403, "Drilldown 未授权")
     try:
-        result = execute_snapshot_drilldown(definition, version.data_manifest, request.filters, request.page, request.page_size)
+        if definition.get("mode", "snapshot") == "live":
+            result = await _execute_private_live(version, definition, request, identity)
+        else:
+            result = execute_snapshot_drilldown(definition, version.data_manifest, request.filters, request.page, request.page_size)
     except ValueError as exc:
         await store.record_audit({"tenant_id": identity.tenant_id, "user_id": identity.user_id, "report_id": report_id, "action": "drilldown", "result": "invalid"})
         raise HTTPException(422, str(exc)) from exc
     await store.record_audit({"tenant_id": identity.tenant_id, "user_id": identity.user_id, "report_id": report_id, "action": "drilldown", "result": "success", "metadata": {"drilldown_id": drilldown_id, "row_count": len(result["rows"])}})
     return result
+
+
+# 方法作用：在实时查询入口重验数据源权限、限流和并发预算，失败时不回退旧权限。
+# Args: version - 当前授权页面；definition - 签发定义；request - 客户端参数；identity - 当前身份。
+# Returns: 脱敏实时明细。
+async def _execute_private_live(version: Any, definition: dict[str, Any], request: DrilldownRequest, identity: Any) -> dict[str, Any]:
+    from src.reporting.live_drilldown import execute_live_drilldown
+    from src.reporting.models import AnalysisUnit
+    from src.security.data_masker import check_rate_limit
+
+    await _require_capability(identity, "report.live_drilldown")
+    store = get_report_store()
+    query = await store.get_live_query(str(definition.get("query_ref", "")), version, identity)
+    if query is None:
+        raise HTTPException(403, "实时查询模板不存在或无权访问")
+    plan = ReportPlan(analysis_units=[AnalysisUnit(unit_id="live", question="受控实时钻取", datasource=query["datasource"])])
+    access = await _resolve_plan_access(identity, plan)
+    if query["datasource"] not in access:
+        raise HTTPException(403, "实时钻取数据源授权已撤销")
+    if not await check_rate_limit(identity.user_id, tenant_id=identity.tenant_id):
+        raise HTTPException(429, "实时钻取请求过于频繁")
+    quota = get_report_quota_manager()
+    reservation = None
+    try:
+        reservation = await quota.reserve(identity, concurrent=1, queries=1, rows=request.page_size + 1)
+        return await execute_live_drilldown(query, access[query["datasource"]], definition, request.filters, request.page, request.page_size, tenant_id=identity.tenant_id)
+    except QuotaExceededError as exc:
+        raise HTTPException(429, "实时钻取资源预算不足") from exc
+    except PermissionError as exc:
+        raise HTTPException(403, str(exc)) from exc
+    except RuntimeError as exc:
+        logger.error("实时钻取执行边界失败", report_id=version.report_id, exc_info=True)
+        raise HTTPException(503, "实时查询暂不可用") from exc
+    finally:
+        if reservation is not None:
+            await quota.release_concurrent(identity, period_start=reservation.period_start)
 
 
 @router.get("/quotas/me")
@@ -471,22 +620,50 @@ async def get_my_permissions() -> dict[str, Any]:
 # Args: user_id - 目标用户；request - 能力与配额配置。
 # Returns: 更新后的非敏感配置摘要。
 async def set_user_policy(user_id: int, request: QuotaPolicyRequest) -> dict[str, Any]:
+    """由当前租户管理员原子替换用户额度和菜单能力。"""
     identity = get_current_identity()
-    require_tenant_admin()
+    if str(identity.role) != "tenant_admin":
+        raise HTTPException(403, "报表使用额度由当前租户管理员配置")
     if int(user_id) <= 0:
         raise HTTPException(422, "用户 ID 无效")
     if int(identity.tenant_id) <= 0:
         raise HTTPException(403, "当前身份没有租户")
     policy = QuotaPolicy(**request.model_dump(exclude={"capabilities"}))
+    store = get_report_store()
+    try:
+        await store.save_user_policy(identity, user_id, policy, request.capabilities)
+    except LookupError as exc:
+        raise HTTPException(404, "目标用户不存在或不属于当前租户") from exc
     quota = get_report_quota_manager()
     quota.set_policy(int(identity.tenant_id), int(user_id), policy)
     permissions = get_report_permission_service()
     permissions.set_user_capabilities(int(user_id), request.capabilities, tenant_id=int(identity.tenant_id))
-    store = get_report_store()
-    await store.set_quota_policy(int(identity.tenant_id), int(user_id), policy)
-    await store.set_user_capabilities(int(identity.tenant_id), int(user_id), request.capabilities)
     await store.record_audit({"tenant_id": identity.tenant_id, "user_id": identity.user_id, "action": "quota_policy_update", "result": "success", "metadata": {"target_user_id": int(user_id)}})
     return {"user_id": int(user_id), "capabilities": request.capabilities, "policy": request.model_dump(exclude={"capabilities"})}
+
+
+@router.get("/admin/users/{user_id}/policy")
+# 方法作用：向租户管理员展示目标用户的有效配额、能力及周期用量。
+# Args: user_id - 当前租户内的用户 ID。
+# Returns: 策略、能力和余额摘要。
+async def get_user_policy(user_id: int) -> dict[str, Any]:
+    """平台管理员不介入租户日常业务配额配置。"""
+    identity = get_current_identity()
+    if str(identity.role) != "tenant_admin":
+        raise HTTPException(403, "报表使用额度由当前租户管理员配置")
+    if user_id <= 0:
+        raise HTTPException(422, "用户 ID 无效")
+    store = get_report_store()
+    try:
+        user = await store.get_policy_subject(identity, user_id)
+    except LookupError as exc:
+        raise HTTPException(404, "目标用户不存在或不属于当前租户") from exc
+    subject = SimpleNamespace(tenant_id=int(identity.tenant_id), user_id=int(user_id), role=str(user["role"]))
+    persisted = await store.get_quota_policy(subject.tenant_id, subject.user_id)
+    policy = QuotaPolicyRequest.model_validate(persisted or {})
+    capabilities = await get_report_permission_service().capabilities(subject)
+    snapshot = await get_report_quota_manager().snapshot(subject)
+    return {"user_id": user_id, "capabilities": capabilities, "policy": policy.model_dump(exclude={"capabilities"}), "quota": asdict(snapshot), "period": "calendar_month"}
 
 
 @router.get("/shared/reports/{token}")
@@ -523,6 +700,7 @@ async def get_shared_report(token: str, share_session: str | None = Header(defau
             await store.record_audit({"tenant_id": share.get("tenant_id"), "share_id": share.get("id"), "action": "share_access", "result": "denied"})
             raise HTTPException(403, "当前用户不在分享授权范围内")
     document = dict(version.document)
+    document["drilldowns"] = [item for item in document.get("drilldowns", []) if item.get("mode", "snapshot") == "snapshot"]
     if not bool(share.get("allow_drilldown", False)):
         document["drilldowns"] = []
         document["permissions"] = {**document.get("permissions", {}), "drilldown": False}

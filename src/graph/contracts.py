@@ -6,6 +6,8 @@ from typing import Any, Literal, Mapping
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from src.security.data_masker import MaskingMetadata
+
 TaskCapability = Literal[
     "sql_analysis",
     "direct_answer",
@@ -78,8 +80,7 @@ class SourceQueryRequest(BaseModel):
         state: Mapping[str, Any],
     ) -> SourceQueryRequest:
         """从扁平兼容状态提取单源 worker 所需的显式字段。"""
-        from src.graph.context import read_contexts
-        from src.graph.context import resolve_request_identity
+        from src.graph.context import read_contexts, resolve_request_identity
 
         contexts = read_contexts(state)
         tenant_id, user_id = resolve_request_identity(state)
@@ -171,6 +172,7 @@ class SourceQueryResult(BaseModel):
     tables: int = Field(default=0, ge=0)
     full_count: int = Field(default=0, ge=0)
     truncated: bool = False
+    masking: MaskingMetadata = Field(default_factory=MaskingMetadata)
     error: str = ""
     error_type: str = ""
     validation_errors: list[dict[str, Any]] = Field(default_factory=list)

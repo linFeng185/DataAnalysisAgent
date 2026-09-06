@@ -128,11 +128,11 @@ async def _ensure_tenant_admin_continuity(
 # Args: connection - 当前 PostgreSQL 连接；tenant_id - 待清理租户 ID。
 # Returns: 无返回值。
 async def _set_tenant_delete_rls_context(connection, tenant_id: int) -> None:
+    logger.info("租户生命周期系统边界", tenant_id=tenant_id)
     await connection.execute(
-        "SELECT set_config('app.current_tenant_id', $1, true), "
-        "set_config('app.current_user_id', '1', true), "
+        "SELECT set_config('app.current_tenant_id', '0', true), "
+        "set_config('app.current_user_id', '0', true), "
         "set_config('app.current_role', 'super_admin', true)",
-        str(int(tenant_id)),
     )
 
 

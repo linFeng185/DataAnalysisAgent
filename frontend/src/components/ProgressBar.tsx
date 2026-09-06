@@ -1,3 +1,4 @@
+import { t, useLanguage } from '../i18n';
 import { CheckCircleOutlined, SyncOutlined, CloseCircleOutlined } from '@ant-design/icons';
 
 interface ProgressNode {
@@ -6,13 +7,14 @@ interface ProgressNode {
 }
 
 const NODES: Record<string, string> = {
-  classify_intent: '意图识别', retrieve_schema: '检索表结构',
-  generate_sql: '生成 SQL', layer3_validate: 'SQL 校验',
-  execute_sql: '执行查询', analyze_result: '分析结果',
-  generate_chart: '生成图表', build_response: '组装响应',
+  get classify_intent() { return t("意图识别"); }, get retrieve_schema() { return t("检索表结构"); },
+  get generate_sql() { return t("生成 SQL"); }, get layer3_validate() { return t("SQL 校验"); },
+  get execute_sql() { return t("执行查询"); }, get analyze_result() { return t("分析结果"); },
+  get generate_chart() { return t("生成图表"); }, get build_response() { return t("组装响应"); },
 };
 
 export default function ProgressBar({ nodes }: { nodes: Record<string, ProgressNode> }) {
+  useLanguage();
   const entries = Object.entries(nodes);
   if (entries.length === 0) return null;
 

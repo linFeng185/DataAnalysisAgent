@@ -110,7 +110,6 @@ class TestExecuteSQLSecurity:
         )
         context = AppContext(settings)
         context.set_resource("datasource_registry", registry)
-        data_masker._rate_limits.clear()  # noqa: SLF001
 
         # Act
         with use_app_context(context):
@@ -223,7 +222,6 @@ class TestExecuteSQLSecurity:
         )
         context = AppContext(settings)
         context.set_resource("datasource_registry", registry)
-        data_masker._rate_limits.clear()  # noqa: SLF001
 
         with use_app_context(context):
             result = await execute_module.execute_sql_node({
@@ -263,7 +261,6 @@ class TestExecuteSQLSecurity:
         monkeypatch.setattr(data_masker, "get_settings", lambda: settings)
         monkeypatch.setattr(data_masker, "log_audit", audit)
         monkeypatch.setattr(registry_module, "get_registry", lambda: registry)
-        data_masker._rate_limits.clear()  # noqa: SLF001
 
         # Act
         result = await execute_module.execute_sql_node({

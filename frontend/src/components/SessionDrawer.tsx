@@ -1,3 +1,4 @@
+import { t, useLanguage } from '../i18n';
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { Drawer, List, Tag, Typography, Spin, Empty, message } from 'antd';
 import { HistoryOutlined, ClockCircleOutlined } from '@ant-design/icons';
@@ -14,19 +15,20 @@ interface Props {
 function relativeTime(isoStr: string): string {
   if (!isoStr) return '';
   const now = Date.now();
-  const t = new Date(isoStr).getTime();
-  const diff = now - t;
+  const timestamp = new Date(isoStr).getTime();
+  const diff = now - timestamp;
   const mins = Math.floor(diff / 60000);
-  if (mins < 1) return '刚刚';
-  if (mins < 60) return `${mins}分钟前`;
+  if (mins < 1) return t("刚刚");
+  if (mins < 60) return t("{value0}分钟前", { value0: mins });
   const hours = Math.floor(mins / 60);
-  if (hours < 24) return `${hours}小时前`;
+  if (hours < 24) return t("{value0}小时前", { value0: hours });
   const days = Math.floor(hours / 24);
-  if (days < 30) return `${days}天前`;
+  if (days < 30) return t("{value0}天前", { value0: days });
   return new Date(isoStr).toLocaleDateString('zh-CN');
 }
 
 export default function SessionDrawer({ open, onClose, activeSessionId, onSelect }: Props) {
+  useLanguage();
   const [sessions, setSessions] = useState<SessionInfo[]>([]);
   const [loading, setLoading] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
@@ -44,7 +46,7 @@ export default function SessionDrawer({ open, onClose, activeSessionId, onSelect
       cursorRef.current = res.next_cursor;
       setHasMore(res.has_more);
     } catch {
-      message.error('加载会话列表失败');
+      message.error(t("加载会话列表失败"));
     } finally {
       loadingRef.current = false;
       setLoading(false);
@@ -73,7 +75,7 @@ export default function SessionDrawer({ open, onClose, activeSessionId, onSelect
 
   return (
     <Drawer
-      title={<><HistoryOutlined style={{ marginRight: 8 }} />历史会话</>}
+      title={<><HistoryOutlined style={{ marginRight: 8 }} />{t("历史会话")}</>}
       open={open}
       onClose={onClose}
       width={380}
@@ -84,10 +86,10 @@ export default function SessionDrawer({ open, onClose, activeSessionId, onSelect
         {loading && sessions.length === 0 ? (
           <div style={{ textAlign: 'center', padding: 60 }}>
             <Spin />
-            <Typography.Text type="secondary" style={{ display: 'block', marginTop: 12 }}>加载会话列表...</Typography.Text>
+            <Typography.Text type="secondary" style={{ display: 'block', marginTop: 12 }}>{t("加载会话列表...")}</Typography.Text>
           </div>
         ) : sessions.length === 0 && !loading ? (
-          <Empty description="暂无历史会话" style={{ marginTop: 60 }} />
+          <Empty description={t("暂无历史会话")} style={{ marginTop: 60 }} />
         ) : (
           <List
             dataSource={sessions}
@@ -115,7 +117,7 @@ export default function SessionDrawer({ open, onClose, activeSessionId, onSelect
                         strong ellipsis
                         style={{ fontSize: 14, maxWidth: 220, color: isActive ? '#1677ff' : undefined }}
                       >
-                        {item.title || '未命名会话'}
+                        {item.title || t("未命名会话")}
                       </Typography.Text>
                       <Tag color={isActive ? 'blue' : 'default'} style={{ margin: 0, fontSize: 11 }}>
                         {item.datasource}
@@ -127,7 +129,7 @@ export default function SessionDrawer({ open, onClose, activeSessionId, onSelect
                         {relativeTime(item.last_active_at)}
                       </Typography.Text>
                       <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-                        {item.turn_count} 轮对话
+                        {item.turn_count} {t("轮对话")}
                       </Typography.Text>
                     </div>
                   </div>

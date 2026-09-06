@@ -52,6 +52,7 @@ class TestUnifiedConfig:
         from src.config import Settings
 
         config = yaml.safe_load(Path("config/app.example.yaml").read_text(encoding="utf-8"))
+        logger.info("配置字段边界探针 missing=%s", sorted(set(Settings.model_fields) - set(config)))
 
         assert set(Settings.model_fields).issubset(config)
         assert "mcp_servers" in config

@@ -4,14 +4,17 @@ from __future__ import annotations
 
 import asyncio
 import json
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from dataclasses import asdict, is_dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 from uuid import uuid4
 
 from src.config import get_settings
 from src.logging_config import get_logger
 from src.reporting.models import (
+    PageLifecycleRequest,
     ReportJobRecord,
     ReportPlan,
     ReportRunRecord,
@@ -33,17 +36,80 @@ class ReportStore:
         self.dialect = str(dialect or "postgres").lower()
         self._memory = bool(memory) if memory is not None else (pg_pool is None)
         self._claim_lock = asyncio.Lock()
+        self._execution_locks: dict[str, asyncio.Lock] = {}
         self._jobs: dict[str, dict[str, Any]] = {}
         self._idempotency: dict[tuple[int, int, str], str] = {}
         self._runs: dict[str, dict[str, Any]] = {}
         self._steps: dict[str, list[dict[str, Any]]] = {}
         self._versions: dict[str, dict[str, Any]] = {}
+        self._live_queries: dict[str, dict[str, Any]] = {}
         self._shares: dict[str, dict[str, Any]] = {}
         self._share_by_token: dict[str, str] = {}
         self._audits: list[dict[str, Any]] = []
         self._capabilities: dict[tuple[int, int], list[str]] = {}
         self._quota_policies: dict[tuple[int, int], dict[str, Any]] = {}
         logger.debug("ReportStore 初始化完成", dialect=self.dialect, memory=self._memory)
+
+    # 方法作用：在同一事务中去重、扣任务配额并创建任务，返回是否需要首次入队。
+    # Args: identity - 当前身份；prompt - 描述；plan - 已确认计划；idempotency_key - 幂等键；quota_manager - 配额服务。
+    # Returns: 任务、是否新建及配额快照。
+    async def create_job_with_quota(self, identity: Any, prompt: str, plan: ReportPlan, idempotency_key: str, quota_manager: Any) -> tuple[ReportJobRecord, bool, Any]:
+        """内存使用应用锁，PostgreSQL 使用事务锁保证多实例幂等。"""
+        if self._memory:
+            async with self._claim_lock:
+                return await self._create_reserved_job(identity, prompt, plan, idempotency_key, quota_manager)
+        from src.memory.pg_pool import pg_pool_connection
+        from src.reporting.quota import QuotaManager
+
+        pool = await self._pool()
+        async with pg_pool_connection(pool, int(identity.tenant_id), int(identity.user_id), str(identity.role)) as connection:
+            # 相同身份与幂等键的重试必须在去重查询前串行化。
+            if idempotency_key.strip():
+                await connection.execute(
+                    "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
+                    f"report-create:{identity.tenant_id}:{identity.user_id}:{idempotency_key.strip()}",
+                )
+            scoped_store = ReportStore(pg_pool=connection, memory=False)
+            scoped_quota = QuotaManager(store=scoped_store, default_policy=quota_manager.default_policy)
+            return await scoped_store._create_reserved_job(identity, prompt, plan, idempotency_key, scoped_quota)
+
+    # 方法作用：在调用方已经取得的创建事务或应用锁内完成去重和预占。
+    # Args: identity - 当前身份；prompt - 描述；plan - 计划；idempotency_key - 幂等键；quota_manager - 同事务配额服务。
+    # Returns: 任务、是否新建及配额快照。
+    async def _create_reserved_job(self, identity: Any, prompt: str, plan: ReportPlan, idempotency_key: str, quota_manager: Any) -> tuple[ReportJobRecord, bool, Any]:
+        existing = await self.get_job_by_idempotency(identity, idempotency_key)
+        if existing is not None:
+            if existing.plan.canonical_hash() != plan.canonical_hash():
+                raise ValueError("该幂等键已用于其他报表计划")
+            return existing, False, await quota_manager.snapshot(identity, timezone_name=plan.timezone)
+        snapshot = await quota_manager.reserve(identity, jobs=1, timezone_name=plan.timezone)
+        try:
+            job = await self.create_job(identity, prompt, plan, idempotency_key)
+        except BaseException:
+            if self._memory:
+                await quota_manager.refund_uncreated_job(identity, plan.timezone, period_start=snapshot.period_start)
+            raise
+        return job, True, snapshot
+
+    # 方法作用：按当前租户和用户查询已创建的幂等任务，不跨身份复用。
+    # Args: identity - 当前身份；idempotency_key - 客户端幂等键。
+    # Returns: 已存在任务，空键或未命中返回 None。
+    async def get_job_by_idempotency(self, identity: Any, idempotency_key: str) -> ReportJobRecord | None:
+        """读取当前身份幂等键关联的任务。"""
+        key = idempotency_key.strip()
+        if not key:
+            return None
+        if self._memory:
+            job_id = self._idempotency.get((int(identity.tenant_id), int(identity.user_id), key))
+            return await self.get_job(job_id, identity) if job_id else None
+        from src.memory.pg_pool import pg_pool_connection
+
+        async with pg_pool_connection(await self._pool(), int(identity.tenant_id), int(identity.user_id), str(identity.role)) as connection:
+            row = await connection.fetchrow(
+                "SELECT * FROM report_jobs WHERE tenant_id=$1 AND user_id=$2 AND idempotency_key=$3",
+                int(identity.tenant_id), int(identity.user_id), key,
+            )
+        return self._to_job(row) if row else None
 
     # 方法作用：创建当前身份的报表任务并执行幂等键去重。
     # Args: identity - 当前租户身份；prompt - 用户描述；plan - 已确认计划；idempotency_key - 客户端幂等键。
@@ -60,7 +126,7 @@ class ReportStore:
             row = {
                 "id": job_id, "tenant_id": tenant_id, "user_id": user_id, "prompt": prompt,
                 "plan_json": plan.model_dump(mode="json"), "plan_hash": plan.canonical_hash(),
-                "status": "queued" if plan.execution_mode == "immediate" else "draft",
+                "status": "queued", "next_run_at": plan.run_at or now, "is_paused": False,
                 "runs_started": 0, "created_at": now, "updated_at": now,
             }
             self._jobs[job_id] = row
@@ -82,11 +148,11 @@ class ReportStore:
                 if existing:
                     return self._to_job(existing)
             row = await connection.fetchrow(
-                "INSERT INTO report_jobs (id,tenant_id,user_id,prompt,plan_json,plan_hash,execution_mode,frequency,timezone,max_runs,status,idempotency_key) "
-                "VALUES ($1::uuid,$2,$3,$4,$5::jsonb,$6,$7,$8,$9,$10,$11,$12) RETURNING id,tenant_id,user_id,prompt,plan_json,status,runs_started,created_at,updated_at",
+                "INSERT INTO report_jobs (id,tenant_id,user_id,prompt,plan_json,plan_hash,execution_mode,frequency,timezone,max_runs,status,idempotency_key,next_run_at,schedule_end_at,page_ttl_days,permanent) "
+                "VALUES ($1::uuid,$2,$3,$4,$5::jsonb,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16) RETURNING *",
                 job_id, tenant_id, user_id, prompt, json.dumps(plan.model_dump(mode="json"), ensure_ascii=False),
                 plan.canonical_hash(), plan.execution_mode, plan.frequency, plan.timezone, plan.max_runs,
-                "queued" if plan.execution_mode == "immediate" else "draft", idempotency_key.strip() or None,
+                "queued", idempotency_key.strip() or None, plan.run_at or datetime.now(timezone.utc), plan.schedule_end_at, plan.page_ttl_days, plan.permanent,
             )
         logger.info("报表任务创建完成", job_id=job_id, tenant_id=tenant_id, user_id=user_id)
         return self._to_job(row)
@@ -106,8 +172,8 @@ class ReportStore:
         role = str(getattr(identity, "role", "") or "")
         async with pg_pool_connection(pool, tenant_id, user_id, role) as connection:
             row = await connection.fetchrow(
-                "SELECT id,tenant_id,user_id,prompt,plan_json,status,runs_started,created_at,updated_at FROM report_jobs "
-                "WHERE id=$1::uuid AND tenant_id=$2 AND ($3 IN ('super_admin','tenant_admin') OR user_id=$4)",
+                "SELECT id,tenant_id,user_id,prompt,plan_json,status,runs_started,created_at,updated_at,next_run_at,is_paused FROM report_jobs "
+                "WHERE id=$1::uuid AND tenant_id=$2 AND ($3<>'super_admin' AND ($3='tenant_admin' OR user_id=$4))",
                 str(job_id), tenant_id, role, user_id,
             )
         return self._to_job(row) if row else None
@@ -129,8 +195,8 @@ class ReportStore:
         role = str(getattr(identity, "role", "") or "")
         async with pg_pool_connection(pool, tenant_id, user_id, role) as connection:
             rows = await connection.fetch(
-                "SELECT id,tenant_id,user_id,prompt,plan_json,status,runs_started,created_at,updated_at FROM report_jobs "
-                "WHERE tenant_id=$1 AND ($2 IN ('super_admin','tenant_admin') OR user_id=$3) ORDER BY updated_at DESC LIMIT $4",
+                "SELECT id,tenant_id,user_id,prompt,plan_json,status,runs_started,created_at,updated_at,next_run_at,is_paused FROM report_jobs "
+                "WHERE tenant_id=$1 AND ($2<>'super_admin' AND ($2='tenant_admin' OR user_id=$3)) ORDER BY updated_at DESC LIMIT $4",
                 tenant_id, role, user_id, bounded,
             )
         return [self._to_job(row) for row in rows]
@@ -157,13 +223,14 @@ class ReportStore:
         user_id = int(getattr(identity, "user_id", 0) or 0)
         role = str(getattr(identity, "role", "") or "")
         async with pg_pool_connection(pool, tenant_id, user_id, role) as connection:
-            row = await connection.fetchrow("UPDATE report_jobs SET status=$1,updated_at=NOW() WHERE id=$2::uuid AND tenant_id=$3 AND ($4 IN ('super_admin','tenant_admin') OR user_id=$5) RETURNING id,tenant_id,user_id,prompt,plan_json,status,runs_started,created_at,updated_at", status, str(job_id), tenant_id, role, user_id)
+            row = await connection.fetchrow("UPDATE report_jobs SET status=$1,updated_at=NOW() WHERE id=$2::uuid AND tenant_id=$3 AND ($4<>'super_admin' AND ($4='tenant_admin' OR user_id=$5)) RETURNING id,tenant_id,user_id,prompt,plan_json,status,runs_started,created_at,updated_at", status, str(job_id), tenant_id, role, user_id)
         return self._to_job(row) if row else None
 
     # 方法作用：创建幂等的报表运行记录并增加任务运行计数。
     # Args: job_id - 任务 ID；identity - 当前身份；attempt - 运行尝试序号。
     # Returns: 新建的 ReportRunRecord。
     async def create_run(self, job_id: str, identity: Any, attempt: int = 1) -> ReportRunRecord:
+        """为每次实际运行创建独立标识，尝试编号不充当任务全局幂等键。"""
         job = await self.get_job(job_id, identity)
         if job is None:
             raise LookupError("报表任务不存在")
@@ -183,7 +250,7 @@ class ReportStore:
         async with pg_pool_connection(pool, job.tenant_id, job.user_id, role) as connection:
             db_row = await connection.fetchrow(
                 "INSERT INTO report_runs (id,job_id,tenant_id,user_id,status,attempt,run_key,trace_id) VALUES ($1::uuid,$2::uuid,$3,$4,'queued',$5,$6,$7) RETURNING *",
-                run_id, job_id, job.tenant_id, job.user_id, int(attempt), f"{job_id}:{attempt}", run_id,
+                run_id, job_id, job.tenant_id, job.user_id, int(attempt), f"{job_id}:{run_id}", run_id,
             )
             await connection.execute("UPDATE report_jobs SET runs_started=runs_started+1,updated_at=NOW() WHERE id=$1::uuid AND tenant_id=$2", job_id, job.tenant_id)
         return self._to_run(db_row)
@@ -232,7 +299,7 @@ class ReportStore:
         role = str(getattr(identity, "role", "") or "")
         async with pg_pool_connection(pool, tenant_id, user_id, role) as connection:
             row = await connection.fetchrow(
-                "SELECT * FROM report_runs WHERE id=$1::uuid AND tenant_id=$2 AND ($3 IN ('super_admin','tenant_admin') OR user_id=$4)",
+                "SELECT * FROM report_runs WHERE id=$1::uuid AND tenant_id=$2 AND ($3<>'super_admin' AND ($3='tenant_admin' OR user_id=$4))",
                 str(run_id), tenant_id, role, user_id,
             )
         return self._to_run(row) if row else None
@@ -296,17 +363,22 @@ class ReportStore:
     # 方法作用：以不可变版本写入页面、数据清单和校验摘要。
     # Args: job_id - 任务 ID；run_id - 运行 ID；identity - 当前身份；document - 页面字典；manifest - 脱敏数据清单；expires_at - 到期时间。
     # Returns: ReportVersionRecord。
-    async def persist_version(self, job_id: str, run_id: str, identity: Any, document: dict[str, Any], manifest: dict[str, Any], expires_at: datetime | None) -> ReportVersionRecord:
+    async def persist_version(self, job_id: str, run_id: str, identity: Any, document: dict[str, Any], manifest: dict[str, Any], expires_at: datetime | None, *, require_active_job: bool = False) -> ReportVersionRecord:
         report_id = str(document.get("report_id") or f"report-{uuid4()}")
         version_id = str(uuid4())
         checksum = self._checksum(document, manifest)
         if self._memory:
+            if require_active_job and self._jobs.get(job_id, {}).get("is_paused", True):
+                raise asyncio.CancelledError("任务已暂停，阻止发布")
             previous = [item for item in self._versions.values() if item["report_id"] == report_id]
             version = max((int(item["version"]) for item in previous), default=0) + 1
+            document = {**document, "version": version}
+            checksum = self._checksum(document, manifest)
             for item in previous:
                 item["is_latest"] = False
             row = {"id": version_id, "report_id": report_id, "job_id": str(job_id), "run_id": str(run_id), "version": version, "document": document, "data_manifest": manifest, "checksum": checksum, "expires_at": expires_at, "is_latest": True, "tenant_id": int(getattr(identity, "tenant_id", 0) or 0), "user_id": int(getattr(identity, "user_id", 0) or 0)}
             self._versions[version_id] = row
+            row["created_at"] = datetime.now(timezone.utc)
             return self._to_version(row)
         pool = await self._pool()
         from src.memory.pg_pool import pg_pool_connection
@@ -316,10 +388,53 @@ class ReportStore:
         role = str(getattr(identity, "role", "") or "")
         async with pg_pool_connection(pool, tenant_id, user_id, role) as connection:
             async with connection.transaction():
+                if require_active_job:
+                    await connection.execute("SELECT set_config('app.current_tenant_id',$1,true),set_config('app.current_user_id',$2,true),set_config('app.current_role',$3,true)", str(tenant_id), str(user_id), role)
+                    active = await connection.fetchrow("SELECT is_paused FROM report_jobs WHERE id=$1::uuid AND tenant_id=$2 FOR UPDATE", job_id, tenant_id)
+                    if active is None or active["is_paused"]:
+                        raise asyncio.CancelledError("任务已暂停，阻止发布")
                 version = int(await connection.fetchval("SELECT COALESCE(MAX(version),0)+1 FROM report_versions WHERE report_id=$1::uuid AND tenant_id=$2", report_id, tenant_id))
+                document = {**document, "version": version}
+                checksum = self._checksum(document, manifest)
                 await connection.execute("UPDATE report_versions SET is_latest=FALSE WHERE report_id=$1::uuid AND tenant_id=$2", report_id, tenant_id)
                 row = await connection.fetchrow("INSERT INTO report_versions (id,report_id,job_id,run_id,tenant_id,version,document_json,data_manifest_json,checksum,expires_at,is_latest) VALUES ($1::uuid,$2::uuid,$3::uuid,$4::uuid,$5,$6,$7::jsonb,$8::jsonb,$9,$10,TRUE) RETURNING *", version_id, report_id, job_id, run_id, tenant_id, version, json.dumps(document, ensure_ascii=False), json.dumps(manifest, ensure_ascii=False), checksum, expires_at)
         return self._to_version(row)
+
+    # 方法作用：保存成功执行后的私有只读模板，仅返回随机标识进入页面。
+    # Args: run_id - 当前运行；identity - 实际执行身份；datasource/dialect/sql - 服务端查询。
+    # Returns: 私有模板标识。
+    async def save_live_query(self, run_id: str, identity: Any, datasource: str, dialect: str, sql: str) -> str:
+        """模板不进入公开 DSL、数据清单或分享响应。"""
+        logger.debug("实时钻取模板保存入口", run_id=run_id, tenant_id=identity.tenant_id)
+        if not sql.strip() or len(sql) > 100_000:
+            raise ValueError("实时查询模板长度无效")
+        query_id = str(uuid4())
+        row = {"id": query_id, "run_id": run_id, "tenant_id": int(identity.tenant_id), "user_id": int(identity.user_id), "datasource": datasource, "dialect": dialect, "sql": sql}
+        if self._memory:
+            self._live_queries[query_id] = row
+        else:
+            from src.memory.pg_pool import pg_pool_connection
+
+            pool = await self._pool()
+            async with pg_pool_connection(pool, identity.tenant_id, identity.user_id, identity.role) as connection:
+                await connection.execute("INSERT INTO report_live_queries (id,run_id,tenant_id,user_id,datasource,dialect,sql_text) VALUES ($1::uuid,$2::uuid,$3,$4,$5,$6,$7)", query_id, run_id, identity.tenant_id, identity.user_id, datasource, dialect, sql)
+        logger.info("实时钻取模板保存完成", run_id=run_id, query_id=query_id)
+        return query_id
+
+    # 方法作用：只读取与已授权页面运行绑定的私有模板，防止跨页面标识替换。
+    # Args: query_id - 随机模板标识；version - 当前授权页面；identity - 当前身份。
+    # Returns: 私有模板或 None。
+    async def get_live_query(self, query_id: str, version: ReportVersionRecord, identity: Any) -> dict[str, Any] | None:
+        """调用者须先完成页面可见性、到期和实时能力校验。"""
+        if self._memory:
+            row = self._live_queries.get(query_id)
+            return dict(row) if row and row["tenant_id"] == identity.tenant_id and row["run_id"] == version.run_id else None
+        from src.memory.pg_pool import pg_pool_connection
+
+        pool = await self._pool()
+        async with pg_pool_connection(pool, identity.tenant_id, identity.user_id, identity.role) as connection:
+            row = await connection.fetchrow("SELECT id,run_id,datasource,dialect,sql_text AS sql FROM report_live_queries WHERE id=$1::uuid AND run_id=$2::uuid AND tenant_id=$3", query_id, version.run_id, identity.tenant_id)
+        return dict(row) if row else None
 
     # 方法作用：读取当前身份可访问的最新报表版本。
     # Args: report_id - 报表 ID；identity - 当前身份。
@@ -336,8 +451,61 @@ class ReportStore:
         user_id = int(getattr(identity, "user_id", 0) or 0)
         role = str(getattr(identity, "role", "") or "")
         async with pg_pool_connection(pool, tenant_id, user_id, role) as connection:
-            row = await connection.fetchrow("SELECT v.* FROM report_versions v JOIN report_jobs j ON j.id=v.job_id WHERE v.report_id=$1::uuid AND v.tenant_id=$2 AND v.deleted_at IS NULL AND ($3 IN ('super_admin','tenant_admin') OR j.user_id=$4) ORDER BY v.is_latest DESC,v.version DESC LIMIT 1", str(report_id), tenant_id, role, user_id)
+            row = await connection.fetchrow("SELECT v.* FROM report_versions v JOIN report_jobs j ON j.id=v.job_id WHERE v.report_id=$1::uuid AND v.tenant_id=$2 AND v.deleted_at IS NULL AND ($3<>'super_admin' AND ($3='tenant_admin' OR j.user_id=$4)) ORDER BY v.is_latest DESC,v.version DESC LIMIT 1", str(report_id), tenant_id, role, user_id)
         return self._to_version(row) if row else None
+
+    # 方法作用：锁定页面后更新有效期，并收紧而不延长既有分享授权。
+    # Args: report_id - 页面标识；identity - 当前身份；days - 延期天数；permanent - 永久保留。
+    # Returns: 更新后的页面；不存在、已清理或越权返回 None。
+    async def update_page_lifecycle(self, report_id: str, identity: Any, *, days: int | None = None, permanent: bool = False) -> ReportVersionRecord | None:
+        """从当前期限与当前时间较晚者延期，永久转有限从现在计算。"""
+        request = PageLifecycleRequest(days=days, permanent=permanent)
+        logger.debug("页面生命周期更新入口", report_id=report_id, days=days, permanent=permanent)
+        if self._memory:
+            async with self._claim_lock:
+                version = await self.get_report_version(report_id, identity)
+                if version is None:
+                    return None
+                row = self._versions[version.id]
+                expiry, document, checksum = self._lifecycle_values(version, request)
+                row.update(expires_at=expiry, document=document, checksum=checksum)
+                for share in self._shares.values():
+                    if share.get("report_version_id") == version.id and expiry is not None:
+                        previous = share.get("expires_at")
+                        if previous is None or previous > expiry:
+                            share["expires_at"] = expiry
+                result = self._to_version(row)
+        else:
+            from src.memory.pg_pool import pg_pool_connection
+
+            pool = await self._pool()
+            tenant_id, user_id, role = int(identity.tenant_id), int(identity.user_id), str(identity.role)
+            async with pg_pool_connection(pool, tenant_id, user_id, role) as connection:
+                async with connection.transaction():
+                    row = await connection.fetchrow("SELECT v.* FROM report_versions v JOIN report_jobs j ON j.id=v.job_id WHERE v.report_id=$1::uuid AND v.tenant_id=$2 AND v.deleted_at IS NULL AND ($3='tenant_admin' OR j.user_id=$4) ORDER BY v.is_latest DESC,v.version DESC LIMIT 1 FOR UPDATE OF v", report_id, tenant_id, role, user_id)
+                    if row is None:
+                        return None
+                    version = self._to_version(row)
+                    expiry, document, checksum = self._lifecycle_values(version, request)
+                    updated = await connection.fetchrow("UPDATE report_versions SET expires_at=$1,document_json=$2::jsonb,checksum=$3 WHERE id=$4::uuid AND tenant_id=$5 RETURNING *", expiry, json.dumps(document, ensure_ascii=False), checksum, version.id, tenant_id)
+                    if expiry is not None:
+                        await connection.execute("UPDATE report_shares SET expires_at=$1 WHERE report_version_id=$2::uuid AND tenant_id=$3 AND (expires_at IS NULL OR expires_at>$1)", expiry, version.id, tenant_id)
+                    result = self._to_version(updated)
+        logger.info("页面生命周期更新完成", report_id=report_id, permanent=permanent, expires_at=result.expires_at)
+        return result
+
+    # 方法作用：统一内存与数据库页面延期计算，保持内容校验摘要一致。
+    # Args: version - 原页面；request - 已校验操作。
+    # Returns: 新有效期、页面文档和校验摘要。
+    @classmethod
+    def _lifecycle_values(cls, version: ReportVersionRecord, request: PageLifecycleRequest) -> tuple[datetime | None, dict[str, Any], str]:
+        now = datetime.now(timezone.utc)
+        previous = version.expires_at
+        if previous is not None and previous.tzinfo is None:
+            previous = previous.replace(tzinfo=timezone.utc)
+        expiry = None if request.permanent else max(now, previous or now) + timedelta(days=request.days or 0)
+        document = {**version.document, "expires_at": expiry.isoformat() if expiry else None}
+        return expiry, document, cls._checksum(document, version.data_manifest)
 
     # 方法作用：按任务读取当前身份可访问的最新不可变报表版本。
     # Args: job_id - 报表任务 ID；identity - 当前租户身份。
@@ -351,7 +519,7 @@ class ReportStore:
                 and row.get("deleted_at") is None
                 and self._visible(row, identity)
             ]
-            row = max(rows, key=lambda item: int(item.get("version", 0) or 0), default=None)
+            row = max(rows, key=lambda item: (item.get("created_at") or datetime.min.replace(tzinfo=timezone.utc), int(item.get("version", 0) or 0)), default=None)
             return self._to_version(row) if row else None
         pool = await self._pool()
         from src.memory.pg_pool import pg_pool_connection
@@ -363,8 +531,8 @@ class ReportStore:
             row = await connection.fetchrow(
                 "SELECT v.* FROM report_versions v JOIN report_jobs j ON j.id=v.job_id "
                 "WHERE v.job_id=$1::uuid AND v.tenant_id=$2 AND v.deleted_at IS NULL "
-                "AND ($3 IN ('super_admin','tenant_admin') OR j.user_id=$4) "
-                "ORDER BY v.version DESC LIMIT 1",
+                "AND ($3<>'super_admin' AND ($3='tenant_admin' OR j.user_id=$4)) "
+                "ORDER BY v.created_at DESC,v.version DESC LIMIT 1",
                 str(job_id), tenant_id, role, user_id,
             )
         return self._to_version(row) if row else None
@@ -394,7 +562,7 @@ class ReportStore:
         from src.memory.pg_pool import pg_pool_connection
 
         async with pg_pool_connection(pool, int(getattr(identity, "tenant_id", 0) or 0), int(getattr(identity, "user_id", 0) or 0), str(getattr(identity, "role", "") or "")) as connection:
-            rows = await connection.fetch("SELECT id::text,report_id::text,scope,user_scope,user_ids,allow_drilldown,allow_download,pin_latest,expires_at,revoked_at,view_count,last_viewed_at,created_at FROM report_shares WHERE report_id=$1::uuid AND tenant_id=$2 AND ($3 IN ('super_admin','tenant_admin') OR created_by=$4) ORDER BY created_at DESC", report_id, int(getattr(identity, "tenant_id", 0) or 0), str(getattr(identity, "role", "") or ""), int(getattr(identity, "user_id", 0) or 0))
+            rows = await connection.fetch("SELECT id::text,report_id::text,scope,user_scope,user_ids,allow_drilldown,allow_download,pin_latest,expires_at,revoked_at,view_count,last_viewed_at,created_at FROM report_shares WHERE report_id=$1::uuid AND tenant_id=$2 AND ($3<>'super_admin' AND ($3='tenant_admin' OR created_by=$4)) ORDER BY created_at DESC", report_id, int(getattr(identity, "tenant_id", 0) or 0), str(getattr(identity, "role", "") or ""), int(getattr(identity, "user_id", 0) or 0))
         return [dict(row) for row in rows]
 
     # 方法作用：保存分享 token 摘要和用户范围授权，不保存明文 token。
@@ -411,7 +579,7 @@ class ReportStore:
         from src.memory.pg_pool import pg_pool_connection
 
         tenant_id = int(record.get("tenant_id", 0) or 0)
-        async with pg_pool_connection(pool, tenant_id, int(record.get("created_by", 0) or 0), "super_admin") as connection:
+        async with pg_pool_connection(pool, 0, 0, "super_admin") as connection:
             db_row = await connection.fetchrow("INSERT INTO report_shares (id,report_version_id,report_id,tenant_id,created_by,token_hash,code_hash,scope,user_scope,user_ids,allow_drilldown,allow_download,pin_latest,expires_at) VALUES ($1::uuid,$2::uuid,$3::uuid,$4,$5,$6,$7,$8,$9,$10::jsonb,$11,$12,$13,$14) RETURNING *", share_id, record["report_version_id"], record["report_id"], tenant_id, record["created_by"], token_hash, code_hash, record.get("scope", "public"), record.get("user_scope", "none"), json.dumps(record.get("user_ids", [])), bool(record.get("allow_drilldown", False)), bool(record.get("allow_download", False)), bool(record.get("pin_latest", False)), record.get("expires_at"))
         return self._to_share(db_row)
 
@@ -446,7 +614,7 @@ class ReportStore:
         from src.memory.pg_pool import pg_pool_connection
 
         async with pg_pool_connection(pool, int(getattr(identity, "tenant_id", 0) or 0), int(getattr(identity, "user_id", 0) or 0), str(getattr(identity, "role", "") or "")) as connection:
-            status = await connection.execute("UPDATE report_shares SET revoked_at=NOW() WHERE id=$1::uuid AND tenant_id=$2 AND ($3 IN ('super_admin','tenant_admin') OR created_by=$4) AND revoked_at IS NULL", share_id, int(getattr(identity, "tenant_id", 0) or 0), str(getattr(identity, "role", "") or ""), int(getattr(identity, "user_id", 0) or 0))
+            status = await connection.execute("UPDATE report_shares SET revoked_at=NOW() WHERE id=$1::uuid AND tenant_id=$2 AND ($3<>'super_admin' AND ($3='tenant_admin' OR created_by=$4)) AND revoked_at IS NULL", share_id, int(getattr(identity, "tenant_id", 0) or 0), str(getattr(identity, "role", "") or ""), int(getattr(identity, "user_id", 0) or 0))
         return str(status).endswith(" 1")
 
     # 方法作用：把内部分享记录转换为不含 token 和授权码的摘要。
@@ -468,7 +636,7 @@ class ReportStore:
             pool = await self._pool()
             from src.memory.pg_pool import pg_pool_connection
 
-            async with pg_pool_connection(pool, int(safe.get("tenant_id", 0) or 0), int(safe.get("user_id", 0) or 0), "super_admin") as connection:
+            async with pg_pool_connection(pool, 0, 0, "super_admin") as connection:
                 await connection.execute("INSERT INTO report_access_audit (tenant_id,user_id,share_id,report_id,action,result,ip_hash,metadata_json) VALUES ($1,$2,$3::uuid,$4::uuid,$5,$6,$7,$8::jsonb)", safe.get("tenant_id"), safe.get("user_id"), safe.get("share_id"), safe.get("report_id"), safe.get("action", "view"), safe.get("result", "success"), safe.get("ip_hash", ""), json.dumps(safe.get("metadata", {}), ensure_ascii=False))
         except Exception as exc:
             logger.error("报表访问审计写入失败", error=str(exc), exc_info=True)
@@ -481,19 +649,23 @@ class ReportStore:
             return self._capabilities.get((int(tenant_id), int(user_id)))
         try:
             pool = await self._pool()
-            async with pool.acquire() as connection:
+            from src.memory.pg_pool import pg_pool_connection
+
+            async with pg_pool_connection(pool, tenant_id, user_id, "analyst") as connection:
                 value = await connection.fetchval("SELECT capabilities FROM report_user_permissions WHERE tenant_id=$1 AND user_id=$2", tenant_id, user_id)
+            if isinstance(value, str):
+                value = json.loads(value)
             return list(value or []) if value is not None else None
         except Exception as exc:
-            # 迁移尚未执行或数据库暂不可用时，能力服务回退到角色默认值，不阻断基础登录页面。
-            logger.warning(
-                "报表用户能力持久化读取失败，回退角色默认值",
+            # 无法确认授权时禁止报表业务操作，不能把已撤销能力恢复为角色默认值。
+            logger.error(
+                "报表用户能力持久化读取失败，拒绝报表操作",
                 tenant_id=int(tenant_id),
                 user_id=int(user_id),
                 error_type=type(exc).__name__,
                 exc_info=True,
             )
-            return None
+            return []
 
     # 方法作用：保存租户管理员配置的用户报表能力。
     # Args: tenant_id - 当前租户；user_id - 目标用户；capabilities - report.* 能力列表。
@@ -504,8 +676,43 @@ class ReportStore:
             self._capabilities[(int(tenant_id), int(user_id))] = normalized
             return
         pool = await self._pool()
-        async with pool.acquire() as connection:
+        from src.memory.pg_pool import pg_pool_connection
+
+        async with pg_pool_connection(pool, tenant_id, user_id, "analyst") as connection:
             await connection.execute("INSERT INTO report_user_permissions (tenant_id,user_id,capabilities) VALUES ($1,$2,$3::jsonb) ON CONFLICT (tenant_id,user_id) DO UPDATE SET capabilities=EXCLUDED.capabilities,updated_at=NOW()", tenant_id, user_id, json.dumps(normalized, ensure_ascii=False))
+
+    # 方法作用：验证当前管理员管理的目标用户归属并锁定账号行。
+    # Args: identity - 操作管理员；user_id - 目标用户。
+    # Returns: 当前租户内的目标用户，不存在或跨租户时抛出 LookupError。
+    async def get_policy_subject(self, identity: Any, user_id: int) -> dict[str, Any]:
+        """策略管理不能仅凭客户端用户 ID 写入外租户用户配置。"""
+        if str(identity.role) != "tenant_admin" or int(identity.tenant_id) <= 0:
+            raise PermissionError("需要当前租户管理员权限")
+        from src.memory.pg_pool import pg_pool_connection
+
+        async with pg_pool_connection(await self._pool(), int(identity.tenant_id), int(identity.user_id), str(identity.role)) as connection:
+            row = await connection.fetchrow(
+                "SELECT id, tenant_id, role, username FROM users WHERE id=$1 AND tenant_id=$2 FOR SHARE",
+                int(user_id), int(identity.tenant_id),
+            )
+        if row is None:
+            raise LookupError("目标用户不存在或不属于当前租户")
+        return dict(row)
+
+    # 方法作用：验证目标租户归属并在同一事务保存能力与额度。
+    # Args: identity - 租户管理员；user_id - 目标用户；policy - 额度策略；capabilities - 能力列表。
+    # Returns: 无返回值。
+    async def save_user_policy(self, identity: Any, user_id: int, policy: Any, capabilities: list[str]) -> None:
+        """数据库写入失败时全部回滚，调用方不能提前更新缓存。"""
+        from src.memory.pg_pool import pg_pool_connection
+
+        logger.debug("保存租户报表策略入口", tenant_id=identity.tenant_id, user_id=user_id)
+        async with pg_pool_connection(await self._pool(), int(identity.tenant_id), int(identity.user_id), str(identity.role)) as connection:
+            scoped = ReportStore(pg_pool=connection, memory=False)
+            await scoped.get_policy_subject(identity, user_id)
+            await scoped.set_quota_policy(int(identity.tenant_id), int(user_id), policy)
+            await scoped.set_user_capabilities(int(identity.tenant_id), int(user_id), capabilities)
+        logger.info("租户报表策略保存完成", tenant_id=identity.tenant_id, user_id=user_id)
 
     # 方法作用：读取用户持久化配额覆盖，缺失时交给调用方使用默认策略。
     # Args: tenant_id - 租户 ID；user_id - 用户 ID。
@@ -515,7 +722,9 @@ class ReportStore:
             value = self._quota_policies.get((int(tenant_id), int(user_id)))
             return dict(value) if value else None
         pool = await self._pool()
-        async with pool.acquire() as connection:
+        from src.memory.pg_pool import pg_pool_connection
+
+        async with pg_pool_connection(pool, tenant_id, user_id, "analyst") as connection:
             row = await connection.fetchrow("SELECT max_jobs_created,max_runs_started,max_concurrent_runs,max_analysis_units_per_run,max_queries_per_run,max_rows_per_query,max_llm_tokens,max_page_bytes,max_share_links,timezone FROM report_quota_policies WHERE tenant_id=$1 AND user_id=$2", tenant_id, user_id)
         return dict(row) if row else None
 
@@ -528,7 +737,9 @@ class ReportStore:
             self._quota_policies[(int(tenant_id), int(user_id))] = {**fields, "timezone": timezone_name}
             return
         pool = await self._pool()
-        async with pool.acquire() as connection:
+        from src.memory.pg_pool import pg_pool_connection
+
+        async with pg_pool_connection(pool, tenant_id, user_id, "analyst") as connection:
             await connection.execute("INSERT INTO report_quota_policies (tenant_id,user_id,timezone,max_jobs_created,max_runs_started,max_concurrent_runs,max_analysis_units_per_run,max_queries_per_run,max_rows_per_query,max_llm_tokens,max_page_bytes,max_share_links) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) ON CONFLICT (tenant_id,user_id) DO UPDATE SET timezone=EXCLUDED.timezone,max_jobs_created=EXCLUDED.max_jobs_created,max_runs_started=EXCLUDED.max_runs_started,max_concurrent_runs=EXCLUDED.max_concurrent_runs,max_analysis_units_per_run=EXCLUDED.max_analysis_units_per_run,max_queries_per_run=EXCLUDED.max_queries_per_run,max_rows_per_query=EXCLUDED.max_rows_per_query,max_llm_tokens=EXCLUDED.max_llm_tokens,max_page_bytes=EXCLUDED.max_page_bytes,max_share_links=EXCLUDED.max_share_links,updated_at=NOW()", tenant_id, user_id, timezone_name, fields.get("max_jobs_created", 20), fields.get("max_runs_started", 50), fields.get("max_concurrent_runs", 2), fields.get("max_analysis_units_per_run", 12), fields.get("max_queries_per_run", 16), fields.get("max_rows_per_query", 100000), fields.get("max_llm_tokens", 200000), fields.get("max_page_bytes", 2097152), fields.get("max_share_links", 20))
 
     # 方法作用：用 PostgreSQL 条件 UPDATE 原子预占周期配额，避免多 Worker 超额。
@@ -541,16 +752,50 @@ class ReportStore:
         tenant_id = int(getattr(identity, "tenant_id", 0) or 0)
         user_id = int(getattr(identity, "user_id", 0) or 0)
         fields = asdict(policy) if is_dataclass(policy) else (dict(policy) if isinstance(policy, dict) else {})
-        async with pool.acquire() as connection:
-            async with connection.transaction():
-                await connection.execute("INSERT INTO report_quota_usage (tenant_id,user_id,period_start,period_end) VALUES ($1,$2,$3,$4) ON CONFLICT (tenant_id,user_id,period_start) DO NOTHING", tenant_id, user_id, period_start, period_end)
-                row = await connection.fetchrow("UPDATE report_quota_usage SET jobs_created=jobs_created+$3,runs_started=runs_started+$4,concurrent_runs=concurrent_runs+$5,analysis_units=analysis_units+$6,queries=queries+$7,rows=rows+$8,llm_tokens=llm_tokens+$9,share_links=share_links+$10 WHERE tenant_id=$1 AND user_id=$2 AND period_start=$11 AND jobs_created+$3 <= $12 AND runs_started+$4 <= $13 AND concurrent_runs+$5 <= $14 AND analysis_units+$6 <= $15 AND queries+$7 <= $16 AND rows+$8 <= $17 AND llm_tokens+$9 <= $18 AND share_links+$10 <= $19 RETURNING *", tenant_id, user_id, int(increments.get("jobs", 0)), int(increments.get("runs", 0)), int(increments.get("concurrent", 0)), int(increments.get("units", 0)), int(increments.get("queries", 0)), int(increments.get("rows", 0)), int(increments.get("tokens", 0)), int(increments.get("shares", 0)), period_start, fields.get("max_jobs_created", 20), fields.get("max_runs_started", 50), fields.get("max_concurrent_runs", 2), fields.get("max_analysis_units_per_run", 12), fields.get("max_queries_per_run", 16), fields.get("max_rows_per_query", 100000), fields.get("max_llm_tokens", 200000), fields.get("max_share_links", 20))
+        from src.memory.pg_pool import pg_pool_connection
+
+        async with pg_pool_connection(pool, tenant_id, user_id, str(identity.role)) as connection:
+            await connection.execute("INSERT INTO report_quota_usage (tenant_id,user_id,period_start,period_end) VALUES ($1,$2,$3,$4) ON CONFLICT (tenant_id,user_id,period_start) DO NOTHING", tenant_id, user_id, period_start, period_end)
+            row = await connection.fetchrow(
+                "UPDATE report_quota_usage SET jobs_created=jobs_created+$3,runs_started=runs_started+$4,"
+                "concurrent_runs=concurrent_runs+$5,analysis_units=analysis_units+$6,queries=queries+$7,"
+                "rows=rows+$8,llm_tokens=llm_tokens+$9,share_links=share_links+$10 "
+                "WHERE tenant_id=$1 AND user_id=$2 AND period_start=$11 "
+                "AND jobs_created+$3 <= $12 AND runs_started+$4 <= $13 AND concurrent_runs+$5 <= $14 "
+                "AND $6 <= $15 AND $7 <= $16 AND $8 <= $17 "
+                "AND llm_tokens+$9 <= $18 AND share_links+$10 <= $19 RETURNING *",
+                tenant_id, user_id, int(increments.get("jobs", 0)), int(increments.get("runs", 0)),
+                int(increments.get("concurrent", 0)), int(increments.get("units", 0)),
+                int(increments.get("queries", 0)), int(increments.get("rows", 0)),
+                int(increments.get("tokens", 0)), int(increments.get("shares", 0)), period_start,
+                fields.get("max_jobs_created", 20), fields.get("max_runs_started", 50),
+                fields.get("max_concurrent_runs", 2), fields.get("max_analysis_units_per_run", 12),
+                fields.get("max_queries_per_run", 16), fields.get("max_rows_per_query", 100000),
+                fields.get("max_llm_tokens", 200000), fields.get("max_share_links", 20),
+            )
         return dict(row) if row else None
 
+    # 方法作用：按显式身份读取指定周期的真实持久化用量。
+    # Args: identity - 当前身份；period_start - 周期起点。
+    # Returns: 用量字典，没有记录时返回空字典。
+    async def get_quota_usage(self, identity: Any, period_start: datetime) -> dict[str, Any]:
+        """供配额展示和事务内幂等重试查询使用。"""
+        if self._memory:
+            return {}
+        from src.memory.pg_pool import pg_pool_connection
+
+        async with pg_pool_connection(await self._pool(), int(identity.tenant_id), int(identity.user_id), str(identity.role)) as connection:
+            row = await connection.fetchrow(
+                "SELECT * FROM report_quota_usage WHERE tenant_id=$1 AND user_id=$2 AND period_start=$3",
+                int(identity.tenant_id), int(identity.user_id), period_start,
+            )
+        return dict(row) if row else {}
+
     # 方法作用：释放 PostgreSQL 周期用量中的并发运行槽，避免失败或完成后永久占用。
-    # Args: identity - 当前租户身份；amount - 释放槽位数；timezone_name - 周期时区。
+    # Args: identity - 当前租户身份；amount - 释放槽位数；timezone_name - 周期时区；period_start - 原预占周期起点。
     # Returns: 无返回值。
-    async def release_concurrent_quota(self, identity: Any, amount: int = 1, timezone_name: str = "Asia/Shanghai") -> None:
+    async def release_concurrent_quota(self, identity: Any, amount: int = 1, timezone_name: str = "Asia/Shanghai", period_start: datetime | None = None) -> None:
+        """按原周期参数化减少并发用量，不回滚已经发生的运行次数。"""
         bounded = max(0, int(amount))
         if bounded == 0:
             return
@@ -558,7 +803,7 @@ class ReportStore:
             return
         from src.memory.pg_pool import pg_pool_connection
 
-        period_start, _ = self._period_bounds(timezone_name)
+        period_start = period_start or self._period_bounds(timezone_name)[0]
         tenant_id = int(getattr(identity, "tenant_id", 0) or 0)
         user_id = int(getattr(identity, "user_id", 0) or 0)
         pool = await self._pool()
@@ -595,9 +840,10 @@ class ReportStore:
         if self._memory:
             async with self._claim_lock:
                 now = datetime.now(timezone.utc)
-                rows = [row for row in self._jobs.values() if row.get("status") == "queued" and row.get("next_run_at") and row["next_run_at"] <= now]
+                rows = [row for row in self._jobs.values() if (row.get("status") == "queued" and not row.get("is_paused", False) and row.get("next_run_at") and row["next_run_at"] <= now) or (row.get("status") == "running" and row.get("updated_at", now) < now - timedelta(seconds=120))]
                 for row in rows[:bounded]:
                     row["status"] = "running"
+                    row["updated_at"] = now
                 return [self._to_job(row) for row in rows[:bounded]]
         pool = await self._pool()
         from src.memory.pg_pool import pg_pool_connection
@@ -619,8 +865,145 @@ class ReportStore:
                         if claimed is not None:
                             rows.append(claimed)
             else:
-                rows = await connection.fetch("WITH due AS (SELECT id FROM report_jobs WHERE status='queued' AND next_run_at<=NOW() ORDER BY next_run_at FOR UPDATE SKIP LOCKED LIMIT $1) UPDATE report_jobs SET status='running',updated_at=NOW() FROM due WHERE report_jobs.id=due.id RETURNING report_jobs.*", bounded)
+                rows = await connection.fetch("WITH due AS (SELECT id FROM report_jobs WHERE (status='queued' AND NOT is_paused AND next_run_at<=NOW()) OR (status='running' AND updated_at<NOW()-INTERVAL '120 seconds') ORDER BY next_run_at FOR UPDATE SKIP LOCKED LIMIT $1) UPDATE report_jobs SET status='running',updated_at=NOW() FROM due WHERE report_jobs.id=due.id RETURNING report_jobs.*", bounded)
         return [self._to_job(row) for row in rows]
+
+    # 方法作用：持久化暂停标志，不改变既有次数或绕过租户归属。
+    # Args: job_id - 任务；identity - 当前租户身份；paused - 是否暂停。
+    # Returns: 是否更新成功。
+    async def set_job_paused(self, job_id: str, identity: Any, paused: bool) -> bool:
+        """暂停中的执行在发布前再次检查，已发布历史页面不受影响。"""
+        logger.debug("报表暂停状态入口", job_id=job_id, paused=paused)
+        if self._memory:
+            row = self._jobs.get(job_id)
+            if row is None or not self._visible(row, identity):
+                return False
+            row["is_paused"] = paused
+        else:
+            from src.memory.pg_pool import pg_pool_connection
+
+            async with pg_pool_connection(await self._pool(), identity.tenant_id, identity.user_id, identity.role) as connection:
+                row = await connection.fetchrow("UPDATE report_jobs SET is_paused=$1,updated_at=NOW() WHERE id=$2::uuid AND tenant_id=$3 AND (user_id=$4 OR $5='tenant_admin') RETURNING id", paused, job_id, identity.tenant_id, identity.user_id, identity.role)
+                if row is None:
+                    return False
+        logger.info("报表暂停状态更新完成", job_id=job_id, paused=paused)
+        return True
+
+    # 方法作用：写入下次运行时间与最终调度状态，心跳只刷新更新时间。
+    # Args: job_id - 任务；identity - 身份；status - 状态；next_run_at - 下次时间；heartbeat - 仅更新心跳。
+    # Returns: 无返回值。
+    async def update_dispatch(self, job_id: str, identity: Any, *, status: str = "running", next_run_at: datetime | None = None, heartbeat: bool = False) -> None:
+        """运行器和恢复扫描使用同一持久化更新时间。"""
+        if self._memory:
+            row = self._jobs.get(job_id)
+            if row is not None and self._visible(row, identity):
+                row["updated_at"] = datetime.now(timezone.utc)
+                if not heartbeat:
+                    row.update(status=status, next_run_at=next_run_at)
+            return
+        from src.memory.pg_pool import pg_pool_connection
+
+        async with pg_pool_connection(await self._pool(), identity.tenant_id, identity.user_id, identity.role) as connection:
+            if heartbeat:
+                await connection.execute("UPDATE report_jobs SET updated_at=NOW() WHERE id=$1::uuid AND tenant_id=$2", job_id, identity.tenant_id)
+            else:
+                await connection.execute("UPDATE report_jobs SET status=$1,next_run_at=$2,updated_at=NOW() WHERE id=$3::uuid AND tenant_id=$4", status, next_run_at, job_id, identity.tenant_id)
+
+    # 方法作用：跨 Worker 持有任务专属会话锁，锁连接同时用于发布以阻断失联旧 Worker。
+    # Args: job_id - 任务标识。
+    # Returns: 专属发布 Store；其他实例持锁时返回 None。
+    @asynccontextmanager
+    async def execution_lock(self, job_id: str) -> AsyncIterator["ReportStore | None"]:
+        """数据库连接失联会自动释放锁，旧连接也无法提交页面。"""
+        if self._memory:
+            lock = self._execution_locks.setdefault(job_id, asyncio.Lock())
+            if lock.locked():
+                yield None
+                return
+            async with lock:
+                yield self
+            return
+        pool = await self._pool()
+        async with pool.acquire() as connection:
+            lock_name = f"report-dispatch:{job_id}"
+            acquired = await connection.fetchval("SELECT pg_try_advisory_lock(hashtextextended($1, 0))", lock_name)
+            if not acquired:
+                yield None
+                return
+            try:
+                yield ReportStore(pg_pool=connection, memory=False)
+            finally:
+                if not connection.is_closed():
+                    await connection.execute("SELECT pg_advisory_unlock(hashtextextended($1, 0))", lock_name)
+
+    # 方法作用：将配额预占和原周期租约写入同一事务，防止进程退出遗留未知并发槽。
+    # Args: run_id - 运行；identity - 身份；plan - 资源估算；quota - 配额服务。
+    # Returns: 已持久化的配额快照。
+    async def reserve_run_quota(self, run_id: str, identity: Any, plan: ReportPlan, quota: Any) -> Any:
+        """数据库事务失败时，预占和租约同时回滚。"""
+        parameters = {"runs": 1, "concurrent": 1, "units": len(plan.analysis_units), "queries": plan.estimated.query_count, "tokens": plan.estimated.llm_tokens, "timezone_name": plan.timezone}
+        if self._memory:
+            reservation = await quota.reserve(identity, **parameters)
+            self._runs[run_id].update(quota_held=True, quota_period_start=reservation.period_start)
+            return reservation
+        from src.memory.pg_pool import pg_pool_connection
+        from src.reporting.quota import QuotaManager
+
+        async with pg_pool_connection(await self._pool(), identity.tenant_id, identity.user_id, identity.role) as connection:
+            scoped = QuotaManager(store=ReportStore(pg_pool=connection, memory=False), default_policy=quota.default_policy)
+            reservation = await scoped.reserve(identity, **parameters)
+            await connection.execute("UPDATE report_runs SET quota_held=TRUE,quota_period_start=$1 WHERE id=$2::uuid AND tenant_id=$3", reservation.period_start, run_id, identity.tenant_id)
+        return reservation
+
+    # 方法作用：只释放一次运行持有的原周期并发槽，正常收尾和恢复扫描共用。
+    # Args: run_id - 运行；identity - 原业务身份；quota - 配额服务。
+    # Returns: 无返回值。
+    async def release_run_quota(self, run_id: str, identity: Any, quota: Any) -> None:
+        """次数和 Token 预算不退款，仅释放可重用并发槽。"""
+        if self._memory:
+            async with self._claim_lock:
+                row = self._runs.get(run_id)
+                if row and row.get("quota_held"):
+                    await quota.release_concurrent(identity, period_start=row["quota_period_start"])
+                    row["quota_held"] = False
+            return
+        from src.memory.pg_pool import pg_pool_connection
+
+        async with pg_pool_connection(await self._pool(), identity.tenant_id, identity.user_id, identity.role) as connection:
+            row = await connection.fetchrow("SELECT quota_held,quota_period_start FROM report_runs WHERE id=$1::uuid AND tenant_id=$2 FOR UPDATE", run_id, identity.tenant_id)
+            if row and row["quota_held"]:
+                await connection.execute("UPDATE report_quota_usage SET concurrent_runs=GREATEST(0,concurrent_runs-1),updated_at=NOW() WHERE tenant_id=$1 AND user_id=$2 AND period_start=$3", identity.tenant_id, identity.user_id, row["quota_period_start"])
+                await connection.execute("UPDATE report_runs SET quota_held=FALSE WHERE id=$1::uuid AND tenant_id=$2", run_id, identity.tenant_id)
+
+    # 方法作用：取得独占执行锁后终结旧进程遗留运行并释放可确认的配额租约。
+    # Args: job_id - 任务；identity - 原任务拥有者身份；quota - 配额服务。
+    # Returns: 中断恢复数与已发布页面恢复数。
+    async def recover_job_runs(self, job_id: str, identity: Any, quota: Any) -> dict[str, int]:
+        """不覆盖已经成功的页面，后续运行使用新的 run_id 与审计记录。"""
+        runs = await self.list_runs(job_id, identity, 100)
+        published = await self.get_latest_version_for_job(job_id, identity)
+        logger.info("报表恢复持久化探针", job_id=job_id, run_count=len(runs), published_run_id=published.run_id if published else None)
+        recovered = 0
+        published_count = 0
+        for run in runs:
+            await self.release_run_quota(run.id, identity, quota)
+            if run.status in {"queued", "running"}:
+                if self._memory:
+                    has_version = any(row["run_id"] == run.id and row.get("deleted_at") is None for row in self._versions.values())
+                else:
+                    from src.memory.pg_pool import pg_pool_connection
+
+                    async with pg_pool_connection(await self._pool(), identity.tenant_id, identity.user_id, identity.role) as connection:
+                        has_version = bool(await connection.fetchval("SELECT 1 FROM report_versions WHERE run_id=$1::uuid AND tenant_id=$2 AND deleted_at IS NULL LIMIT 1", run.id, identity.tenant_id))
+                if has_version:
+                    await self.update_run(run.id, identity, status="succeeded", finished_at=datetime.now(timezone.utc))
+                    published_count += 1
+                else:
+                    await self.update_run(run.id, identity, status="failed", error_code="WORKER_INTERRUPTED", user_error_message="执行进程中断，已释放并发资源并进入恢复", finished_at=datetime.now(timezone.utc))
+                recovered += 1
+        if recovered:
+            logger.info("报表遗留运行恢复完成", job_id=job_id, recovered=recovered)
+        return {"interrupted": recovered, "published": published_count}
 
     # 方法作用：惰性获取 PostgreSQL 连接池。
     # Args: self - 当前 Store。
@@ -643,7 +1026,7 @@ class ReportStore:
         if int(row.get("tenant_id", -1) or -1) != tenant_id:
             return False
         owner = row.get("user_id", row.get("created_by", -1))
-        return role in {"super_admin", "tenant_admin"} or int(owner or -1) == user_id
+        return role != "super_admin" and (role == "tenant_admin" or int(owner or -1) == user_id)
 
     # 方法作用：计算页面和数据清单的稳定校验摘要。
     # Args: document - 页面 JSON；manifest - 脱敏数据清单。
@@ -676,7 +1059,7 @@ class ReportStore:
     @classmethod
     def _to_job(cls, row: Any) -> ReportJobRecord:
         plan_data = cls._json_dict(row.get("plan_json", {}) if hasattr(row, "get") else row["plan_json"])
-        return ReportJobRecord(id=str(row["id"]), tenant_id=int(row["tenant_id"]), user_id=int(row["user_id"]), prompt=str(row["prompt"]), plan=ReportPlan.model_validate(plan_data), status=str(row.get("status", "draft")), runs_started=int(row.get("runs_started", 0) or 0), created_at=row.get("created_at"), updated_at=row.get("updated_at"))
+        return ReportJobRecord(id=str(row["id"]), tenant_id=int(row["tenant_id"]), user_id=int(row["user_id"]), prompt=str(row["prompt"]), plan=ReportPlan.model_validate(plan_data), status=str(row.get("status", "draft")), runs_started=int(row.get("runs_started", 0) or 0), next_run_at=row.get("next_run_at"), is_paused=bool(row.get("is_paused", False)), created_at=row.get("created_at"), updated_at=row.get("updated_at"))
 
     # 方法作用：把数据库行转换为安全的运行模型。
     # Args: row - asyncpg Record 或内存字典。

@@ -24,37 +24,17 @@ async def list_models():
     return await list_tenant_model_options(tenant_id=get_current_tenant_id())
 
 
-@router.post("/models/test")
+@router.post("/models/test", deprecated=True)
+# 方法作用：关闭使用全局凭证的旧模型测试入口，引导租户使用命名连接。
+# Args: req - 兼容旧客户端的模型请求。
+# Returns: 始终抛出包含迁移提示的 HTTP 410。
 async def test_model(req: ModelTestRequest):
-    """使用固定最小请求测试已注册模型连通性。
-
-    Args:
-        req: 已校验的模型 ID。
-
-    Returns:
-        连通状态和请求延迟。
-    """
-    import time as _t
-
-    from src.api.auth import require_super_admin
-    from src.llm.client import get_provider
-    logger.debug("模型连通性测试入口", model_id=req.model_id)
-    require_super_admin()
-    try:
-        p = get_provider(req.model_id)
-        s = _t.monotonic()
-        await p.agenerate([{"role": "user", "content": "ping"}], max_tokens=1)
-        result = {"ok": True, "latency_ms": round((_t.monotonic() - s) * 1000)}
-        logger.info("模型连通性测试完成", model_id=req.model_id, ok=True)
-        return result
-    except Exception as exc:
-        logger.error(
-            "模型连通性测试失败",
-            model_id=req.model_id,
-            error=str(exc),
-            exc_info=True,
-        )
-        return {"ok": False, "error": "模型连接测试失败"}
+    """保留路由兼容，但不再调用任何模型或全局凭证。"""
+    logger.info("旧模型测试入口已停用", model_id=req.model_id)
+    raise HTTPException(410, {
+        "message": "旧模型测试入口已停用，请在租户管理中测试自己的 LLM 命名连接",
+        "replacement": "/api/v1/admin/llm/connections/{connection_id}/test",
+    })
 
 # ---- Knowledge / 知识库 ----
 

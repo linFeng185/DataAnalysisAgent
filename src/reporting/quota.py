@@ -60,7 +60,7 @@ class QuotaSnapshot:
 
 
 _ROLE_CAPABILITIES: dict[str, frozenset[str]] = {
-    "super_admin": frozenset({"report.menu", "report.create", "report.schedule", "report.share", "report.extend", "report.permanent", "report.live_drilldown", "report.view_all", "report.download"}),
+    "super_admin": frozenset(),
     "tenant_admin": frozenset({"report.menu", "report.create", "report.schedule", "report.share", "report.extend", "report.permanent", "report.live_drilldown", "report.view_all", "report.download"}),
     "analyst": frozenset({"report.menu", "report.create"}),
     "viewer": frozenset(),
@@ -81,6 +81,10 @@ class ReportPermissionService:
     # Args: identity - 当前租户身份；capability - report.* 能力键。
     # Returns: 具备能力返回 True，否则返回 False。
     async def has(self, identity: Any, capability: str) -> bool:
+        """先拒绝平台业务身份，再合并租户角色默认值和用户覆盖。"""
+        if str(getattr(identity, "role", "")).strip().lower() == "super_admin":
+            logger.info("平台身份报表业务阻断", capability=capability)
+            return False
         user_id = int(getattr(identity, "user_id", 0) or 0)
         tenant_id = int(getattr(identity, "tenant_id", 0) or 0)
         role = str(getattr(identity, "role", "") or "")
@@ -88,7 +92,7 @@ class ReportPermissionService:
         if override is None:
             # 兼容旧测试和未迁移的进程内覆盖项，生产配置优先使用租户键。
             override = self._user_capabilities.get((0, user_id))
-        if override is None and self._store is not None and hasattr(self._store, "get_user_capabilities"):
+        if self._store is not None and hasattr(self._store, "get_user_capabilities") and (override is None or not bool(getattr(self._store, "_memory", True))):
             override = await self._store.get_user_capabilities(tenant_id, user_id)
         allowed = capability in (override if override is not None else _ROLE_CAPABILITIES.get(role, frozenset()))
         logger.debug("报表能力判断完成", user_id=user_id, role=role, capability=capability, allowed=allowed)
@@ -98,13 +102,16 @@ class ReportPermissionService:
     # Args: identity - 当前租户身份。
     # Returns: 排序后的 report.* 能力列表。
     async def capabilities(self, identity: Any) -> list[str]:
+        """平台始终返回空集合，不让旧持久化覆盖恢复菜单。"""
+        if str(getattr(identity, "role", "")).strip().lower() == "super_admin":
+            return []
         user_id = int(getattr(identity, "user_id", 0) or 0)
         tenant_id = int(getattr(identity, "tenant_id", 0) or 0)
         role = str(getattr(identity, "role", "") or "")
         override = self._user_capabilities.get((tenant_id, user_id))
         if override is None:
             override = self._user_capabilities.get((0, user_id))
-        if override is None and self._store is not None and hasattr(self._store, "get_user_capabilities"):
+        if self._store is not None and hasattr(self._store, "get_user_capabilities") and (override is None or not bool(getattr(self._store, "_memory", True))):
             override = await self._store.get_user_capabilities(tenant_id, user_id)
         result = sorted(str(item) for item in (override if override is not None else _ROLE_CAPABILITIES.get(role, frozenset())))
         logger.debug("报表能力集合读取完成", user_id=user_id, role=role, capability_count=len(result))
@@ -173,8 +180,13 @@ class QuotaManager:
         shares: int = 0,
         timezone_name: str = "Asia/Shanghai",
     ) -> QuotaSnapshot:
+        """校验单次预算，并原子累计当前周期实际申请的用量。"""
+        increments = (jobs, runs, concurrent, units, queries, rows, tokens, shares)
+        if any(not isinstance(value, int) or isinstance(value, bool) or value < 0 for value in increments):
+            raise ValueError("配额增量必须是非负整数")
         tenant_id = int(getattr(identity, "tenant_id", 0) or 0)
         user_id = int(getattr(identity, "user_id", 0) or 0)
+        logger.debug("报表配额预占入口", tenant_id=tenant_id, user_id=user_id, jobs=jobs, runs=runs, concurrent=concurrent)
         period_start, period_end = self.period_bounds(timezone_name)
         key = (tenant_id, user_id, period_start.isoformat())
         if self._store is not None and not bool(getattr(self._store, "_memory", True)) and hasattr(self._store, "reserve_quota"):
@@ -198,9 +210,9 @@ class QuotaManager:
                 (usage.jobs_created + jobs, policy.max_jobs_created, "jobs_created"),
                 (usage.runs_started + runs, policy.max_runs_started, "runs_started"),
                 (usage.concurrent_runs + concurrent, policy.max_concurrent_runs, "concurrent_runs"),
-                (usage.analysis_units + units, policy.max_analysis_units_per_run, "analysis_units"),
-                (usage.queries + queries, policy.max_queries_per_run, "queries"),
-                (usage.rows + rows, policy.max_rows_per_query, "rows"),
+                (units, policy.max_analysis_units_per_run, "analysis_units"),
+                (queries, policy.max_queries_per_run, "queries"),
+                (rows, policy.max_rows_per_query, "rows"),
                 (usage.llm_tokens + tokens, policy.max_llm_tokens, "llm_tokens"),
                 (usage.share_links + shares, policy.max_share_links, "share_links"),
             )
@@ -219,13 +231,14 @@ class QuotaManager:
             return self._snapshot(policy, usage, period_start, period_end)
 
     # 方法作用：释放运行结束后的并发槽，不回滚已经消耗的次数。
-    # Args: identity - 当前身份；amount - 待释放槽位数；timezone_name - 周期时区。
+    # Args: identity - 当前身份；amount - 待释放槽位数；timezone_name - 周期时区；period_start - 原预占周期起点。
     # Returns: 无返回值。
-    async def release_concurrent(self, identity: Any, amount: int = 1, timezone_name: str = "Asia/Shanghai") -> None:
-        period_start, _ = self.period_bounds(timezone_name)
+    async def release_concurrent(self, identity: Any, amount: int = 1, timezone_name: str = "Asia/Shanghai", period_start: datetime | None = None) -> None:
+        """释放原预占周期的并发槽，避免跨月污染新周期用量。"""
+        period_start = period_start or self.period_bounds(timezone_name)[0]
         key = (int(getattr(identity, "tenant_id", 0) or 0), int(getattr(identity, "user_id", 0) or 0), period_start.isoformat())
         if self._store is not None and not bool(getattr(self._store, "_memory", True)) and hasattr(self._store, "release_concurrent_quota"):
-            await self._store.release_concurrent_quota(identity, amount=amount, timezone_name=timezone_name)
+            await self._store.release_concurrent_quota(identity, amount=amount, timezone_name=timezone_name, period_start=period_start)
             return
         usage = self._usage.get(key)
         if usage is not None:
@@ -235,10 +248,30 @@ class QuotaManager:
     # Args: identity - 当前身份；timezone_name - 周期时区。
     # Returns: 当前 QuotaSnapshot。
     async def snapshot(self, identity: Any, timezone_name: str = "Asia/Shanghai") -> QuotaSnapshot:
+        """读取当前用户有效配额，生产模式以持久化用量为准。"""
         period_start, period_end = self.period_bounds(timezone_name)
         key = (int(getattr(identity, "tenant_id", 0) or 0), int(getattr(identity, "user_id", 0) or 0), period_start.isoformat())
         policy = self._policies.get((key[0], key[1]), self.default_policy)
+        if self._store is not None and not bool(getattr(self._store, "_memory", True)):
+            persisted = await self._store.get_quota_policy(key[0], key[1])
+            if persisted:
+                policy = self._policy_from_mapping(persisted)
+            row = await self._store.get_quota_usage(identity, period_start)
+            usage = QuotaUsage(**{name: int((row or {}).get(name, 0)) for name in QuotaUsage.__dataclass_fields__})
+            return self._snapshot(policy, usage, period_start, period_end)
         return self._snapshot(policy, self._usage.get(key, QuotaUsage()), period_start, period_end)
+
+    # 方法作用：返还创建失败且尚未进入运行的内存任务预占。
+    # Args: identity - 当前身份；timezone_name - 原预占周期时区；period_start - 原预占周期起点。
+    # Returns: 无返回值。
+    async def refund_uncreated_job(self, identity: Any, timezone_name: str, period_start: datetime | None = None) -> None:
+        """仅供任务创建事务回滚使用，持久化分支由数据库回滚。"""
+        period_start = period_start or self.period_bounds(timezone_name)[0]
+        key = (int(identity.tenant_id), int(identity.user_id), period_start.isoformat())
+        async with self._locks.setdefault(key, asyncio.Lock()):
+            usage = self._usage.get(key)
+            if usage is not None:
+                usage.jobs_created = max(0, usage.jobs_created - 1)
 
     # 方法作用：把策略和用量转换为不含敏感明细的剩余摘要。
     # Args: policy - 当前策略；usage - 当前用量；period_start/period_end - 周期边界。

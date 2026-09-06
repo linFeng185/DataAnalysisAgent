@@ -423,6 +423,11 @@ async def _execute_supplemental_question(
                     not bool(work.get("query_result_truncated", False))
                     and row_count <= len(rows)
                 )
+                logger.debug(
+                    "补查脱敏元数据写回边界",
+                    masking_present="masking" in (work.get("query_result_statistics", {}) or {}),
+                    result_rows=len(rows),
+                )
                 return {
                     "question": question,
                     "success": True,
@@ -431,6 +436,7 @@ async def _execute_supplemental_question(
                     "row_count": row_count,
                     "complete": complete,
                     "data": rows,
+                    "masking": (work.get("query_result_statistics", {}) or {}).get("masking", {}),
                     "error": "",
                 }
             last_error = str(work.get("execution_error", "") or "补查 SQL 执行失败")

@@ -129,7 +129,7 @@ class TestMCPToolIsolation:
     # 方法作用：验证公开 Server 解析接口按作用域优先级选择连接。
     # Args: self - pytest 测试类实例。
     # Returns: 无返回值，断言失败时由 pytest 报告。
-    def test_resolve_loaded_server_prefers_narrowest_scope(self) -> None:
+    def test_resolve_loaded_server_prefers_narrowest_scope(self, monkeypatch) -> None:
         """同名 Server 默认选 private，显式 scope 时必须精确匹配。"""
         logger.debug("test_resolve_loaded_server_prefers_narrowest_scope 入口")
         from src.mcp_client.client_manager import MCPClientManager
@@ -140,6 +140,10 @@ class TestMCPToolIsolation:
             "tenant_4_0_docs": object(),
             "private_4_7_docs": object(),
         }
+        manager._server_tenants = {"docs": 0, "tenant_4_0_docs": 4, "private_4_7_docs": 4}
+        manager._server_owners = {"docs": 0, "tenant_4_0_docs": 0, "private_4_7_docs": 7}
+        monkeypatch.setattr("src.api.auth.get_current_tenant_id", lambda: 4)
+        monkeypatch.setattr("src.api.auth.get_current_user_id", lambda: 7)
         manager._server_scopes = {
             "docs": "system",
             "tenant_4_0_docs": "tenant",

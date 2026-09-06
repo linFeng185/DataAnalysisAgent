@@ -1,9 +1,10 @@
+import { t, useLanguage } from '../i18n';
 import { lazy, Suspense, useEffect, useState } from 'react';
 import { Button, Dropdown, Empty, message, Space, Tooltip, Typography } from 'antd';
 import { BarChartOutlined, DownOutlined } from '@ant-design/icons';
 import { post } from '../api/client';
 
-const ReactECharts = lazy(() => import('echarts-for-react'));
+const ReactECharts = lazy(() => import('./EChartsView'));
 
 export interface ChartConfig {
   type: string;
@@ -15,13 +16,13 @@ export interface ChartConfig {
 }
 
 const CHART_TYPES = [
-  { key: 'auto', label: '自动' },
-  { key: 'line', label: '折线图' },
-  { key: 'bar', label: '柱状图' },
-  { key: 'pie', label: '饼图' },
-  { key: 'scatter', label: '散点图' },
-  { key: 'heatmap', label: '热力图' },
-  { key: 'table', label: '表格' },
+  { key: 'auto', get label() { return t("自动"); } },
+  { key: 'line', get label() { return t("折线图"); } },
+  { key: 'bar', get label() { return t("柱状图"); } },
+  { key: 'pie', get label() { return t("饼图"); } },
+  { key: 'scatter', get label() { return t("散点图"); } },
+  { key: 'heatmap', get label() { return t("热力图"); } },
+  { key: 'table', get label() { return t("表格"); } },
 ];
 
 // 方法作用：渲染 ECharts 图表并允许基于原始结果切换图表类型。
@@ -32,6 +33,7 @@ export default function ChartPanel({ chartConfig, rows = [], height = 360 }: {
   rows?: Record<string, unknown>[];
   height?: number;
 }) {
+  useLanguage();
   const [current, setCurrent] = useState<ChartConfig | null | undefined>(chartConfig);
   const [adjusting, setAdjusting] = useState(false);
 
@@ -42,7 +44,7 @@ export default function ChartPanel({ chartConfig, rows = [], height = 360 }: {
   // Returns: 请求结束后无返回值。
   const handleAdjust = async (instruction: string): Promise<void> => {
     if (rows.length === 0) {
-      message.warning('当前结果没有可用数据');
+      message.warning(t("当前结果没有可用数据"));
       return;
     }
     setAdjusting(true);
@@ -50,7 +52,7 @@ export default function ChartPanel({ chartConfig, rows = [], height = 360 }: {
       const adjusted = await post<ChartConfig>('/charts/adjust', { rows, instruction });
       setCurrent(adjusted);
     } catch (error) {
-      message.error(error instanceof Error ? error.message : '图表调整失败');
+      message.error(error instanceof Error ? error.message : t("图表调整失败"));
     } finally {
       setAdjusting(false);
     }
@@ -60,7 +62,7 @@ export default function ChartPanel({ chartConfig, rows = [], height = 360 }: {
     return (
       <div style={{ textAlign: 'center', padding: 40 }}>
         <Empty image={<BarChartOutlined style={{ fontSize: 48, color: '#d9d9d9' }} />}
-          description={<Typography.Text type="secondary">暂无图表数据</Typography.Text>} />
+          description={<Typography.Text type="secondary">{t("暂无图表数据")}</Typography.Text>} />
       </div>
     );
   }
@@ -75,7 +77,7 @@ export default function ChartPanel({ chartConfig, rows = [], height = 360 }: {
           onClick: ({ key }) => void handleAdjust(key),
         }}
       >
-        <Tooltip title="调整图表">
+        <Tooltip title={t("调整图表")}>
           <Button size="small" loading={adjusting} icon={<BarChartOutlined />}>
             <Space size={4}>{CHART_TYPES.find(item => item.key === current.type)?.label || current.type}<DownOutlined /></Space>
           </Button>
@@ -95,7 +97,7 @@ export default function ChartPanel({ chartConfig, rows = [], height = 360 }: {
           <div style={{ textAlign: 'center' }}>
             <BarChartOutlined style={{ fontSize: 40, color: '#d9d9d9', marginBottom: 12 }} />
             <Typography.Text type="secondary">
-              {current.reason || `图表类型: ${current.type}（配置数据未生成）`}
+              {current.reason || t("图表类型: {value0}（配置数据未生成）", { value0: current.type })}
             </Typography.Text>
           </div>
         </div>
@@ -109,7 +111,7 @@ export default function ChartPanel({ chartConfig, rows = [], height = 360 }: {
       <div className="chart-container" style={{ height }}>
         <Suspense fallback={(
           <div style={{ height: '100%', display: 'grid', placeItems: 'center' }}>
-            <Typography.Text type="secondary">图表加载中...</Typography.Text>
+            <Typography.Text type="secondary">{t("图表加载中...")}</Typography.Text>
           </div>
         )}>
           <ReactECharts option={current.option}

@@ -18,7 +18,7 @@
 | 11.1.10 | GET /health | `src/api/routes/management.py` | 仅返回应用存活、版本和运行时长，不执行无租户 LLM 探测 | 单测完成 | P0 |
 | 11.1.11 | PUT /schema/.../comment | `src/api/routes.py` | 手动标注字段 | 单测完成 | P1 |
 | 11.1.12 | POST /mcp/{name}/reset | `src/api/routes.py` | Phase 2: MCP reset (依赖模块 8) | 待开发[^8] | P1 |
-| 11.1.13 | GET /metrics | `src/api/routes.py` | Phase 2: 指标列表 (依赖模块 6) | 待开发 | P2 |
+| 11.1.13 | 业务指标目录 API | `src/api/routes/metric_catalog.py` | 独立 /metric-catalog；租户隔离、分页、不可变版本、审核、生效和固定版本引用，不占用 Prometheus /metrics | 单测完成 | P2 |
 | 11.1.14 | GET /skills | `src/api/routes.py` | `GET /api/v1/skills` | 列出所有 Skill，含 is_builtin/triggers/tools/deps | 开发完成 | P2 |
 | 11.1.15 | POST /skills/upload | `src/api/routes.py` | `POST /api/v1/skills/upload` | 批量上传、验签、失败回滚和受控错误分类 | 单测完成 | P2 |
 | 11.1.16 | POST /skills/refresh | `src/api/routes.py` | `POST /api/v1/skills/refresh` | 全量重扫并恢复持久启停状态 | 单测完成 | P2 |
@@ -88,11 +88,10 @@
 
 ### 模块收尾
 
-模块功能点共 60 项，已完成 58 项，待开发 2 项。
+模块功能点共 60 项，已完成 59 项，待开发 1 项。
 
 | 功能点 | 不开发原因 | 可开发条件 | 预计开发时机 |
 |--------|------------|------------|--------------|
 | 11.1.12 POST /mcp/{name}/reset | MCPClientManager 已具备连接生命周期，但 reset 的并发请求处理和失败回滚语义尚未定义，且缺少可控 MCP 集成测试服务 | 明确 reset 状态机并完成 StaticMCPTestServer 后，可直接接入现有 Manager | Phase 2，MCP 生命周期集成测试就绪后 |
-| 11.1.13 GET /metrics | 当前同路径用于 Prometheus exposition；业务指标仍缺少独立 MetricDefinition 生命周期与分页 API | 完成指标定义模型、审核状态并为业务指标目录确定独立路由 | Phase 4，指标治理模块 |
 
 ---

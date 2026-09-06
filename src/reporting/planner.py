@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
+import calendar
 import re
+from datetime import datetime, timedelta
+from datetime import timezone as datetime_timezone
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from src.logging_config import get_logger
 from src.reporting.models import AnalysisUnit, EstimatedResources, ReportPlan, SharePlan
@@ -87,6 +91,8 @@ class ReportPlanner:
                 estimated_seconds=min(3600, max(5, len(units) * 8)),
             ),
         )
+        if execution_mode == "scheduled" and frequency:
+            plan.run_at, plan.schedule_day = self.parse_schedule_start(normalized, frequency, timezone)
         if self._llm is not None:
             plan = await self._merge_structured_llm(plan, normalized)
         logger.info(
@@ -97,6 +103,47 @@ class ReportPlanner:
             needs_confirmation=plan.needs_confirmation,
         )
         return plan
+
+    # 方法作用：解析明确星期、时刻和月内日期，首次时间与锚点显示给用户确认。
+    # Args: text - 用户描述；frequency - 已识别频率；timezone_name - IANA 时区；now - 可注入当前时间。
+    # Returns: 首次 UTC 时间与可选月度锚点日。
+    @staticmethod
+    def parse_schedule_start(text: str, frequency: str, timezone_name: str, *, now: datetime | None = None) -> tuple[datetime, int | None]:
+        """未指定时刻时首次立即执行；月末不足目标日时夹到该月末日。"""
+        zone = ZoneInfo(timezone_name)
+        current = (now or datetime.now(datetime_timezone.utc)).astimezone(zone)
+        clock = re.search(r"(?<!\d)(\d{1,2})(?::(\d{2})|点(?:(\d{1,2})分?)?|时)(?!\d)", text)
+        weekday = re.search(r"每周([一二三四五六日天])", text)
+        month_day = re.search(r"每月\s*(\d{1,2})[日号]", text)
+        if not any((clock, weekday, month_day)):
+            return current.astimezone(datetime_timezone.utc), None
+        hour = int(clock.group(1)) if clock else current.hour
+        minute = int(clock.group(2) or clock.group(3) or 0) if clock else current.minute
+        if clock and any(marker in text[:clock.start()] for marker in ("下午", "晚上")) and hour < 12:
+            hour += 12
+        if not 0 <= hour <= 23 or not 0 <= minute <= 59:
+            raise ValueError("调度时刻必须在 00:00 至 23:59 之间")
+        candidate = current.replace(hour=hour, minute=minute, second=0, microsecond=0)
+        anchor_day = int(month_day.group(1)) if month_day else None
+        if frequency == "weekly":
+            target = {"一": 0, "二": 1, "三": 2, "四": 3, "五": 4, "六": 5, "日": 6, "天": 6}[weekday.group(1)] if weekday else current.weekday()
+            candidate += timedelta(days=(target - current.weekday()) % 7)
+            if candidate <= current:
+                candidate += timedelta(days=7)
+        elif frequency == "monthly":
+            anchor_day = anchor_day or current.day
+            if not 1 <= anchor_day <= 31:
+                raise ValueError("月度调度日期必须在 1 至 31 日之间")
+            candidate = candidate.replace(day=min(anchor_day, calendar.monthrange(current.year, current.month)[1]))
+            if candidate <= current:
+                year, month_zero = divmod(current.year * 12 + current.month, 12)
+                candidate = candidate.replace(year=year, month=month_zero + 1, day=min(anchor_day, calendar.monthrange(year, month_zero + 1)[1]))
+        elif frequency == "daily":
+            if candidate <= current:
+                candidate += timedelta(days=1)
+        else:
+            raise ValueError("每小时调度不能同时指定每天的固定时刻")
+        return candidate.astimezone(datetime_timezone.utc), anchor_day
 
     # 方法作用：校验客户端提交的数据源候选，不接受 SQL 或路径表达式。
     # Args: datasources - 用户提交的数据源名称。

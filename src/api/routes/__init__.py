@@ -37,6 +37,7 @@ from src.api.routes.datasource import (
 from src.api.routes.datasource import (
     router as datasource_router,
 )
+from src.api.routes.emergency_access import router as emergency_access_router
 from src.api.routes.grafana import annotations, query, search, tag_keys, tag_values
 from src.api.routes.grafana import router as grafana_router
 from src.api.routes.knowledge import (
@@ -84,8 +85,11 @@ from src.api.routes.mcp import (
 from src.api.routes.mcp import (
     router as mcp_router,
 )
+from src.api.routes.metric_catalog import router as metric_catalog_router
 from src.api.routes.optimization import advice
 from src.api.routes.optimization import router as optimization_router
+from src.api.routes.query_quota import router as query_quota_router
+from src.api.routes.runtime_controls import router as runtime_controls_router
 from src.api.routes.report_workbench import router as report_workbench_router
 from src.api.routes.schema import (
     _schema_manager,
@@ -146,6 +150,10 @@ for domain_router in (
     grafana_router,
     optimization_router,
     report_workbench_router,
+    metric_catalog_router,
+    query_quota_router,
+    runtime_controls_router,
+    emergency_access_router,
 ):
     # 各领域路由已经包含自身 prefix，直接展开可让 FastAPI 新版和路由审计看到完整 APIRoute。
     router.routes.extend(domain_router.routes)

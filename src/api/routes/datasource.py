@@ -19,6 +19,17 @@ router = APIRouter()
 _started_at = time.time()
 
 
+# 在注册、更新与连接测试入口拒绝停用或未安装类型。
+# Args: dialect - 请求中的连接器标识。
+# Returns: 无返回值，不可用时返回 422。
+def _require_available_dialect(dialect: str) -> None:
+    from src.connectors.plugins import require_plugin
+    try:
+        require_plugin(dialect)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from None
+
+
 # ---- 数据源管理 (2.3.7-9) ----
 
 # 方法作用：把内部数据源配置转换为不包含密码的 API 摘要。
@@ -66,6 +77,7 @@ async def register_datasource(req: DataSourceCreateRequest):
     from src.datasource.providers.external import ExternalDataSourceProvider
 
     require_tenant_admin()
+    _require_available_dialect(req.dialect)
     registry = routes_package._registry()
     provider = registry.get_provider("external")
     if provider is None:
@@ -99,6 +111,7 @@ async def test_datasource_connection(req: DataSourceCreateRequest):
     from src.datasource.providers.external import ExternalDataSourceProvider
 
     require_tenant_admin()
+    _require_available_dialect(req.dialect)
     registry = routes_package._registry()
     provider = registry.get_provider("external")
     if provider is None:
@@ -129,6 +142,7 @@ async def update_datasource(name: str, req: DataSourceUpdateRequest):
     )
 
     require_tenant_admin()
+    _require_available_dialect(req.dialect)
     registry = routes_package._registry()
     provider = registry.get_provider("external")
     if provider is None:

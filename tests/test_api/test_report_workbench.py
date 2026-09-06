@@ -13,6 +13,19 @@ from fastapi import HTTPException
 class TestReportWorkbenchApi:
     """覆盖功能 23.1、23.2、23.6、23.7、23.8、23.10。"""
 
+    # 方法作用：让 API 单测的权限查询使用独立内存 Store，禁止复用真实 PG 连接。
+    # Args: self - 测试实例；monkeypatch - 补丁 fixture。
+    # Returns: 无返回值。
+    @pytest.fixture(autouse=True)
+    def isolate_permission_store(self, monkeypatch) -> None:
+        """权限库故障应失败关闭，普通 API 用例不依赖开发数据库可用性。"""
+        import src.api.routes.report_workbench as route
+        from src.reporting.quota import ReportPermissionService
+        from src.reporting.store import ReportStore
+
+        service = ReportPermissionService(store=ReportStore(memory=True))
+        monkeypatch.setattr(route, "get_report_permission_service", lambda: service)
+
     # 方法作用：验证计划预览只解析和估算，不创建任务。
     # Args: self - pytest 测试类实例；monkeypatch - pytest 补丁工具。
     # Returns: 无返回值，断言失败时由 pytest 报告。

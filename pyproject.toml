@@ -41,6 +41,8 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+vision = ["pillow>=12.0"]
+browser = ["playwright>=1.49"]
 dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.25.0",
@@ -89,6 +91,7 @@ include = ["src*"]
 asyncio_mode = "auto"
 testpaths = ["tests"]
 markers = [
+    "browser: 通过 RUN_BROWSER_TESTS=1 显式启用的离线浏览器行为测试",
     "integration: 使用真实模块边界但不访问远程服务的集成测试",
     "local_llm: 调用快速本地模型的集成、链路或冒烟测试",
     "live_llm: 仅在 RUN_LIVE_LLM_TESTS=1 时调用远程配置模型的测试",

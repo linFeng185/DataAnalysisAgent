@@ -164,11 +164,11 @@ class TenantPolicy:
             result = role == "super_admin"
         elif normalized_scope == "tenant":
             result = (
-                role in {"super_admin", "tenant_admin"}
+                role == "tenant_admin"
                 and identity.tenant_id >= DEFAULT_TENANT_ID
             )
         elif normalized_scope == "private":
-            result = identity.user_id > ANONYMOUS_USER_ID or (
+            result = (role != "super_admin" and identity.user_id > ANONYMOUS_USER_ID) or (
                 not self.multi_tenant and role == ANONYMOUS_ROLE
             )
         else:

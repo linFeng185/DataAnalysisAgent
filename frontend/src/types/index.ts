@@ -63,6 +63,11 @@ export interface TouchpointAttributionAnalysis {
   results: TouchpointAttributionItem[];
 }
 
+export interface MaskingMetadata {
+  applied: boolean;
+  fields: Array<{ column: string; categories: string[]; masked_count: number }>;
+}
+
 export interface ChatResponse {
   success: boolean;
   status?: string;
@@ -73,6 +78,8 @@ export interface ChatResponse {
   data: Record<string, unknown>[] | Record<string, unknown>;
   row_count: number;
   truncated: boolean;
+  masking?: MaskingMetadata;
+  supplemental_masking?: MaskingMetadata[];
   analysis: {
     summary: string;
     insights: string[];
@@ -308,6 +315,7 @@ export interface KnowledgeEntry {
 }
 
 export interface KnowledgeDoc {
+  id?: number;
   name: string;
   size: number;
   modified: number;

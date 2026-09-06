@@ -1,3 +1,4 @@
+import { t, useLanguage } from '../i18n';
 import { useState } from 'react';
 import { Alert, Card, Tag, Typography, Button, Collapse, Space, Statistic, Table } from 'antd';
 import {
@@ -6,6 +7,7 @@ import {
 } from '@ant-design/icons';
 import SqlPanel from './SqlPanel';
 import DataTable from './DataTable';
+import type { MaskingMetadata } from '../types';
 import ChartPanel from './ChartPanel';
 import type {
   ActionRequestPayload, SQLStatement, TouchpointAttributionAnalysis,
@@ -22,8 +24,11 @@ export default function ResultCard({
   onSendMessage?: (msg: string) => void;
   onConfirmAction?: (request: ActionRequestPayload) => void;
 }) {
+  useLanguage();
   const [expanded, setExpanded] = useState(true);
   const analysis = finalResult?.analysis as Record<string, unknown> | undefined;
+  const masking = finalResult?.masking as MaskingMetadata | undefined;
+  const supplementalMasking = finalResult?.supplemental_masking as MaskingMetadata[] | undefined;
   const errorMessage = finalResult?.error_message as string || '';
   const status = String(finalResult?.status || (finalResult?.success ? 'success' : 'failed'));
   const needsTimeRange = finalResult?.needs_time_range as boolean;
@@ -31,7 +36,7 @@ export default function ResultCard({
   const isError = status === 'failed' || (!finalResult?.success && !needsInput);
   const isSuccessful = !isError && !needsInput;
   const summary = isError ? errorMessage
-    : (analysis?.summary as string || tokens?.slice(0, 200) || '分析完成');
+    : (analysis?.summary as string || tokens?.slice(0, 200) || t("分析完成"));
   const insights = (analysis?.insights as string[]) || [];
   const indicatorGroups = (analysis?.indicator_groups as Array<{
     theme: string;
@@ -40,10 +45,10 @@ export default function ResultCard({
   const attribution = analysis?.attribution as TouchpointAttributionAnalysis | undefined;
   const attributionRows = attribution?.results || [];
   const businessSections = [
-    { title: '关联指标', items: (analysis?.related_metrics as string[]) || [] },
-    { title: '业务影响', items: (analysis?.business_impacts as string[]) || [] },
-    { title: '待验证原因', items: (analysis?.possible_causes as string[]) || [] },
-    { title: '行动建议', items: (analysis?.recommended_actions as string[]) || [] },
+    { title: t("关联指标"), items: (analysis?.related_metrics as string[]) || [] },
+    { title: t("业务影响"), items: (analysis?.business_impacts as string[]) || [] },
+    { title: t("待验证原因"), items: (analysis?.possible_causes as string[]) || [] },
+    { title: t("行动建议"), items: (analysis?.recommended_actions as string[]) || [] },
   ].filter(section => section.items.length > 0);
   const renderedReport = (analysis?.rendered_report as string) || '';
   const chartConfig = finalResult?.chart as {
@@ -75,7 +80,7 @@ export default function ResultCard({
       {sqlStatements.map((statement, index) => (
         <div key={`${statement.datasource}-${index}`} style={{ marginBottom: index < sqlStatements.length - 1 ? 16 : 0 }}>
           <Typography.Text strong style={{ display: 'block', marginBottom: 6 }}>
-            {statement.purpose === 'supplemental' ? '自主补查' : statement.datasource} ({statement.dialect})
+            {statement.purpose === 'supplemental' ? t("自主补查") : statement.datasource} ({statement.dialect})
           </Typography.Text>
           {statement.purpose === 'supplemental' && statement.question && (
             <Typography.Text type="secondary" style={{ display: 'block', marginBottom: 6 }}>
@@ -88,50 +93,50 @@ export default function ResultCard({
     </div>
   ) : effectiveSql ? <SqlPanel sqlCode={effectiveSql} /> : null;
   const TIME_OPTIONS = [
-    { label: '最近一周', query: '最近一周' },
-    { label: '最近一月', query: '最近一个月' },
-    { label: '最近一年', query: '最近一年' },
-    { label: '最近两年', query: '最近两年' },
-    { label: '最近三年', query: '最近三年' },
-    { label: '最近五年', query: '最近五年' },
-    { label: '全部数据', query: '全部数据' },
+    { label: t("最近一周"), query: '最近一周' },
+    { label: t("最近一月"), query: '最近一个月' },
+    { label: t("最近一年"), query: '最近一年' },
+    { label: t("最近两年"), query: '最近两年' },
+    { label: t("最近三年"), query: '最近三年' },
+    { label: t("最近五年"), query: '最近五年' },
+    { label: t("全部数据"), query: '全部数据' },
   ];
 
   const collapseItems = [
     ...(sqlContent ? [{
       key: 'sql',
-      label: sqlStatements.length > 1 ? `执行 SQL (${sqlStatements.length})` : '执行 SQL',
+      label: sqlStatements.length > 1 ? t("执行 SQL ({value0})", { value0: sqlStatements.length }) : t("执行 SQL"),
       children: sqlContent,
     }] : []),
-    ...(hasData ? [{ key: 'data', label: `数据 (${data.length} 行)`, children: <DataTable data={data} /> }] : []),
+    ...(hasData ? [{ key: 'data', label: <span>{t("数据 (")}{data.length} {t("行)")} {masking?.applied && <Tag color="gold">{t("敏感数据已脱敏")}</Tag>}</span>, children: <><DataTable data={data} masking={masking} />{supplementalMasking?.some(item => item.applied) && <Tag color="gold">{t("补查数据已脱敏")}</Tag>}</> }] : []),
     ...(shouldShowChart && chartConfig ? [{
       key: 'chart',
-      label: chartConfig.status === 'failed' ? '图表生成失败' : `图表 (${chartConfig.type})`,
+      label: chartConfig.status === 'failed' ? t("图表生成失败") : t("图表 ({value0})", { value0: chartConfig.type }),
       children: <ChartPanel chartConfig={chartConfig} rows={chartRows} />,
     }] : []),
-    ...(renderedReport ? [{ key: 'report', label: '报告正文', children: <Typography.Paragraph style={{ whiteSpace: 'pre-wrap', marginBottom: 0 }}>{renderedReport}</Typography.Paragraph> }] : []),
+    ...(renderedReport ? [{ key: 'report', label: t("报告正文"), children: <Typography.Paragraph style={{ whiteSpace: 'pre-wrap', marginBottom: 0 }}>{renderedReport}</Typography.Paragraph> }] : []),
   ];
 
   return (
     <Card size="small"
       title={<Space>
         {isError ? (
-          <><span>执行出错</span><Tag icon={<CloseCircleOutlined />} color="error">失败</Tag></>
+          <><span>{t("执行出错")}</span><Tag icon={<CloseCircleOutlined />} color="error">{t("失败")}</Tag></>
         ) : needsInput ? (
-          <><span>{status === 'needs_confirmation' ? '等待人工确认' : '需要补充信息'}</span><Tag icon={<ClockCircleOutlined />} color="processing">待处理</Tag></>
+          <><span>{status === 'needs_confirmation' ? t("等待人工确认") : t("需要补充信息")}</span><Tag icon={<ClockCircleOutlined />} color="processing">{t("待处理")}</Tag></>
         ) : (
-          <><span>分析完成</span><Tag icon={<CheckCircleOutlined />} color="success">成功</Tag></>
+          <><span>{t("分析完成")}</span><Tag icon={<CheckCircleOutlined />} color="success">{t("成功")}</Tag></>
         )}
-        {validationErrors.length > 0 && <Tag color="warning">{validationErrors.length} 个警告</Tag>}
+        {validationErrors.length > 0 && <Tag color="warning">{validationErrors.length} {t("个警告")}</Tag>}
       </Space>}
       extra={<Button type="text" size="small" icon={expanded ? <DownOutlined /> : <RightOutlined />}
-        onClick={() => setExpanded(!expanded)}>{expanded ? '收起' : '展开'}</Button>}>
+        onClick={() => setExpanded(!expanded)}>{expanded ? t("收起") : t("展开")}</Button>}>
       <Typography.Paragraph style={{ marginBottom: expanded ? 12 : 0 }} ellipsis={!expanded ? { rows: 2 } : false}>
         {summary}
       </Typography.Paragraph>
       {expanded && needsTimeRange && (
         <div style={{ marginBottom: 12 }}>
-          <Typography.Text type="secondary" style={{ display: 'block', marginBottom: 8 }}>选择查询时间范围：</Typography.Text>
+          <Typography.Text type="secondary" style={{ display: 'block', marginBottom: 8 }}>{t("选择查询时间范围：")}</Typography.Text>
           <Space wrap>
             {TIME_OPTIONS.map(opt => (
               <Tag key={opt.label} color="blue" style={{ cursor: 'pointer', padding: '2px 10px' }}
@@ -149,7 +154,7 @@ export default function ResultCard({
           onClick={() => onConfirmAction?.({ ...actionRequest, confirmed: true })}
           style={{ marginBottom: 12 }}
         >
-          确认执行
+          {t("确认执行")}
         </Button>
       )}
       {expanded && insights.length > 0 && (
@@ -168,7 +173,7 @@ export default function ResultCard({
         </div>
       )}
       {expanded && chartConfig?.status === 'failed' && chartConfig.reason && (
-        <Alert type="warning" showIcon message="图表未生成" description={chartConfig.reason} style={{ marginBottom: 12 }} />
+        <Alert type="warning" showIcon message={t("图表未生成")} description={chartConfig.reason} style={{ marginBottom: 12 }} />
       )}
       {expanded && indicatorGroups.length > 0 && (
         <div style={{ marginBottom: 12 }}>
@@ -178,7 +183,7 @@ export default function ResultCard({
                 <Typography.Title level={5} style={{ margin: 0, fontSize: 14 }}>
                   {group.theme}
                 </Typography.Title>
-                <Tag>{group.indicators.length} 项</Tag>
+                <Tag>{group.indicators.length} {t("项")}</Tag>
               </Space>
               <div style={{
                 display: 'grid',
@@ -215,41 +220,41 @@ export default function ResultCard({
       {expanded && attribution && (
         <section style={{ marginBottom: 16, borderTop: '1px solid #f0f0f0', paddingTop: 12 }}>
           <Space size={8} wrap style={{ marginBottom: 8 }}>
-            <Typography.Text strong>触点归因</Typography.Text>
+            <Typography.Text strong>{t("触点归因")}</Typography.Text>
             <Tag color={attribution.status === 'applied' ? 'green' : 'warning'}>
               {attribution.model_display_name}
             </Tag>
             <Tag>{({
-              user_explicit: '用户指定',
-              llm_recommended: '模型推荐',
-              rule_default: '规则默认',
+              user_explicit: t("用户指定"),
+              llm_recommended: t("模型推荐"),
+              rule_default: t("规则默认"),
             } as const)[attribution.selection_source]}</Tag>
-            <Tag>{attribution.dataset_source === 'supplemental' ? '补查数据' : '主查询数据'}</Tag>
+            <Tag>{attribution.dataset_source === 'supplemental' ? t("补查数据") : t("主查询数据")}</Tag>
           </Space>
           <Typography.Paragraph type="secondary" style={{ marginBottom: 8 }}>
             {attribution.selection_reason}
           </Typography.Paragraph>
           {attribution.status === 'insufficient' ? (
-            <Alert type="warning" showIcon message="归因证据不足"
+            <Alert type="warning" showIcon message={t("归因证据不足")}
               description={(attribution.eligibility?.missing_requirements || []).join('；')} />
           ) : (
             <>
               <Space size={[8, 8]} wrap style={{ marginBottom: 10 }}>
-                <Tag>路径 {attribution.total_paths || 0}</Tag>
-                <Tag color="green">已转化 {attribution.converted_paths || 0}</Tag>
-                <Tag>未转化 {attribution.unconverted_paths || 0}</Tag>
+                <Tag>{t("路径")} {attribution.total_paths || 0}</Tag>
+                <Tag color="green">{t("已转化")} {attribution.converted_paths || 0}</Tag>
+                <Tag>{t("未转化")} {attribution.unconverted_paths || 0}</Tag>
                 {attribution.half_life_days != null && (
-                  <Tag>半衰期 {String(attribution.half_life_days)} 天</Tag>
+                  <Tag>{t("半衰期")} {String(attribution.half_life_days)} {t("天")}</Tag>
                 )}
               </Space>
               <Table rowKey="touchpoint" size="small" pagination={false}
                 dataSource={attributionRows}
                 columns={[
-                  { title: '触点', dataIndex: 'touchpoint' },
-                  { title: '归因价值', dataIndex: 'attributed_value', align: 'right' },
-                  { title: '归因占比', dataIndex: 'attribution_pct', align: 'right',
+                  { title: t("触点"), dataIndex: 'touchpoint' },
+                  { title: t("归因价值"), dataIndex: 'attributed_value', align: 'right' },
+                  { title: t("归因占比"), dataIndex: 'attribution_pct', align: 'right',
                     render: value => `${value}%` },
-                  { title: '转化信用', dataIndex: 'conversion_credit', align: 'right' },
+                  { title: t("转化信用"), dataIndex: 'conversion_credit', align: 'right' },
                 ]} />
             </>
           )}

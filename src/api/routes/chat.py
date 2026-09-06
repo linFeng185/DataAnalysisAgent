@@ -8,8 +8,8 @@ from typing import TYPE_CHECKING
 
 from fastapi import APIRouter, File, HTTPException, UploadFile
 
-from src.api.schemas import ChatRequest, ChatResponse
 from src.api.routes._helpers import _call_with_optional_tenant
+from src.api.schemas import ChatRequest, ChatResponse
 from src.logging_config import get_logger
 
 logger = get_logger(__name__)
@@ -17,6 +17,7 @@ router = APIRouter()
 _started_at = time.time()
 _CHAT_ATTACHMENT_EXTENSIONS = frozenset({
     ".csv", ".xlsx", ".xls", ".parquet", ".pdf", ".docx", ".txt", ".md", ".markdown",
+    ".png", ".jpg", ".jpeg", ".webp",
 })
 
 if TYPE_CHECKING:
@@ -41,7 +42,7 @@ def _requested_chat_datasources(req: ChatRequest) -> list[str]:
 # 方法作用：在任何权限、Schema 或 LLM 工作前校验聊天资源预算并计入用户配额。
 # Args: req - 聊天请求模型。
 # Returns: 校验通过时返回 None；超限时抛出 HTTP 413/429。
-def _enforce_chat_request_quota(req: ChatRequest) -> None:
+async def _enforce_chat_request_quota(req: ChatRequest) -> None:
     from src.api.auth import get_current_user_id
     from src.config import get_settings
     from src.security.data_masker import check_rate_limit
@@ -71,7 +72,7 @@ def _enforce_chat_request_quota(req: ChatRequest) -> None:
             limit=max_datasources,
         )
         raise HTTPException(413, f"单次查询最多选择 {max_datasources} 个数据源")
-    if not check_rate_limit(user_id=get_current_user_id()):
+    if not await check_rate_limit(user_id=get_current_user_id()):
         logger.warning("聊天请求频率超限", user_id=get_current_user_id())
         raise HTTPException(429, "请求频率超限，请稍后重试")
     logger.info(
@@ -258,6 +259,7 @@ async def _read_chat_uploads(
         max_total_bytes=max_total_bytes,
     )
     prepared: list[tuple[str, bytes, int]] = []
+    image_count = 0
     total_bytes = 0
     for uploaded_file in files:
         filename = os.path.basename(str(uploaded_file.filename or "").strip())
@@ -275,6 +277,23 @@ async def _read_chat_uploads(
         if total_bytes > max_total_bytes:
             logger.warning("聊天附件累计大小超限", total_bytes=total_bytes, limit=max_total_bytes)
             raise HTTPException(413, "上传附件累计大小超过限制")
+        from src.knowledge.image_assets import (
+            IMAGE_EXTENSIONS,
+            MAX_REQUEST_IMAGES,
+            ImageAssetError,
+            prepare_image_bytes,
+        )
+
+        if extension in IMAGE_EXTENSIONS:
+            import asyncio
+
+            image_count += 1
+            if image_count > MAX_REQUEST_IMAGES:
+                raise HTTPException(413, f"单次最多上传 {MAX_REQUEST_IMAGES} 张图片")
+            try:
+                await asyncio.to_thread(prepare_image_bytes, content)
+            except ImageAssetError as exc:
+                raise HTTPException(400, str(exc)) from None
         prepared.append((filename, content, len(content)))
     logger.info("读取聊天附件完成", accepted=len(prepared), total_bytes=total_bytes)
     return prepared
@@ -360,7 +379,7 @@ async def upload_chat_files(files: list[UploadFile] = File(...)) -> dict:
 @router.post("/chat")
 async def chat(req: ChatRequest):
     """统一 chat 端点：stream=False 返回 JSON，stream=True 返回 SSE 流式。"""
-    _enforce_chat_request_quota(req)
+    await _enforce_chat_request_quota(req)
     enabled_skill_ids = _validated_skill_ids(req)
     selected_datasources = _requested_chat_datasources(req)
     import src.api.routes as routes_package
@@ -479,7 +498,7 @@ async def chat(req: ChatRequest):
 @router.post("/chat/stream")
 async def chat_stream(req: ChatRequest):
     """（保留向后兼容）独立流式端点，等价于 /chat + stream=True。"""
-    _enforce_chat_request_quota(req)
+    await _enforce_chat_request_quota(req)
     enabled_skill_ids = _validated_skill_ids(req)
     logger.debug(
         "兼容流式 Chat 入口",

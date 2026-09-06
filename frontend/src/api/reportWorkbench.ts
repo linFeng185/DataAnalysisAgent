@@ -18,6 +18,36 @@ import type {
 
 const REPORT_BASE = '/report-workbench';
 
+// 方法作用：暂停或恢复已有报表调度，不改变运行次数上限。
+// Args: jobId - 任务标识；paused - 目标暂停状态。
+// Returns: 调度状态。
+export function setReportJobPaused(jobId: string, paused: boolean): Promise<Record<string, unknown>> {
+  return post<Record<string, unknown>>(`${REPORT_BASE}/jobs/${encodeURIComponent(jobId)}/${paused ? 'pause' : 'resume'}`, {});
+}
+
+export interface PageLifecycle {
+  report_id: string;
+  expires_at: string | null;
+  expired: boolean;
+  can_extend: boolean;
+  can_permanent: boolean;
+}
+
+// 方法作用：读取含过期页面在内的生命周期管理权限，不读取页面正文。
+// Args: reportId - 页面标识。
+// Returns: 有效期与可执行操作。
+export function fetchPageLifecycle(reportId: string): Promise<PageLifecycle> {
+  return get<PageLifecycle>(`${REPORT_BASE}/reports/${encodeURIComponent(reportId)}/lifecycle`);
+}
+
+// 方法作用：按已授权能力延期或永久保留页面，不自动延长分享。
+// Args: reportId - 页面标识；days - 延期天数，null 表示永久。
+// Returns: 操作结果。
+export function updatePageLifecycle(reportId: string, days: number | null): Promise<Record<string, unknown>> {
+  const action = days === null ? 'permanent' : 'extend';
+  return post<Record<string, unknown>>(`${REPORT_BASE}/reports/${encodeURIComponent(reportId)}/${action}`, days === null ? {} : { days });
+}
+
 // 方法作用：解析报表工作台计划预览请求。
 // Args: prompt - 自然语言报表描述；datasources - 当前用户选择的数据源；timezone - 租户时区。
 // Returns: 结构化计划、哈希和资源估算。

@@ -291,6 +291,7 @@ class Settings(BaseSettings):
 
     # ---- 主动洞察与定时报告 ----
     automation_enabled: bool = True
+    report_scheduler_enabled: bool = True
     automation_poll_interval_seconds: int = Field(default=60, ge=10, le=3600)
     automation_smtp_host: str = ""
     automation_smtp_port: int = Field(default=587, ge=1, le=65535)
@@ -324,7 +325,19 @@ class Settings(BaseSettings):
     jwt_access_token_expire_hours: int = 24
     jwt_refresh_token_expire_days: int = 7
     admin_api_key: str = ""                  # 管理端点 API Key，空=不启用
-    credential_encryption_key: str = ""
+    credential_encryption_key: str = Field(default="", repr=False)
+    credential_key_id: str = Field(default="", max_length=64)
+    credential_previous_keys: dict[str, str] = Field(default_factory=dict, repr=False)
+    secret_provider: Literal["environment", "file", "vault"] = "environment"
+    secret_file: str = ""
+    vault_addr: str = ""
+    vault_mount: str = "secret"
+    vault_secret_path: str = ""
+    vault_token_file: str = ""
+    vault_namespace: str = ""
+    vault_ca_file: str = ""
+    vault_secret_version: int = Field(default=0, ge=0)
+    vault_timeout_seconds: float = Field(default=10.0, gt=0, le=60)
 
     # ---- API 浏览器安全 ----
     cors_allowed_origins: str = ""

@@ -89,9 +89,9 @@ class TestLLMGovernanceFrontend:
 
         # Act / Assert
         assert source.count("scroll={{ x: 990 }}") >= 2
-        assert "{ title: '编码', dataIndex: 'code', width: 130 }" in source
-        assert "{ title: '协议', dataIndex: 'protocol', width: 180 }" in source
-        assert "{ title: '模型 ID', dataIndex: 'model_id', width: 180 }" in source
+        assert '''{ title: t("编码"), dataIndex: 'code', width: 130 }''' in source
+        assert '''{ title: t("协议"), dataIndex: 'protocol', width: 180 }''' in source
+        assert '''{ title: t("模型 ID"), dataIndex: 'model_id', width: 180 }''' in source
 
     # 方法作用：验证命名连接表单与默认模型表单使用独立的 FormInstance。
     # Args: self - pytest 测试类实例。

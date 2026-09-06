@@ -352,10 +352,25 @@ async def introspect_table(
     )
 
 
+# 内置数据库走原有元数据契约，扩展数据库走插件声明的异步内省。
+# Args: ds - 数据源配置；executor - 异步执行器；table_names - 可选表过滤。
+# Returns: 已验证的表结构快照。
 async def introspect_database(
-    ds: DataSourceConfig, executor, table_names: list[str] | None = None
+    ds: DataSourceConfig, executor, table_names: list[str] | None = None, *, strict: bool = False
 ) -> SchemaSnapshot:
     """内省整个数据库。"""
+    from src.connectors.plugins import require_plugin
+    from src.connectors.registry import create_connector
+    require_plugin(ds.dialect)
+    if ds.dialect not in {"clickhouse", "mysql", "postgres", "oracle", "mssql", "sqlite"}:
+        connector = ds.connector or create_connector(ds)
+        if ds.engine is not None:
+            connector.attach_engine(ds.engine)
+        logger.info("插件表结构内省入口", datasource=ds.name, dialect=ds.dialect)
+        snapshot = await connector.introspect_schema(executor=executor, table_names=table_names)
+        if not isinstance(snapshot, SchemaSnapshot):
+            raise ValueError("插件内省必须返回 SchemaSnapshot")
+        return snapshot
     if table_names is None:
         table_names = await _list_tables(ds, executor)
     tables = []
@@ -365,6 +380,8 @@ async def introspect_database(
         except MetadataPermissionError:
             raise
         except Exception as e:
+            if strict:
+                raise
             logger.warning("表内省失败", table=name, error=str(e))
     return SchemaSnapshot(tables=tables)
 

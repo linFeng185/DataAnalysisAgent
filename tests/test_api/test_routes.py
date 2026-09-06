@@ -321,7 +321,7 @@ class TestEndpoints:
 
         access = AsyncMock(side_effect=AssertionError("限流后不应解析数据源"))
         monkeypatch.setattr(routes, "_resolve_chat_access", access, raising=False)
-        monkeypatch.setattr(masker, "check_rate_limit", lambda user_id=None: False)
+        monkeypatch.setattr(masker, "check_rate_limit", AsyncMock(return_value=False))
 
         # Act
         response = await client.post("/api/v1/chat", json={

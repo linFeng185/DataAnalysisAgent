@@ -17,6 +17,12 @@ import { get } from './api/client';
 import { fetchReportPermissions } from './api/reportWorkbench';
 import type { HealthResponse } from './types';
 import zhCN from 'antd/locale/zh_CN';
+import enUS from 'antd/locale/en_US';
+import dayjs from 'dayjs';
+import 'dayjs/locale/zh-cn';
+import 'dayjs/locale/en';
+import { t, useLanguage } from './i18n';
+import LanguageSwitcher from './components/LanguageSwitcher';
 
 const { Header, Sider, Content } = Layout;
 
@@ -26,6 +32,7 @@ const SchemaPage = lazy(() => import('./pages/SchemaPage'));
 const HistoryPage = lazy(() => import('./pages/HistoryPage'));
 const SkillsPage = lazy(() => import('./pages/SkillsPage'));
 const KnowledgePage = lazy(() => import('./pages/KnowledgePage'));
+const MetricsPage = lazy(() => import('./pages/MetricsPage'));
 const McpPage = lazy(() => import('./pages/McpPage'));
 const AdminPage = lazy(() => import('./pages/AdminPage'));
 const AutomationPage = lazy(() => import('./pages/AutomationPage'));
@@ -36,7 +43,7 @@ const LoginPage = lazy(() => import('./pages/LoginPage'));
 
 const pageFallback = (
   <div style={{ minHeight: 240, display: 'grid', placeItems: 'center' }}>
-    页面加载中...
+    {t("页面加载中...")}
   </div>
 );
 
@@ -44,6 +51,7 @@ const pageFallback = (
 // Args: 无。
 // Returns: 工作台、登录重定向或加载占位。
 function ProtectedApp() {
+  useLanguage();
   const { loading, authRequired, isAuthenticated } = useAuth();
   if (loading) return <Layout style={{ minHeight: '100vh' }} />;
   if (authRequired && !isAuthenticated) return <Navigate to="/login" replace />;
@@ -54,6 +62,7 @@ function ProtectedApp() {
 // Args: 无，读取 AuthContext 当前身份。
 // Returns: 超级管理员页面或首页重定向。
 function AdminRoute() {
+  useLanguage();
   const { user } = useAuth();
   console.debug('AdminRoute 入口', { role: user?.role || '' });
   const result = ['super_admin', 'tenant_admin'].includes(user?.role || '')
@@ -66,6 +75,7 @@ function AdminRoute() {
 // Args: 无，读取当前认证身份和报表能力接口。
 // Returns: 报表工作台、加载占位或首页重定向。
 function ReportRoute() {
+  useLanguage();
   const { user } = useAuth();
   const [allowed, setAllowed] = useState<boolean | null>(null);
 
@@ -77,6 +87,7 @@ function ReportRoute() {
     return () => { active = false; };
   }, [user?.role]);
 
+  if (user?.role === 'super_admin') return <Navigate to="/admin" replace />;
   if (allowed === null) return pageFallback;
   return allowed ? <ReportWorkbenchPage /> : <Navigate to="/" replace />;
 }
@@ -85,6 +96,7 @@ function ReportRoute() {
 // Args: 无。
 // Returns: 已认证应用工作台。
 function AppContent() {
+  useLanguage();
   const [collapsed, setCollapsed] = useState(false);
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const [health, setHealth] = useState<HealthResponse | null>(null);
@@ -112,31 +124,34 @@ function AppContent() {
 
   const menuKey = location.pathname === '/' ? 'chat' : location.pathname.replace('/', '') || 'chat';
   const navigationItems: MenuProps['items'] = [
-    { key: 'chat', icon: <MessageOutlined />, label: <NavLink to="/">对话分析</NavLink> },
+    { key: 'chat', icon: <MessageOutlined />, label: <NavLink to="/">{t("对话分析")}</NavLink> },
     user?.role !== 'viewer'
-      ? { key: 'datasource', icon: <DatabaseOutlined />, label: <NavLink to="/datasource">数据源</NavLink> }
+      ? { key: 'datasource', icon: <DatabaseOutlined />, label: <NavLink to="/datasource">{t("数据源")}</NavLink> }
       : null,
     user?.role !== 'viewer'
-      ? { key: 'schema', icon: <SettingOutlined />, label: <NavLink to="/schema">表结构</NavLink> }
+      ? { key: 'schema', icon: <SettingOutlined />, label: <NavLink to="/schema">{t("表结构")}</NavLink> }
       : null,
-    { key: 'history', icon: <HistoryOutlined />, label: <NavLink to="/history">历史</NavLink> },
+    { key: 'history', icon: <HistoryOutlined />, label: <NavLink to="/history">{t("历史")}</NavLink> },
+    ['tenant_admin', 'analyst', 'viewer'].includes(user?.role || '')
+      ? { key: 'metric-catalog', icon: <ReadOutlined />, label: <NavLink to="/metric-catalog">{t("指标目录")}</NavLink> }
+      : null,
     user?.role !== 'viewer'
       ? { key: 'skills', icon: <ThunderboltOutlined />, label: <NavLink to="/skills">Skills</NavLink> }
       : null,
     user?.role !== 'viewer'
-      ? { key: 'knowledge', icon: <ReadOutlined />, label: <NavLink to="/knowledge">知识库</NavLink> }
+      ? { key: 'knowledge', icon: <ReadOutlined />, label: <NavLink to="/knowledge">{t("知识库")}</NavLink> }
       : null,
-    reportMenuAllowed === true
-      ? { key: 'report-workbench', icon: <ScheduleOutlined />, label: <NavLink to="/report-workbench">报表工作台</NavLink> }
+    reportMenuAllowed === true && user?.role !== 'super_admin'
+      ? { key: 'report-workbench', icon: <ScheduleOutlined />, label: <NavLink to="/report-workbench">{t("报表工作台")}</NavLink> }
       : null,
     user?.role !== 'viewer'
-      ? { key: 'automation', icon: <ScheduleOutlined />, label: <NavLink to="/automation">自动化</NavLink> }
+      ? { key: 'automation', icon: <ScheduleOutlined />, label: <NavLink to="/automation">{t("自动化")}</NavLink> }
       : null,
     ['super_admin', 'tenant_admin'].includes(user?.role || '')
       ? { key: 'mcp', icon: <ApiOutlined />, label: <NavLink to="/mcp">MCP</NavLink> }
       : null,
     ['super_admin', 'tenant_admin'].includes(user?.role || '')
-      ? { key: 'admin', icon: <SafetyCertificateOutlined />, label: <NavLink to="/admin">管理工作区</NavLink> }
+      ? { key: 'admin', icon: <SafetyCertificateOutlined />, label: <NavLink to="/admin">{t("管理工作区")}</NavLink> }
       : null,
   ].filter((item): item is NonNullable<typeof item> => item !== null);
   const navigationMenu = (
@@ -159,7 +174,7 @@ function AppContent() {
         <div style={{ display: 'flex', alignItems: 'center', minWidth: 0 }}>
           {isCompact && (
             <Button
-              aria-label="打开导航"
+              aria-label={t("打开导航")}
               type="text"
               icon={<MenuOutlined />}
               onClick={() => setMobileNavOpen(true)}
@@ -167,23 +182,24 @@ function AppContent() {
             />
           )}
           <Typography.Text className="app-title" strong style={{ color: '#fff', fontSize: 16 }}>
-            数据分析智能体
+            {t("数据分析智能体")}
           </Typography.Text>
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+          <LanguageSwitcher />
           {health ? (
             <span className="mobile-health" style={{ display: 'contents' }}>
-              <Tag icon={<CheckCircleOutlined />} color="green">服务正常</Tag>
+              <Tag icon={<CheckCircleOutlined />} color="green">{t("服务正常")}</Tag>
             </span>
           ) : healthChecked ? (
-            <Tag className="mobile-health" color="red">服务不可用</Tag>
+            <Tag className="mobile-health" color="red">{t("服务不可用")}</Tag>
           ) : (
-            <Tag className="mobile-health" icon={<LoadingOutlined />} color="default">检查连接中</Tag>
+            <Tag className="mobile-health" icon={<LoadingOutlined />} color="default">{t("检查连接中")}</Tag>
           )}
-          <Tag icon={<UserOutlined />}>{user?.tenant_code ? `${user.tenant_code} / ` : ''}{user?.username || `用户 ${user?.user_id ?? ''}`}</Tag>
+          <Tag icon={<UserOutlined />}>{user?.tenant_code ? `${user.tenant_code} / ` : ''}{user?.username || t("用户 {value0}", { value0: user?.user_id ?? '' })}</Tag>
           <Tag className="role-tag" color={user?.role === 'super_admin' ? 'red' : 'default'}>{user?.role || '-'}</Tag>
           <Button type="text" icon={<LogoutOutlined />} onClick={() => void logout()}
-            style={{ color: '#fff' }}><span className="logout-label">退出</span></Button>
+            style={{ color: '#fff' }}><span className="logout-label">{t("退出")}</span></Button>
         </div>
       </Header>
       <Layout>
@@ -195,7 +211,7 @@ function AppContent() {
         )}
         <Drawer
           className="mobile-nav-drawer"
-          title="导航"
+          title={t("导航")}
           placement="left"
           width={260}
           open={isCompact && mobileNavOpen}
@@ -214,6 +230,7 @@ function AppContent() {
                 <Route path="/history" element={<HistoryPage />} />
                 <Route path="/skills" element={<SkillsPage />} />
                 <Route path="/knowledge" element={<KnowledgePage />} />
+                <Route path="/metric-catalog" element={<MetricsPage />} />
                 <Route path="/report-workbench" element={<ReportRoute />} />
                 <Route path="/reports/:reportId" element={<ReportViewerPage />} />
                 <Route path="/automation" element={<AutomationPage />} />
@@ -232,8 +249,10 @@ function AppContent() {
 // Args: 无。
 // Returns: 应用根组件。
 export default function App() {
+  const language = useLanguage();
+  dayjs.locale(language === 'en-US' ? 'en' : 'zh-cn');
   return (
-    <ConfigProvider locale={zhCN} theme={{ algorithm: theme.defaultAlgorithm }}>
+    <ConfigProvider locale={language === 'en-US' ? enUS : zhCN} theme={{ algorithm: theme.defaultAlgorithm }}>
       <BrowserRouter>
         <AuthProvider>
         <Routes>

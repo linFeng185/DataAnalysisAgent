@@ -51,6 +51,13 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     setup_logging()
     async with use_app_context_async(context):
         settings = context.settings
+        from src.config import validate_production_settings
+        from src.datasource.secret_provider import load_secret_settings
+
+        # 托管凭证必须先完成注入和校验，之后才能创建连接池和后台任务。
+        settings = await load_secret_settings(settings)
+        validate_production_settings(settings)
+        context.settings = settings
         logger.info("=" * 50)
         logger.info("智能体启动", env=settings.env, version="0.1.0")
         logger.info(
@@ -80,7 +87,8 @@ def create_app() -> FastAPI:
     settings = get_settings()
     logger.debug("create_app 入口", env=settings.env)
     from src.config import validate_production_settings
-    validate_production_settings(settings)
+    if getattr(settings, "secret_provider", "environment") == "environment":
+        validate_production_settings(settings)
 
     import json as _json
 

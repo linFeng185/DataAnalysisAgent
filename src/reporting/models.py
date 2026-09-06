@@ -104,6 +104,7 @@ class ReportPlan(BaseModel):
     execution_mode: Literal["immediate", "scheduled"] = "immediate"
     frequency: Literal["hourly", "daily", "weekly", "monthly"] | None = None
     run_at: datetime | None = None
+    schedule_day: int | None = Field(default=None, ge=1, le=31)
     timezone: str = "Asia/Shanghai"
     max_runs: int | None = Field(default=1, ge=1, le=1000)
     schedule_end_at: datetime | None = None
@@ -124,6 +125,16 @@ class ReportPlan(BaseModel):
         if not _TIMEZONE_RE.fullmatch(self.timezone.strip()):
             raise ValueError("时区格式无效")
         self.timezone = self.timezone.strip()
+        from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+        try:
+            zone = ZoneInfo(self.timezone)
+        except (ZoneInfoNotFoundError, ValueError) as exc:
+            raise ValueError("未知的 IANA 时区") from exc
+        for field in ("run_at", "schedule_end_at"):
+            value = getattr(self, field)
+            if value is not None and value.tzinfo is None:
+                setattr(self, field, value.replace(tzinfo=zone))
         self.requested_datasources = list(dict.fromkeys(item.strip() for item in self.requested_datasources if item.strip()))
         if any(not _IDENTIFIER_RE.fullmatch(item) for item in self.requested_datasources):
             raise ValueError("数据源名称格式无效")
@@ -218,6 +229,7 @@ class ReportShareCreateRequest(BaseModel):
 class DrilldownRequest(BaseModel):
     """快照 Drilldown 请求，只允许已签发字段和过滤条件。"""
 
+    model_config = {"extra": "forbid"}
     filters: dict[str, Any] = Field(default_factory=dict, max_length=20)
     page: int = Field(default=1, ge=1, le=10_000)
     page_size: int = Field(default=50, ge=1, le=100)
@@ -249,6 +261,7 @@ class UnitResult(BaseModel):
 
     unit_id: str
     datasource: str = ""
+    live_query_id: str = ""
     status: Literal["success", "partial", "failed"] = "success"
     rows: list[dict[str, Any]] = Field(default_factory=list, max_length=1000)
     columns: list[str] = Field(default_factory=list, max_length=100)
@@ -277,6 +290,8 @@ class ReportJobRecord(BaseModel):
     plan: ReportPlan
     status: str = "draft"
     runs_started: int = 0
+    next_run_at: datetime | None = None
+    is_paused: bool = False
     created_at: datetime | None = None
     updated_at: datetime | None = None
 
@@ -313,6 +328,23 @@ class ReportVersionRecord(BaseModel):
     checksum: str
     expires_at: datetime | None = None
     is_latest: bool = True
+
+
+class PageLifecycleRequest(BaseModel):
+    """对既有页面延期或切换永久保留，不改变旧分享授权。"""
+
+    model_config = {"extra": "forbid"}
+    days: int | None = Field(default=None, ge=1, le=30)
+    permanent: bool = False
+
+    # 方法作用：只允许一个明确的页面生命周期操作。
+    # Args: self - 生命周期请求。
+    # Returns: 校验后的请求。
+    @model_validator(mode="after")
+    def validate_operation(self) -> "PageLifecycleRequest":
+        if (self.days is not None) == self.permanent:
+            raise ValueError("必须且只能选择延期天数或永久保留")
+        return self
 
 
 class ReportShareRecord(BaseModel):

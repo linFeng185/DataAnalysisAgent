@@ -9,6 +9,7 @@ from langgraph.graph import END, StateGraph
 from typing_extensions import TypedDict
 
 from src.logging_config import get_logger
+from src.reporting.aggregation import aggregate_cross_source
 from src.reporting.document import ReportArtifact, build_report_document
 from src.reporting.models import ReportPlan, UnitResult
 from src.reporting.relations import RelationEvidence, build_relations
@@ -32,6 +33,8 @@ class ReportWorkbenchState(TypedDict, total=False):
     execute_unit: Any
     step_logger: Any
     report_id: str
+    job_id: str
+    run_id: str
 
 
 # 方法作用：在节点边界记录可审计的节点状态，不写入敏感输入。
@@ -258,6 +261,9 @@ async def report_synthesize_insights(state: ReportWorkbenchState) -> dict[str, A
         "verified_relations": [item.model_dump(mode="json") for item in verified],
         "limitations": ["关系证据不代表因果关系"] + (["跨数据源关系证据不足或被安全边界阻断，已分别分析"] if blocked else []),
     }
+    aggregation = aggregate_cross_source(list(state.get("resolved_units", [])), list(state.get("unit_results", [])))
+    analysis["aggregation"] = aggregation
+    analysis["limitations"].extend(aggregation["limitations"])
     await _log_step(state, "report_synthesize_insights", "succeeded")
     return {"cross_business_analysis": analysis}
 
@@ -270,6 +276,20 @@ async def report_plan_layout(state: ReportWorkbenchState) -> dict[str, Any]:
     artifact = build_report_document(state["plan"], list(state.get("unit_results", [])), report_id=state.get("report_id"), relations=list(state.get("relations", [])))
     if state.get("cross_business_analysis", {}).get("limitations"):
         artifact.document.limitations.extend(state["cross_business_analysis"]["limitations"])
+    aggregation = state.get("cross_business_analysis", {}).get("aggregation", {})
+    if aggregation.get("status") == "success":
+        from src.reporting.document import (
+            ReportBlock,
+            ReportSection,
+            layout_for_block,
+            sanitize_value,
+        )
+
+        data_ref = "cross_source_aggregate"
+        rows = sanitize_value(aggregation["rows"])
+        artifact.data_manifest[data_ref] = rows
+        artifact.document.navigation.append(data_ref)
+        artifact.document.sections.append(ReportSection(id=data_ref, title="跨源样本聚合", subtitle="同一明确粒度，按来源分别统计；不代表全量业务总额", blocks=[ReportBlock(section_id=data_ref, type="table", title="授权样本的分组统计", data_ref=data_ref, content={"columns": list(rows[0]) if rows else [], "rows": rows}, layout=layout_for_block("table"))]))
     await _log_step(state, "report_plan_layout", "succeeded")
     return {"artifact": artifact}
 

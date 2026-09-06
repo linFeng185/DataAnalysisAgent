@@ -19,6 +19,7 @@ from langchain_core.runnables import RunnableConfig
 from src.graph.contracts import MultiSourceResult, SourceQueryRequest, SourceQueryResult
 from src.graph.state import AnalysisState
 from src.logging_config import get_logger
+from src.security.data_masker import merge_masking_metadata
 
 logger = get_logger(__name__)
 
@@ -236,6 +237,7 @@ async def _analyze_one(
             tables=len(result.get("relevant_tables", []) or []),
             full_count=int(result.get("query_result_full_count", len(data)) or len(data)),
             truncated=bool(result.get("query_result_truncated", False)),
+            masking=(result.get("query_result_statistics", {}) or {}).get("masking", {}),
         )
         logger.info(
             "单源分析完成",
@@ -852,5 +854,6 @@ async def merge_results_node(
         "query_result_statistics": {
             "row_count": len(all_data),
             "truncated": truncated,
+            "masking": merge_masking_metadata([result.get("masking", {}) for result in ok]),
         },
     }
