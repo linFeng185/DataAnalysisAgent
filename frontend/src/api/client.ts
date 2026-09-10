@@ -1,13 +1,26 @@
+import { t } from '../i18n';
+
 const BASE = '/api/v1';
 const pendingGetRequests = new Map<string, Promise<unknown>>();
+
+export class ApiError extends Error {
+  readonly status: number;
+
+  // 保存 HTTP 状态供认证边界区分未登录与服务不可用。
+  // Args: message - 展示消息；status - HTTP 状态码。
+  // Returns: API 错误实例。
+  constructor(message: string, status: number) {
+    super(message);
+    this.name = 'ApiError';
+    this.status = status;
+  }
+}
 
 // 方法作用：认证失效时统一返回登录页，避免页面停留在不可用状态。
 // Args: 无。
 // Returns: 无返回值。
 function redirectToLogin(): void {
-  console.debug('redirectToLogin 入口');
   if (window.location.pathname !== '/login') window.location.assign('/login');
-  console.info('redirectToLogin 完成');
 }
 
 // 方法作用：发送统一 JSON API 请求并处理认证失效和错误响应。
@@ -20,13 +33,47 @@ async function request<T>(method: string, path: string, body?: Record<string, un
     credentials: 'include',
   };
   if (body) opts.body = JSON.stringify(body);
-  const res = await fetch(`${BASE}${path}`, opts);
-  if (res.status === 401) redirectToLogin();
-  if (!res.ok) {
-    const text = await res.text().catch(() => '');
-    throw new Error(formatApiError(text, `API error: ${res.status}`));
+  return timedRequest<T>(path, opts, response => response.json());
+}
+
+// 方法作用：为非流式 API 的连接和响应读取设置期限，超时取消网络请求。
+// Args: path - 相对路径；options - 请求选项；read - 响应读取函数。
+// Returns: 解析结果；失败时释放定时器并抛出可显示的错误。
+async function timedRequest<T>(path: string, options: RequestInit, read: (response: Response) => Promise<T>): Promise<T> {
+  const controller = new AbortController();
+  const timer = window.setTimeout(() => controller.abort(), path.startsWith('/auth/') ? 10000 : 30000);
+  try {
+    const response = await fetch(`${BASE}${path}`, { ...options, credentials: 'include', signal: controller.signal });
+    if (response.status === 401 && path !== '/auth/me' && path !== '/auth/login') redirectToLogin();
+    if (!response.ok) {
+      throw new ApiError(formatApiError(await response.text(), `API error: ${response.status}`), response.status);
+    }
+    return await read(response);
+  } catch (error) {
+    if (controller.signal.aborted) {
+      console.warn('API 请求超时', { method: options.method || 'GET', path: path.split('?')[0] });
+      throw new Error(t("请求超时，请检查服务状态后重试"));
+    }
+    throw error;
+  } finally {
+    window.clearTimeout(timer);
   }
-  return res.json();
+}
+
+// 方法作用：通过统一超时和认证边界上传 JSON 配置文件。
+// Args: path - API 路径；file - 用户选择的文件。
+// Returns: 服务端导入结果。
+export function uploadConfig<T>(path: string, file: File): Promise<T> {
+  const body = new FormData();
+  body.append('file', file);
+  return timedRequest(path, { method: 'POST', body }, response => response.json());
+}
+
+// 方法作用：通过带认证和超时控制的请求下载配置文件。
+// Args: path - API 路径。
+// Returns: 文件内容。
+export function downloadConfig(path: string): Promise<Blob> {
+  return timedRequest(path, { method: 'GET' }, response => response.blob());
 }
 
 // 方法作用：将 FastAPI 错误响应转换为用户可读的简短消息。

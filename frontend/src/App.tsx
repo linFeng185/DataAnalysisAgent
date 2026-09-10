@@ -1,6 +1,6 @@
 import { lazy, Suspense, useState, useEffect } from 'react';
 import { BrowserRouter, Routes, Route, NavLink, Navigate, useLocation } from 'react-router-dom';
-import { Layout, Menu, ConfigProvider, Tag, Typography, theme, Grid, Button, Drawer } from 'antd';
+import { Layout, Menu, ConfigProvider, Tag, Typography, theme, Grid, Button, Drawer, Result } from 'antd';
 import type { MenuProps } from 'antd';
 import {
   MessageOutlined, DatabaseOutlined, HistoryOutlined, SettingOutlined,
@@ -52,8 +52,12 @@ const pageFallback = (
 // Returns: 工作台、登录重定向或加载占位。
 function ProtectedApp() {
   useLanguage();
-  const { loading, authRequired, isAuthenticated } = useAuth();
-  if (loading) return <Layout style={{ minHeight: '100vh' }} />;
+  const { loading, authRequired, isAuthenticated, error, retryAuth } = useAuth();
+  if (loading) return <Layout style={{ minHeight: '100vh', display: 'grid', placeItems: 'center' }}><div role="status"><LoadingOutlined /> {t("页面加载中...")}</div></Layout>;
+  if (error) return <Layout style={{ minHeight: '100vh', display: 'grid', placeItems: 'center' }}>
+    <Result status="warning" title={t("暂时无法确认登录状态")} subTitle={error}
+      extra={<Button type="primary" onClick={retryAuth}>{t("重试验证")}</Button>} />
+  </Layout>;
   if (authRequired && !isAuthenticated) return <Navigate to="/login" replace />;
   return <ChatProvider><AppContent /></ChatProvider>;
 }
@@ -64,10 +68,8 @@ function ProtectedApp() {
 function AdminRoute() {
   useLanguage();
   const { user } = useAuth();
-  console.debug('AdminRoute 入口', { role: user?.role || '' });
   const result = ['super_admin', 'tenant_admin'].includes(user?.role || '')
     ? <AdminPage /> : <Navigate to="/" replace />;
-  console.info('AdminRoute 完成', { allowed: ['super_admin', 'tenant_admin'].includes(user?.role || '') });
   return result;
 }
 

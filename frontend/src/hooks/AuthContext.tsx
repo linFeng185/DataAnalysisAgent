@@ -2,7 +2,7 @@ import { t, useLanguage } from '../i18n';
 import { createContext, useContext, useState, useCallback, useEffect, type ReactNode } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { message } from 'antd';
-import { get } from '../api/client';
+import { ApiError, get, post } from '../api/client';
 import { clearChatStorage } from './chatStorage';
 
 interface User { user_id: number; tenant_id: number; tenant_code: string; role: string; username: string; }
@@ -24,6 +24,8 @@ interface AuthState {
   isAuthenticated: boolean;
   authRequired: boolean;
   loading: boolean;
+  error: string;
+  retryAuth: () => void;
 }
 
 const AuthContext = createContext<AuthState | null>(null);
@@ -36,10 +38,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
   const [authRequired, setAuthRequired] = useState(true);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
+  const [probeVersion, setProbeVersion] = useState(0);
   const navigate = useNavigate();
 
   useEffect(() => {
     let active = true;
+    setLoading(true);
+    setError('');
     get<AuthProbe>('/auth/me')
       .then(data => {
         if (!active) return;
@@ -52,31 +58,36 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           username: data.username || '',
         } : null);
       })
-      .catch(() => {
-        if (active) { setAuthRequired(true); setUser(null); }
+      .catch((failure: unknown) => {
+        if (active) {
+          if (failure instanceof ApiError && failure.status === 401) {
+            setAuthRequired(true);
+            setUser(null);
+          } else {
+            console.warn('认证服务暂时不可用，保留当前路由等待重试');
+            setError(failure instanceof Error ? failure.message : t("认证服务暂时不可用"));
+          }
+        }
       })
       .finally(() => {
         if (active) setLoading(false);
       });
     return () => { active = false; };
+  }, [probeVersion]);
+
+  // 重新验证浏览器已有会话，不清除 Cookie 或要求用户重新登录。
+  // Args: 无。
+  // Returns: 无返回值。
+  const retryAuth = useCallback(() => {
+    setProbeVersion(version => version + 1);
   }, []);
 
   // 方法作用：使用租户编码、大小写敏感用户名和密码建立认证会话。
   // Args: tenantCode - 全局唯一租户编码；username - 区分大小写的用户名；password - 密码。
   // Returns: 登录成功后无返回值，失败时抛出服务端错误。
   const login = useCallback(async (tenantCode: string, username: string, password: string) => {
-    console.debug('login 入口', { tenantCode, username });
-    const response = await fetch('/api/v1/auth/login', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      credentials: 'include',
-      body: JSON.stringify({ tenant_code: tenantCode, username, password }),
-    });
-    if (!response.ok) {
-      const error = await response.json().catch(() => ({ detail: t("登录失败") }));
-      throw new Error(error.detail || t("登录失败"));
-    }
-    const data = await response.json();
+    const data = await post<User>('/auth/login', { tenant_code: tenantCode, username, password });
+    setError('');
     setAuthRequired(true);
     setUser({
       user_id: data.user_id,
@@ -85,7 +96,6 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       role: data.role,
       username,
     });
-    console.info('login 完成', { userId: data.user_id });
     navigate('/');
   }, [navigate]);
 
@@ -113,6 +123,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       isAuthenticated: user !== null,
       authRequired,
       loading,
+      error,
+      retryAuth,
     }}>
       {children}
     </AuthContext.Provider>

@@ -259,7 +259,6 @@ function renderCapabilitySummary(
 // Returns: 平台管理 React 页面。
 export default function AdminPage() {
   useLanguage();
-  console.debug('AdminPage 入口');
   const navigate = useNavigate();
   const { user } = useAuth();
   const isTenantAdmin = user?.role === 'tenant_admin';
@@ -306,7 +305,6 @@ export default function AdminPage() {
   // Args: 无。
   // Returns: 加载完成后无返回值。
   const load = async () => {
-    console.debug('AdminPage.load 入口', { tenantFilter });
     setLoading(true);
     try {
       const providerData = await get<{ providers: LLMProvider[] }>('/admin/llm/providers');
@@ -329,10 +327,6 @@ export default function AdminPage() {
         ]);
         setUsers(userData.users || []);
         setConnections(connectionData.connections || []);
-        console.info('AdminPage.load 租户工作区完成', {
-          users: userData.users.length,
-          connections: connectionData.connections.length,
-        });
         return;
       }
       const [tenantData, configData, accessData] = await Promise.all([
@@ -344,7 +338,6 @@ export default function AdminPage() {
       setConfig(configData);
       setAccessPolicies(accessData.policies || []);
       setAccessIpRules(accessData.ip_rules || []);
-      console.info('AdminPage.load 平台工作区完成', { tenants: tenantData.tenants.length });
     } catch (error) {
       console.error('AdminPage.load 异常', error);
       message.error(t("平台数据加载失败"));
@@ -358,7 +351,6 @@ export default function AdminPage() {
   // Returns: 加载完成后无返回值。
   const loadTenantAdmins = async (tenantId: number, force = false) => {
     if (!force && tenantAdminStates[tenantId]?.loaded) return;
-    console.info('租户管理员展开加载入口', { tenantId, force });
     setTenantAdminStates(previous => ({
       ...previous,
       [tenantId]: {
@@ -381,10 +373,6 @@ export default function AdminPage() {
           error: '',
         },
       }));
-      console.info('租户管理员展开加载完成', {
-        tenantId,
-        adminCount: data.admins?.length || 0,
-      });
     } catch (error) {
       console.error('租户管理员展开加载异常', { tenantId, error });
       setTenantAdminStates(previous => ({
@@ -412,7 +400,6 @@ export default function AdminPage() {
   // Args: 无，读取 tenantForm 当前值。
   // Returns: 创建完成后无返回值。
   const createTenant = async () => {
-    console.debug('AdminPage.createTenant 入口');
     try {
       const values = await tenantForm.validateFields();
       await post('/admin/tenants', values);
@@ -420,7 +407,6 @@ export default function AdminPage() {
       setTenantModal(false);
       tenantForm.resetFields();
       await load();
-      console.info('AdminPage.createTenant 完成');
     } catch (error) { console.error('AdminPage.createTenant 异常', error); }
   };
 
@@ -428,7 +414,6 @@ export default function AdminPage() {
   // Args: 无，读取 userForm 当前值。
   // Returns: 创建完成后无返回值。
   const createUser = async () => {
-    console.debug('AdminPage.createUser 入口');
     try {
       const values = await userForm.validateFields();
       await post('/admin/users', values);
@@ -436,7 +421,6 @@ export default function AdminPage() {
       setUserModal(false);
       userForm.resetFields();
       await load();
-      console.info('AdminPage.createUser 完成');
     } catch (error) { console.error('AdminPage.createUser 异常', error); }
   };
 
@@ -544,22 +528,7 @@ export default function AdminPage() {
   // Returns: 保存完成后无返回值。
   const saveConnection = async () => {
     try {
-      const snapshot = connectionForm.getFieldsValue(true);
-      console.info('命名连接保存校验边界', {
-        editing: Boolean(editingConnection),
-        field_names: Object.keys(snapshot),
-        provider_id: snapshot.provider_id,
-        model_count: Array.isArray(snapshot.model_catalog_ids) ? snapshot.model_catalog_ids.length : 0,
-        api_key_configured: Boolean(snapshot.api_key),
-        default_connection_present: Boolean(snapshot.default_connection_id),
-        default_model_present: Boolean(snapshot.default_model_catalog_id),
-      });
       const values = await connectionForm.validateFields();
-      console.info('命名连接表单校验通过', {
-        editing: Boolean(editingConnection),
-        provider_id: values.provider_id,
-        model_count: Array.isArray(values.model_catalog_ids) ? values.model_catalog_ids.length : 0,
-      });
       if (editingConnection) {
         await patch(`/admin/llm/connections/${editingConnection.id}`, values);
       } else {
@@ -571,14 +540,7 @@ export default function AdminPage() {
       await load();
       message.success(t("LLM 连接已保存"));
     } catch (error) {
-      const errorFields = (
-        typeof error === 'object' && error !== null && 'errorFields' in error
-          ? (error as { errorFields?: Array<{ name?: Array<string | number> }> }).errorFields
-          : []
-      ) || [];
-      console.info('命名连接表单校验阻断', {
-        error_fields: errorFields.map(item => item.name?.join('.') || ''),
-      });
+      if (typeof error === 'object' && error !== null && 'errorFields' in error) return;
       console.error('AdminPage.saveConnection 异常', error);
     }
   };
@@ -612,11 +574,9 @@ export default function AdminPage() {
   // Args: tenant - 目标租户；isActive - 新状态。
   // Returns: 更新完成后无返回值。
   const toggleTenant = async (tenant: Tenant, isActive: boolean) => {
-    console.debug('AdminPage.toggleTenant 入口', { tenantId: tenant.id, isActive });
     try {
       await patch(`/admin/tenants/${tenant.id}`, { is_active: isActive });
       await load();
-      console.info('AdminPage.toggleTenant 完成', { tenantId: tenant.id });
     } catch (error) { console.error('AdminPage.toggleTenant 异常', error); message.error(t("租户状态更新失败")); }
   };
 
@@ -644,11 +604,9 @@ export default function AdminPage() {
   // Args: user - 目标用户；isActive - 新状态。
   // Returns: 更新完成后无返回值。
   const toggleUser = async (user: ManagedUser, isActive: boolean) => {
-    console.debug('AdminPage.toggleUser 入口', { userId: user.id, isActive });
     try {
       await patch(`/admin/users/${user.id}`, { is_active: isActive });
       await load();
-      console.info('AdminPage.toggleUser 完成', { userId: user.id });
     } catch (error) { console.error('AdminPage.toggleUser 异常', error); message.error(t("用户状态更新失败")); }
   };
 
@@ -656,11 +614,9 @@ export default function AdminPage() {
   // Args: user - 目标用户；role - 新角色。
   // Returns: 更新完成后无返回值。
   const updateRole = async (user: ManagedUser, role: string) => {
-    console.debug('AdminPage.updateRole 入口', { userId: user.id, role });
     try {
       await patch(`/admin/users/${user.id}`, { role });
       await load();
-      console.info('AdminPage.updateRole 完成', { userId: user.id });
     } catch (error) { console.error('AdminPage.updateRole 异常', error); message.error(t("角色更新失败")); }
   };
 
@@ -668,10 +624,6 @@ export default function AdminPage() {
   // Args: 无，读取 passwordUser 和 passwordForm。
   // Returns: 重置完成后无返回值。
   const resetPassword = async () => {
-    console.debug('AdminPage.resetPassword 入口', {
-      userId: passwordUser?.id,
-      tenantId: passwordTenantId,
-    });
     if (!passwordUser) return;
     try {
       const values = await passwordForm.validateFields();
@@ -686,7 +638,6 @@ export default function AdminPage() {
       passwordForm.resetFields();
       if (targetTenantId === null) await load();
       else await loadTenantAdmins(targetTenantId, true);
-      console.info('AdminPage.resetPassword 完成', { userId: passwordUser.id });
     } catch (error) {
       console.error('AdminPage.resetPassword 异常', error);
       if (error instanceof Error && !('errorFields' in error)) message.error(t("密码重置失败"));
@@ -697,7 +648,6 @@ export default function AdminPage() {
   // Args: policy - 可选数据库策略，缺失时进入创建模式。
   // Returns: 无返回值。
   const openPolicyEditor = (policy?: AccessPolicy) => {
-    console.debug('AdminPage.openPolicyEditor 入口', { policyKey: policy?.policy_key || '' });
     setEditingPolicy(policy || null);
     policyForm.setFieldsValue(policy ? {
       policy_key: policy.policy_key,
@@ -713,14 +663,12 @@ export default function AdminPage() {
       access_log_mode: 'standard', priority: 0,
     });
     setPolicyModal(true);
-    console.info('AdminPage.openPolicyEditor 完成', { editing: Boolean(policy) });
   };
 
   // 方法作用：创建或更新数据库动态访问策略。
   // Args: 无，读取 policyForm 和 editingPolicy。
   // Returns: 保存完成后无返回值。
   const saveAccessPolicy = async () => {
-    console.debug('AdminPage.saveAccessPolicy 入口', { policyId: editingPolicy?.id || null });
     try {
       const values = await policyForm.validateFields();
       if (editingPolicy?.id) {
@@ -734,7 +682,6 @@ export default function AdminPage() {
       setEditingPolicy(null);
       policyForm.resetFields();
       await load();
-      console.info('AdminPage.saveAccessPolicy 完成');
     } catch (error) { console.error('AdminPage.saveAccessPolicy 异常', error); }
   };
 
@@ -742,12 +689,10 @@ export default function AdminPage() {
   // Args: policy - 数据库策略；enabled - 目标状态。
   // Returns: 更新完成后无返回值。
   const toggleAccessPolicy = async (policy: AccessPolicy, enabled: boolean) => {
-    console.debug('AdminPage.toggleAccessPolicy 入口', { policyId: policy.id, enabled });
     if (!policy.id) return;
     try {
       await patch(`/admin/access-policies/${policy.id}`, { enabled });
       await load();
-      console.info('AdminPage.toggleAccessPolicy 完成', { policyId: policy.id });
     } catch (error) { console.error('AdminPage.toggleAccessPolicy 异常', error); message.error(t("策略状态更新失败")); }
   };
 
@@ -755,13 +700,11 @@ export default function AdminPage() {
   // Args: policy - 待删除数据库策略。
   // Returns: 删除完成后无返回值。
   const deleteAccessPolicy = async (policy: AccessPolicy) => {
-    console.debug('AdminPage.deleteAccessPolicy 入口', { policyId: policy.id });
     if (!policy.id) return;
     try {
       await del(`/admin/access-policies/${policy.id}`);
       message.success(t("访问策略已删除"));
       await load();
-      console.info('AdminPage.deleteAccessPolicy 完成', { policyId: policy.id });
     } catch (error) { console.error('AdminPage.deleteAccessPolicy 异常', error); message.error(t("访问策略删除失败")); }
   };
 
@@ -769,17 +712,14 @@ export default function AdminPage() {
   // Args: policy - 目标 YAML 或数据库策略。
   // Returns: 无返回值。
   const openIpRuleEditor = (policy: AccessPolicy) => {
-    console.debug('AdminPage.openIpRuleEditor 入口', { policyKey: policy.policy_key });
     setRulePolicy(policy);
     ruleForm.setFieldsValue({ action: 'deny', enabled: true });
-    console.info('AdminPage.openIpRuleEditor 完成', { policyKey: policy.policy_key });
   };
 
   // 方法作用：为选中策略创建 CIDR allow 或 deny 规则。
   // Args: 无，读取 rulePolicy 和 ruleForm。
   // Returns: 创建完成后无返回值。
   const createIpRule = async () => {
-    console.debug('AdminPage.createIpRule 入口', { policyKey: rulePolicy?.policy_key || '' });
     if (!rulePolicy) return;
     try {
       const values = await ruleForm.validateFields();
@@ -788,7 +728,6 @@ export default function AdminPage() {
       setRulePolicy(null);
       ruleForm.resetFields();
       await load();
-      console.info('AdminPage.createIpRule 完成');
     } catch (error) { console.error('AdminPage.createIpRule 异常', error); }
   };
 
@@ -796,11 +735,9 @@ export default function AdminPage() {
   // Args: rule - IP 规则；enabled - 目标状态。
   // Returns: 更新完成后无返回值。
   const toggleIpRule = async (rule: AccessIpRule, enabled: boolean) => {
-    console.debug('AdminPage.toggleIpRule 入口', { ruleId: rule.id, enabled });
     try {
       await patch(`/admin/access-ip-rules/${rule.id}`, { enabled });
       await load();
-      console.info('AdminPage.toggleIpRule 完成', { ruleId: rule.id });
     } catch (error) { console.error('AdminPage.toggleIpRule 异常', error); message.error(t("IP 规则状态更新失败")); }
   };
 
@@ -808,12 +745,10 @@ export default function AdminPage() {
   // Args: rule - 待删除规则。
   // Returns: 删除完成后无返回值。
   const deleteIpRule = async (rule: AccessIpRule) => {
-    console.debug('AdminPage.deleteIpRule 入口', { ruleId: rule.id });
     try {
       await del(`/admin/access-ip-rules/${rule.id}`);
       message.success(t("IP 规则已删除"));
       await load();
-      console.info('AdminPage.deleteIpRule 完成', { ruleId: rule.id });
     } catch (error) { console.error('AdminPage.deleteIpRule 异常', error); message.error(t("IP 规则删除失败")); }
   };
 
@@ -1086,7 +1021,6 @@ export default function AdminPage() {
     </Form>
   </Space>;
 
-  console.info('AdminPage 完成', { tenantCount: tenants.length, userCount: users.length });
   return <div style={{ padding: 24, maxWidth: 1280, margin: '0 auto' }}>
     {reportPolicyUser && <ReportPolicyEditor user={reportPolicyUser} onClose={() => setReportPolicyUser(null)} />}
     <Typography.Title level={3} style={{ marginTop: 0 }}>{isTenantAdmin ? t("租户管理") : t("平台管理")}</Typography.Title>
