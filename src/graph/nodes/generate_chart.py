@@ -68,7 +68,7 @@ async def generate_chart_node(state: AnalysisState) -> dict:
 
     contexts = read_contexts(state)
     _start = time.monotonic()
-    logger.info(
+    logger.debug(
         "节点开始",
         node="generate_chart",
         intent=contexts.routing.intent,
@@ -130,7 +130,7 @@ async def generate_chart_node(state: AnalysisState) -> dict:
         return {"chart_config": _failed_chart(chart_type, "图表配置为空，请检查维度与数值字段")}
 
     elapsed = round((time.monotonic() - _start) * 1000)
-    logger.info("节点完成", node="generate_chart", elapsed_ms=elapsed,
+    logger.debug("节点完成", node="generate_chart", elapsed_ms=elapsed,
                 chart_type=chart_type, data_rows=len(data))
     return {"chart_config": {
         "type": chart_type,

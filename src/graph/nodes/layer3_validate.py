@@ -36,12 +36,12 @@ async def layer3_validate_node(state: AnalysisState) -> dict:
 
     contexts = read_contexts(state)
     _start = time.monotonic()
-    logger.info("节点开始", node="layer3_validate")
+    logger.debug("节点开始", node="layer3_validate")
     sql = state.get("generated_sql", "").strip()
 
     errors = validate_readonly_sql(sql, contexts.execution.dialect or "clickhouse")
 
-    logger.info("节点完成", node="layer3_validate", elapsed_ms=round((time.monotonic() - _start) * 1000))
+    logger.debug("节点完成", node="layer3_validate", elapsed_ms=round((time.monotonic() - _start) * 1000))
     update = {
         "sql_valid": len(errors) == 0,
         "validation_errors": errors,

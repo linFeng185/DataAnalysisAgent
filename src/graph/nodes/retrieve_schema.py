@@ -29,7 +29,7 @@ async def retrieve_schema_node(state: AnalysisState) -> dict:
 
     contexts = read_contexts(state)
     _start = time.monotonic()
-    logger.info("节点开始", node="retrieve_schema")
+    logger.debug("节点开始", node="retrieve_schema")
     datasource_name = contexts.routing.datasource
     tenant_id, _ = resolve_request_identity(state)
     schema = state.get("resolved_schema")
@@ -127,7 +127,7 @@ async def retrieve_schema_node(state: AnalysisState) -> dict:
         if history:
             logger.info("对话历史从 messages 复原", turns=len(history))
 
-    logger.info("节点完成", node="retrieve_schema", elapsed_ms=round((time.monotonic() - _start) * 1000))
+    logger.debug("节点完成", node="retrieve_schema", elapsed_ms=round((time.monotonic() - _start) * 1000))
 
     # 知识库加载策略：只要可能走 SQL 生成就加载，只有闲聊跳过
     #   - 非 chat 意图 → 加载（表结构/业务规则/函数手册来自知识库）

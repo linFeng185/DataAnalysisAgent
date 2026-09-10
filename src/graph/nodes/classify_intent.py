@@ -18,7 +18,7 @@ async def classify_intent_node(state: AnalysisState) -> dict:
 
     contexts = read_contexts(state)
     _start = time.monotonic()
-    logger.info("节点开始", node="classify_intent")
+    logger.debug("节点开始", node="classify_intent")
     ch = state.get("conversation_history", []) or []
     logger.info("对话历史检查", has_history=len(ch) > 0, turns=len(ch))
     q = contexts.request.user_query.lower()
@@ -151,7 +151,7 @@ async def classify_intent_node(state: AnalysisState) -> dict:
     from src.graph.context import build_routing_context
 
     update["routing_context"] = build_routing_context({**state, **update}).model_dump()
-    logger.info(
+    logger.debug(
         "节点完成",
         node="classify_intent",
         elapsed_ms=round((time.monotonic() - _start) * 1000),

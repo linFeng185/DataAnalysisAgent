@@ -123,7 +123,7 @@ def resolve_request_identity(state: Mapping[str, Any]) -> tuple[int, int]:
             reason="身份编号不能为负数",
         )
         raise ValueError("身份编号不能为负数")
-    logger.info(
+    logger.debug(
         "请求身份解析完成",
         tenant_id=tenant_id,
         user_id=user_id,
@@ -206,7 +206,7 @@ def build_routing_context(state: Mapping[str, Any]) -> RoutingContext:
 def build_execution_context(state: Mapping[str, Any]) -> ExecutionContext:
     """从兼容状态构造不含富结果的执行上下文。"""
     existing_context = state.get("execution_context", {}) or {}
-    logger.info(
+    logger.debug(
         "执行上下文构建边界输入",
         has_flat_row_count="query_result_full_count" in state,
         flat_row_count=state.get("query_result_full_count"),
@@ -262,7 +262,7 @@ def build_execution_context(state: Mapping[str, Any]) -> ExecutionContext:
         row_count=row_count,
         truncated=truncated,
     )
-    logger.info(
+    logger.debug(
         "执行上下文构建完成",
         dialect=result.dialect,
         table_count=len(result.table_names),

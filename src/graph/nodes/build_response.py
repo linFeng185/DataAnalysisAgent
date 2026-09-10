@@ -492,7 +492,7 @@ async def build_response_node(state: AnalysisState) -> dict:
                 exc_info=True,
             )
 
-    logger.info("节点完成", node="build_response", elapsed_ms=round((time.monotonic() - _start) * 1000))
+    logger.debug("节点完成", node="build_response", elapsed_ms=round((time.monotonic() - _start) * 1000))
     from src.graph.nodes.prepare_turn import build_turn_snapshot
 
     snapshot_state = dict(state)

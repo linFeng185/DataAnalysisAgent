@@ -63,7 +63,7 @@ def is_llm_available() -> bool:
     """返回结果分析任务的模型可用状态。"""
     logger.debug("分析任务模型可用性入口")
     available = _is_task_llm_available("analyze_result")
-    logger.info("分析任务模型可用性完成", available=available)
+    logger.debug("分析任务模型可用性完成", available=available)
     return available
 
 
@@ -81,7 +81,7 @@ def get_llm(temperature: float = 0.3, max_tokens: int | None = None):
     if max_tokens is not None:
         kwargs["max_tokens"] = max_tokens
     model = _get_task_llm("analyze_result", **kwargs)
-    logger.info("创建分析任务模型完成")
+    logger.debug("创建分析任务模型完成")
     return model
 
 
@@ -105,11 +105,11 @@ async def analyze_result_node(state: AnalysisState) -> dict:
 
     contexts = read_contexts(state)
     _start = time.monotonic()
-    logger.info("节点开始", node="analyze_result")
+    logger.debug("节点开始", node="analyze_result")
     rows: list[dict] = state.get("query_result_sample", [])
     intent = contexts.routing.intent or "query"
     sql = state.get("generated_sql", "")
-    logger.info(
+    logger.debug(
         "分析节点边界输入",
         intent=intent,
         data_rows=len(rows),
@@ -273,7 +273,7 @@ async def analyze_result_node(state: AnalysisState) -> dict:
                 gap_count=len(result.get("evidence_gaps", []) or []),
             )
             return {"analysis_result": result}
-        logger.info("节点完成", node="analyze_result", elapsed_ms=round((time.monotonic() - _start) * 1000))
+        logger.debug("节点完成", node="analyze_result", elapsed_ms=round((time.monotonic() - _start) * 1000))
         return {"analysis_result": {
             "summary": "无数据可供分析",
             "insights": [],
@@ -313,7 +313,7 @@ async def analyze_result_node(state: AnalysisState) -> dict:
                 state.get("long_term_memories_text", "") or "",
             ) if part
         )
-        logger.info(
+        logger.debug(
             "分析分支选择边界",
             branch="processor_then_business_analysis",
             processor=getattr(proc, "name", "unknown"),
@@ -360,7 +360,7 @@ async def analyze_result_node(state: AnalysisState) -> dict:
                 stats,
                 contexts.request.user_query,
             )
-            logger.info(
+            logger.debug(
                 "处理器与规则输出合并边界",
                 processor_chart_type=processor_result.chart_type,
                 rule_chart_type=rule_context.get("recommended_chart_type", ""),
@@ -369,7 +369,7 @@ async def analyze_result_node(state: AnalysisState) -> dict:
             result.update(rule_context)
         result = _attach_supplemental_trace(result, state)
         result, skill_calls = await _execute_post_analysis_skill_tools(result, rows, state)
-        logger.info(
+        logger.debug(
             "处理器分析输出边界",
             summary_chars=len(str(result.get("summary", "") or "")),
             insight_count=len(result.get("insights", []) or []),
@@ -378,7 +378,7 @@ async def analyze_result_node(state: AnalysisState) -> dict:
             action_count=len(result.get("recommended_actions", []) or []),
             related_metric_count=len(result.get("related_metrics", []) or []),
         )
-        logger.info("节点完成", node="analyze_result", processor=result.get("processor_name"),
+        logger.debug("节点完成", node="analyze_result", processor=result.get("processor_name"),
                     elapsed_ms=round((time.monotonic() - _start) * 1000))
         return {"analysis_result": result, "skill_tool_calls": skill_calls}
 
@@ -451,7 +451,7 @@ async def analyze_result_node(state: AnalysisState) -> dict:
     result = _attach_supplemental_trace(result, state)
     result = _attach_skill_outputs(result, rows, state.get("activated_skills", []) or [])
     result, skill_calls = await _execute_post_analysis_skill_tools(result, rows, state)
-    logger.info("节点完成", node="analyze_result", elapsed_ms=round((time.monotonic() - _start) * 1000))
+    logger.debug("节点完成", node="analyze_result", elapsed_ms=round((time.monotonic() - _start) * 1000))
     return {"analysis_result": result, "skill_tool_calls": skill_calls}
 
 
@@ -622,7 +622,7 @@ def _attach_skill_outputs(
         row_count=len(rows),
     )
     if "data-quality-check" not in activated_skills:
-        logger.info("附加 Skill 分析产物跳过", reason="未激活数据质量 Skill")
+        logger.debug("附加 Skill 分析产物跳过", reason="未激活数据质量 Skill")
         return result
 
     columns = sorted({str(column) for row in rows for column in row})
@@ -686,7 +686,7 @@ async def _execute_post_analysis_skill_tools(
     budget = int(state.get("skill_tool_budget", 0) or 0)
     limit = max(0, budget)
     if not tools:
-        logger.info("分析后 Skill 工具跳过", reason="无已授权工具")
+        logger.debug("分析后 Skill 工具跳过", reason="无已授权工具")
         return result, used
 
     enriched = dict(result)
@@ -756,7 +756,7 @@ async def _execute_post_analysis_skill_tools(
                 if used >= limit:
                     break
         else:
-            logger.info("分析后 Skill 工具跳过", tool=name, reason="未注册参数适配器")
+            logger.debug("分析后 Skill 工具跳过", tool=name, reason="未注册参数适配器")
             continue
         cleaned_outputs = [item for item in outputs if item is not None]
         if cleaned_outputs:
@@ -936,7 +936,7 @@ async def _llm_analyze(
         from src.llm.adapters.registry import get_adapter
         from src.llm.invocation import prepare_invocation
         llm = _get_analysis_llm(max_tokens=2048)
-        logger.info(
+        logger.debug(
             "分析模型调用资源预算",
             timeout_seconds=timeout_seconds,
             max_tokens=2048,
@@ -1195,7 +1195,7 @@ def _find_category_cols(rows: list[dict]) -> list[str]:
         str(key) for key in rows[0]
         if all(value is None or isinstance(value, str) for value in (row.get(key) for row in rows))
     ]
-    logger.info("分类列识别完成", columns=result)
+    logger.debug("分类列识别完成", columns=result)
     return result
 
 
@@ -1207,9 +1207,9 @@ def _match_column(columns: list[str], keywords: tuple[str, ...]) -> str:
     for column in columns:
         normalized = column.lower()
         if any(keyword in normalized for keyword in keywords):
-            logger.info("语义列匹配完成", column=column)
+            logger.debug("语义列匹配完成", column=column)
             return column
-    logger.info("语义列匹配未命中", keywords=keywords)
+    logger.debug("语义列匹配未命中", keywords=keywords)
     return ""
 
 
@@ -1285,7 +1285,7 @@ def _build_processor_params(
             "previous_value_col": previous_col,
         })
 
-    logger.info("构造处理器参数完成", processor=processor_name, params=params)
+    logger.debug("构造处理器参数完成", processor=processor_name, params=params)
     return params
 
 

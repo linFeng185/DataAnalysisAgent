@@ -61,7 +61,7 @@ async def execute_sql_node(state: AnalysisState) -> dict:
     contexts = read_contexts(state)
     effective_tenant_id, _ = resolve_request_identity(state)
     _start = time.monotonic()
-    logger.info("节点开始", node="execute_sql")
+    logger.debug("节点开始", node="execute_sql")
     sql = (state.get("generated_sql", "") or "").strip()
     ds_name = contexts.routing.datasource
 
@@ -172,7 +172,7 @@ async def execute_sql_node(state: AnalysisState) -> dict:
                 masked_rows[:settings.attribution_max_touchpoint_rows]
                 if collect_attribution_rows else []
             )
-            logger.info("节点完成", node="execute_sql", elapsed_ms=elapsed)
+            logger.debug("节点完成", node="execute_sql", elapsed_ms=elapsed)
             return complete({
                 "generated_sql": sql,  # 同步重写后的 SQL 到前端
                 "query_result_sample": masked_rows[:200],
@@ -206,7 +206,7 @@ async def execute_sql_node(state: AnalysisState) -> dict:
 
     if len(err_msg) > 300:
         err_msg = err_msg[:300]
-    logger.info(
+    logger.debug(
         "节点完成",
         node="execute_sql",
         elapsed_ms=round((time.monotonic() - _start) * 1000),

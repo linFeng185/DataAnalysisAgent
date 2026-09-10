@@ -137,7 +137,7 @@ async def _analyze_one(
         from src.datasource.registry import get_registry
 
         request = SourceQueryRequest.from_state(datasource, state)
-        logger.info(
+        logger.debug(
             "多源单库请求契约完成",
             datasource=request.datasource,
             selected_sources=request.selected_datasources,
@@ -168,7 +168,7 @@ async def _analyze_one(
                 allowed_columns=len(request.permission.allowed_columns),
                 has_row_filter=bool(request.permission.row_filter_sql),
             )
-        logger.info(
+        logger.debug(
             "多源单库 SQL 子图边界输入",
             datasource=datasource,
             selected_sources=request.selected_datasources,
@@ -287,23 +287,23 @@ def _build_cross_source_aggregation(
         matched_comparison = [
             keyword for keyword in comparison_keywords if keyword in normalized_query
         ]
-        logger.info(
+        logger.debug(
             "跨源汇总意图探针",
             matched_additive=matched_additive,
             matched_comparison=matched_comparison,
             query=query[:120],
         )
         if not matched_additive:
-            logger.info("跨源精确汇总跳过", reason="用户未要求可加汇总")
+            logger.debug("跨源精确汇总跳过", reason="用户未要求可加汇总")
             return None
         if matched_comparison:
-            logger.info("跨源精确汇总跳过", reason="用户要求比较或分布分析")
+            logger.debug("跨源精确汇总跳过", reason="用户要求比较或分布分析")
             return None
         if len(successful_results) < 2:
-            logger.info("跨源精确汇总跳过", reason="成功来源少于两个")
+            logger.debug("跨源精确汇总跳过", reason="成功来源少于两个")
             return None
         if any(len(result.get("data", []) or []) != 1 for result in successful_results):
-            logger.info("跨源精确汇总跳过", reason="存在非单行来源结果")
+            logger.debug("跨源精确汇总跳过", reason="存在非单行来源结果")
             return None
 
         aligned_rows = _normalize_single_row_numeric_metrics(successful_results)
@@ -336,7 +336,7 @@ def _build_cross_source_aggregation(
                     and isinstance(value, (int, float, Decimal))
                 ]
                 if len(candidates) != 1:
-                    logger.info(
+                    logger.debug(
                         "跨源精确汇总跳过",
                         reason="来源结果不满足单数值列别名归一化",
                     )
@@ -356,7 +356,7 @@ def _build_cross_source_aggregation(
             normalized_rows = [
                 {canonical_column: value} for _, value in single_metrics
             ]
-            logger.info(
+            logger.debug(
                 "跨源数值列别名归一化完成",
                 aliases=aliases,
                 canonical_column=canonical_column,
@@ -412,14 +412,14 @@ def _classify_result_column(rows: list[dict], column: str) -> str:
     logger.debug("跨源结果列角色识别入口", column=column, row_count=len(rows))
     values = [row.get(column) for row in rows if row.get(column) is not None]
     if not values:
-        logger.info("跨源结果列角色识别完成", column=column, role="unknown")
+        logger.debug("跨源结果列角色识别完成", column=column, role="unknown")
         return "unknown"
     is_metric = all(
         not isinstance(value, bool) and isinstance(value, (int, float, Decimal))
         for value in values
     )
     role = "metric" if is_metric else "dimension"
-    logger.info("跨源结果列角色识别完成", column=column, role=role)
+    logger.debug("跨源结果列角色识别完成", column=column, role=role)
     return role
 
 
@@ -438,7 +438,7 @@ def _choose_canonical_column(aliases: list[str]) -> str:
             -aliases.index(alias),
         ),
     )
-    logger.info("跨源规范列名选择完成", aliases=aliases, canonical=canonical)
+    logger.debug("跨源规范列名选择完成", aliases=aliases, canonical=canonical)
     return canonical
 
 
@@ -463,7 +463,7 @@ def _strip_redundant_source_columns(
         )
     }
     if removable:
-        logger.info(
+        logger.debug(
             "跨源冗余来源列移除完成",
             datasource=datasource,
             columns=sorted(removable),
@@ -488,17 +488,17 @@ def _normalize_cross_source_rows(
     logger.debug("跨源结果列契约对齐入口", source_count=len(successful_results))
     try:
         if len(successful_results) < 2:
-            logger.info("跨源结果列契约对齐跳过", reason="成功来源少于两个")
+            logger.debug("跨源结果列契约对齐跳过", reason="成功来源少于两个")
             return None
 
         raw_source_rows = [
             list(result.get("data", []) or []) for result in successful_results
         ]
         if any(not rows for rows in raw_source_rows):
-            logger.info("跨源结果列契约对齐跳过", reason="存在空来源结果")
+            logger.debug("跨源结果列契约对齐跳过", reason="存在空来源结果")
             return None
         if any(any(not isinstance(row, dict) for row in rows) for rows in raw_source_rows):
-            logger.info("跨源结果列契约对齐跳过", reason="来源行不是字典")
+            logger.debug("跨源结果列契约对齐跳过", reason="来源行不是字典")
             return None
         source_rows = [
             _strip_redundant_source_columns(result, rows)
@@ -517,13 +517,13 @@ def _normalize_cross_source_rows(
         if column_width == 0 or any(
             len(columns) != column_width for columns in source_columns
         ):
-            logger.info("跨源结果列契约对齐跳过", reason="来源列数量不一致")
+            logger.debug("跨源结果列契约对齐跳过", reason="来源列数量不一致")
             return None
         if any(
             any(set(row) - {"_datasource"} != set(columns) for row in rows)
             for rows, columns in zip(source_rows, source_columns, strict=True)
         ):
-            logger.info("跨源结果列契约对齐跳过", reason="同一来源结果行字段不一致")
+            logger.debug("跨源结果列契约对齐跳过", reason="同一来源结果行字段不一致")
             return None
 
         source_roles = [
@@ -570,7 +570,7 @@ def _normalize_cross_source_rows(
                 for row in rows
             ])
 
-        logger.info(
+        logger.debug(
             "跨源结果列契约对齐完成",
             aliases=aliases_by_position,
             roles=resolved_roles,
@@ -592,14 +592,14 @@ def _normalize_single_row_numeric_metrics(
     """复用通用列契约对齐，并提取每个来源的唯一结果行。"""
     logger.debug("跨源单行指标对齐入口", source_count=len(successful_results))
     if any(len(result.get("data", []) or []) != 1 for result in successful_results):
-        logger.info("跨源单行指标对齐跳过", reason="来源结果不是单行")
+        logger.debug("跨源单行指标对齐跳过", reason="来源结果不是单行")
         return None
     batches = _normalize_cross_source_rows(successful_results)
     if batches is None:
-        logger.info("跨源单行指标对齐跳过", reason="列契约不兼容")
+        logger.debug("跨源单行指标对齐跳过", reason="列契约不兼容")
         return None
     rows = [batch[0] for batch in batches]
-    logger.info("跨源单行指标对齐完成", source_count=len(rows))
+    logger.debug("跨源单行指标对齐完成", source_count=len(rows))
     return rows
 
 
@@ -617,7 +617,7 @@ def _build_merge_context(query: str, results: list[dict]) -> str:
         parts.append(f"数据 (前3行): {result.get('data', [])[:3]}")
         parts.append(f"总行数: {len(result.get('data', []))}")
     context = "\n\n".join(parts)
-    logger.info("构建跨源分析上下文完成", source_count=len(results), chars=len(context))
+    logger.debug("构建跨源分析上下文完成", source_count=len(results), chars=len(context))
     return context
 
 
@@ -653,7 +653,7 @@ def _collect_merged_rows(
             for result in results
             for row in result.get("data", [])[:30]
         ]
-    logger.info("收集跨源结果行完成", rows=len(rows))
+    logger.debug("收集跨源结果行完成", rows=len(rows))
     return rows
 
 
@@ -663,7 +663,7 @@ def _collect_merged_rows(
 def _append_source_failures(analysis: dict, failed_results: list[dict]) -> dict:
     logger.debug("补充跨源失败摘要入口", failed=len(failed_results))
     if not failed_results:
-        logger.info("补充跨源失败摘要完成", changed=False)
+        logger.debug("补充跨源失败摘要完成", changed=False)
         return analysis
     failed_names = ", ".join(
         str(result.get("datasource", "未知来源")) for result in failed_results
@@ -673,7 +673,7 @@ def _append_source_failures(analysis: dict, failed_results: list[dict]) -> dict:
     result = analysis
     if failure_note not in current_summary:
         result = {**analysis, "summary": f"{current_summary} {failure_note}".strip()}
-    logger.info("补充跨源失败摘要完成", changed=result is not analysis)
+    logger.debug("补充跨源失败摘要完成", changed=result is not analysis)
     return result
 
 
@@ -723,7 +723,7 @@ async def merge_results_node(
 
     ok = [r for r in results if r.get("success")]
     fail = [r for r in results if not r.get("success")]
-    logger.info(
+    logger.debug(
         "跨源结果列探针",
         source_columns={
             str(result.get("datasource", "")): [

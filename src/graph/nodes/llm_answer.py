@@ -36,7 +36,7 @@ async def llm_direct_answer_node(state: AnalysisState) -> dict:
     query = contexts.request.user_query
     knowledge_text = state.get("long_term_memories_text", "") or ""
     schema_text = _format_schema_context(state.get("relevant_tables", []) or [])
-    logger.info("节点开始", node="llm_direct_answer", intent=intent, query=query[:60])
+    logger.debug("节点开始", node="llm_direct_answer", intent=intent, query=query[:60])
     logger.info(
         "直接回答上下文到达",
         intent=intent,
@@ -188,7 +188,7 @@ async def llm_direct_answer_node(state: AnalysisState) -> dict:
         answer = _fallback_answer(intent, query, knowledge_text, schema_text)
 
     elapsed = round((time.monotonic() - _start) * 1000)
-    logger.info("节点完成", node="llm_direct_answer", elapsed_ms=elapsed, answer_len=len(answer))
+    logger.debug("节点完成", node="llm_direct_answer", elapsed_ms=elapsed, answer_len=len(answer))
 
     # 输出结构与 build_response 兼容
     return {

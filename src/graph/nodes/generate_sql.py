@@ -82,7 +82,7 @@ def is_llm_available() -> bool:
     """返回 SQL 生成任务的模型可用状态。"""
     logger.debug("SQL 任务模型可用性入口")
     available = _is_task_llm_available("generate_sql")
-    logger.info("SQL 任务模型可用性完成", available=available)
+    logger.debug("SQL 任务模型可用性完成", available=available)
     return available
 
 
@@ -98,7 +98,7 @@ def get_llm(temperature: float = 0, *, stream: bool = True):
         reasoning=False,
         stream=stream,
     )
-    logger.info("创建 SQL 任务模型完成", stream=stream)
+    logger.debug("创建 SQL 任务模型完成", stream=stream)
     return model
 
 
@@ -115,7 +115,7 @@ async def generate_sql_node(state: AnalysisState, config: RunnableConfig) -> dic
 
     contexts = read_contexts(state)
     _start = time.monotonic()
-    logger.info("节点开始", node="generate_sql")
+    logger.debug("节点开始", node="generate_sql")
     tables = state.get("relevant_tables", [])
     dialect = contexts.execution.dialect or "clickhouse"
     query = contexts.request.user_query
@@ -177,7 +177,7 @@ async def generate_sql_node(state: AnalysisState, config: RunnableConfig) -> dic
     )
     schema_text = format_schema_for_prompt(prompt_tables, dialect)
     table_whitelist = build_table_whitelist_context(tables)
-    logger.info(
+    logger.debug(
         "SQL Schema Prompt 裁剪完成",
         total_tables=len(tables),
         prompt_tables=len(prompt_tables),
@@ -226,12 +226,12 @@ async def generate_sql_node(state: AnalysisState, config: RunnableConfig) -> dic
                         "chart_type": '',
                     })
         if history:
-            logger.info("对话上下文（从 messages 复原）", turns=len(history))
+            logger.debug("对话上下文（从 messages 复原）", turns=len(history))
     if history:
-        logger.info("对话上下文", turns=len(history),
+        logger.debug("对话上下文", turns=len(history),
                     types=[type(t).__name__ for t in history])
     else:
-        logger.info("对话上下文为空（可能是首轮或 checkpointer 反序列化失败）")
+        logger.debug("对话上下文为空（可能是首轮或 checkpointer 反序列化失败）")
     # ── 主路径：LLM 流式生成 ──
     explanation = ""
     fallback_error = ""
@@ -260,7 +260,7 @@ async def generate_sql_node(state: AnalysisState, config: RunnableConfig) -> dic
 
     logger.info("SQL 生成完成", sql=sql[:200], reasoning_chars=len(reasoning))
 
-    logger.info(
+    logger.debug(
         "SQL 时间补参判定边界",
         task_plan_needs_time_range=bool(contexts.routing.task_plan.get("needs_time_range", False)),
         sql_present=bool(sql.strip()),
@@ -297,11 +297,11 @@ async def generate_sql_node(state: AnalysisState, config: RunnableConfig) -> dic
                           "unknown_tables": hallucination}]}
             if reasoning:
                 result["sql_reasoning_content"] = reasoning
-            logger.info("节点完成", node="generate_sql",
+            logger.debug("节点完成", node="generate_sql",
                        elapsed_ms=round((time.monotonic() - _start) * 1000))
             return result
 
-    logger.info("节点完成", node="generate_sql", elapsed_ms=round((time.monotonic() - _start) * 1000))
+    logger.debug("节点完成", node="generate_sql", elapsed_ms=round((time.monotonic() - _start) * 1000))
     result = {
         "generated_sql": sql,
         "retry_count": retry + 1,
@@ -454,7 +454,7 @@ def build_sql_grounding_context(state: AnalysisState) -> str:
             if formatted_examples:
                 sections.append("### 已验证 SQL 示例\n" + "\n\n".join(formatted_examples))
         result = "\n\n".join(sections) if sections else "(无额外业务证据，以 Schema 为准)"
-        logger.info(
+        logger.debug(
             "组装 SQL 证据上下文完成",
             section_count=len(sections),
             chars=len(result),
@@ -610,7 +610,7 @@ async def _llm_generate(
 
         # ── 流式消费：逐 chunk 累积，LangGraph 自动捕获事件推送到前端 ──
         stream_started_at = time.monotonic()
-        logger.info(
+        logger.debug(
             "SQL LLM 流式调用边界输入",
             model_type=type(prepared.model).__name__,
             streaming=bool(getattr(prepared.model, "streaming", False)),
@@ -628,7 +628,7 @@ async def _llm_generate(
             ):
                 chunk_count += 1
                 if chunk_count == 1:
-                    logger.info(
+                    logger.debug(
                         "SQL LLM 首个流式块到达",
                         elapsed_ms=round((time.monotonic() - stream_started_at) * 1000),
                         chunk_type=type(chunk).__name__,
@@ -685,12 +685,12 @@ async def _llm_generate(
         raw = "".join(content_parts)
         reasoning_text = "".join(reasoning_parts)
         if reasoning_parts:
-            logger.info(
+            logger.debug(
                 "LLM 推理链已收集",
                 reasoning_chunks=len(reasoning_parts),
                 reasoning_chars=len(reasoning_text),
             )
-        logger.info("LLM 原始响应", raw=raw[:500], content_chunks=len(content_parts))
+        logger.debug("LLM 原始响应", raw=raw[:500], content_chunks=len(content_parts))
 
         # ── 响应内容为空时的回退 ──
         if not raw or raw.strip() == "":
@@ -856,7 +856,7 @@ def _check_table_hallucination(
     known_bases = {name.rsplit(".", 1)[-1] for name in known}
     unknown: list[str] = []
     parser_dialect = normalize_sql_dialect(dialect)
-    logger.info(
+    logger.debug(
         "表名幻觉校验边界输入",
         known_tables=sorted(known),
         parser_dialect=parser_dialect or "default",
@@ -867,7 +867,7 @@ def _check_table_hallucination(
         from sqlglot import exp
 
         parsed = sqlglot.parse(sql, read=parser_dialect or None)
-        logger.info(
+        logger.debug(
             "表名幻觉校验解析完成",
             parsed_type=type(parsed).__name__,
             statement_count=len(parsed),
@@ -902,7 +902,7 @@ def _check_table_hallucination(
             exc_info=True,
         )
         unknown.append("SQL 解析失败，已阻断执行")
-    logger.info("表名幻觉校验完成", unknown_tables=unknown, unknown_count=len(unknown))
+    logger.debug("表名幻觉校验完成", unknown_tables=unknown, unknown_count=len(unknown))
     return unknown
 
 
@@ -1197,7 +1197,7 @@ def select_prompt_tables(
         if selected and len(rendered) > max_chars and len(selected) > 1:
             selected.pop()
             break
-    logger.info(
+    logger.debug(
         "详细 Schema 按表按列裁剪完成",
         query=query[:80],
         total=len(tables),
