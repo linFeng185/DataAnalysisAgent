@@ -184,6 +184,8 @@ export interface TableInfo {
   name: string;
   description: string;
   columns: ColumnInfo[];
+  column_count?: number;
+  row_count_estimate?: number;
   relations?: { target_table: string; join_key: string }[];
 }
 

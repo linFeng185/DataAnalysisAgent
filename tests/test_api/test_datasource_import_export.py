@@ -94,6 +94,52 @@ class TestDatasourceImportExport:
         registry.resolve.assert_not_awaited()
         service.apply_snapshot.assert_awaited_once_with(source)
 
+    # 方法作用：验证表结构列表只返回当前页摘要且不带列详情。
+    # Args: self - 测试实例；monkeypatch - 运行时依赖替换工具。
+    # Returns: 无返回值。
+    async def test_table_list_returns_page_summary_without_columns(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """一次内省可达数百张表，列表不得先构造全部列再切片。"""
+        from fastapi import FastAPI
+        from httpx import ASGITransport, AsyncClient
+
+        import src.api.routes as routes
+        import src.api.routes.schema as schema_route
+
+        # Arrange：用轻量替身，避免与真实 schema 结构的字段顺序绑定。
+        source = SimpleNamespace(name="sales", tenant_id=2, schema=None)
+        registry = SimpleNamespace(
+            get_provider=lambda name: SimpleNamespace(lookup=AsyncMock(return_value=source)),
+            resolve=AsyncMock(),
+        )
+        snapshot = SimpleNamespace(tables=[
+            SimpleNamespace(
+                name=f"table_{index:03d}", description="", row_count_estimate=index,
+                columns=[SimpleNamespace(name="c1"), SimpleNamespace(name="c2")],
+            )
+            for index in range(25)
+        ])
+        service = SimpleNamespace(apply_snapshot=AsyncMock(return_value=snapshot))
+        monkeypatch.setattr(routes, "_registry", lambda: registry)
+        monkeypatch.setattr(schema_route, "_resolve_datasource_name", AsyncMock(return_value="sales"))
+        monkeypatch.setattr("src.api.auth.get_current_identity", lambda: SimpleNamespace(tenant_id=2))
+        monkeypatch.setattr("src.app_context.get_app_context", lambda: SimpleNamespace(get_resource=lambda name: service))
+        app = FastAPI()
+        app.include_router(schema_route.router)
+
+        # Act
+        async with AsyncClient(transport=ASGITransport(app), base_url="http://test") as client:
+            first = await client.get("/schema/tables?datasource=sales&cached_only=true&page=1&page_size=20")
+            second = await client.get("/schema/tables?datasource=sales&cached_only=true&page=2&page_size=20")
+
+        # Assert：第二页只应剩 5 张，证明切片发生在服务端而非客户端。
+        payload = first.json()
+        assert payload["total"] == 25
+        assert len(payload["tables"]) == 20
+        assert len(second.json()["tables"]) == 5
+        assert payload["tables"][0]["name"] == "table_000"
+        assert payload["tables"][0]["column_count"] == 2
+        assert "columns" not in json.dumps(payload)
+
     # 方法作用：构造只包含安全摘要的 Provider 和 Registry 测试替身。
     # Args: self - 测试实例；monkeypatch - 运行时依赖替换工具。
     # Returns: 测试替身、数据源列表和持久化记录。

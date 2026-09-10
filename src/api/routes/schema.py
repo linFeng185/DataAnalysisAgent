@@ -5,7 +5,7 @@ from __future__ import annotations
 from fastapi import APIRouter, HTTPException, Query
 
 from src.api.routes._helpers import _call_with_optional_tenant
-from src.api.schemas import ColumnCommentRequest, TableInfo
+from src.api.schemas import ColumnCommentRequest, TableInfo, TableSummary
 from src.exceptions import DataSourceNotFoundError
 from src.logging_config import get_logger
 
@@ -172,18 +172,32 @@ async def list_tables(
             tenant_id=identity.tenant_id,
         )
         snapshot = ds.schema
-    tables = []
-    for t in (snapshot.tables if snapshot else []):
-        if search and search.lower() not in t.name.lower():
-            continue
-        tables.append(TableInfo(name=t.name, description=t.description,
-            columns=[{"name": c.name, "type": c.type, "comment": c.comment,
-                      "is_indexed": c.is_indexed, "is_primary_key": c.is_primary_key}
-                     for c in t.columns],
-            row_count_estimate=t.row_count_estimate))
-    total = len(tables)
+    matched = [
+        t for t in (snapshot.tables if snapshot else [])
+        if not search or search.lower() in t.name.lower()
+    ]
+    total = len(matched)
     start = (page - 1) * page_size
-    return {"tables": tables[start:start+page_size], "datasource": datasource,
+    # 只构造当前页摘要且不带列详情：单次内省可达数百张表、每表数十列，
+    # 先全量构造再切片会产生数万行临时对象。列详情改由单表详情接口按需加载。
+    page_tables = [
+        TableSummary(
+            name=t.name,
+            description=t.description,
+            column_count=len(t.columns),
+            row_count_estimate=t.row_count_estimate,
+        )
+        for t in matched[start:start + page_size]
+    ]
+    logger.debug(
+        "表结构只读分页边界",
+        datasource=datasource,
+        total=total,
+        returned=len(page_tables),
+        page=page,
+        page_size=page_size,
+    )
+    return {"tables": page_tables, "datasource": datasource,
             "total": total, "page": page, "page_size": page_size}
 
 

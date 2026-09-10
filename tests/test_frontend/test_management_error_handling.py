@@ -57,7 +57,8 @@ def test_schema_comment_update_carries_selected_datasource() -> None:
     _assert_source_contains(
         "pages/SchemaPage.tsx",
         "此处仅供查看",
-        "new URLSearchParams({ datasource, search: query, cached_only: 'true' })",
+        # 断言查询参数仍携带当前数据源与只读标记；不绑定参数对象的具体换行格式。
+        "datasource, search: query, cached_only: 'true'",
     )
     logger.info("test_schema_comment_update_carries_selected_datasource 完成")
 

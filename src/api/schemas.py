@@ -234,6 +234,15 @@ class TableInfo(BaseModel):
     row_count_estimate: int = 0
 
 
+class TableSummary(BaseModel):
+    """列表专用的表摘要：不含列详情，列详情由单表接口按需返回。"""
+
+    name: str
+    description: str = ""
+    column_count: int = 0
+    row_count_estimate: int = 0
+
+
 class MCPServerCreate(BaseModel):
     """创建 system/tenant/private MCP Server 的请求。"""
 
