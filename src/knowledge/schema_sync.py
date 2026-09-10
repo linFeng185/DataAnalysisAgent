@@ -18,6 +18,7 @@ from src.memory.pg_pool import get_pg_pool, pg_connection
 logger = get_logger(__name__)
 ACTIVE = {"running", "cancelling"}
 SNAPSHOT = TypeAdapter(SchemaSnapshot)
+_INDEX_REFRESH_TIMEOUT_SECONDS = 30.0
 
 
 # 构造稳定租户数据源锁键，进程间无需共享内存。
@@ -278,7 +279,9 @@ class SchemaSyncService:
     async def _publish(self, tenant: int, name: str, run_id: str, snapshot: SchemaSnapshot, fingerprint: str) -> None:
         await self.store.publish(tenant, name, run_id, snapshot, fingerprint)
         try:
-            await self.manager.refresh_from_snapshot(name, snapshot, tenant_id=tenant)
+            # 派生索引有独立期限；其失效不能让已提交的表结构永久停在发布中。
+            async with asyncio.timeout(_INDEX_REFRESH_TIMEOUT_SECONDS):
+                await self.manager.refresh_from_snapshot(name, snapshot, tenant_id=tenant)
         except Exception:
             logger.error("规范表结构已发布，向量索引更新失败", tenant_id=tenant, datasource=name, exc_info=True)
         await self.store.finish(tenant, name, run_id, "succeeded")

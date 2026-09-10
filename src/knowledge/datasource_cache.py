@@ -91,7 +91,7 @@ def build_connection_fingerprint(datasource: DataSourceConfig) -> str:
             identity, ensure_ascii=True, sort_keys=True, separators=(",", ":"),
         )
         fingerprint = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
-        logger.info(
+        logger.debug(
             "生成连接指纹完成",
             datasource=datasource.name,
             fingerprint=fingerprint[:12],
@@ -115,7 +115,7 @@ def _validate_fingerprint(fingerprint: str) -> str:
     if not _FINGERPRINT_PATTERN.fullmatch(fingerprint):
         logger.error("缓存指纹校验失败", fingerprint=fingerprint[:12] if fingerprint else "")
         raise ValueError("缓存指纹必须是 64 位十六进制 SHA-256")
-    logger.info("校验缓存指纹完成", fingerprint=fingerprint[:12])
+    logger.debug("校验缓存指纹完成", fingerprint=fingerprint[:12])
     return fingerprint
 
 
@@ -144,7 +144,7 @@ def _serialize_record(
             "entries": [entry.to_dict() for entry in entries],
         }
         result = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
-        logger.info(
+        logger.debug(
             "序列化数据库缓存完成",
             fingerprint=fingerprint[:12],
             entry_count=len(entries),
@@ -190,7 +190,7 @@ def _deserialize_record(raw: str | bytes, fingerprint: str) -> list[KnowledgeEnt
         if not isinstance(raw_entries, list):
             raise ValueError("缓存 entries 必须是数组")
         entries = [KnowledgeEntry.from_dict(item) for item in raw_entries]
-        logger.info(
+        logger.debug(
             "反序列化数据库缓存完成",
             fingerprint=fingerprint[:12],
             entry_count=len(entries),
@@ -235,12 +235,12 @@ class LocalDatasourceCache:
         logger.debug("读取本地数据库缓存入口", fingerprint=fingerprint[:12] if fingerprint else "")
         path = self._path_for(fingerprint)
         if not path.exists():
-            logger.info("本地数据库缓存未命中", fingerprint=fingerprint[:12])
+            logger.debug("本地数据库缓存未命中", fingerprint=fingerprint[:12])
             return None
         try:
             raw = await asyncio.to_thread(path.read_text, encoding="utf-8")
             entries = _deserialize_record(raw, fingerprint)
-            logger.info(
+            logger.debug(
                 "读取本地数据库缓存完成",
                 fingerprint=fingerprint[:12],
                 entry_count=len(entries),
@@ -315,7 +315,7 @@ class LocalDatasourceCache:
         logger.debug("生成本地缓存路径入口", fingerprint=fingerprint[:12] if fingerprint else "")
         validated = _validate_fingerprint(fingerprint)
         path = self._cache_dir / f"{validated}.json"
-        logger.info("生成本地缓存路径完成", fingerprint=validated[:12])
+        logger.debug("生成本地缓存路径完成", fingerprint=validated[:12])
         return path
 
     # 通过同目录临时文件和 os.replace 保证写入原子性。
@@ -327,7 +327,7 @@ class LocalDatasourceCache:
         try:
             temp_path.write_text(raw, encoding="utf-8")
             os.replace(temp_path, path)
-            logger.info("本地缓存原子写完成", path=str(path), chars=len(raw))
+            logger.debug("本地缓存原子写完成", path=str(path), chars=len(raw))
         except Exception as exc:
             if temp_path.exists():
                 temp_path.unlink()
@@ -403,7 +403,7 @@ class RedisDatasourceCache:
             )
             raise
         if raw is None:
-            logger.info("Redis 数据库缓存未命中", fingerprint=fingerprint[:12])
+            logger.debug("Redis 数据库缓存未命中", fingerprint=fingerprint[:12])
             return None
         try:
             entries = _deserialize_record(raw, fingerprint)
@@ -428,7 +428,7 @@ class RedisDatasourceCache:
             )
             await self._discard_invalid_record(key, fingerprint)
             return None
-        logger.info(
+        logger.debug(
             "读取 Redis 数据库缓存完成",
             fingerprint=fingerprint[:12],
             entry_count=len(entries),
@@ -523,7 +523,7 @@ class RedisDatasourceCache:
         logger.debug("生成 Redis 缓存键入口", fingerprint=fingerprint[:12] if fingerprint else "")
         validated = _validate_fingerprint(fingerprint)
         key = f"{self._prefix}:v{_CACHE_VERSION}:{validated}"
-        logger.info("生成 Redis 缓存键完成", fingerprint=validated[:12])
+        logger.debug("生成 Redis 缓存键完成", fingerprint=validated[:12])
         return key
 
 

@@ -94,7 +94,7 @@ class SchemaManager:
         if sync_service is not None and datasource is not None:
             published = await sync_service.apply_snapshot(datasource)
             if published is not None:
-                logger.info("Schema 已发布快照读取边界", datasource=datasource_name, tenant_id=tenant_id, table_count=len(published.tables))
+                logger.debug("Schema 已发布快照读取边界", datasource=datasource_name, tenant_id=tenant_id, table_count=len(published.tables))
                 doc_entries = self._load_from_docs(datasource_name)
                 if doc_entries:
                     # 文档覆盖只作用于当前请求，不写回其他 Worker 共用的规范快照。
@@ -120,7 +120,7 @@ class SchemaManager:
                 **tenant_kwargs,
             )
             merged = self._merge_entries(doc_entries, rebound)
-            logger.info(
+            logger.debug(
                 "Schema 连接级共享缓存命中",
                 datasource=datasource_name,
                 fingerprint=fingerprint[:12],
@@ -131,7 +131,7 @@ class SchemaManager:
                 snapshot = await self._filter_relevant_tables(
                     snapshot, user_query, datasource_name, **tenant_kwargs,
                 )
-            logger.info(
+            logger.debug(
                 "获取 Schema 完成",
                 datasource=datasource_name,
                 source="shared_cache",
@@ -150,14 +150,14 @@ class SchemaManager:
         cached = await self._query_cache(datasource_name, **tenant_kwargs)
         if cached and not self._any_expired(cached):
             if self._entries_complete(cached):
-                logger.info("Schema 缓存命中", datasource=datasource_name, entries=len(cached))
+                logger.debug("Schema 缓存命中", datasource=datasource_name, entries=len(cached))
                 await self._write_shared_cache(fingerprint, cached)
                 snapshot = self._build_snapshot(cached)
                 if user_query:
                     snapshot = await self._filter_relevant_tables(
                         snapshot, user_query, datasource_name, **tenant_kwargs,
                     )
-                logger.info(
+                logger.debug(
                     "获取 Schema 完成",
                     datasource=datasource_name,
                     source="vector_cache",
@@ -209,7 +209,7 @@ class SchemaManager:
             snapshot = await self._filter_relevant_tables(
                 snapshot, user_query, datasource_name, **tenant_kwargs,
             )
-        logger.info(
+        logger.debug(
             "获取 Schema 完成",
             datasource=datasource_name,
             source="database" if introspected else "fallback",
@@ -242,7 +242,7 @@ class SchemaManager:
                 if tenant_id is not None
                 else await resolver(datasource_name)
             )
-            logger.info(
+            logger.debug(
                 "解析共享缓存数据源完成",
                 datasource=datasource_name,
                 found=datasource is not None,
@@ -268,12 +268,12 @@ class SchemaManager:
         """
         logger.debug("读取连接级共享缓存入口", fingerprint=fingerprint[:12])
         if not fingerprint:
-            logger.info("读取连接级共享缓存跳过", reason="无连接指纹")
+            logger.debug("读取连接级共享缓存跳过", reason="无连接指纹")
             return []
         try:
             entries = await self._datasource_cache.get(fingerprint)
             result = entries or []
-            logger.info(
+            logger.debug(
                 "读取连接级共享缓存完成",
                 fingerprint=fingerprint[:12],
                 entry_count=len(result),
@@ -306,7 +306,7 @@ class SchemaManager:
             entry_count=len(entries),
         )
         if not fingerprint or not entries:
-            logger.info(
+            logger.debug(
                 "写入连接级共享缓存跳过",
                 reason="无连接指纹或条目为空",
             )
@@ -318,12 +318,12 @@ class SchemaManager:
         }
         shareable = [entry for entry in entries if entry.source in shareable_sources]
         if not shareable:
-            logger.info("写入连接级共享缓存跳过", reason="无可共享数据库元数据")
+            logger.debug("写入连接级共享缓存跳过", reason="无可共享数据库元数据")
             return
         sanitized = self._sanitize_shared_entries(shareable)
         try:
             await self._datasource_cache.set(fingerprint, sanitized)
-            logger.info(
+            logger.debug(
                 "写入连接级共享缓存完成",
                 fingerprint=fingerprint[:12],
                 entry_count=len(sanitized),
@@ -347,11 +347,11 @@ class SchemaManager:
         """
         logger.debug("删除连接级共享缓存入口", fingerprint=fingerprint[:12])
         if not fingerprint:
-            logger.info("删除连接级共享缓存跳过", reason="无连接指纹")
+            logger.debug("删除连接级共享缓存跳过", reason="无连接指纹")
             return
         try:
             deleted = await self._datasource_cache.delete(fingerprint)
-            logger.info(
+            logger.debug(
                 "删除连接级共享缓存完成",
                 fingerprint=fingerprint[:12],
                 deleted=deleted,
@@ -375,7 +375,7 @@ class SchemaManager:
         """
         logger.debug("检查 Schema 缓存完整性入口", entry_count=len(entries))
         if not entries or self._any_expired(entries):
-            logger.info("检查 Schema 缓存完整性完成", complete=False, reason="空或过期")
+            logger.debug("检查 Schema 缓存完整性完成", complete=False, reason="空或过期")
             return False
         table_names = {
             entry.table_name for entry in entries
@@ -386,7 +386,7 @@ class SchemaManager:
             if entry.category == "column" and entry.table_name
         }
         complete = bool(table_names) and not (table_names - column_tables)
-        logger.info(
+        logger.debug(
             "检查 Schema 缓存完整性完成",
             complete=complete,
             table_count=len(table_names),
@@ -418,7 +418,7 @@ class SchemaManager:
             else:
                 continue
             result.append(replace(entry, id=entry_id, metadata=metadata))
-        logger.info("清理共享缓存条目完成", entry_count=len(result))
+        logger.debug("清理共享缓存条目完成", entry_count=len(result))
         return result
 
     # 方法作用：把连接级共享条目重新绑定到当前别名和租户分区。
@@ -471,7 +471,7 @@ class SchemaManager:
             else:
                 continue
             result.append(replace(entry, id=entry_id, metadata=metadata))
-        logger.info(
+        logger.debug(
             "绑定共享缓存条目完成",
             datasource=datasource_name,
             entry_count=len(result),
@@ -522,7 +522,7 @@ class SchemaManager:
                     "meta_json": metadata.get("meta_json", "{}"),
                 }
                 entries.append(KnowledgeEntry.from_dict(raw_entry))
-            logger.info(
+            logger.debug(
                 "查询 Schema 缓存完成",
                 datasource=datasource_name,
                 count=len(entries),
@@ -564,7 +564,7 @@ class SchemaManager:
             stale_ids = [entry.id for entry in cached]
             if stale_ids:
                 deleted = await store.delete_by_ids(stale_ids)
-                logger.info(
+                logger.debug(
                     "Schema 快照替换旧缓存完成",
                     datasource=datasource_name,
                     deleted=deleted,
@@ -616,7 +616,7 @@ class SchemaManager:
             cached = await self._query_cache(datasource_name, tenant_id=tenant_id)
             if cached:
                 deleted = await store.delete_by_ids([entry.id for entry in cached])
-                logger.info("Schema 旧缓存已删除", datasource=datasource_name, deleted=deleted)
+                logger.debug("Schema 旧缓存已删除", datasource=datasource_name, deleted=deleted)
         except Exception as exc:
             logger.warning("Schema 旧缓存清理失败，继续内省", datasource=datasource_name, error=str(exc))
 
@@ -765,7 +765,7 @@ class SchemaManager:
 
             registry = get_registry()
             existing_provider = registry.get_provider("external")
-            logger.info(
+            logger.debug(
                 "外部数据源 Provider 注册边界",
                 existing=existing_provider is not None,
                 existing_type=(
@@ -776,13 +776,13 @@ class SchemaManager:
             )
             if existing_provider is not None:
                 self._ext_provider_registered = True
-                logger.info(
+                logger.debug(
                     "外部数据源 Provider 已复用",
                     provider_type=type(existing_provider).__name__,
                 )
                 return
 
-            provider = ExternalDataSourceProvider.from_yaml("config/datasources.yaml")
+            provider = ExternalDataSourceProvider()
             registry.register_provider("external", provider)
             self._ext_provider_registered = True
             logger.info("外部数据源 Provider 已注册")
@@ -941,7 +941,7 @@ class SchemaManager:
         now = datetime.now(timezone.utc)
         tenant_id = self._current_tenant_id() if tenant_id is None else int(tenant_id)
         owner_user_id = self._current_user_id()
-        logger.info(
+        logger.debug(
             "Schema 条目身份解析边界",
             datasource=datasource_name,
             tenant_id=tenant_id,
@@ -1072,7 +1072,7 @@ class SchemaManager:
         """将 KnowledgeEntry 批量写入向量存储。"""
         logger.debug("写入 Schema 缓存入口", count=len(entries))
         if not entries:
-            logger.info("写入 Schema 缓存跳过", reason="条目为空")
+            logger.debug("写入 Schema 缓存跳过", reason="条目为空")
             return
         try:
             from src.memory.vector_store import VectorEntry, get_vector_store
@@ -1188,7 +1188,7 @@ class SchemaManager:
         """语义搜索 + FK 图扩张，从大量表中筛选与查询相关的子集。"""
         tables = snapshot.tables if snapshot else []
         if len(tables) <= self._FILTER_THRESHOLD:
-            logger.info("表数量未超阈值，跳过筛选", table_count=len(tables),
+            logger.debug("表数量未超阈值，跳过筛选", table_count=len(tables),
                         threshold=self._FILTER_THRESHOLD)
             return snapshot
 
@@ -1202,21 +1202,21 @@ class SchemaManager:
             tables,
             tenant_id=tenant_id,
         )
-        logger.info("语义搜索完成", matched=len(matched_names),
+        logger.debug("语义搜索完成", matched=len(matched_names),
                     tables=sorted(matched_names))
 
         # ③ FK 图扩张：包含与匹配表有 FK 关系的表（1-hop）
         expanded = self._expand_fk_neighbors(matched_names, fk_graph)
         added = expanded - matched_names
         if added:
-            logger.info("FK 扩张", added_tables=sorted(added),
+            logger.debug("FK 扩张", added_tables=sorted(added),
                         added_count=len(added))
 
         # ④ 构建筛选后的快照
         all_selected = {t.lower() for t in expanded}
         filtered_tables = [t for t in tables if t.name.lower() in all_selected]
         from src.datasource.schema_snapshot import SchemaSnapshot
-        logger.info("表筛选完成", total=len(tables), selected=len(filtered_tables),
+        logger.debug("表筛选完成", total=len(tables), selected=len(filtered_tables),
                     filtered_out=len(tables) - len(filtered_tables))
         return SchemaSnapshot(tables=filtered_tables)
 
@@ -1301,7 +1301,7 @@ class SchemaManager:
             # 按相似度排序，取 top-K
             matched.sort(key=lambda x: x[1])
             selected = {name for name, _ in matched[:self._SEMANTIC_TOP_K]}
-            logger.info("语义搜索匹配", query=user_query[:60],
+            logger.debug("语义搜索匹配", query=user_query[:60],
                         candidates=len(matched), selected=len(selected))
             return selected
         except Exception as exc:

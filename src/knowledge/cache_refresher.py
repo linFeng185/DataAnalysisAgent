@@ -79,7 +79,7 @@ class CacheRefresher:
         )
         expired = [entry for entry in entries if self._is_expired(entry.metadata)]
         if not expired:
-            logger.info("过期 Schema 缓存刷新完成", expired=0, deleted=0)
+            logger.debug("过期 Schema 缓存刷新完成", expired=0, deleted=0)
             return 0
         datasource_scopes = sorted({
             (
@@ -93,7 +93,7 @@ class CacheRefresher:
         for tenant_id, datasource in datasource_scopes:
             token = await self._acquire_lock(datasource, tenant_id=tenant_id)
             if token is None:
-                logger.info(
+                logger.debug(
                     "过期 Schema 主动刷新跳过",
                     datasource=datasource,
                     tenant_id=tenant_id,
@@ -159,7 +159,7 @@ class CacheRefresher:
     ) -> bool:
         token = await self._acquire_lock(datasource_name, tenant_id=tenant_id)
         if token is None:
-            logger.info(
+            logger.debug(
                 "Schema 指纹轮询跳过",
                 datasource=datasource_name,
                 tenant_id=tenant_id,
@@ -186,7 +186,7 @@ class CacheRefresher:
                 )
                 return False
             if previous == current:
-                logger.info(
+                logger.debug(
                     "Schema 指纹未变化",
                     datasource=datasource_name,
                     tenant_id=tenant_id,
@@ -426,13 +426,13 @@ class CacheRefreshService:
                     except HTTPException as exc:
                         if exc.status_code != 409:
                             raise
-                        logger.info("周期同步跳过已有任务", tenant_id=tenant_id, datasource=item["name"])
+                        logger.debug("周期同步跳过已有任务", tenant_id=tenant_id, datasource=item["name"])
             return {"deleted": 0, "checked": checked, "changed": changed}
         deleted = await self._refresher.refresh_expired()
         tenant_ids = await self._registry.list_tenant_ids()
         changed = 0
         checked = 0
-        logger.info("Schema 周期刷新租户枚举探针", tenant_ids=tenant_ids)
+        logger.debug("Schema 周期刷新租户枚举探针", tenant_ids=tenant_ids)
         for tenant_id in tenant_ids:
             items = await self._registry.list_all(tenant_id=tenant_id)
             names = sorted({
@@ -448,7 +448,10 @@ class CacheRefreshService:
                 ):
                     changed += 1
         result = {"deleted": deleted, "checked": checked, "changed": changed}
-        logger.info("Schema 缓存周期刷新完成", **result)
+        if deleted or changed:
+            logger.info("Schema 缓存周期刷新完成", **result)
+        else:
+            logger.debug("Schema 缓存周期刷新完成", **result)
         return result
 
     # 方法作用：按配置周期等待并执行刷新，单轮失败不终止后台服务。
