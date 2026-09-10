@@ -381,3 +381,87 @@ class TestDatasourceImportExport:
         assert payload["renamed"][0]["from"] == "sales"
         assert payload["renamed"][0]["to"].startswith("sales_")
         assert payload["imported"] == [payload["renamed"][0]["to"]]
+
+    # 方法作用：验证 names 参数可单源与多源导出，重复名称被去重。
+    # Args: self - 测试实例；monkeypatch - 依赖替换；names - 查询参数；expected - 期望名称。
+    # Returns: 无返回值。
+    @pytest.mark.parametrize(
+        ("names", "expected"),
+        [
+            (["sales"], ["sales"]),
+            (["orders", "sales"], ["sales", "orders"]),
+            (["sales", "sales"], ["sales"]),
+        ],
+    )
+    async def test_export_filters_by_names(
+        self, monkeypatch: pytest.MonkeyPatch, names: list[str], expected: list[str],
+    ) -> None:
+        """重复名称必须去重，否则产出的文件会被导入侧按重复名整批拒绝。"""
+        from fastapi import FastAPI
+        from httpx import ASGITransport, AsyncClient
+
+        from src.api.routes.datasource import router
+
+        # Arrange
+        items, _ = self._setup(monkeypatch)
+        items.append({**items[0], "name": "orders", "tenant_id": 2})
+        app = FastAPI()
+        app.include_router(router)
+        # Act
+        async with AsyncClient(transport=ASGITransport(app), base_url="http://test") as client:
+            exported = await client.get("/datasources/export", params=[("names", n) for n in names])
+        # Assert
+        assert exported.status_code == 200
+        assert [item["name"] for item in exported.json()["datasources"]] == expected
+
+    # 方法作用：验证未知名称返回 404 且不产出文件，跨租户名称同样不可见。
+    # Args: self - 测试实例；monkeypatch - 依赖替换；name - 请求名称。
+    # Returns: 无返回值。
+    @pytest.mark.parametrize("name", ["missing", "other-tenant"])
+    async def test_export_rejects_unknown_names(self, monkeypatch: pytest.MonkeyPatch, name: str) -> None:
+        """「不存在」与「属于其他租户」必须返回一致，不泄露跨租户信息。"""
+        from fastapi import FastAPI
+        from httpx import ASGITransport, AsyncClient
+
+        from src.api.routes.datasource import router
+
+        # Arrange
+        items, _ = self._setup(monkeypatch)
+        items.append({**items[0], "name": "other-tenant", "tenant_id": 3})
+        app = FastAPI()
+        app.include_router(router)
+        # Act
+        async with AsyncClient(transport=ASGITransport(app), base_url="http://test") as client:
+            exported = await client.get("/datasources/export", params=[("names", name)])
+        # Assert
+        assert exported.status_code == 404
+
+    # 方法作用：验证不带参数仍是全量导出，保持既有行为。
+    # Args: self - 测试实例；monkeypatch - 依赖替换。
+    # Returns: 无返回值。
+    async def test_export_without_names_returns_all(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """既有调用方与测试依赖无参全量语义，不能破坏。"""
+        # Arrange
+        self._setup(monkeypatch)
+        # Act
+        from src.api.routes.datasource import export_datasources
+
+        response = await export_datasources()
+        payload = json.loads(b"".join([chunk async for chunk in response.body_iterator]))
+        # Assert
+        assert [item["name"] for item in payload["datasources"]] == ["sales"]
+
+    # 方法作用：验证导出条目不含 updated_at 运行时元数据。
+    # Args: self - 测试实例；monkeypatch - 依赖替换。
+    # Returns: 无返回值。
+    async def test_export_excludes_updated_at(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """updated_at 与同步状态同属运行时元数据，不得进入可迁移文件。"""
+        # Arrange
+        self._setup(monkeypatch)
+        # Act
+        from src.api.routes.datasource import export_datasources
+
+        response = await export_datasources()
+        payload = json.loads(b"".join([chunk async for chunk in response.body_iterator]))
+        # Assert
+        assert "updated_at" not in json.dumps(payload)

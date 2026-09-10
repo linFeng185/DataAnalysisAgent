@@ -6,6 +6,7 @@ import asyncio
 import io
 import json
 import time
+from typing import Annotated
 
 from fastapi import APIRouter, HTTPException, Query, UploadFile
 from fastapi.responses import StreamingResponse
@@ -24,11 +25,11 @@ router = APIRouter()
 _started_at = time.time()
 
 
-# 方法作用：导出当前租户应用内数据源的无凭证配置。
-# Args: 无，所属租户由认证上下文决定。
-# Returns: 可下载的 JSON 配置文件。
+# 方法作用：导出当前租户应用内数据源的无凭证配置，可按名称筛选子集。
+# Args: names - 可选的数据源名称，可重复；不传或为空即导出全部。
+# Returns: 可下载的 JSON 配置文件；名称不可用时返回 404 且不产出文件。
 @router.get("/datasources/export")
-async def export_datasources() -> StreamingResponse:
+async def export_datasources(names: Annotated[list[str] | None, Query()] = None) -> StreamingResponse:
     """导出不包含密码，导入后需在应用中补充凭证。"""
     import src.api.routes as routes_package
     from src.api.auth import get_current_tenant_id, require_tenant_admin
@@ -36,12 +37,20 @@ async def export_datasources() -> StreamingResponse:
 
     require_tenant_admin()
     tenant_id = get_current_tenant_id()
-    logger.debug("数据源导出入口", tenant_id=tenant_id)
+    logger.debug("数据源导出入口", tenant_id=tenant_id, requested=len(names or []))
     provider = routes_package._registry().get_provider("external")
     sources = await provider.list_all(tenant_id=tenant_id) if provider else []
-    configs = [export_config(source) for source in sources if int(source.tenant_id) == tenant_id]
+    available = [source for source in sources if int(source.tenant_id) == tenant_id]
+    if names:
+        # 去重后按 Provider 顺序过滤：重复名称会产出重复条目，导入侧将整批拒绝。
+        wanted = set(names)
+        if not wanted <= {source.name for source in available}:
+            logger.warning("数据源导出请求包含不可用名称", tenant_id=tenant_id, requested=len(wanted))
+            raise HTTPException(404, "指定的数据源不存在")
+        available = [source for source in available if source.name in wanted]
+    configs = [export_config(source) for source in available]
     payload = json.dumps({"version": 1, "datasources": configs}, ensure_ascii=False, indent=2).encode("utf-8")
-    logger.info("数据源导出完成", tenant_id=tenant_id, count=len(configs))
+    logger.info("数据源导出完成", tenant_id=tenant_id, count=len(configs), filtered=bool(names))
     return StreamingResponse(io.BytesIO(payload), media_type="application/json", headers={
         "Content-Disposition": 'attachment; filename="datasources.json"', "Cache-Control": "no-store",
     })
