@@ -444,6 +444,7 @@ const en: Record<string, string> = {
   "任务状态更新失败": "Failed to update task status",
   "运行记录加载失败": "Failed to load run history",
   "刷新": "Refresh",
+  "该数据源还没有可浏览的表结构，请先在数据源管理页面完成一次同步": "No browsable schema for this data source yet. Run a sync from the data source page first.",
   "刷新自动化数据": "Refresh automation data",
   "创建自动化任务": "Create automation task",
   "自动化 = 按计划执行只读 SQL，并在数据变化或报告生成后通知你": "Automation runs scheduled read-only SQL and notifies you about data changes or generated reports",

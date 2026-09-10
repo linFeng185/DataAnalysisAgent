@@ -84,6 +84,7 @@ export default function SchemaPage() {
       }>
         <Typography.Paragraph type="secondary">{t("请在数据源管理页面同步表结构，此处仅供查看")}</Typography.Paragraph>
         <Table<TableInfo> dataSource={tables} rowKey="name" loading={loading}
+          locale={{ emptyText: t("该数据源还没有可浏览的表结构，请先在数据源管理页面完成一次同步") }}
           onRow={record => ({ onClick: () => setSelectedTable(record), style: { cursor: 'pointer' } })}
           expandable={{ expandedRowRender: (record: TableInfo) => (
             <Table<ColumnInfo> dataSource={record.columns} rowKey="name" size="small" pagination={false} columns={columns} />
