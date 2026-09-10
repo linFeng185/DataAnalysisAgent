@@ -3,97 +3,24 @@
 from __future__ import annotations
 
 import asyncio
-import tempfile
-from pathlib import Path
 
 
-class TestYAMLLoading:
-    """2.3.6 YAML 加载。"""
+class TestApplicationOnlyLoading:
+    """2.3.6 配置只由应用管理，不保留 YAML 发现接口。"""
 
-    def test_load_basic(self):
-        import yaml
-
-        from src.datasource.providers.external import ExternalDataSourceProvider
-
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False, encoding="utf-8") as f:
-            yaml.dump({"datasources": {
-                "prod_ch": {"dialect": "clickhouse", "host": "10.0.1.100", "port": 9000, "database": "analytics", "username": "reader", "password": "s3cret", "description": "生产", "tags": ["生产"]},
-                "stg_pg": {"dialect": "postgres", "host": "10.0.2.50", "database": "ecom", "username": "ro"},
-            }}, f)
-            yaml_path = f.name
-
-        try:
-            provider = ExternalDataSourceProvider()
-            sources = provider.load_yaml(yaml_path)
-            assert len(sources) == 2
-            assert sources[0].name == "prod_ch"
-            assert sources[0].dialect == "clickhouse"
-            assert sources[0].port == 9000
-            assert sources[0].password != "s3cret"  # 已加密
-            assert sources[1].name == "stg_pg"
-        finally:
-            Path(yaml_path).unlink()
-
-    def test_nonexistent_file(self):
-        from src.datasource.providers.external import ExternalDataSourceProvider
-        assert ExternalDataSourceProvider().load_yaml("/nonexistent/path.yaml") == []
-
-    def test_empty_yaml(self):
-        import yaml
-
-        from src.datasource.providers.external import ExternalDataSourceProvider
-
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
-            yaml.dump({}, f)
-            yaml_path = f.name
-
-        try:
-            provider = ExternalDataSourceProvider()
-            assert provider.load_yaml(yaml_path) == []
-        finally:
-            Path(yaml_path).unlink()
-
-    def test_from_yaml_classmethod(self):
-        import yaml
-
-        from src.datasource.providers.external import ExternalDataSourceProvider
-
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
-            yaml.dump({"datasources": {"t": {"dialect": "mysql", "host": "localhost", "database": "test"}}}, f)
-            yaml_path = f.name
-
-        try:
-            provider = ExternalDataSourceProvider.from_yaml(yaml_path)
-            sources = asyncio.run(provider.list_all())
-            assert len(sources) == 1
-            assert sources[0].name == "t"
-        finally:
-            Path(yaml_path).unlink()
-
-    # 方法作用：验证 YAML 用户名环境变量占位符在创建配置时被解析。
-    # Args: self - pytest 测试类实例；monkeypatch - pytest 补丁工具；tmp_path - 临时目录。
-    # Returns: 无返回值，断言失败时由 pytest 报告。
-    def test_load_yaml_resolves_username_environment_reference(self, monkeypatch, tmp_path) -> None:
-        """最小权限数据库账号应由部署环境注入，而不是保留字面占位符。"""
+    # 方法作用：确认构造 Provider 不读取任何外部配置。
+    # Args: self - 测试实例。
+    # Returns: 无返回值。
+    def test_no_yaml_loader(self) -> None:
+        """空 Provider 不会因本地文件存在而隐式注册连接。"""
         # Arrange
         from src.datasource.providers.external import ExternalDataSourceProvider
-
-        monkeypatch.setenv("MSSQL_USERNAME", "data_analysis_reader")
-        path = tmp_path / "datasources.yaml"
-        path.write_text(
-            "datasources:\n"
-            "  mssql:\n"
-            "    dialect: mssql\n"
-            "    username: ${MSSQL_USERNAME}\n"
-            "    password: ${MSSQL_PASSWORD}\n",
-            encoding="utf-8",
-        )
-
         # Act
-        sources = ExternalDataSourceProvider().load_yaml(str(path))
-
+        provider = ExternalDataSourceProvider()
         # Assert
-        assert sources[0].username == "data_analysis_reader"
+        assert not provider._sources
+        assert not hasattr(provider, "load_yaml")
+        assert not hasattr(provider, "from_yaml")
 
 
 class TestDynamicRegistration:

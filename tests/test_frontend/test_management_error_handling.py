@@ -44,7 +44,7 @@ def test_chat_page_validates_selected_datasource() -> None:
 def test_schema_refresh_checks_http_status() -> None:
     """非 2xx 刷新响应不得显示成功。"""
     logger.debug("test_schema_refresh_checks_http_status 入口")
-    _assert_source_contains("pages/SchemaPage.tsx", "await post<SyncStatus>(", "/schema/sync?datasource=", "表结构同步已启动", "catch (error)")
+    _assert_source_contains("pages/DatasourcePage.tsx", "await post<SchemaSyncStatus>(", "encodeURIComponent(source.name)", "表结构同步已启动", "catch (error)")
     logger.info("test_schema_refresh_checks_http_status 完成")
 
 
@@ -52,12 +52,12 @@ def test_schema_refresh_checks_http_status() -> None:
 # Args: 无。
 # Returns: 无返回值，断言失败时由 pytest 报告。
 def test_schema_comment_update_carries_selected_datasource() -> None:
-    """选择非 demo 数据源时不得把注释静默写入默认数据源。"""
+    """表结构页面只读，不再提供注释写入或同步操作。"""
     logger.debug("test_schema_comment_update_carries_selected_datasource 入口")
     _assert_source_contains(
         "pages/SchemaPage.tsx",
-        "comment?datasource=${encodeURIComponent(ds)}",
-        "字段备注保存请求边界",
+        "此处仅供查看",
+        "new URLSearchParams({ datasource, search: query, cached_only: 'true' })",
     )
     logger.info("test_schema_comment_update_carries_selected_datasource 完成")
 

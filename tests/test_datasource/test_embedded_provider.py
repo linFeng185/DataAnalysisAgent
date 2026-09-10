@@ -52,7 +52,7 @@ class TestModelDescription:
 
 
 class TestEnvDiscovery:
-    """2.2.2 环境变量发现。"""
+    """2.2.2 历史环境变量发现入口已停用。"""
 
     def test_single_source(self, monkeypatch):
         monkeypatch.setenv("DATASOURCE_NAME", "ch")
@@ -60,7 +60,7 @@ class TestEnvDiscovery:
         monkeypatch.setenv("DATASOURCE_HOST", "10.0.0.1")
         from src.datasource.providers.embedded import EmbeddedDataSourceProvider
         sources = asyncio.run(EmbeddedDataSourceProvider().list_all())
-        assert any(s.name == "ch" for s in sources)
+        assert not sources
 
     def test_multi_source(self, monkeypatch):
         monkeypatch.setenv("DATASOURCE_0_NAME", "ch1")
@@ -70,8 +70,8 @@ class TestEnvDiscovery:
         from src.datasource.providers.embedded import EmbeddedDataSourceProvider
         sources = asyncio.run(EmbeddedDataSourceProvider().list_all())
         names = {s.name for s in sources}
-        assert "ch1" in names
-        assert "pg1" in names
+        assert "ch1" not in names
+        assert "pg1" not in names
 
     # 方法作用：验证空端口环境变量回退到对应方言默认端口。
     # Args: self - pytest 测试类实例；monkeypatch - pytest 补丁工具。
@@ -79,16 +79,16 @@ class TestEnvDiscovery:
     def test_empty_port_uses_dialect_default(self, monkeypatch) -> None:
         """Docker/Kubernetes 注入空字符串时应用不得启动失败。"""
         # Arrange
-        from src.datasource.providers.embedded import _parse_ds_from_prefix
+        from src.datasource.providers.embedded import EmbeddedDataSourceProvider
 
         monkeypatch.setenv("DATASOURCE_X_DIALECT", "postgres")
         monkeypatch.setenv("DATASOURCE_X_PORT", "")
 
         # Act
-        datasource = _parse_ds_from_prefix("DATASOURCE_X_", "pg")
+        sources = asyncio.run(EmbeddedDataSourceProvider().list_all())
 
         # Assert
-        assert datasource.port == 5432
+        assert not sources
 
 
 class TestNormalizeDialect:

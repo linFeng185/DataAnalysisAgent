@@ -108,7 +108,7 @@ class TestEmbeddedProviderEdgeCases:
     """2.2.1~2 补充。"""
 
     def test_multi_source(self, monkeypatch):
-        """正常路径: DATASOURCE_0 + DATASOURCE_1。"""
+        """历史多数据源环境变量不得注册业务数据源。"""
         monkeypatch.setenv("DATASOURCE_0_NAME", "ch_prod")
         monkeypatch.setenv("DATASOURCE_0_DIALECT", "clickhouse")
         monkeypatch.setenv("DATASOURCE_0_HOST", "10.0.1.1")
@@ -119,8 +119,8 @@ class TestEmbeddedProviderEdgeCases:
         from src.datasource.providers.embedded import EmbeddedDataSourceProvider
         sources = asyncio.run(EmbeddedDataSourceProvider().list_all())
         names = {s.name for s in sources}
-        assert "ch_prod" in names
-        assert "pg_analytics" in names
+        assert "ch_prod" not in names
+        assert "pg_analytics" not in names
 
     def test_no_env_configured(self, monkeypatch):
         """边界条件: 无环境变量时 Provider 为空。"""

@@ -540,95 +540,18 @@ class TestDockerSecrets:
             )
             raise
 
-    def test_datasource_yaml_uses_environment_credentials(self):
-        """仓库内置外挂数据源必须使用环境变量凭证占位符。"""
+    # 方法作用：验证部署模板不再挂载或声明业务数据源配置文件。
+    # Args: self - 测试实例。
+    # Returns: 无返回值。
+    def test_datasource_yaml_is_removed(self) -> None:
+        """业务数据源只能通过应用 API 管理，模板不提供旧配置入口。"""
         # Arrange
-        from pathlib import Path
-
-        import yaml
-
-        config = yaml.safe_load(
-            Path("config/datasources.example.yaml").read_text(encoding="utf-8")
-        )
-
+        config_path = Path("config/datasources.example.yaml")
         # Act
-        passwords = [
-            str(item.get("password", ""))
-            for item in config.get("datasources", {}).values()
-            if item.get("dialect") != "sqlite"
-        ]
-
+        compose = Path("docker-compose.example.yml").read_text(encoding="utf-8")
         # Assert
-        assert all(value.startswith("${") and value.endswith("}") for value in passwords)
-
-    # 方法作用：验证仓库默认配置保留历史固定数据源及关键连接信息。
-    # Args: self - pytest 测试类实例。
-    # Returns: 无返回值，断言失败时由 pytest 报告。
-    def test_datasource_yaml_example_is_optional(self) -> None:
-        """可选配置示例应保持合法映射，允许生产环境完全使用管理页面。"""
-        logger.debug("test_datasource_yaml_preserves_default_sources 入口")
-        try:
-            # Arrange
-            import yaml
-
-            # Act
-            config = yaml.safe_load(
-                Path("config/datasources.example.yaml").read_text(encoding="utf-8")
-            )
-            datasources = config.get("datasources", {})
-
-            # Assert
-            assert isinstance(datasources, dict)
-            logger.info(
-                "test_datasource_yaml_preserves_default_sources 完成",
-                extra={"count": len(datasources)},
-            )
-        except Exception as exc:
-            logger.error(
-                "test_datasource_yaml_preserves_default_sources 异常: %s",
-                exc,
-                exc_info=True,
-            )
-            raise
-
-    # 方法作用：验证高权限数据库用户名只能由部署环境注入。
-    # Args: self - pytest 测试类实例。
-    # Returns: 无返回值，断言失败时由 pytest 报告。
-    def test_elevated_datasource_usernames_use_environment_references(self) -> None:
-        """SYSTEM 和 sa 可连接，但不得作为固定明文写入仓库 YAML。"""
-        logger.debug("test_elevated_datasource_usernames_use_environment_references 入口")
-        try:
-            # Arrange
-            import yaml
-
-            config = yaml.safe_load(
-                Path("config/datasources.example.yaml").read_text(encoding="utf-8")
-            )
-
-            # Act
-            datasources = config.get("datasources", {})
-            usernames = {
-                name: str(datasources.get(name, {}).get("username", ""))
-                for name in ("oracle_xe", "mssql_express")
-            }
-
-            # Assert
-            assert all(
-                username.startswith("${") and username.endswith("}")
-                for username in usernames.values()
-                if username
-            )
-            logger.info(
-                "test_elevated_datasource_usernames_use_environment_references 完成",
-                extra={"configured": sorted(usernames)},
-            )
-        except Exception as exc:
-            logger.error(
-                "test_elevated_datasource_usernames_use_environment_references 异常: %s",
-                exc,
-                exc_info=True,
-            )
-            raise
+        assert not config_path.exists()
+        assert "config/datasources.yaml" not in compose
 
     def test_data_import_script_has_no_hardcoded_database_passwords(self):
         """数据导入辅助脚本不得内置数据库明文密码。"""

@@ -168,7 +168,7 @@ class TestBootstrap:
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
         ("env", "enabled", "expected_calls"),
-        (("dev", True, 1), ("dev", False, 0), ("prod", True, 0)),
+        (("dev", True, 0), ("dev", False, 0), ("prod", True, 0)),
     )
     async def test_demo_datasource_respects_environment_boundary(
         self,
@@ -184,10 +184,11 @@ class TestBootstrap:
 
         ensure_demo = AsyncMock()
         monkeypatch.setattr(setup_module, "ensure_demo_datasource", ensure_demo)
-        settings = SimpleNamespace(env=env, demo_datasource_enabled=enabled)
+        monkeypatch.setenv("DEMO_DATASOURCE_ENABLED", str(enabled))
 
         # Act
-        await bootstrap._ensure_demo_datasource(settings)
+        steps = dict(bootstrap._BOOTSTRAP_STEPS)
 
         # Assert
         assert ensure_demo.await_count == expected_calls
+        assert "_ensure_demo_datasource" not in steps

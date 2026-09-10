@@ -99,7 +99,7 @@ class TestUnifiedConfig:
         logger.debug("test_missing_datasources_yaml_is_allowed 入口")
         from src.datasource.providers.external import ExternalDataSourceProvider
 
-        provider = ExternalDataSourceProvider.from_yaml(str(tmp_path / "missing.yaml"))
+        provider = ExternalDataSourceProvider()
 
         assert provider._sources == {}  # noqa: SLF001
         logger.info("test_missing_datasources_yaml_is_allowed 完成")

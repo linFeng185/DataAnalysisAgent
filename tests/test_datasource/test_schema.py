@@ -131,7 +131,9 @@ class TestEmbeddedProvider:
 
         from src.datasource.providers.embedded import EmbeddedDataSourceProvider
         p = EmbeddedDataSourceProvider()
-        assert len(list(p._sources.values())) >= 1  # noqa: SLF001
+        from src.logging_config import get_logger
+        get_logger(__name__).info("旧环境变量发现探针", configured=True, source_count=len(p._sources))
+        assert not p._sources
 
 
 class TestDataSourceRegistry:

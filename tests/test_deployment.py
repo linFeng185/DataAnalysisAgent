@@ -77,7 +77,7 @@ class TestContainerDeployment:
 
         backend_volumes = "\n".join(str(item) for item in backend["volumes"])
         assert "./config/app.yaml:/app/config/app.yaml:ro" in backend_volumes
-        assert "./config/datasources.yaml:/app/config/datasources.yaml:ro" in backend_volumes
+        assert "./config/datasources.yaml:/app/config/datasources.yaml:ro" not in backend_volumes
         assert "./data/backend:/app/data" in backend_volumes
         assert "./logs/backend:/app/logs" in backend_volumes
         assert "./data/postgres:/var/lib/postgresql/data" in str(
