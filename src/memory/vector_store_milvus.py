@@ -240,6 +240,30 @@ class MilvusVectorStore(VectorStore):
         result = await asyncio.to_thread(encode, text, show_progress_bar=False)
         return result.tolist()
 
+    # 批量编码条目向量：逐条调用模型会让 1386 条的刷新把 30 秒预算吃满。
+    # Args: self - 实例；entries - 待写入条目。
+    # Returns: 与 entries 一一对应的向量列表，已带 embedding 的条目原样复用。
+    async def _embed_entries(self, entries: list[VectorEntry]) -> list[list[float]]:
+        pending = [entry.content for entry in entries if not entry.embedding]
+        if not pending:
+            return [entry.embedding for entry in entries]
+        encode = await self._get_embed_fn()
+        started = time.monotonic()
+        # sentence-transformers 的 encode 接受列表入参，一次前向即可编码整批。
+        vectors = await asyncio.to_thread(encode, pending, show_progress_bar=False)
+        logger.info("向量批量编码完成", count=len(pending),
+                    elapsed_ms=round((time.monotonic() - started) * 1000))
+        batch = [vector.tolist() for vector in vectors]
+        result: list[list[float]] = []
+        cursor = 0
+        for entry in entries:
+            if entry.embedding:
+                result.append(entry.embedding)
+            else:
+                result.append(batch[cursor])
+                cursor += 1
+        return result
+
     def _to_expr(self, filters: MetadataFilters | None) -> str | None:
         """把 metadata 等值条件转换为安全的 Milvus 候选过滤表达式。
 
@@ -433,7 +457,7 @@ class MilvusVectorStore(VectorStore):
             return 0
         async with self._write_lock:
             ids = [e.id for e in entries]
-            embs = [e.embedding or await self._embed(e.content) for e in entries]
+            embs = await self._embed_entries(entries)
 
             # 保持远程写入与 flush 同一线程生命周期，避免取消后继续无锁修改。
             # Args: 无，使用外层批次与嵌入结果。

@@ -555,7 +555,8 @@ class SchemaManager:
             snapshot,
             tenant_id=tenant_id,
         )
-        await self._delete_shared_cache(fingerprint)
+        # 前置删除已移除，改为按需处理（见下方 if entries 分支）：
+        # 非空时直接整体覆盖，避免「删成功、写失败」留下空态；空时仍必须删除旧缓存。
         try:
             from src.memory.vector_store import get_vector_store
 
@@ -577,8 +578,14 @@ class SchemaManager:
                 exc_info=True,
             )
         if entries:
-            await self._upsert_to_cache(entries)
+            # 先写稳定的连接级缓存（本地原子文件），再做易超时的向量写入。
+            # 不放在 finally 里：取消期间 await 本身可能立即被再次取消，靠 finally
+            # 保证写入并不可靠；把可靠的一步排到前面才是确定性的保证。
             await self._write_shared_cache(fingerprint, entries)
+            await self._upsert_to_cache(entries)
+        else:
+            # 空结构必须清掉旧自动缓存，否则已删除的表会继续出现在知识检索里。
+            await self._delete_shared_cache(fingerprint)
         logger.info(
             "使用实时快照刷新 Schema 完成",
             datasource=datasource_name,

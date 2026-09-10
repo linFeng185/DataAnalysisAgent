@@ -538,6 +538,39 @@ class TestMilvusCollectionLoadResilience:
             )
             raise
 
+    # 方法作用：验证缺失向量一次性批量编码，而不是逐条调用模型。
+    # Args: self - pytest 测试类实例；monkeypatch - pytest 补丁工具。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    @pytest.mark.asyncio
+    async def test_upsert_embeds_missing_vectors_in_one_batch(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """逐条编码会把大表结构刷新的预算吃满，必须合并为一次 encode。"""
+        logger.debug("test_upsert_embeds_missing_vectors_in_one_batch 入口")
+        try:
+            # Arrange
+            import numpy as np
+
+            from src.memory.vector_store import VectorEntry
+            from src.memory.vector_store_milvus import MilvusVectorStore
+
+            encode = MagicMock(return_value=np.array([[0.1, 0.2], [0.3, 0.4]]))
+            store = MilvusVectorStore()
+            monkeypatch.setattr(store, "_get_embed_fn", AsyncMock(return_value=encode))
+            monkeypatch.setattr(store, "_run_on_collection", AsyncMock(return_value=None))
+            entries = [VectorEntry("a", "first"), VectorEntry("b", "second")]
+
+            # Act
+            result = await store.upsert(entries)
+
+            # Assert
+            assert result == 2
+            encode.assert_called_once()
+            assert encode.call_args.args[0] == ["first", "second"]
+            assert encode.call_args.kwargs["show_progress_bar"] is False
+            logger.info("test_upsert_embeds_missing_vectors_in_one_batch 完成")
+        except Exception as exc:
+            logger.error("test_upsert_embeds_missing_vectors_in_one_batch 异常: %s", exc, exc_info=True)
+            raise
+
     # 方法作用：验证空批次写入不触碰集合，边界输入保持零 RPC。
     # Args: self - pytest 测试类实例；monkeypatch - pytest 补丁工具。
     # Returns: 无返回值，断言失败时由 pytest 报告。
