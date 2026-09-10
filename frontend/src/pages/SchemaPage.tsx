@@ -1,6 +1,7 @@
 import { t, useLanguage } from '../i18n';
 import { useState, useEffect, useRef } from 'react';
-import { Card, Table, Input, Tag, Drawer, Typography, message, Space, Select } from 'antd';
+import { Card, Table, Input, Tag, Drawer, Typography, message, Space, Select, Button } from 'antd';
+import { ReloadOutlined } from '@ant-design/icons';
 import { get } from '../api/client';
 import type { TableInfo, ColumnInfo, DatasourceConfig } from '../types';
 import { fetchDatasourceCatalog } from '../api/datasourceCatalog';
@@ -17,6 +18,7 @@ export default function SchemaPage() {
   const [query, setQuery] = useState('');
   const [loading, setLoading] = useState(false);
   const [selectedTable, setSelectedTable] = useState<TableInfo | null>(null);
+  const [reloadKey, setReloadKey] = useState(0);
   const sequence = useRef(0);
 
   // 方法作用：读取当前身份可见的数据源目录。
@@ -35,6 +37,14 @@ export default function SchemaPage() {
   // 方法作用：在数据源或搜索词变化时读取表结构，避免旧响应覆盖当前选择。
   // Args: 无。
   // Returns: 卸载或切换时使旧请求失效。
+  // 方法作用：手动触发一次表结构重新拉取，用于同步完成后刷新页面数据。
+  // Args: 无。
+  // Returns: 无返回值。
+  const reload = (): void => setReloadKey(key => key + 1);
+
+  // 方法作用：在数据源、搜索词或手动刷新变化时读取表结构，避免旧响应覆盖当前选择。
+  // Args: 无。
+  // Returns: 卸载或切换时使旧请求失效。
   useEffect(() => {
     const current = ++sequence.current;
     setSelectedTable(null);
@@ -50,7 +60,7 @@ export default function SchemaPage() {
       if (sequence.current === current) setLoading(false);
     });
     return () => { sequence.current += 1; };
-  }, [datasource, query]);
+  }, [datasource, query, reloadKey]);
 
   const columns = [
     { title: t("字段"), dataIndex: 'name', width: 150 },
@@ -69,6 +79,7 @@ export default function SchemaPage() {
             options={datasources.map(source => ({ value: source.name, label: `${source.name} (${source.dialect})` }))}
             placeholder={t("选择数据源")} />
           <Input.Search placeholder={t("搜索表名")} value={search} onChange={event => setSearch(event.target.value)} onSearch={setQuery} style={{ width: 200 }} />
+          <Button icon={<ReloadOutlined />} loading={loading} onClick={reload}>{t("刷新")}</Button>
         </Space>
       }>
         <Typography.Paragraph type="secondary">{t("请在数据源管理页面同步表结构，此处仅供查看")}</Typography.Paragraph>

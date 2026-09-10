@@ -36,15 +36,27 @@ class OracleConnector(ConnectorBase):
         """
         cfg = self.config
         logger.debug("Oracle URL 构建入口", datasource=cfg.name)
+        # 服务名可能由界面写入 extra_params.service_name，此时 database 为空。
+        # 必须回退读取，否则会传出空服务名，oracledb 转而把 DSN 当 TNS 别名解析并抛 DPY-4027。
+        service_name = str(
+            (cfg.extra_params or {}).get("service_name") or cfg.database or ""
+        ).strip()
+        if not service_name:
+            # 不抛错：保持既有构造行为，但把「必然失败」的原因说清楚，避免只看到 DPY-4027。
+            logger.warning(
+                "Oracle 未配置服务名，连接必然失败",
+                datasource=cfg.name,
+                hint="请在数据源的扩展参数中填写 service_name，例如 XEPDB1",
+            )
         result = URL.create(
             "oracle+oracledb",
             username=cfg.username or None,
             password=cfg.password or None,
             host=cfg.host or None,
             port=cfg.port or None,
-            query={"service_name": cfg.database},
+            query={"service_name": service_name},
         )
-        logger.info("Oracle URL 构建完成", datasource=cfg.name)
+        logger.info("Oracle URL 构建完成", datasource=cfg.name, service_name=service_name)
         return result
 
     def _get_timeout(self) -> str | None:
