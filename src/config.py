@@ -235,7 +235,6 @@ class Settings(BaseSettings):
     log_format: Literal["console", "json"] = "console"
     log_file: str = "logs/app.log"
     server_reload_enabled: bool = True
-    demo_datasource_enabled: bool = False
 
     # ---- LLM ----
     llm_provider: Literal["openai", "anthropic"] = "openai"

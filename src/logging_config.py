@@ -234,6 +234,7 @@ def setup_logging() -> None:
 
     structlog.configure(
         processors=[
+            structlog.stdlib.filter_by_level,
             *shared_processors,
             structlog.stdlib.ProcessorFormatter.wrap_for_formatter,
         ],

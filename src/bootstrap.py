@@ -22,7 +22,6 @@ _BOOTSTRAP_STEPS: tuple[tuple[str, str], ...] = (
     ("_load_api_access_policies", "API 访问策略"),
     ("_configure_observability", "可观测性"),
     ("_init_workflow", "LangGraph 工作流"),
-    ("_ensure_demo_datasource", "演示数据源"),
     ("_warmup_knowledge", "知识库预热"),
     ("_warmup_llm", "LLM 客户端预热"),
     ("_warmup_stores", "会话存储预热"),
@@ -187,25 +186,6 @@ async def _init_workflow(settings: Settings) -> None:
     logger.info("_init_workflow 完成")
 
 
-# 方法作用：初始化演示 SQLite 数据源，保证开发环境有可用样例。
-# Args: settings - 当前应用配置。
-# Returns: 无返回值。
-async def _ensure_demo_datasource(settings: Settings) -> None:
-    enabled = settings.env == "dev" and settings.demo_datasource_enabled
-    logger.debug(
-        "_ensure_demo_datasource 入口",
-        env=settings.env,
-        enabled=enabled,
-    )
-    if not enabled:
-        logger.info("_ensure_demo_datasource 完成", skipped=True)
-        return
-    from src.datasource.setup import ensure_demo_datasource
-
-    await ensure_demo_datasource()
-    logger.info("_ensure_demo_datasource 完成", skipped=False)
-
-
 # 方法作用：预热知识文件存储、向量库和系统知识目录。
 # Args: settings - 当前应用配置。
 # Returns: 无返回值。
@@ -336,7 +316,7 @@ async def _connect_mcp_servers(settings: Settings) -> None:
 async def _load_external_datasources(settings: Settings) -> None:
     logger.info(
         "_load_external_datasources 配置边界",
-        config_path="config/datasources.yaml",
+        config_source="datasource_configs",
         environment=settings.env,
         settings_key_configured=bool(settings.credential_encryption_key),
         environment_key_configured=bool(os.getenv("CREDENTIAL_ENCRYPTION_KEY", "")),
@@ -344,7 +324,7 @@ async def _load_external_datasources(settings: Settings) -> None:
     from src.datasource.providers.external import ExternalDataSourceProvider
     from src.datasource.registry import get_registry
 
-    provider = ExternalDataSourceProvider.from_yaml("config/datasources.yaml")
+    provider = ExternalDataSourceProvider()
     persisted_count = await provider.load_persisted()
     get_registry().register_provider("external", provider)
     sources = await provider.list_all()
@@ -352,7 +332,7 @@ async def _load_external_datasources(settings: Settings) -> None:
         "_load_external_datasources 完成",
         count=len(sources),
         persisted_count=persisted_count,
-        yaml_optional=True,
+        application_only=True,
         env=settings.env,
     )
 

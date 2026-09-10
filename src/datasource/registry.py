@@ -165,7 +165,7 @@ class DataSourceRegistry:
             self._resolution_generations[key] = (
                 self._resolution_generations.get(key, 0) + 1
             )
-        logger.info(
+        logger.debug(
             "数据源解析代次递增",
             datasource=name,
             tenant_id=effective_tenant,
@@ -454,7 +454,7 @@ class DataSourceRegistry:
             from src.connectors.plugins import require_plugin
             require_plugin(cached.dialect)
             await self._apply_published_schema(cached)
-            logger.info("解析数据源命中缓存", datasource=name)
+            logger.debug("解析数据源命中缓存", datasource=name)
             return cached
 
         # 同一租户和名称只允许一个协程创建连接池，其他协程在锁内二次检查缓存。
@@ -467,7 +467,7 @@ class DataSourceRegistry:
                         from src.connectors.plugins import require_plugin
                         require_plugin(cached.dialect)
                         await self._apply_published_schema(cached)
-                        logger.info("解析数据源等待后命中缓存", datasource=name)
+                        logger.debug("解析数据源等待后命中缓存", datasource=name)
                         return cached
                     generation = self._resolution_generations.get(cache_key, 0)
                     try:
@@ -512,7 +512,7 @@ class DataSourceRegistry:
             legacy_config = self._cache[name]
             legacy_tenant = int(getattr(legacy_config, "tenant_id", 1) or 1)
             legacy_allowed = not self._isolation_enabled() or legacy_tenant == tenant_id
-            logger.info(
+            logger.debug(
                 "旧格式数据源缓存租户校验探针",
                 datasource=name,
                 requested_tenant=tenant_id,
@@ -520,7 +520,7 @@ class DataSourceRegistry:
                 allowed=legacy_allowed,
             )
             if legacy_allowed:
-                logger.info("命中旧格式数据源缓存键", datasource=name)
+                logger.debug("命中旧格式数据源缓存键", datasource=name)
                 return legacy_config
 
         for provider in self._providers.values():
@@ -541,7 +541,7 @@ class DataSourceRegistry:
                 )
 
             if config.password:
-                logger.info(
+                logger.debug(
                     "数据源凭证解密边界",
                     datasource=config.name,
                     credential_format=_credential_reference_kind(config.password),
@@ -549,7 +549,7 @@ class DataSourceRegistry:
                 )
                 config.password = self._credential.resolve_env_ref(config.password)
                 config.password = self._credential.decrypt(config.password)
-                logger.info(
+                logger.debug(
                     "数据源凭证解密边界",
                     datasource=config.name,
                     credential_configured=bool(config.password),
@@ -680,7 +680,7 @@ class DataSourceRegistry:
                     "connected": True,
                     "updated_at": getattr(config, "updated_at", None).isoformat() if getattr(config, "updated_at", None) else "",
                 })
-        logger.info("列出数据源完成", count=len(result))
+        logger.debug("列出数据源完成", count=len(result))
         return result
 
     # 方法作用：为系统后台任务枚举当前 Registry 中实际存在数据源的全部租户。
@@ -707,7 +707,7 @@ class DataSourceRegistry:
                 for config in provider_items
             )
         result = sorted(tenant_id for tenant_id in tenant_ids if tenant_id > 0)
-        logger.info("枚举数据源租户完成", tenant_count=len(result))
+        logger.debug("枚举数据源租户完成", tenant_count=len(result))
         return result
 
     @staticmethod

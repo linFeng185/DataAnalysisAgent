@@ -51,7 +51,7 @@ def _load_default_connectors() -> None:
     global _defaults_loaded
     logger.debug("加载默认连接器入口", already_loaded=_defaults_loaded)
     if _defaults_loaded:
-        logger.info("加载默认连接器跳过", reason="已加载")
+        logger.debug("加载默认连接器跳过", reason="已加载")
         return
     _defaults_loaded = True
     try:
@@ -112,5 +112,5 @@ def list_dialects() -> list[str]:
     """返回稳定的已注册方言清单。"""
     _load_default_connectors()
     result = sorted(_registry)
-    logger.info("列出连接器方言完成", count=len(result), dialects=result)
+    logger.debug("列出连接器方言完成", count=len(result), dialects=result)
     return result

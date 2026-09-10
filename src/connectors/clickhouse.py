@@ -31,8 +31,6 @@ class ClickHouseRow(dict):
         Returns:
             当前字典行。
         """
-        logger.debug("ClickHouseRow._mapping 入口")
-        logger.info("ClickHouseRow._mapping 完成")
         return self
 
 
@@ -43,20 +41,16 @@ class ClickHouseResult:
     # Args: column_names - 列名；rows - 原始结果元组。
     # Returns: 无返回值。
     def __init__(self, column_names: list[str], rows: list[tuple]) -> None:
-        logger.debug("ClickHouseResult.__init__ 入口", row_count=len(rows))
         self._rows = [ClickHouseRow(dict(zip(column_names, row, strict=False))) for row in rows]
         self._cursor = 0
-        logger.info("ClickHouseResult.__init__ 完成", row_count=len(rows))
 
     # 方法作用：返回游标后的全部结果并消费游标。
     # Args: 无。
     # Returns: 剩余 ClickHouseRow 列表。
     def fetchall(self) -> list[ClickHouseRow]:
         """返回剩余全部行。"""
-        logger.debug("ClickHouseResult.fetchall 入口", cursor=self._cursor)
         rows = self._rows[self._cursor:]
         self._cursor = len(self._rows)
-        logger.info("ClickHouseResult.fetchall 完成", row_count=len(rows))
         return rows
 
     # 方法作用：按迭代协议消费剩余结果。
@@ -64,9 +58,7 @@ class ClickHouseResult:
     # Returns: 剩余 ClickHouseRow 的迭代器。
     def __iter__(self):
         """与 fetchall 共享游标。"""
-        logger.debug("ClickHouseResult.__iter__ 入口", cursor=self._cursor)
         result = iter(self.fetchall())
-        logger.info("ClickHouseResult.__iter__ 完成")
         return result
 
     # 方法作用：从当前游标返回最多 size 行。
@@ -74,10 +66,8 @@ class ClickHouseResult:
     # Returns: 结果行列表。
     def fetchmany(self, size: int) -> list[ClickHouseRow]:
         """有界读取 ClickHouse 查询结果。"""
-        logger.debug("ClickHouseResult.fetchmany 入口", cursor=self._cursor, size=size)
         rows = self._rows[self._cursor:self._cursor + size]
         self._cursor += len(rows)
-        logger.info("ClickHouseResult.fetchmany 完成", row_count=len(rows))
         return rows
 
     # 方法作用：释放结果集内存和游标状态。
@@ -85,27 +75,21 @@ class ClickHouseResult:
     # Returns: 无返回值。
     def close(self) -> None:
         """清空结果缓存。"""
-        logger.debug("ClickHouseResult.close 入口", row_count=len(self._rows))
         self._rows = []
         self._cursor = 0
-        logger.info("ClickHouseResult.close 完成")
 
     # 方法作用：允许异步 Provider 对同步结果使用 await。
     # Args: 无。
     # Returns: 解析为自身的 awaitable 迭代器。
     def __await__(self):
         """兼容 `await connection.execute()` 消费方式。"""
-        logger.debug("ClickHouseResult.__await__ 入口")
 
         # 方法作用：异步返回当前结果对象。
         # Args: 无。
         # Returns: 当前 ClickHouseResult。
         async def resolved() -> "ClickHouseResult":
-            logger.debug("ClickHouseResult.resolved 入口")
-            logger.info("ClickHouseResult.resolved 完成")
             return self
 
-        logger.info("ClickHouseResult.__await__ 完成")
         return resolved().__await__()
 
 
@@ -116,9 +100,7 @@ class ClickHouseConnection:
     # Args: client - ClickHouse 客户端。
     # Returns: 无返回值。
     def __init__(self, client: Any) -> None:
-        logger.debug("ClickHouseConnection.__init__ 入口")
         self._client = client
-        logger.info("ClickHouseConnection.__init__ 完成")
 
     # 方法作用：执行 SQL 并返回 SQLAlchemy 风格结果。
     # Args: statement - SQLAlchemy TextClause 或 SQL 文本；params - 命名参数。
@@ -129,7 +111,7 @@ class ClickHouseConnection:
         logger.debug("ClickHouseConnection.execute 入口", sql=sql)
         result = self._client.query(sql, parameters=bound)
         adapted = ClickHouseResult(result.column_names, result.result_rows)
-        logger.info("ClickHouseConnection.execute 完成", row_count=len(result.result_rows))
+        logger.debug("ClickHouseConnection.execute 完成", row_count=len(result.result_rows))
         return adapted
 
     # 方法作用：兼容 SQLAlchemy execution_options 链式调用。
@@ -137,40 +119,30 @@ class ClickHouseConnection:
     # Returns: 当前连接对象。
     def execution_options(self, **kwargs: Any) -> "ClickHouseConnection":
         """ClickHouse 客户端无需额外执行选项。"""
-        logger.debug("ClickHouseConnection.execution_options 入口", options=sorted(kwargs))
-        logger.info("ClickHouseConnection.execution_options 完成")
         return self
 
     # 方法作用：进入同步连接上下文。
     # Args: 无。
     # Returns: 当前连接对象。
     def __enter__(self) -> "ClickHouseConnection":
-        logger.debug("ClickHouseConnection.__enter__ 入口")
-        logger.info("ClickHouseConnection.__enter__ 完成")
         return self
 
     # 方法作用：退出同步连接上下文。
     # Args: exc_type - 异常类型；exc - 异常；tb - 堆栈。
     # Returns: False，不吞掉异常。
     def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> bool:
-        logger.debug("ClickHouseConnection.__exit__ 入口", has_error=exc is not None)
-        logger.info("ClickHouseConnection.__exit__ 完成")
         return False
 
     # 方法作用：进入异步连接上下文。
     # Args: 无。
     # Returns: 当前连接对象。
     async def __aenter__(self) -> "ClickHouseConnection":
-        logger.debug("ClickHouseConnection.__aenter__ 入口")
-        logger.info("ClickHouseConnection.__aenter__ 完成")
         return self
 
     # 方法作用：退出异步连接上下文。
     # Args: exc_type - 异常类型；exc - 异常；tb - 堆栈。
     # Returns: False，不吞掉异常。
     async def __aexit__(self, exc_type: Any, exc: Any, tb: Any) -> bool:
-        logger.debug("ClickHouseConnection.__aexit__ 入口", has_error=exc is not None)
-        logger.info("ClickHouseConnection.__aexit__ 完成")
         return False
 
 
@@ -181,17 +153,13 @@ class ClickHouseEngine:
     # Args: client - clickhouse-connect 客户端。
     # Returns: 无返回值。
     def __init__(self, client: Any) -> None:
-        logger.debug("ClickHouseEngine.__init__ 入口")
         self.client = client
-        logger.info("ClickHouseEngine.__init__ 完成")
 
     # 方法作用：创建 ClickHouse 连接上下文。
     # Args: 无。
     # Returns: ClickHouseConnection。
     def connect(self) -> ClickHouseConnection:
-        logger.debug("ClickHouseEngine.connect 入口")
         connection = ClickHouseConnection(self.client)
-        logger.info("ClickHouseEngine.connect 完成")
         return connection
 
     # 方法作用：关闭底层 ClickHouse 客户端。
@@ -219,9 +187,7 @@ class ClickHouseConnector(ConnectorBase):
         Returns:
             SET max_execution_time SQL。
         """
-        logger.debug("ClickHouse 超时 SQL 入口", datasource=self.config.name)
         result = f"SET max_execution_time = {get_settings().max_execution_time}"
-        logger.info("ClickHouse 超时 SQL 完成", datasource=self.config.name)
         return result
 
     def _build_url(self) -> URL:
@@ -234,7 +200,6 @@ class ClickHouseConnector(ConnectorBase):
             SQLAlchemy URL 对象；实际连接由 clickhouse-connect 创建。
         """
         c = self.config
-        logger.debug("ClickHouse URL 构建入口", datasource=c.name)
         result = URL.create(
             "clickhouse+asynch",
             username=c.username or None,
@@ -243,7 +208,6 @@ class ClickHouseConnector(ConnectorBase):
             port=c.port or None,
             database=c.database or None,
         )
-        logger.info("ClickHouse URL 构建完成", datasource=c.name)
         return result
 
     @staticmethod
@@ -257,9 +221,7 @@ class ClickHouseConnector(ConnectorBase):
         Returns:
             可由 clickhouse-connect 执行的 SQL 和参数映射。
         """
-        logger.debug("ClickHouse 参数绑定入口", parameter_count=len(params or {}))
         if not params:
-            logger.info("ClickHouse 参数绑定完成", parameter_count=0)
             return sql, None
         for name, value in params.items():
             type_name = "String"
@@ -271,7 +233,6 @@ class ClickHouseConnector(ConnectorBase):
                 type_name = "Float64"
             pattern = re.compile(rf"(?<!:):{re.escape(name)}(?![A-Za-z0-9_])")
             sql = pattern.sub(f"{{{name}:{type_name}}}", sql)
-        logger.info("ClickHouse 参数绑定完成", parameter_count=len(params))
         return sql, params
 
     async def create_engine(self) -> Any:

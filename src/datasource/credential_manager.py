@@ -84,7 +84,7 @@ class CredentialManager:
                 if environment_key
                 else "missing"
             )
-            logger.info(
+            logger.debug(
                 "CredentialManager 主密钥选择边界",
                 environment=environment,
                 app_context_bound=context is not None,
@@ -119,7 +119,7 @@ class CredentialManager:
                 identifier: value.encode("utf-8") for identifier, value in configured_previous.items()
             }
             self._legacy_fernet = self._derive_fernet(_LEGACY_SALT)
-            logger.info(
+            logger.debug(
                 "CredentialManager 初始化完成",
                 environment=environment,
                 selected_source=key_source,

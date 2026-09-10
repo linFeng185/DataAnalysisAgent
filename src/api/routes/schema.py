@@ -79,7 +79,7 @@ async def _resolve_datasource_name(datasource: str) -> str:
         tenant_id=identity.tenant_id,
     )
     if not items:
-        logger.info("Schema 默认数据源为空", reason="当前身份没有可访问数据源")
+        logger.debug("Schema 默认数据源为空", reason="当前身份没有可访问数据源")
         if normalized:
             raise HTTPException(404, f"数据源 '{normalized}' 未找到")
         return ""
@@ -107,10 +107,10 @@ async def _resolve_datasource_name(datasource: str) -> str:
         if normalized:
             logger.warning("Schema 数据源权限拒绝", datasource=normalized, tenant_id=identity.tenant_id)
             raise HTTPException(403, "无权访问该数据源") from exc
-        logger.info("Schema 默认数据源为空", reason="当前身份没有授权数据源")
+        logger.debug("Schema 默认数据源为空", reason="当前身份没有授权数据源")
         return ""
     selected = normalized or next(iter(access), "")
-    logger.info("Schema 默认数据源选择完成", datasource=selected, candidate_count=len(access))
+    logger.debug("Schema 默认数据源选择完成", datasource=selected, candidate_count=len(access))
     return selected
 
 
@@ -127,11 +127,16 @@ def _schema_manager():
 # ---- Schema (11.1.3-6) ----
 
 @router.get("/schema/tables")
+# 方法作用：按当前授权分页浏览表结构，可限定为已发布快照而不连接业务数据库。
+# Args: datasource - 数据源；page/page_size - 分页；search - 表名过滤；cached_only - 仅查看已发布结构。
+# Returns: 当前身份可见的表结构分页结果。
 async def list_tables(
     datasource: str = Query(default=""),
     page: int = Query(default=1, ge=1), page_size: int = Query(default=20, ge=1, le=100),
     search: str = Query(default=""),
+    cached_only: bool = Query(default=False),
 ) -> dict:
+    """管理界面的只读浏览使用 cached_only，保留旧 API 的延迟加载兼容路径。"""
     datasource = await _resolve_datasource_name(datasource)
     if not datasource:
         return {"tables": [], "datasource": "", "total": 0, "page": page, "page_size": page_size}
@@ -140,22 +145,35 @@ async def list_tables(
         from src.api.auth import get_current_identity
 
         identity = get_current_identity()
-        ds = await _call_with_optional_tenant(
-            routes_package._registry().resolve,
-            datasource,
-            tenant_id=identity.tenant_id,
-        )
+        if cached_only is True:
+            from src.app_context import get_app_context
+
+            provider = routes_package._registry().get_provider("external")
+            ds = await _call_with_optional_tenant(provider.lookup, datasource, tenant_id=identity.tenant_id) if provider else None
+            if ds is None:
+                raise HTTPException(404, f"数据源 '{datasource}' 未找到")
+            service = get_app_context().get_resource("schema_sync")
+            snapshot = await service.apply_snapshot(ds) if service is not None else ds.schema
+            logger.debug("表结构只读快照边界", datasource=datasource, tenant_id=identity.tenant_id, has_snapshot=snapshot is not None)
+        else:
+            ds = await _call_with_optional_tenant(
+                routes_package._registry().resolve,
+                datasource,
+                tenant_id=identity.tenant_id,
+            )
+            snapshot = ds.schema
     except DataSourceNotFoundError as exc:
         raise HTTPException(404, f"数据源 '{datasource}' 未找到") from exc
-    if ds.schema is None:
+    if cached_only is not True and ds.schema is None:
         logger.info("Schema 路由触发延迟内省", datasource=datasource)
         ds.schema = await _call_with_optional_tenant(
             routes_package._schema_manager().get_or_fetch_schema,
             datasource,
             tenant_id=identity.tenant_id,
         )
+        snapshot = ds.schema
     tables = []
-    for t in (ds.schema.tables if ds.schema else []):
+    for t in (snapshot.tables if snapshot else []):
         if search and search.lower() not in t.name.lower():
             continue
         tables.append(TableInfo(name=t.name, description=t.description,
