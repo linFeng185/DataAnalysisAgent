@@ -5,6 +5,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import logging
+import time
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -46,7 +47,7 @@ class TestMilvusHealthCheck:
             # Assert
             assert result is True
             has_connection.assert_called_once_with("default")
-            has_collection.assert_called_once_with("data_agent_knowledge", using="default")
+            has_collection.assert_called_once_with("data_agent_knowledge", using="default", timeout=10.0)
             logger.info("test_health_check_probes_connected_server 完成")
         except Exception as exc:
             logger.error("test_health_check_probes_connected_server 异常: %s", exc, exc_info=True)
@@ -326,4 +327,240 @@ class TestMilvusExpressionSafety:
             logger.info("test_embed_disables_progress_bar 完成")
         except Exception as exc:
             logger.error("test_embed_disables_progress_bar 异常: %s", exc, exc_info=True)
+            raise
+
+
+@pytest.mark.skipif(
+    importlib.util.find_spec("pymilvus") is None,
+    reason="未安装可选 pymilvus SDK",
+)
+class TestMilvusCollectionLoadResilience:
+    """覆盖 19.17 修复：集合加载只做一次、失败熔断、外部释放后自愈。
+
+    背景：Milvus 2.4.0 的 load 任务会永久卡在 0%，原实现每次操作都无条件
+    调用 Collection.load()，导致每个请求都白等一次完整 RPC 超时。
+    """
+
+    # 装配可直接替换 pymilvus.Collection 的假集合，避免连接真实 Milvus。
+    # Args: monkeypatch - pytest 补丁工具；load_error - 非空时让 load 抛出该异常。
+    # Returns: 假集合 MagicMock 实例。
+    @staticmethod
+    def _fake_collection(
+        monkeypatch: pytest.MonkeyPatch,
+        load_error: Exception | None = None,
+    ) -> MagicMock:
+        import pymilvus
+
+        collection = MagicMock()
+        if load_error is not None:
+            collection.load.side_effect = load_error
+        monkeypatch.setattr(pymilvus, "Collection", MagicMock(return_value=collection))
+        return collection
+
+    # 方法作用：验证连续操作复用加载标记，只发起一次 LoadCollection。
+    # Args: self - pytest 测试类实例；monkeypatch - pytest 补丁工具。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    @pytest.mark.asyncio
+    async def test_collection_loads_once_across_operations(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """集合已加载后不得在每次读操作重发重量级 LoadCollection RPC。"""
+        logger.debug("test_collection_loads_once_across_operations 入口")
+        try:
+            # Arrange
+            from src.memory.vector_store_milvus import MilvusVectorStore
+
+            collection = self._fake_collection(monkeypatch)
+            collection.query.return_value = [
+                {"id": "entry", "content": "body", "metadata": json.dumps({"tenant_id": 1})},
+            ]
+            store = MilvusVectorStore()
+
+            # Act
+            first = await store.get_by_id("entry")
+            second = await store.get_by_id("entry")
+
+            # Assert
+            assert first is not None and second is not None
+            assert collection.load.call_count == 1
+            logger.info("test_collection_loads_once_across_operations 完成")
+        except Exception as exc:
+            logger.error(
+                "test_collection_loads_once_across_operations 异常: %s", exc, exc_info=True,
+            )
+            raise
+
+    # 方法作用：验证 load 失败后立即熔断，后续请求快速失败而非逐个超时。
+    # Args: self - pytest 测试类实例；monkeypatch - pytest 补丁工具。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    @pytest.mark.asyncio
+    async def test_load_failure_opens_circuit_and_short_circuits(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """集合不可用时，第二个请求必须不再触碰 SDK，避免重复付出超时代价。"""
+        logger.debug("test_load_failure_opens_circuit_and_short_circuits 入口")
+        try:
+            # Arrange
+            from src.memory.vector_store_milvus import (
+                MilvusCollectionUnavailable,
+                MilvusVectorStore,
+            )
+
+            collection = self._fake_collection(
+                monkeypatch, TimeoutError("wait for loading collection timeout"),
+            )
+            store = MilvusVectorStore()
+
+            # Act
+            with pytest.raises(TimeoutError):
+                await store.get_by_id("entry")
+
+            # Assert
+            assert store._load_failure_until > time.monotonic()  # noqa: SLF001
+            with pytest.raises(MilvusCollectionUnavailable):
+                await store.get_by_id("entry")
+            assert collection.load.call_count == 1
+            logger.info("test_load_failure_opens_circuit_and_short_circuits 完成")
+        except Exception as exc:
+            logger.error(
+                "test_load_failure_opens_circuit_and_short_circuits 异常: %s", exc, exc_info=True,
+            )
+            raise
+
+    # 方法作用：验证熔断窗口结束后恢复尝试加载，不会永久锁死向量检索。
+    # Args: self - pytest 测试类实例；monkeypatch - pytest 补丁工具。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    @pytest.mark.asyncio
+    async def test_circuit_expiry_retries_load(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """熔断只是限流窗口，服务端恢复后必须能自愈。"""
+        logger.debug("test_circuit_expiry_retries_load 入口")
+        try:
+            # Arrange
+            from src.memory.vector_store_milvus import MilvusVectorStore
+
+            collection = self._fake_collection(monkeypatch, TimeoutError("load timeout"))
+            collection.query.return_value = []
+            store = MilvusVectorStore()
+            with pytest.raises(TimeoutError):
+                await store.get_by_id("entry")
+
+            # Act
+            store._load_failure_until = time.monotonic() - 1  # noqa: SLF001
+            collection.load.side_effect = None
+            result = await store.get_by_id("entry")
+
+            # Assert
+            assert result is None
+            assert collection.load.call_count == 2
+            logger.info("test_circuit_expiry_retries_load 完成")
+        except Exception as exc:
+            logger.error("test_circuit_expiry_retries_load 异常: %s", exc, exc_info=True)
+            raise
+
+    # 方法作用：验证服务端驱逐或人工 release 后本地标记失效并重建集合。
+    # Args: self - pytest 测试类实例；monkeypatch - pytest 补丁工具。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    @pytest.mark.asyncio
+    async def test_not_loaded_error_invalidates_flag(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """集合被外部释放时不得永久停留在「已加载」假象上。"""
+        logger.debug("test_not_loaded_error_invalidates_flag 入口")
+        try:
+            # Arrange
+            from src.memory.vector_store_milvus import MilvusVectorStore
+
+            collection = self._fake_collection(monkeypatch)
+            collection.query.side_effect = RuntimeError("collection not loaded")
+            store = MilvusVectorStore()
+
+            # Act
+            with pytest.raises(RuntimeError):
+                await store.get_by_id("entry")
+
+            # Assert
+            assert store._collection_loaded is False  # noqa: SLF001
+            collection.query.side_effect = None
+            collection.query.return_value = []
+            await store.get_by_id("entry")
+            assert collection.load.call_count == 2
+            logger.info("test_not_loaded_error_invalidates_flag 完成")
+        except Exception as exc:
+            logger.error("test_not_loaded_error_invalidates_flag 异常: %s", exc, exc_info=True)
+            raise
+
+    # 方法作用：验证错误分类只把「未加载」类错误视为标记失效原因。
+    # Args: self - pytest 测试类实例；message - 异常文案；expected - 期望分类。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    @pytest.mark.parametrize(
+        ("message", "expected"),
+        [
+            ("collection not loaded", True),
+            ("Collection not found", True),
+            ("no available query node", True),
+            ("wait for loading collection timeout, collection: data_agent_knowledge", False),
+        ],
+    )
+    def test_not_loaded_error_marker_classification(
+        self, message: str, expected: bool,
+    ) -> None:
+        """真实日志中的加载超时不得被误判为未加载，否则会绕开熔断反复重载。"""
+        logger.debug("test_not_loaded_error_marker_classification 入口")
+        from src.memory.vector_store_milvus import MilvusVectorStore
+
+        assert MilvusVectorStore._is_not_loaded_error(RuntimeError(message)) is expected  # noqa: SLF001
+        logger.info("test_not_loaded_error_marker_classification 完成")
+
+    # 方法作用：验证熔断期内健康检查直接判不健康且不发起探测 RPC。
+    # Args: self - pytest 测试类实例；monkeypatch - pytest 补丁工具。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    @pytest.mark.asyncio
+    async def test_health_check_reports_unhealthy_during_circuit(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """集合必然不可服务时，健康检查不应再产生无意义的远程调用。"""
+        logger.debug("test_health_check_reports_unhealthy_during_circuit 入口")
+        try:
+            # Arrange
+            from pymilvus import connections, utility
+
+            from src.memory.vector_store_milvus import MilvusVectorStore
+
+            has_connection = MagicMock(return_value=True)
+            monkeypatch.setattr(connections, "has_connection", has_connection)
+            monkeypatch.setattr(utility, "has_collection", MagicMock(return_value=True))
+            store = MilvusVectorStore()
+            store._load_failure_until = time.monotonic() + 60  # noqa: SLF001
+            store._load_error_detail = "wait for loading collection timeout"  # noqa: SLF001
+
+            # Act
+            result = await store.health_check()
+
+            # Assert
+            assert result is False
+            has_connection.assert_not_called()
+            logger.info("test_health_check_reports_unhealthy_during_circuit 完成")
+        except Exception as exc:
+            logger.error(
+                "test_health_check_reports_unhealthy_during_circuit 异常: %s", exc, exc_info=True,
+            )
+            raise
+
+    # 方法作用：验证空批次写入不触碰集合，边界输入保持零 RPC。
+    # Args: self - pytest 测试类实例；monkeypatch - pytest 补丁工具。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    @pytest.mark.asyncio
+    async def test_empty_upsert_skips_collection(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """空批次属于边界输入，不得触发集合加载。"""
+        logger.debug("test_empty_upsert_skips_collection 入口")
+        try:
+            # Arrange
+            import pymilvus
+
+            from src.memory.vector_store_milvus import MilvusVectorStore
+
+            factory = MagicMock()
+            monkeypatch.setattr(pymilvus, "Collection", factory)
+
+            # Act
+            result = await MilvusVectorStore().upsert([])
+
+            # Assert
+            assert result == 0
+            factory.assert_not_called()
+            logger.info("test_empty_upsert_skips_collection 完成")
+        except Exception as exc:
+            logger.error("test_empty_upsert_skips_collection 异常: %s", exc, exc_info=True)
             raise
