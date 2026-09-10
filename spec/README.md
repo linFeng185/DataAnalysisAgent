@@ -34,4 +34,5 @@
 | [34-report-phase2-implementation.md](34-report-phase2-implementation.md) | 报表持久化调度、实时钻取与生命周期实现约束 | 动态 |
 | [35-platform-tenant-governance.md](35-platform-tenant-governance.md) | 平台报表分权、共享查询额度、知识应急授权与 MCP 安全停用 | 动态 |
 | [37-runtime-platform-and-ui.md](37-runtime-platform-and-ui.md) | 平台动态配置、连接器热插拔、双语界面与表结构同步 | 动态 |
+| [38-datasource-transfer-and-polling.md](38-datasource-transfer-and-polling.md) | 数据源导出选择、导入改名、列表排序与轮询修复的实施计划 | 动态 |
 | [36-large-test-datasets.md](36-large-test-datasets.md) | 每源 125 表、五业务域与千万级中文模拟数据 | 动态 |
