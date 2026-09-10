@@ -62,14 +62,15 @@
 
 ## 2026-09-10 Milvus 集合加载卡死根因定位与客户端熔断
 
-- 承接 09-08 遗留的「只读探测实际 Milvus 集合仍为 `Loading`、进度 `0%`」环境问题，本轮完成根因分层定位。
-- 实际证据（对远端 v2.4.0 实例的只读实测）：`has_collection=True`；索引存在（`embedding` / IVF_FLAT / COSINE / nlist=128）；分区仅 `_default`；实例内仅此一个集合——排除缺索引、多分区与跨集合资源争抢。`load_state` 恒为 `Loading`、`loading_progress` 恒为 `0%`，手动 `load(timeout=120)` 仍然失败，排除「超时设得太短」，判定为永久卡死而非加载缓慢。
+- 承接 09-08 遗留的「只读探测实际 Milvus 集合仍为 `Loading`、进度 `0%`」环境问题，本轮完成根因分层定位。该状态是**升级前**的测量结果，下文升级复核已将其取代。
+- 实际证据（**升级前**对远端 v2.4.0 实例的只读实测，彼时 `server_version` = `v2.4.0`）：`has_collection=True`；索引存在（`embedding` / IVF_FLAT / COSINE / nlist=128）；分区仅 `_default`；实例内仅此一个集合——排除缺索引、多分区与跨集合资源争抢。`load_state` 恒为 `Loading`、`loading_progress` 恒为 `0%`，手动 `load(timeout=120)` 仍然失败，排除「超时设得太短」，判定为永久卡死而非加载缓慢。
 - 根因层（服务端，应用代码无法修复）：load 任务永久卡死。对照 Milvus 官方 [issue #35630](https://github.com/milvus-io/milvus/issues/35630) 与 [issue #35441](https://github.com/milvus-io/milvus/issues/35441)（关联 bug #35008，2.4.9 修复、2.4.23 稳定），判定为 v2.4.0 已知缺陷。
 - 放大因素层（客户端）：`_get_collection()` 每次读写操作都无条件调用 `Collection.load()`，且失败后无熔断，导致集合不可用时每个请求各白等一次完整 10 秒超时——09-08 日志中一次同步即在读、写两处各空转 10 秒。
 - 客户端修复：确认加载后复用本地标记，不再每次操作重发 `LoadCollection`；加载失败进入 60 秒熔断窗口，窗口内直接抛 `MilvusCollectionUnavailable` 且不发起 RPC；操作报「未加载」类错误时失效标记，支持服务端驱逐或人工 release 后自愈；熔断期内健康检查直接判不健康。
 - 回归：`tests/test_memory/test_vector_store_milvus.py` 新增 10 项（加载只做一次、熔断快速失败、窗口过期重试、未加载错误自愈、错误分类边界、熔断期健康检查、空批次零 RPC），与既有 23 项合计 33 项通过；`tests/test_memory` 与 `tests/test_knowledge` 合计 296 项通过。
 - 范围与清理：诊断用的一次性探针脚本 `tmp_milvus_probe.py`、`tmp_milvus_probe2.py` 在结论确认后已删除，未进入代码库；全程对远端 Milvus 仅做只读探测，未执行 `release`、写入或删除。
-- **仍未修复**：服务端集合目前依然卡死在 `Loading` / `0%`，向量缓存读写仍会失败并降级到 DB 内省。处置方案为将该实例升级到 2.4.23（至少 2.4.9），由部署侧执行；升级完成前不应把 19.17 的向量检索描述为可用。
+- **已处置并复核**：部署侧已按上述处置方案将该实例升级到 2.4.23。升级后对同一实例只读复核：`server_version` = `v2.4.23`，`load_state` = `Loaded`，`loading_progress` = `100%`，`count(*)` = 931。集合加载卡死已解除，向量缓存读写恢复，不再降级到 DB 内省，19.17 的向量检索在该实例上已可用。
+- **升级后遗留（独立问题）**：Milvus 容器持续刷 `[INFO] [msgstream/mq_msgstream.go] ["skip msg"] [type=TimeTick]`。官方 [issue #36569](https://github.com/milvus-io/milvus/issues/36569) 归因于 rocksmq 消费者 seek 到过早位置，需要消费并跳过 2.4.0 时期写入的大量陈旧消息；修复 PR #36617 / #36618 已含在 2.4.21+。本实例升级后可服务性正常（集合 `Loaded`），刷屏属恢复期日志噪声，主要风险是 Docker 日志无上限增长撑爆磁盘（该实例数据在 `/data/milvus/data` 下）。建议为容器配置日志轮转上限，并观察陈旧消息消费完毕后刷屏是否自行消退。
 
 ## 部署验收边界
 
