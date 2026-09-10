@@ -654,6 +654,7 @@ class DataSourceRegistry:
                     "instance": ds.extra_params.get("instance", ""),
                     "file_path": ds.database if ds.dialect == "sqlite" else "",
                     "connected": (int(ds.tenant_id), ds.name) in self._cache,
+                    "updated_at": ds.updated_at.isoformat() if getattr(ds, "updated_at", None) else "",
                 })
         # 包含直接注入缓存的 demo 数据源（不通过 Provider 注册）
         for raw_key, config in self._cache.items():
@@ -677,6 +678,7 @@ class DataSourceRegistry:
                     "instance": config.extra_params.get("instance", ""),
                     "file_path": config.database if config.dialect == "sqlite" else "",
                     "connected": True,
+                    "updated_at": getattr(config, "updated_at", None).isoformat() if getattr(config, "updated_at", None) else "",
                 })
         logger.info("列出数据源完成", count=len(result))
         return result

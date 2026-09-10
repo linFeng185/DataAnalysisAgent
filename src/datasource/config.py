@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import datetime
 
 
 @dataclass
@@ -29,3 +30,5 @@ class DataSourceConfig:
     version: str = ""  # 数据库版本号 (如 "8.0", "16", "24.x")，影响函数可用性和知识库匹配
     tags: list[str] = field(default_factory=list)
     extra_params: dict = field(default_factory=dict)
+    # 列表排序用的运行时元数据，不进入导出文件。
+    updated_at: datetime | None = None

@@ -222,6 +222,7 @@ class DataSourceInfo(BaseModel):
     instance: str = ""
     file_path: str = ""
     connected: bool = False
+    updated_at: str = ""
 
     model_config = {"populate_by_name": True}
 

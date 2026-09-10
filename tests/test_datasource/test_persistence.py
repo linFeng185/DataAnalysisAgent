@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -42,6 +43,7 @@ class TestDatasourcePersistence:
         from src.datasource.providers.external import ExternalDataSourceProvider
 
         pool, connection = _fake_pool()
+        connection.fetchrow.return_value = {"updated_at": None}
         monkeypatch.setattr(pg_pool, "get_pg_pool", AsyncMock(return_value=pool))
         provider = ExternalDataSourceProvider()
         datasource = DataSourceConfig(
@@ -51,11 +53,14 @@ class TestDatasourcePersistence:
 
         await provider.persist(datasource, tenant_id=2, owner_user_id=9)
 
-        calls = connection.execute.await_args_list
-        assert len(calls) == 2
-        assert "v2:salt:ciphertext" in calls[0].args
-        assert "plaintext-password" not in str(calls)
-        assert "datasource_permissions" in calls[1].args[0]
+        # 配置写入改为 INSERT ... RETURNING updated_at，凭证必须只出现在该语句参数中。
+        config_calls = connection.fetchrow.await_args_list
+        permission_calls = connection.execute.await_args_list
+        assert len(config_calls) == 1
+        assert len(permission_calls) == 1
+        assert "v2:salt:ciphertext" in config_calls[0].args
+        assert "plaintext-password" not in str(config_calls) + str(permission_calls)
+        assert "datasource_permissions" in permission_calls[0].args[0]
         logger.info("test_persist_stores_encrypted_password 完成")
 
     # 方法作用：验证启动时从状态数据库恢复所有连接字段和所属身份。
@@ -74,6 +79,7 @@ class TestDatasourcePersistence:
             "port": 5432, "database_name": "analytics", "username": "reader",
             "encrypted_password": "v2:salt:ciphertext", "description": "生产只读库",
             "extra_params": {"ssl": True},
+            "updated_at": datetime(2026, 1, 1, tzinfo=UTC),
         }]
         monkeypatch.setattr(pg_pool, "get_pg_pool", AsyncMock(return_value=pool))
         provider = ExternalDataSourceProvider()
@@ -86,6 +92,7 @@ class TestDatasourcePersistence:
         assert datasource.tenant_id == 2
         assert datasource.owner_user_id == 9
         assert datasource.password == "v2:salt:ciphertext"
+        assert datasource.updated_at == datetime(2026, 1, 1, tzinfo=UTC)
         logger.info("test_load_persisted_restores_datasource 完成")
 
     # 方法作用：验证 asyncpg 默认返回 JSON 字符串时仍能恢复方言参数。
@@ -104,6 +111,7 @@ class TestDatasourcePersistence:
             "port": 9000, "database_name": "analytics", "username": "reader",
             "encrypted_password": "v2:salt:ciphertext", "description": "分析库",
             "extra_params": '{"connect_timeout": 5, "secure": true}',
+            "updated_at": datetime(2026, 1, 1, tzinfo=UTC),
         }]
         monkeypatch.setattr(pg_pool, "get_pg_pool", AsyncMock(return_value=pool))
         provider = ExternalDataSourceProvider()
@@ -160,6 +168,7 @@ class TestDatasourcePersistence:
             "port": 5432, "database_name": "analytics", "username": "reader",
             "encrypted_password": original.password, "description": "生产只读库",
             "extra_params": {},
+            "updated_at": datetime(2026, 1, 1, tzinfo=UTC),
         }]
         monkeypatch.setattr(pg_pool, "get_pg_pool", AsyncMock(return_value=pool))
         monkeypatch.setattr(

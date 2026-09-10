@@ -35,6 +35,8 @@ class TestDataSourceTransfer:
         # Assert
         assert "secret" not in payload
         assert "password" not in result and "tenant_id" not in result
+        # 运行时元数据 updated_at 仅用于列表排序，不得进入导出文件。
+        assert "updated_at" not in result
         assert result["extra_params"]["ssl"] == {"mode": "verify-full"}
         assert result["extra_params"]["options"] == [{"timeout": 3}]
         assert source.extra_params["ssl"]["apiKey"] == "nested-secret"
@@ -86,7 +88,17 @@ class TestDataSourceTransfer:
                 raise failure("模拟事务失败")
             writes.append((sql, values))
 
-        connection = SimpleNamespace(transaction=transaction, execute=execute)
+        # 方法作用：模拟配置写入的 INSERT ... RETURNING 并回填数据库时间。
+        # Args: sql - 写入语句；values - 参数。
+        # Returns: 含 updated_at 的结果行，模拟数据库生成值。
+        async def fetchrow(sql: str, *values: object) -> dict:
+            assert set(provider._sources) == {(2, "keep")}
+            if values[0] == "second" and failure:
+                raise failure("模拟事务失败")
+            writes.append((sql, values))
+            return {"updated_at": None}
+
+        connection = SimpleNamespace(transaction=transaction, execute=execute, fetchrow=fetchrow)
 
         # 方法作用：模拟借用状态库连接。
         # Args: 无。
@@ -142,7 +154,14 @@ class TestDataSourceTransfer:
         async def execute(sql: str, *values: object) -> None:
             writes.append((sql, values))
 
-        connection = SimpleNamespace(transaction=transaction, execute=execute)
+        # 方法作用：模拟配置写入的 INSERT ... RETURNING 并回填数据库时间。
+        # Args: sql - 写入语句；values - 参数。
+        # Returns: 含 updated_at 的结果行。
+        async def fetchrow(sql: str, *values: object) -> dict:
+            writes.append((sql, values))
+            return {"updated_at": None}
+
+        connection = SimpleNamespace(transaction=transaction, execute=execute, fetchrow=fetchrow)
 
         # 方法作用：模拟借用状态库连接。
         # Args: 无。
@@ -161,6 +180,51 @@ class TestDataSourceTransfer:
         assert re.fullmatch(r"sales_[0-9a-z]{6}", result[0].name), result[0].name
         assert writes[0][1][0] == result[0].name
         assert provider._sources[(2, "sales")] is source
+
+
+class TestListOrdering:
+    """覆盖 25.7 列表排序：按 updated_at 倒序，缺失值排最后。"""
+
+    # 方法作用：验证列表按 updated_at 倒序返回。
+    # Args: self - 测试类实例。
+    # Returns: 无返回值。
+    async def test_list_all_orders_by_updated_at_desc(self) -> None:
+        """最近更新的数据源必须排在最前，用户才能看到刚导入的对象。"""
+        logger.debug("test_list_all_orders_by_updated_at_desc 入口")
+        from datetime import UTC, datetime, timedelta
+
+        provider = ExternalDataSourceProvider()
+        now = datetime.now(UTC)
+        for offset, name in ((2, "oldest"), (1, "middle"), (0, "newest")):
+            provider._register(DataSourceConfig(
+                name=name, dialect="sqlite", mode="external", tenant_id=2,
+                updated_at=now - timedelta(hours=offset),
+            ))
+        # Act
+        result = await provider.list_all(tenant_id=2)
+        # Assert
+        assert [item.name for item in result] == ["newest", "middle", "oldest"]
+        logger.info("test_list_all_orders_by_updated_at_desc 完成")
+
+    # 方法作用：验证缺失 updated_at 的条目排在最后且不抛异常。
+    # Args: self - 测试类实例。
+    # Returns: 无返回值。
+    async def test_list_all_places_missing_updated_at_last(self) -> None:
+        """朴素与带时区 datetime 不可直接比较，实现必须避开该陷阱。"""
+        logger.debug("test_list_all_places_missing_updated_at_last 入口")
+        from datetime import UTC, datetime
+
+        provider = ExternalDataSourceProvider()
+        provider._register(DataSourceConfig(
+            name="undated", dialect="sqlite", mode="external", tenant_id=2))
+        provider._register(DataSourceConfig(
+            name="dated", dialect="sqlite", mode="external", tenant_id=2,
+            updated_at=datetime.now(UTC)))
+        # Act
+        result = await provider.list_all(tenant_id=2)
+        # Assert
+        assert [item.name for item in result] == ["dated", "undated"]
+        logger.info("test_list_all_places_missing_updated_at_last 完成")
 
 
 class TestResolveAvailableName:

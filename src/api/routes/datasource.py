@@ -169,6 +169,7 @@ def _datasource_info(datasource: object) -> DataSourceInfo:
         file_path=(str(getattr(datasource, "database", "") or "")
                    if str(getattr(datasource, "dialect", "")).lower() == "sqlite" else ""),
         connected=False,
+        updated_at=datasource.updated_at.isoformat() if getattr(datasource, "updated_at", None) else "",
     )
 
 @router.post("/datasources", status_code=201)

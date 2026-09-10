@@ -264,7 +264,7 @@ class ExternalDataSourceProvider(DataSourceProvider):
             pool = await get_pg_pool()
             async with pool.acquire() as connection:
                 async with connection.transaction():
-                    await connection.execute(
+                    row = await connection.fetchrow(
                         "INSERT INTO datasource_configs "
                         "(name, tenant_id, owner_user_id, dialect, version, host, port, "
                         "database_name, username, encrypted_password, description, extra_params) "
@@ -275,11 +275,14 @@ class ExternalDataSourceProvider(DataSourceProvider):
                         "database_name=EXCLUDED.database_name, username=EXCLUDED.username, "
                         "encrypted_password=EXCLUDED.encrypted_password, "
                         "description=EXCLUDED.description, extra_params=EXCLUDED.extra_params, "
-                        "updated_at=NOW()",
+                        "updated_at=NOW() "
+                        "RETURNING updated_at",
                         ds.name, tenant_id, owner_user_id, ds.dialect, ds.version,
                         ds.host, ds.port, ds.database, ds.username, ds.password,
                         ds.description, json.dumps(ds.extra_params, ensure_ascii=False),
                     )
+                    # 回填数据库生成的时间，保证内存摘要与库内一致。
+                    ds.updated_at = row["updated_at"]
                     await connection.execute(
                         "INSERT INTO datasource_permissions "
                         "(datasource_name, tenant_id, owner_user_id, visibility, access_level) "
@@ -330,14 +333,16 @@ class ExternalDataSourceProvider(DataSourceProvider):
         try:
             async with pool.acquire() as connection, connection.transaction():
                 for source in sources:
-                    await connection.execute(
+                    row = await connection.fetchrow(
                         "INSERT INTO datasource_configs "
                         "(name,tenant_id,owner_user_id,dialect,version,host,port,database_name,username,encrypted_password,description,extra_params) "
-                        "VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12::jsonb)",
+                        "VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12::jsonb) "
+                        "RETURNING updated_at",
                         source.name, tenant_id, owner_user_id, source.dialect, source.version,
                         source.host, source.port, source.database, source.username, source.password,
                         source.description, json.dumps(source.extra_params, ensure_ascii=False),
                     )
+                    source.updated_at = row["updated_at"]
                     await connection.execute(
                         "INSERT INTO datasource_permissions "
                         "(datasource_name,tenant_id,owner_user_id,visibility,access_level) VALUES($1,$2,$3,'tenant','read')",
@@ -362,8 +367,8 @@ class ExternalDataSourceProvider(DataSourceProvider):
             async with pool.acquire() as connection:
                 rows = await connection.fetch(
                     "SELECT name, tenant_id, owner_user_id, dialect, version, host, port, "
-                    "database_name, username, encrypted_password, description, extra_params "
-                    "FROM datasource_configs ORDER BY id",
+                    "database_name, username, encrypted_password, description, extra_params, updated_at "
+                    "FROM datasource_configs ORDER BY updated_at DESC, id DESC",
                 )
             logger.debug("持久化数据源读取边界", row_count=len(rows))
             for row in rows:
@@ -387,6 +392,7 @@ class ExternalDataSourceProvider(DataSourceProvider):
                     extra_params=_decode_extra_params(row["extra_params"]),
                     tenant_id=int(row["tenant_id"]),
                     owner_user_id=int(row["owner_user_id"]),
+                    updated_at=row["updated_at"],
                 )
                 self._register(ds)
                 logger.debug(
@@ -493,14 +499,19 @@ class ExternalDataSourceProvider(DataSourceProvider):
         return matches[0] if len(matches) == 1 else None
 
     async def list_all(self, *, tenant_id: int | None = None) -> list[DataSourceConfig]:
+        """按 updated_at 倒序返回，最近更新的数据源排在最前。"""
         if not self._isolation_enabled():
             tenant_id = None
         elif tenant_id is None:
             tenant_id = self._effective_tenant_id(None)
-        return [
+        items = [
             value for (source_tenant, _), value in self._sources.items()
             if tenant_id is None or source_tenant == int(tenant_id)
         ]
+        # 用时间戳比较，避开朴素与带时区 datetime 不可比较的陷阱；缺失值排最后。
+        items.sort(key=lambda ds: ds.updated_at.timestamp() if ds.updated_at else 0.0, reverse=True)
+        logger.debug("列出外部数据源完成", tenant_id=tenant_id, count=len(items))
+        return items
 
     # 方法作用：为受信任的系统后台任务枚举已加载数据源的全部租户。
     # Args: self - ExternalDataSourceProvider 实例。
