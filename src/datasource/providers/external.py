@@ -1,13 +1,10 @@
-"""外挂模式 Provider — YAML/API 手动注册数据源，独立连接池。"""
+"""应用内 Provider — API 管理并从状态数据库恢复数据源。"""
 
 from __future__ import annotations
 
 import inspect
 import json
 from collections.abc import Awaitable, Callable
-from pathlib import Path
-
-import yaml
 
 from src.datasource.config import DataSourceConfig
 from src.datasource.credential_manager import (
@@ -41,51 +38,11 @@ def _decode_extra_params(value: object) -> dict:
 class ExternalDataSourceProvider(DataSourceProvider):
     """外挂模式 — 独立部署，一个 Agent 连接多个项目的数据源。
 
-    配置来源: YAML 文件 | 管理 API | 配置数据库(远期)
+    配置来源：应用管理 API 和状态数据库，不读取文件或环境变量数据源。
     """
 
     def __init__(self) -> None:
         self._sources: dict[tuple[int, str], DataSourceConfig] = {}
-
-    @classmethod
-    def from_yaml(cls, yaml_path: str = "config/datasources.yaml") -> "ExternalDataSourceProvider":
-        """2.3.6 从 YAML 加载并返回已填充的 Provider。"""
-        provider = cls()
-        provider.load_yaml(yaml_path)
-        return provider
-
-    def load_yaml(self, yaml_path: str = "config/datasources.yaml") -> list[DataSourceConfig]:
-        """2.3.6 解析 YAML 配置文件。"""
-        path = Path(yaml_path)
-        if not path.exists():
-            logger.warning("配置文件不存在", path=yaml_path)
-            return []
-
-        with open(path, "r", encoding="utf-8") as f:
-            config_data = yaml.safe_load(f) or {}
-
-        sources = []
-        cred_mgr = CredentialManager()
-        for name, cfg in config_data.get("datasources", {}).items():
-            raw_pw = cred_mgr.resolve_env_ref(str(cfg.get("password", "")))
-            username = cred_mgr.resolve_env_ref(str(cfg.get("username", "")))
-            ds = DataSourceConfig(
-                name=name, mode="external",
-                dialect=cfg.get("dialect", "postgres"),
-                version=cfg.get("version", ""),
-                host=cfg.get("host", "localhost"),
-                port=cfg.get("port", 0) or _DIALECT_DEFAULTS.get(cfg.get("dialect", ""), 0),
-                database=cfg.get("database", ""),
-                username=username,
-                password=cred_mgr.encrypt(raw_pw),
-                description=cfg.get("description", ""),
-                tags=cfg.get("tags", []),
-                extra_params=cfg.get("extra_params", {}),
-            )
-            self._register(ds)
-            sources.append(ds)
-        logger.info("YAML 配置加载完成", count=len(sources))
-        return sources
 
     async def register(
         self,
@@ -107,7 +64,7 @@ class ExternalDataSourceProvider(DataSourceProvider):
         ds.tenant_id = int(tenant_id)
         ds.owner_user_id = int(owner_user_id)
         self._register(ds)
-        logger.info("外部数据源注册完成", datasource=ds.name, dialect=ds.dialect)
+        logger.debug("外部数据源注册完成", datasource=ds.name, dialect=ds.dialect)
         return ds
 
     # 方法作用：从 API 请求统一构建运行时数据源配置并归一化方言扩展字段。
@@ -267,7 +224,7 @@ class ExternalDataSourceProvider(DataSourceProvider):
         same_name_tenant_ids = sorted(
             key[0] for key in self._sources if key[1] == name
         )
-        logger.info(
+        logger.debug(
             "外部数据源内存替换边界",
             datasource=name,
             target_tenant_id=tenant_id,
@@ -275,7 +232,7 @@ class ExternalDataSourceProvider(DataSourceProvider):
         )
         self._sources.pop(replacement_key, None)
         self._register(updated)
-        logger.info("外部数据源更新完成", datasource=name, tenant_id=tenant_id)
+        logger.debug("外部数据源更新完成", datasource=name, tenant_id=tenant_id)
         return updated
 
     # 方法作用：把页面创建的数据源及加密凭证持久化到状态数据库。
@@ -294,7 +251,7 @@ class ExternalDataSourceProvider(DataSourceProvider):
             tenant_id=tenant_id,
             owner_user_id=owner_user_id,
         )
-        logger.info(
+        logger.debug(
             "页面数据源持久化凭证边界",
             datasource=ds.name,
             credential_format=_credential_reference_kind(ds.password),
@@ -336,6 +293,63 @@ class ExternalDataSourceProvider(DataSourceProvider):
             raise
         logger.info("页面数据源持久化完成", datasource=ds.name, tenant_id=tenant_id)
 
+    # 方法作用：在单个事务中仅新增整批配置，提交后才发布内存状态。
+    # Args: self - Provider；requests - 已校验请求；tenant_id/owner_user_id - 认证身份。
+    # Returns: 全部已保存的数据源；冲突或失败不写入任何内存配置。
+    async def import_configs(
+        self, requests: list, *, tenant_id: int, owner_user_id: int,
+    ) -> list[DataSourceConfig]:
+        """通过唯一约束防止并发导入覆盖同租户配置；返回值顺序与入参一一对应。"""
+        from asyncpg import UniqueViolationError
+
+        from src.datasource.transfer import DataSourceConflictError, resolve_available_name
+        from src.memory.pg_pool import get_pg_pool
+
+        logger.debug("数据源原子导入入口", tenant_id=tenant_id, count=len(requests))
+        # 服务端仍是唯一改名权威；DB 唯一约束继续作为并发兜底。
+        # Args: candidate - 候选名称。
+        # Returns: 该租户下名称是否已被占用。
+        def is_taken(candidate: str) -> bool:
+            return (tenant_id, candidate) in self._sources
+
+        reserved: set[tuple[int, str]] = set()
+        sources = []
+        for request in requests:
+            # 同批次内先解析的名称也要占用，避免批次内互相撞名。
+            resolved = resolve_available_name(
+                request.name, lambda c: is_taken(c) or (tenant_id, c) in reserved,
+            )
+            request = request.model_copy(update={"name": resolved})
+            source = self._build_config(request, encrypt_password=True)
+            source.tenant_id, source.owner_user_id = tenant_id, owner_user_id
+            reserved.add((tenant_id, resolved))
+            sources.append(source)
+        if len({source.name for source in sources}) != len(sources):
+            raise DataSourceConflictError("同批次改名后仍存在重名")
+        pool = await get_pg_pool()
+        try:
+            async with pool.acquire() as connection, connection.transaction():
+                for source in sources:
+                    await connection.execute(
+                        "INSERT INTO datasource_configs "
+                        "(name,tenant_id,owner_user_id,dialect,version,host,port,database_name,username,encrypted_password,description,extra_params) "
+                        "VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12::jsonb)",
+                        source.name, tenant_id, owner_user_id, source.dialect, source.version,
+                        source.host, source.port, source.database, source.username, source.password,
+                        source.description, json.dumps(source.extra_params, ensure_ascii=False),
+                    )
+                    await connection.execute(
+                        "INSERT INTO datasource_permissions "
+                        "(datasource_name,tenant_id,owner_user_id,visibility,access_level) VALUES($1,$2,$3,'tenant','read')",
+                        source.name, tenant_id, owner_user_id,
+                    )
+        except UniqueViolationError:
+            raise DataSourceConflictError("同名数据源已存在") from None
+        for source in sources:
+            self._register(source)
+        logger.info("数据源原子导入完成", tenant_id=tenant_id, count=len(sources))
+        return sources
+
     # 方法作用：从状态数据库恢复页面维护的数据源配置。
     # Args: 无。
     # Returns: 本次加载的数据源数量。
@@ -351,9 +365,9 @@ class ExternalDataSourceProvider(DataSourceProvider):
                     "database_name, username, encrypted_password, description, extra_params "
                     "FROM datasource_configs ORDER BY id",
                 )
-            logger.info("持久化数据源读取边界", row_count=len(rows))
+            logger.debug("持久化数据源读取边界", row_count=len(rows))
             for row in rows:
-                logger.info(
+                logger.debug(
                     "持久化数据源反序列化边界",
                     datasource=str(row["name"]),
                     extra_params_type=type(row["extra_params"]).__name__,
@@ -375,7 +389,7 @@ class ExternalDataSourceProvider(DataSourceProvider):
                     owner_user_id=int(row["owner_user_id"]),
                 )
                 self._register(ds)
-                logger.info(
+                logger.debug(
                     "持久化数据源恢复边界",
                     datasource=ds.name,
                     credential_format=_credential_reference_kind(ds.password),
@@ -447,7 +461,7 @@ class ExternalDataSourceProvider(DataSourceProvider):
             await self._close_runtime(ds)
             logger.info("数据源已移除", name=name, tenant_id=ds.tenant_id)
         if not keys:
-            logger.info("外部数据源注销跳过", datasource=name, reason="不存在")
+            logger.debug("外部数据源注销跳过", datasource=name, reason="不存在")
 
     async def _prefetch_schema(self, ds: DataSourceConfig) -> None:
         """后台预采集 Schema。"""
@@ -493,7 +507,7 @@ class ExternalDataSourceProvider(DataSourceProvider):
     # Returns: 去重并升序排列的租户 ID。
     async def list_tenant_ids(self) -> list[int]:
         result = sorted({int(source_tenant) for source_tenant, _ in self._sources})
-        logger.info("枚举外部数据源租户完成", tenant_count=len(result))
+        logger.debug("枚举外部数据源租户完成", tenant_count=len(result))
         return result
 
     @staticmethod
@@ -604,4 +618,4 @@ class DataSourceCreateRequest:
         self.description = description
         self.tags = tags or []
         self.extra_params = extra_params or {}
-        logger.info("构建兼容注册请求完成", datasource=name, dialect=dialect)
+        logger.debug("构建兼容注册请求完成", datasource=name, dialect=dialect)

@@ -2,9 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
+import io
+import json
 import time
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, UploadFile
+from fastapi.responses import StreamingResponse
+from pydantic import ValidationError
 
 from src.api.routes._helpers import _call_with_optional_tenant
 from src.api.schemas import (
@@ -17,6 +22,105 @@ from src.logging_config import get_logger
 logger = get_logger(__name__)
 router = APIRouter()
 _started_at = time.time()
+
+
+# 方法作用：导出当前租户应用内数据源的无凭证配置。
+# Args: 无，所属租户由认证上下文决定。
+# Returns: 可下载的 JSON 配置文件。
+@router.get("/datasources/export")
+async def export_datasources() -> StreamingResponse:
+    """导出不包含密码，导入后需在应用中补充凭证。"""
+    import src.api.routes as routes_package
+    from src.api.auth import get_current_tenant_id, require_tenant_admin
+    from src.datasource.transfer import export_config
+
+    require_tenant_admin()
+    tenant_id = get_current_tenant_id()
+    logger.debug("数据源导出入口", tenant_id=tenant_id)
+    provider = routes_package._registry().get_provider("external")
+    sources = await provider.list_all(tenant_id=tenant_id) if provider else []
+    configs = [export_config(source) for source in sources if int(source.tenant_id) == tenant_id]
+    payload = json.dumps({"version": 1, "datasources": configs}, ensure_ascii=False, indent=2).encode("utf-8")
+    logger.info("数据源导出完成", tenant_id=tenant_id, count=len(configs))
+    return StreamingResponse(io.BytesIO(payload), media_type="application/json", headers={
+        "Content-Disposition": 'attachment; filename="datasources.json"', "Cache-Control": "no-store",
+    })
+
+
+# 方法作用：校验 JSON 文件后通过应用 Provider 原子新增数据源。
+# Args: file - 最大 1 MiB、最多一百条配置的上传文件。
+# Returns: 导入的数据源名称与改名映射；改名后仍冲突才整批拒绝。
+@router.post("/datasources/import", status_code=201)
+async def import_datasources(file: UploadFile) -> dict:
+    """仅新增当前租户配置，不从文件采纳归属身份或覆盖现有数据源。"""
+    import src.api.routes as routes_package
+    from src.api.auth import get_current_tenant_id, get_current_user_id, require_tenant_admin
+    from src.datasource.providers.external import ExternalDataSourceProvider
+    from src.datasource.transfer import MAX_IMPORT_BYTES, DataSourceBundle, DataSourceConflictError
+
+    require_tenant_admin()
+    tenant_id = get_current_tenant_id()
+    logger.debug("数据源导入入口", tenant_id=tenant_id)
+    try:
+        content = await file.read(MAX_IMPORT_BYTES + 1)
+    finally:
+        await file.close()
+    if len(content) > MAX_IMPORT_BYTES:
+        raise HTTPException(413, "数据源配置文件不能超过 1 MiB")
+    try:
+        bundle = DataSourceBundle.model_validate_json(content)
+    except ValidationError:
+        # 不返回校验器的原始输入，避免非法配置携带的密码出现在响应或日志中。
+        raise HTTPException(422, "配置格式无效：需要 version=1 和 1—100 条名称唯一、数据库插件可用的数据源配置") from None
+    registry = routes_package._registry()
+    provider = registry.get_provider("external")
+    if provider is None:
+        provider = ExternalDataSourceProvider()
+        registry.register_provider("external", provider)
+    try:
+        sources = await provider.import_configs(bundle.datasources, tenant_id=tenant_id, owner_user_id=get_current_user_id())
+    except DataSourceConflictError:
+        raise HTTPException(409, "存在同名数据源，整批未导入，请修改名称后重试") from None
+    except Exception:
+        logger.error("数据源批量导入失败", tenant_id=tenant_id, exc_info=True)
+        raise HTTPException(500, "数据源配置保存失败，整批未导入") from None
+    for source in sources:
+        registry.invalidate(source.name, tenant_id=tenant_id)
+    requested = [item.name for item in bundle.datasources]
+    returned = [source.name for source in sources]
+    renamed = [
+        {"from": original, "to": current}
+        for original, current in zip(requested, returned, strict=True)
+        if original != current
+    ]
+    logger.info("数据源导入完成", tenant_id=tenant_id, count=len(sources), renamed_count=len(renamed))
+    return {"imported": returned, "renamed": renamed}
+
+
+# 方法作用：附加当前页的共享同步状态，读取失败不得伪装成已完成或允许重复同步。
+# Args: items - 已授权的当前页摘要；tenant_id - 当前租户。
+# Returns: 包含 schema_sync 的摘要列表。
+async def _with_sync_status(items: list[dict], tenant_id: int) -> list[dict]:
+    from src.app_context import get_app_context
+
+    service = get_app_context().get_resource("schema_sync")
+    semaphore = asyncio.Semaphore(5)
+
+    # 方法作用：限制并发读取共享状态，避免列表占满状态库连接。
+    # Args: item - 当前数据源摘要。
+    # Returns: 不修改 Registry 原摘要的状态副本。
+    async def enrich(item: dict) -> dict:
+        state = {"status": "idle", "phase": "", "table_count": 0, "error": ""}
+        if service is not None:
+            try:
+                async with asyncio.timeout(5), semaphore:
+                    state = await service.store.state(tenant_id, str(item["name"]))
+            except Exception:
+                logger.error("数据源同步状态读取失败", tenant_id=tenant_id, datasource=item["name"], exc_info=True)
+                state = {"status": "unknown", "error": "同步状态暂时不可用，请稍后重试"}
+        return {**item, "schema_sync": state}
+
+    return list(await asyncio.gather(*(enrich(item) for item in items)))
 
 
 # 在注册、更新与连接测试入口拒绝停用或未安装类型。
@@ -246,7 +350,7 @@ async def list_datasources(page: int = Query(default=1, ge=1), page_size: int = 
             items = [item for item in items if str(item.get("name", "")) in authorized_names]
         except PermissionError as exc:
             if str(exc) == "没有可访问的数据源":
-                logger.info(
+                logger.debug(
                     "数据源列表授权为空",
                     tenant_id=tenant_id,
                     user_id=get_current_user_id(),
@@ -258,10 +362,10 @@ async def list_datasources(page: int = Query(default=1, ge=1), page_size: int = 
     total = len(items)
     start = (page - 1) * page_size
     result = {
-        "datasources": items[start:start + page_size],
+        "datasources": await _with_sync_status(items[start:start + page_size], tenant_id),
         "total": total,
         "page": page,
         "page_size": page_size,
     }
-    logger.info("数据源列表授权完成", total=total, returned=len(result["datasources"]))
+    logger.debug("数据源列表授权完成", total=total, returned=len(result["datasources"]))
     return result
