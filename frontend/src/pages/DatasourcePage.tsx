@@ -1,12 +1,13 @@
 import { t, useLanguage } from '../i18n';
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import {
   Button, Card, Form, Input, message, Modal, Popconfirm, Select, Space,
-  Table, Tag, Tooltip, Typography,
+  Table, Tag, Tooltip, Typography, Upload,
 } from 'antd';
 import { ApiOutlined, DeleteOutlined, EditOutlined, PlusOutlined } from '@ant-design/icons';
-import { del, get, post, put } from '../api/client';
-import type { DatasourceConfig, DatasourceConnectionResult } from '../types';
+import { del, downloadConfig, get, post, put, uploadConfig } from '../api/client';
+import { fetchDatasourceCatalog } from '../api/datasourceCatalog';
+import type { DatasourceConfig, DatasourceConnectionResult, SchemaSyncStatus } from '../types';
 import { useAuth } from '../hooks/AuthContext';
 import type { ConnectorPlugin } from '../components/RuntimeControlsPanel';
 
@@ -78,6 +79,12 @@ export default function DatasourcePage() {
   const [testing, setTesting] = useState(false);
   const [plugins, setPlugins] = useState<ConnectorPlugin[]>([]);
   const selectedPlugin = plugins.find(plugin => plugin.dialect === dialect);
+  const [transferring, setTransferring] = useState(false);
+  const [pendingSync, setPendingSync] = useState<string[]>([]);
+  const [selectedNames, setSelectedNames] = useState<string[]>([]);
+  const syncLocks = useRef(new Set<string>());
+  const revision = useRef(0);
+  const syncLabels: Record<string, string> = { idle: t("未同步"), running: t("同步中"), cancelling: t("终止中"), succeeded: t("同步完成"), cancelled: t("已终止"), failed: t("同步失败"), unknown: t("同步状态读取失败") };
 
   // 方法作用：每次打开表单刷新插件目录，不使用前端硬编码数据库枚举。
   // Args: 无。
@@ -98,8 +105,9 @@ export default function DatasourcePage() {
   const load = async (): Promise<void> => {
     setLoading(true);
     try {
-      const data = await get<{ datasources: DatasourceConfig[] }>('/datasources');
-      setDatasources(data.datasources || []);
+      const currentRevision = ++revision.current;
+      const items = await fetchDatasourceCatalog();
+      if (currentRevision === revision.current) setDatasources(items);
     } catch {
       message.error(t("加载失败"));
     } finally {
@@ -108,6 +116,92 @@ export default function DatasourcePage() {
   };
 
   useEffect(() => { void load(); }, []);
+
+  // 方法作用：顺序轮询共享状态，页面刷新和其他 Worker 发起的同步均可恢复显示。
+  // Args: 无。
+  // Returns: 卸载时停止轮询，旧响应不能覆盖刚提交的状态。
+  useEffect(() => {
+    let active = true;
+    let timer: number;
+    // 方法作用：刷新列表而不打断用户表单，并丢弃跨操作的旧结果。
+    // Args: 无。
+    // Returns: 安排下一次轮询。
+    const poll = async (): Promise<void> => {
+      const currentRevision = revision.current;
+      try {
+        const items = await fetchDatasourceCatalog();
+        if (active && currentRevision === revision.current) setDatasources(items);
+      } catch {
+        if (active && currentRevision === revision.current) setDatasources(items => items.map(item => ({ ...item, schema_sync: { status: 'unknown' } })));
+      } finally {
+        if (active) timer = window.setTimeout(() => void poll(), 1500);
+      }
+    };
+    timer = window.setTimeout(() => void poll(), 1500);
+    return () => { active = false; window.clearTimeout(timer); };
+  }, []);
+
+  // 方法作用：以数据源为单位提交启动或终止信号，阻止重复点击与旧轮询覆盖。
+  // Args: source - 当前数据源；cancel - 是否终止。
+  // Returns: 更新对应行的共享状态。
+  const changeSync = async (source: DatasourceConfig, cancel = false): Promise<void> => {
+    if (syncLocks.current.has(source.name)) return;
+    syncLocks.current.add(source.name);
+    setPendingSync([...syncLocks.current]);
+    revision.current += 1;
+    try {
+      const state = await post<SchemaSyncStatus>(`/schema/sync${cancel ? '/cancel' : ''}?datasource=${encodeURIComponent(source.name)}`, {});
+      revision.current += 1;
+      setDatasources(items => items.map(item => item.name === source.name ? { ...item, schema_sync: state } : item));
+      if (!cancel) message.success(t("表结构同步已启动"));
+    } catch (error) {
+      message.error(error instanceof Error ? error.message : t("同步失败"));
+      await load();
+    } finally {
+      syncLocks.current.delete(source.name);
+      setPendingSync([...syncLocks.current]);
+    }
+  };
+
+  // 方法作用：上传 JSON 配置并在原子导入成功后刷新列表。
+  // Args: file - 本地配置文件。
+  // Returns: 禁止 Upload 自行发送第二次请求。
+  const importSources = async (file: File): Promise<false> => {
+    if (file.size > 1024 * 1024) { message.error(t("配置文件不能超过 1 MiB")); return false; }
+    setTransferring(true);
+    try {
+      const result = await uploadConfig<{ imported: string[]; renamed: { from: string; to: string }[] }>('/datasources/import', file);
+      if (result.renamed?.length) {
+        message.warning(t("已导入 {value0} 个数据源；其中 {value1} 个因重名已改名：{value2}", {
+          value0: result.imported.length,
+          value1: result.renamed.length,
+          value2: result.renamed.map(item => `${item.from} → ${item.to}`).join('、'),
+        }), 8);
+      } else {
+        message.success(t("已导入 {value0} 个数据源，请补充连接凭证后同步", { value0: result.imported.length }));
+      }
+      await load();
+    } catch (error) { message.error(error instanceof Error ? error.message : t("导入失败")); }
+    finally { setTransferring(false); }
+    return false;
+  };
+
+  // 方法作用：导出所选数据源；未勾选时导出全部。
+  // Args: 无，读取当前勾选状态。
+  // Returns: 无返回值。
+  const exportSources = async (): Promise<void> => {
+    setTransferring(true);
+    try {
+      const query = selectedNames.map(name => `names=${encodeURIComponent(name)}`).join('&');
+      const blob = await downloadConfig(query ? `/datasources/export?${query}` : '/datasources/export');
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement('a');
+      anchor.href = url; anchor.download = 'datasources.json'; anchor.click();
+      window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+      setSelectedNames([]);
+    } catch (error) { message.error(error instanceof Error ? error.message : t("导出失败")); }
+    finally { setTransferring(false); }
+  };
 
   // 方法作用：在编辑弹窗完成挂载后回填配置，避免销毁隐藏内容时丢弃未挂载字段值。
   // Args: 无，读取 open/editing/datasource 状态。
@@ -211,7 +305,17 @@ export default function DatasourcePage() {
     <div style={{ maxWidth: 1120, margin: '0 auto' }}>
       <Card title={t("数据源管理")} extra={
         canManage
-          ? <Button type="primary" icon={<PlusOutlined />} onClick={openCreate}>{t("添加")}</Button>
+          ? <Space wrap>
+              <Upload accept=".json,application/json" showUploadList={false} beforeUpload={importSources} disabled={transferring}>
+                <Button disabled={transferring}>{t("导入数据源")}</Button>
+              </Upload>
+              <Tooltip title={t("导出不含密码和敏感连接参数，导入后需重新填写")}>
+                <Button loading={transferring} onClick={() => void exportSources()}>
+                  {selectedNames.length ? t("导出所选 ({value0})", { value0: selectedNames.length }) : t("导出数据源")}
+                </Button>
+              </Tooltip>
+              <Button type="primary" icon={<PlusOutlined />} onClick={openCreate}>{t("添加")}</Button>
+            </Space>
           : null
       }>
         <Table
@@ -219,6 +323,10 @@ export default function DatasourcePage() {
           rowKey="name"
           loading={loading}
           scroll={{ x: 1040 }}
+          rowSelection={{
+            selectedRowKeys: selectedNames,
+            onChange: keys => setSelectedNames(keys as string[]),
+          }}
           columns={[
             { title: t("名称"), dataIndex: 'name', key: 'name', width: 120, fixed: 'left' },
             { title: t("数据库类型"), dataIndex: 'dialect', key: 'dialect', width: 110,
@@ -232,10 +340,19 @@ export default function DatasourcePage() {
             { title: t("数据库"), dataIndex: 'database', key: 'database', width: 130, ellipsis: true },
             { title: t("用户"), dataIndex: 'username', key: 'username', width: 110, ellipsis: true },
             { title: t("描述"), dataIndex: 'description', key: 'description', width: 180, ellipsis: true },
+            { title: t("更新时间"), dataIndex: 'updated_at', key: 'updated_at', width: 170, render: (value: string) => value
+              ? new Date(value).toLocaleString()
+              : <Typography.Text type="secondary">-</Typography.Text> },
+            { title: t("同步状态"), key: 'sync', width: 150, render: (_: unknown, source: DatasourceConfig) => {
+              const state = source.schema_sync || { status: 'idle' };
+              return <Tooltip title={state.error || state.finished_at}><Tag color={['running', 'cancelling'].includes(state.status) ? 'processing' : state.status === 'succeeded' ? 'success' : ['failed', 'unknown'].includes(state.status) ? 'error' : 'default'}>{syncLabels[state.status] || state.status}</Tag></Tooltip>;
+            } },
             ...(canManage ? [{
-              title: t("操作"), key: 'action', width: 96, fixed: 'right' as const,
+              title: t("操作"), key: 'action', width: 300, fixed: 'right' as const,
               render: (_: unknown, datasource: DatasourceConfig) => (
                 <Space size={4}>
+                  <Button size="small" disabled={pendingSync.includes(datasource.name) || ['running', 'cancelling', 'unknown'].includes(datasource.schema_sync?.status || '')} onClick={() => void changeSync(datasource)}>{t("同步表结构")}</Button>
+                  {['running', 'cancelling'].includes(datasource.schema_sync?.status || '') && <Button danger size="small" disabled={pendingSync.includes(datasource.name) || datasource.schema_sync?.status === 'cancelling' || datasource.schema_sync?.phase === 'publishing'} onClick={() => void changeSync(datasource, true)}>{t("终止同步")}</Button>}
                   <Tooltip title={t("编辑")}>
                     <Button
                       aria-label={t("编辑 {value0}", { value0: datasource.name })}

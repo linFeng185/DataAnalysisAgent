@@ -34,3 +34,15 @@ class TestDatasourcePageLifecycle:
 
         # Act / Assert
         assert "scroll={{ x:" in source
+
+    # 方法作用：验证导入改名映射被界面消费而不是静默丢弃。
+    # Args: self - pytest 测试类实例。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    def test_import_rename_mapping_is_surfaced(self) -> None:
+        """spec/37 要求改名必须在界面提示，只报导入条数等同静默丢失。"""
+        # Arrange
+        source = Path("frontend/src/pages/DatasourcePage.tsx").read_text(encoding="utf-8")
+
+        # Act / Assert
+        assert "renamed" in source, "导入响应中的 renamed 未被前端读取"
+        assert "因重名已改名" in source, "改名映射未在界面提示"

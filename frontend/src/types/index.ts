@@ -130,7 +130,17 @@ export interface ChatResponse {
   }> | string;
 }
 
+export interface SchemaSyncStatus {
+  status: 'idle' | 'running' | 'cancelling' | 'succeeded' | 'cancelled' | 'failed' | 'unknown';
+  phase?: string;
+  error?: string;
+  table_count?: number;
+  finished_at?: string;
+  run_id?: string;
+}
+
 export interface DatasourceConfig {
+  schema_sync?: SchemaSyncStatus;
   name: string;
   dialect: string;
   version?: string;
@@ -145,6 +155,7 @@ export interface DatasourceConfig {
   instance?: string;
   file_path?: string;
   extra_params?: Record<string, unknown>;
+  updated_at?: string;
 }
 
 export interface DatasourceCreatePayload {
