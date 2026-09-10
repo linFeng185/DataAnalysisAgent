@@ -149,6 +149,8 @@ POST /api/v1/chat {"query": "本月 GMV 排名？", "stream": true}
 
 ### ④ `src/datasource/` — 数据源管理
 
+`transfer.py` 定义带版本的 JSON 迁移契约与凭证过滤；数据源管理页提供导入/导出及逐源同步状态。Provider 的 `import_configs()` 使用单事务新增配置与权限，提交后发布内存状态，重名时按 6 位 base36 随机后缀改名并在响应回传映射，不做静默覆盖。启动只恢复 `datasource_configs`，不再从 YAML/环境变量/ORM 自动发现或注册演示库；`setup.py` 仅保留测试辅助用途。表结构页面只读，认证等待和普通 API 均有有界超时，详见 `spec/37-runtime-platform-and-ui.md`。
+
 `registry.py`（全局 Provider、Oracle/ClickHouse 方言适配、`resolve_or_none` 不抛异常；ClickHouse 按 `extra_params.connect_timeout` 做 TCP 建连探针）+ `credential_manager.py`（无源码默认主密钥、每次随机 salt 的 `v2:salt:token` Fernet 密文、历史 token 兼容 + 环境变量凭证）+ `setup.py`（SQLite 演示库）。
 
 ### ⑤ `src/connectors/` — 数据库连接器
@@ -318,6 +320,8 @@ checksum。执行器同时兼容历史 LF/CRLF 登记值，避免 Git 跨平台�
 - **安全阻断**：layer3 使用 sqlglot AST 只读白名单，阻断 DDL/DML、SELECT INTO 和状态变更函数；表/列解析异常失败关闭
 - **高权限连接告警**：DataSourceRegistry 识别 Oracle `SYS/SYSTEM` 和 SQL Server `sa` 时记录 warning 但继续连接；数据库账号权限不改变 layer3 的只读失败关闭策略
 - **向量过滤精确化**：Milvus LIKE 仅缩小候选集，解析 metadata 后再次精确校验，搜索、计数和删除共享同一过滤语义
+- **阻塞 SDK 隔离**：Milvus 集合操作及嵌入模型导入统一通过工作线程执行，RPC 有限超时；取消写任务等待线程退出后才释放写锁。规范表结构先发布，派生索引刷新有独立超时和异常收束。
+- **认证暂时不可用**：`AuthContext` 区分服务故障和明确未认证；超时、断网、5xx 保留当前路由显示重试，不清 Cookie。只有明确未认证结果进入登录页，不能用保存的用户信息绕过服务端校验。
 - **生产密钥门禁**：生产禁止默认数据库凭证、默认凭证主密钥和临时 JWT；Docs、Redoc、OpenAPI 同时关闭
 - **API 中间件安全**：访问策略先解析可信客户端 IP 并执行 deny/allow，再把认证模式下传纯 ASGI Auth；CORS 默认拒绝跨域；生产 HTTPS 启用 CSP/HSTS
 - **访问策略混合存储**：公开/可选认证仅由版本化 YAML 声明；数据库动态策略只能保持或收紧认证，IP 规则写入后原子刷新 AppContext 快照
