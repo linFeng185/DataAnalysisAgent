@@ -94,7 +94,6 @@ services:
       - "8000"
     volumes:
       - ./config/app.yaml:/app/config/app.yaml:ro
-      - ./config/datasources.yaml:/app/config/datasources.yaml:ro
       - ./data/backend:/app/data
       - ./data/model-cache:/home/app/.cache
       - ./logs/backend:/app/logs

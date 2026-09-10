@@ -54,15 +54,14 @@ pip install -e ".[dev]"
 
 系统实际配置维护在 Git 忽略的 `config/app.yaml`，仓库提供 `config/app.example.yaml`。
 加载优先级为：构造参数 > 环境变量 > `.env` > YAML > 代码默认值；实际配置不存在时自动读取
-example，也可通过 `APP_CONFIG_PATH` 指向其他 YAML。`config/datasources.yaml` 是可选固定数据源
-清单，模板为 `config/datasources.example.yaml`，页面创建的数据源会加密保存到 PostgreSQL。
+example，也可通过 `APP_CONFIG_PATH` 指向其他 YAML。业务数据源只能在应用的数据源管理页面
+新增或导入 JSON；密码加密保存到 PostgreSQL。旧数据源 YAML 和环境变量定义不再读取。
 
 密钥建议通过部署环境或本地 `.env` 覆盖，不要提交真实值：
 
 ```bash
 cp .env.example .env
 cp config/app.example.yaml config/app.yaml
-cp config/datasources.example.yaml config/datasources.yaml
 ```
 
 首次启动至少配置状态库、固定超级管理员密码和 LLM：
@@ -123,7 +122,6 @@ npm run dev
 cp .env.example .env
 cp docker-compose.example.yml docker-compose.yml
 cp config/app.example.yaml config/app.yaml
-cp config/datasources.example.yaml config/datasources.yaml
 
 # 生成 URL 安全密码和生产密钥，把结果写入 .env
 openssl rand -hex 24   # POSTGRES_PASSWORD
@@ -161,7 +159,6 @@ curl http://127.0.0.1:8080/api/v1/health
 | 路径 | 内容 |
 |------|------|
 | `config/app.yaml` | 后端应用配置，只读挂载 |
-| `config/datasources.yaml` | 可选固定数据源配置，只读挂载 |
 | `data/postgres/` | PostgreSQL 状态数据 |
 | `data/redis/` | Redis AOF 数据 |
 | `data/backend/` | Chroma、受管 Skills、系统知识与本地缓存 |

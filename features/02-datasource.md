@@ -17,12 +17,12 @@
 | # | 功能 | 文件 | 描述 | 状态 |
 |---|------|------|------|------|
 | 2.2.1 | EmbeddedDataSourceProvider 类 | `src/datasource/providers/embedded.py` | DataSourceProvider 完整实现 | 单测完成 | P0 |
-| 2.2.2 | _load_from_env() | 同上 | 从环境变量解析数据源 (单/多数据源) | 单测完成 | P0 |
+| 2.2.2 | 历史环境变量发现入口退役 | 同上 | 已删除 `_load_from_env()`，旧单/多数据源变量不再注册连接；→ 见 25.8 | 单测完成 | P0 |
 | 2.2.3 | _is_django_project() | 同上 | 检测当前环境是否为 Django 项目 | 单测完成 | P1 |
 | 2.2.4 | _from_django_config() | 同上 | 从 Django settings.DATABASES 解析 | 单测完成 | P1 |
 | 2.2.5 | _has_sqlalchemy_engine() | 同上 | 检测是否存在 SQLAlchemy engine | 单测完成 | P1 |
 | 2.2.6 | _from_sqlalchemy_engine() | 同上 | 从 SQLAlchemy engine 提取连接信息 | 单测完成 | P1 |
-| 2.2.7 | _load_from_orm() | 同上 | ORM 自发现入口 (Django/SQLAlchemy 路由) | 单测完成 | P1 |
+| 2.2.7 | _load_from_orm() | 同上 | 保留 ORM 提取辅助方法，但构造/启动不再自动发现数据源；→ 见 25.8 | 单测完成 | P1 |
 | 2.2.8 | _find_orm_models() | 同上 | 扫描 Django Model / SQLAlchemy declarative_base | 单测完成 | P1 |
 | 2.2.9 | _extract_model_description() | 同上 | 从 Model.__doc__ / verbose_name 提取中文描述 | 单测完成 | P1 |
 | 2.2.10 | extract_schema() — ORM 优先 | 同上 | ① ORM Model ② DB 内省兜底 | 单测完成 | P1 |
@@ -36,7 +36,7 @@
 | 2.3.3 | unregister() | 同上 | 移除数据源，关闭连接池 | 单测完成 | P1 |
 | 2.3.4 | test_connection() | 同上 | 按方言选择连通性探针，Oracle 使用 SELECT 1 FROM DUAL | 单测完成 | P1 |
 | 2.3.5 | extract_schema() — 纯内省 | 同上 | DB 内省 + 手工标注补充 | 单测完成 | P1 |
-| 2.3.6 | load_yaml() + from_yaml() | 同上 | 解析 config/datasources.yaml | 单测完成 | P1 |
+| 2.3.6 | load_persisted() 应用配置恢复 | 同上 | 已删除 YAML 加载入口，仅恢复 `datasource_configs`；→ 见 25.8 | 单测完成 | P1 |
 | 2.3.7 | POST /datasources | `src/api/routes.py` | 注册数据源 | 单测完成 | P1 |
 | 2.3.8 | DELETE /datasources/{name} | `src/api/routes.py` | 删除数据源 | 单测完成 | P1 |
 | 2.3.9 | GET /datasources | `src/api/routes.py` | 列出数据源 (分页) | 单测完成 | P1 |

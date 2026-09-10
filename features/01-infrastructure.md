@@ -11,7 +11,7 @@
 | 1.1.3 | 配置管理 | `src/config.py` | 基于 pydantic-settings 的 Settings 类，从 .env / 环境变量 / YAML 加载配置 | 单测完成 | P0 |
 | 1.1.4 | Docker Compose 本地依赖 | `docker-compose.yml`（Git 忽略） | 开发者可选维护本地数据库/中间件；生产模板见 17.4.2 | 开发完成 | P0 |
 | 1.1.5 | requirements.txt | `requirements.txt` | 生产环境 pip 依赖固定版本 | 单测完成 | P0 |
-| 1.1.6 | 日志配置 | `src/logging_config.py` | structlog 结构化日志，支持 JSON/Console 双格式，区分开发/生产 | 单测完成 | P0 |
+| 1.1.6 | 日志配置 | `src/logging_config.py` | structlog JSON/Console 双格式；按调用语义分级，高频明细使用 DEBUG、逐行适配静默；渲染前过滤、异常脱敏及七天轮换 | 单测完成 | P0 |
 | 1.1.7 | 异常体系 | `src/exceptions.py` | DataSourceNotFoundError、SQLValidationError、ExecutionError、RateLimitError 等自定义异常 | 单测完成 | P0 |
 | 1.1.8 | Ruff 静态检查 | `pyproject.toml`、`.github/workflows/test.yml` | Python 3.14.0 规则、导入与高风险错误检查，本地和 CI 使用同一配置 | 单测完成 | P1 |
 
@@ -39,5 +39,13 @@
 ### 模块收尾
 
 模块功能点共 19 项，已完成 19 项，待开发 0 项。当前模块无待开发项。
+
+### 2026-09-07 日志降噪回归
+
+- 1.1.6 属于既有功能日志整改，不新增模块或改变业务数据流；本轮无需因日志调整修改 `CODE_GUIDE.md`。
+- `tests/test_logging_policy.py` 覆盖千行结果适配静默、重复数据源列表及缓存读取、后台空轮询/锁竞争、有效工作聚合摘要、INFO/DEBUG 提前过滤、重要事件保留、控制台/文件异常脱敏和七天轮换。
+- 验证结果：日志策略和 Schema 缓存刷新 18 项通过；非实时全量 1933 项通过、16 项排除；隔离浏览器 15 项通过，前端生产构建和 Python 语法检查通过，`git diff --check` 通过。不调用真实业务数据库或远程模型。
+- 静态检查：除 `src/knowledge/schema_manager.py:825` 的既有 I001 导入排序问题外，变更 Python 文件 Ruff 通过；已对比 HEAD 确认该问题不是本轮引入，未夹带格式整改。前端构建仍提示既有 Antd 分包超过 500 kB。
+- 当前配置为 `INFO`。代码变更需由服务重新加载、前端重新部署后生效，本轮没有重启用户正在运行的服务。
 
 ---

@@ -4,7 +4,6 @@ log_level: INFO
 log_format: console
 log_file: logs/app.log
 server_reload_enabled: true
-demo_datasource_enabled: false
 
 # 仅保留模型路由元数据；远程服务地址和凭证由管理后台维护。
 llm_provider: openai
