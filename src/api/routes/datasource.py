@@ -37,7 +37,10 @@ async def export_datasources(names: Annotated[list[str] | None, Query()] = None)
 
     require_tenant_admin()
     tenant_id = get_current_tenant_id()
-    logger.debug("数据源导出入口", tenant_id=tenant_id, requested=len(names or []))
+    # 空字符串与未传参等价：FastAPI 会把 `?names=` 解析为 [""]，必须先剔除空串再判断，
+    # 否则 {""} 不是可用名子集会被误判为 404。
+    names = [name for name in (names or []) if name]
+    logger.debug("数据源导出入口", tenant_id=tenant_id, requested=len(names))
     provider = routes_package._registry().get_provider("external")
     sources = await provider.list_all(tenant_id=tenant_id) if provider else []
     available = [source for source in sources if int(source.tenant_id) == tenant_id]
@@ -89,7 +92,9 @@ async def import_datasources(file: UploadFile) -> dict:
     try:
         sources = await provider.import_configs(bundle.datasources, tenant_id=tenant_id, owner_user_id=get_current_user_id())
     except DataSourceConflictError:
-        raise HTTPException(409, "存在同名数据源，整批未导入，请修改名称后重试") from None
+        # 名称冲突已自动追加随机后缀重试，走到这里只可能是重试耗尽或并发唯一约束冲突，
+        # 两者都是瞬时冲突，重试即可，不应指引用户改名。
+        raise HTTPException(409, "数据源名称冲突，整批未导入，请稍后重试") from None
     except Exception:
         logger.error("数据源批量导入失败", tenant_id=tenant_id, exc_info=True)
         raise HTTPException(500, "数据源配置保存失败，整批未导入") from None
@@ -106,30 +111,59 @@ async def import_datasources(file: UploadFile) -> dict:
     return {"imported": returned, "renamed": renamed}
 
 
+# 单源同步状态读取上限与整批总预算：asyncio.timeout 会同时覆盖信号量等待，
+# 若不设总预算，page_size=100 时最坏耗时 ceil(100/5)*5s≈100s，超过前端 30s 超时，
+# 状态库降级会让整页列表请求失败，恰好绕过 unknown 想防的失败模式。
+_SYNC_STATUS_PER_ITEM_TIMEOUT = 5.0
+_SYNC_STATUS_TOTAL_BUDGET = 8.0
+
+
 # 方法作用：附加当前页的共享同步状态，读取失败不得伪装成已完成或允许重复同步。
 # Args: items - 已授权的当前页摘要；tenant_id - 当前租户。
-# Returns: 包含 schema_sync 的摘要列表。
+# Returns: 包含 schema_sync 的摘要列表，整体耗时受总预算约束。
 async def _with_sync_status(items: list[dict], tenant_id: int) -> list[dict]:
     from src.app_context import get_app_context
 
     service = get_app_context().get_resource("schema_sync")
     semaphore = asyncio.Semaphore(5)
+    loop = asyncio.get_running_loop()
+    # 以绝对截止时间共享预算，超预算的条目按 unknown 降级，保证接口有界。
+    deadline = loop.time() + _SYNC_STATUS_TOTAL_BUDGET
+    logger.debug("数据源同步状态批量读取入口", tenant_id=tenant_id, count=len(items), budget=_SYNC_STATUS_TOTAL_BUDGET)
 
-    # 方法作用：限制并发读取共享状态，避免列表占满状态库连接。
+    # 方法作用：限制并发读取共享状态，并让单源等待不超过剩余总预算。
     # Args: item - 当前数据源摘要。
-    # Returns: 不修改 Registry 原摘要的状态副本。
+    # Returns: 不修改 Registry 原摘要的状态副本；失败或超时记为 unknown。
     async def enrich(item: dict) -> dict:
         state = {"status": "idle", "phase": "", "table_count": 0, "error": ""}
         if service is not None:
             try:
-                async with asyncio.timeout(5), semaphore:
-                    state = await service.store.state(tenant_id, str(item["name"]))
+                async with semaphore:
+                    remaining = deadline - loop.time()
+                    if remaining <= 0:
+                        raise TimeoutError("同步状态读取超出总预算")
+                    async with asyncio.timeout(min(_SYNC_STATUS_PER_ITEM_TIMEOUT, remaining)):
+                        state = await service.store.state(tenant_id, str(item["name"]))
             except Exception:
                 logger.error("数据源同步状态读取失败", tenant_id=tenant_id, datasource=item["name"], exc_info=True)
+                # 失败与超时都必须降级为 unknown，绝不能伪装成 idle 或已完成。
                 state = {"status": "unknown", "error": "同步状态暂时不可用，请稍后重试"}
         return {**item, "schema_sync": state}
 
-    return list(await asyncio.gather(*(enrich(item) for item in items)))
+    try:
+        results = await asyncio.wait_for(
+            asyncio.gather(*(enrich(item) for item in items)),
+            timeout=_SYNC_STATUS_TOTAL_BUDGET + 1.0,
+        )
+    except asyncio.TimeoutError:
+        # 兜底：极端情况下（底层读取不可取消）整批降级，避免请求无限挂起。
+        logger.error("数据源同步状态批量读取超出总预算", tenant_id=tenant_id, count=len(items))
+        results = [
+            {**item, "schema_sync": {"status": "unknown", "error": "同步状态暂时不可用，请稍后重试"}}
+            for item in items
+        ]
+    logger.info("数据源同步状态批量读取完成", tenant_id=tenant_id, count=len(results))
+    return list(results)
 
 
 # 在注册、更新与连接测试入口拒绝停用或未安装类型。

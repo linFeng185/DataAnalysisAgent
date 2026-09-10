@@ -451,17 +451,75 @@ class TestDatasourceImportExport:
         # Assert
         assert [item["name"] for item in payload["datasources"]] == ["sales"]
 
-    # 方法作用：验证导出条目不含 updated_at 运行时元数据。
+    # 方法作用：验证导出条目不含 updated_at 与 schema_sync 运行时元数据。
     # Args: self - 测试实例；monkeypatch - 依赖替换。
     # Returns: 无返回值。
     async def test_export_excludes_updated_at(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """updated_at 与同步状态同属运行时元数据，不得进入可迁移文件。"""
-        # Arrange
-        self._setup(monkeypatch)
+        # Arrange：夹具本身已带真实 schema_sync，再补一个合成 updated_at，
+        # 否则两条排除性断言会因输入不存在该键而恒真。
+        items, _ = self._setup(monkeypatch)
+        items[0]["updated_at"] = "2026-09-10T00:00:00+00:00"
         # Act
         from src.api.routes.datasource import export_datasources
 
         response = await export_datasources()
         payload = json.loads(b"".join([chunk async for chunk in response.body_iterator]))
+        rendered = json.dumps(payload)
         # Assert
-        assert "updated_at" not in json.dumps(payload)
+        assert "updated_at" not in rendered
+        assert "schema_sync" not in rendered
+        assert payload["datasources"][0]["name"] == "sales"
+
+    # 方法作用：验证空字符串 names 参数等同未传参，导出全部而不是 404。
+    # Args: self - 测试实例；monkeypatch - 依赖替换。
+    # Returns: 无返回值。
+    async def test_export_with_empty_names_returns_all(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """`?names=` 会被 FastAPI 解析为 [""]（真值），必须剔除空串后按全量导出。"""
+        from fastapi import FastAPI
+        from httpx import ASGITransport, AsyncClient
+
+        from src.api.routes.datasource import router
+
+        # Arrange
+        self._setup(monkeypatch)
+        app = FastAPI()
+        app.include_router(router)
+        # Act
+        async with AsyncClient(transport=ASGITransport(app), base_url="http://test") as client:
+            exported = await client.get("/datasources/export", params={"names": ""})
+        # Assert
+        assert exported.status_code == 200
+        assert [item["name"] for item in exported.json()["datasources"]] == ["sales"]
+
+    # 方法作用：验证状态读取挂起时列表仍在总预算内返回且降级为 unknown。
+    # Args: self - 测试实例；monkeypatch - 依赖替换。
+    # Returns: 无返回值。
+    async def test_list_returns_within_budget_when_state_read_hangs(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """状态库降级不能让列表请求超过前端超时，超预算条目必须降级为 unknown。"""
+        import asyncio
+        import time
+
+        from src.api.routes import datasource as datasource_route
+        from src.api.routes.datasource import list_datasources
+
+        # Arrange：把预算压到毫秒级以保持测试快速，状态读取永不 resolve。
+        self._setup(monkeypatch)
+
+        # 方法作用：模拟永不返回的状态读取。
+        # Args: tenant_id - 租户 ID；name - 数据源名。
+        # Returns: 永不完成的协程。
+        async def hanging_state(tenant_id, name):
+            await asyncio.sleep(30)
+
+        service = SimpleNamespace(store=SimpleNamespace(state=hanging_state))
+        monkeypatch.setattr("src.app_context.get_app_context", lambda: SimpleNamespace(get_resource=lambda name: service))
+        monkeypatch.setattr(datasource_route, "_SYNC_STATUS_PER_ITEM_TIMEOUT", 0.2)
+        monkeypatch.setattr(datasource_route, "_SYNC_STATUS_TOTAL_BUDGET", 0.5)
+        # Act
+        started = time.monotonic()
+        result = await list_datasources(page=1, page_size=20)
+        elapsed = time.monotonic() - started
+        # Assert：必须在预算内返回，且状态是 unknown 而非伪装成 idle。
+        assert result["datasources"][0]["schema_sync"]["status"] == "unknown"
+        assert elapsed < 2.0, f"列表请求未在预算内返回：{elapsed:.3f}s"

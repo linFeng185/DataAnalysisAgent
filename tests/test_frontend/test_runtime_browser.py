@@ -105,8 +105,10 @@ class TestRuntimeBrowser:
         expect(page.get_by_role("cell", name="sales", exact=True)).to_be_visible()
 
         # Act / Assert：不勾选时全量导出，URL 不得带 names
+        # 用非 exact 匹配：按钮 loading 图标的 CSSMotion 残留会污染可访问名，
+        # 且产品侧 aria-label 文案可能带后缀，这里只要求名称包含「导出数据源」。
         with page.expect_download():
-            page.get_by_role("button", name="导出数据源", exact=True).click()
+            page.get_by_role("button", name=re.compile("导出数据源")).click()
         assert "names=" not in export_urls[-1]
 
         # Act / Assert：勾选 1 个即单选导出，导出后勾选被清空
@@ -114,7 +116,7 @@ class TestRuntimeBrowser:
         with page.expect_download():
             page.get_by_role("button", name=re.compile("导出所选")).click()
         assert export_urls[-1].count("names=") == 1
-        expect(page.get_by_role("button", name="导出数据源", exact=True)).to_be_visible()
+        expect(page.get_by_role("button", name=re.compile("导出数据源"))).to_be_visible()
 
         # Act / Assert：勾选 2 个即多选导出
         page.get_by_role("row", name=re.compile("sales")).get_by_role("checkbox").check()

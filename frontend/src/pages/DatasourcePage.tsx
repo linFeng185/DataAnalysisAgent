@@ -313,7 +313,11 @@ export default function DatasourcePage() {
                 <Button disabled={transferring}>{t("导入数据源")}</Button>
               </Upload>
               <Tooltip title={t("导出不含密码和敏感连接参数，导入后需重新填写")}>
-                <Button loading={transferring} onClick={() => void exportSources()}>
+                <Button
+                  aria-label={selectedNames.length ? t("导出所选 ({value0})", { value0: selectedNames.length }) : t("导出数据源")}
+                  loading={transferring}
+                  onClick={() => void exportSources()}
+                >
                   {selectedNames.length ? t("导出所选 ({value0})", { value0: selectedNames.length }) : t("导出数据源")}
                 </Button>
               </Tooltip>
