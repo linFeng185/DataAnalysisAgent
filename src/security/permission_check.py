@@ -50,7 +50,7 @@ async def resolve_datasource_access(
 
         policy = get_tenant_policy()
         policy_source = "app_context"
-    logger.info(
+    logger.debug(
         "数据源访问策略来源探针",
         source=policy_source,
         multi_tenant=policy.multi_tenant,
@@ -94,7 +94,7 @@ async def resolve_datasource_access(
         if not result:
             logger.warning("数据源访问解析拒绝", reason="没有可用数据源")
             raise PermissionError("没有可访问的数据源")
-        logger.info("数据源访问解析完成", authorized_count=len(result), mode="trusted")
+        logger.debug("数据源访问解析完成", authorized_count=len(result), mode="trusted")
         return result
 
     try:
@@ -157,7 +157,7 @@ async def resolve_datasource_access(
             user_id=user_id,
         )
         raise PermissionError("没有可访问的数据源")
-    logger.info(
+    logger.debug(
         "数据源访问解析完成",
         authorized_count=len(result),
         tenant_id=tenant_id,
@@ -178,7 +178,7 @@ def check_column_whitelist(sql: str, allowed_columns: list[str]) -> str | None:
     """
     logger.debug("列白名单校验入口", allowed_count=len(allowed_columns), sql_preview=sql[:120])
     if not allowed_columns:
-        logger.info("列白名单为空，允许全部列")
+        logger.debug("列白名单为空，允许全部列")
         return None
     try:
         import sqlglot
@@ -207,7 +207,7 @@ def check_column_whitelist(sql: str, allowed_columns: list[str]) -> str | None:
                 qualifier = str(column.table or "").strip().lower()
                 if qualifier:
                     physical_qualifiers[id(column)] = scope_aliases.get(qualifier, qualifier)
-        logger.info(
+        logger.debug(
             "列白名单作用域探针",
             table_aliases=table_aliases,
             qualified_whitelist=sorted(qualified_whitelist),
@@ -237,7 +237,7 @@ def check_column_whitelist(sql: str, allowed_columns: list[str]) -> str | None:
             message = f"列权限不足: {', '.join(violations[:5])} 不在允许范围内"
             logger.warning("列白名单校验失败", violations=violations[:5])
             return message
-        logger.info("列白名单校验通过", referenced_columns=len(list(tree.find_all(exp.Column))))
+        logger.debug("列白名单校验通过", referenced_columns=len(list(tree.find_all(exp.Column))))
         return None
     except Exception as exc:
         logger.error("列白名单 SQL 解析失败", error=str(exc), exc_info=True)
@@ -257,7 +257,7 @@ def inject_row_filter(sql: str, row_filter: str) -> str:
     """
     logger.debug("行过滤注入入口", sql_preview=sql[:120], has_filter=bool(row_filter.strip()))
     if not row_filter or not row_filter.strip():
-        logger.info("行过滤为空，保留原 SQL")
+        logger.debug("行过滤为空，保留原 SQL")
         return sql
     try:
         import sqlglot
@@ -291,7 +291,7 @@ def inject_row_filter(sql: str, row_filter: str) -> str:
             else:
                 select.set("where", exp.Where(this=scoped_filter))
         result = tree.sql()
-        logger.info("行过滤注入完成", filter=row_filter[:80], select_count=len(targets))
+        logger.debug("行过滤注入完成", filter=row_filter[:80], select_count=len(targets))
         return result
     except Exception as exc:
         from src.exceptions import SQLSecurityError

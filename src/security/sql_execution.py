@@ -131,7 +131,7 @@ def normalize_sql_dialect(dialect: str) -> str:
         "postgresql": "postgres",
         **mappings,
     }.get(normalized, normalized)
-    logger.info("规范化 SQL 方言完成", source=normalized, target=result)
+    logger.debug("规范化 SQL 方言完成", source=normalized, target=result)
     return result
 
 
@@ -142,7 +142,7 @@ def _strip_sql_comments(sql: str) -> str:
     logger.debug("移除 SQL 注释入口", sql_chars=len(sql))
     without_blocks = re.sub(r"/\*.*?\*/", " ", sql, flags=re.DOTALL)
     result = re.sub(r"--[^\r\n]*", " ", without_blocks)
-    logger.info("移除 SQL 注释完成", sql_chars=len(result))
+    logger.debug("移除 SQL 注释完成", sql_chars=len(result))
     return result
 
 
@@ -202,7 +202,7 @@ def _query_side_effect(tree: Any, query_type: type[Any]) -> str:
             exp.Update,
         )
         mutating_nodes = [type(node).__name__ for node in tree.walk() if isinstance(node, mutating_types)]
-        logger.info(
+        logger.debug(
             "SQL AST 写操作探针",
             statement_type=type(tree).__name__,
             mutating_nodes=mutating_nodes,
@@ -243,7 +243,7 @@ def _query_side_effect(tree: Any, query_type: type[Any]) -> str:
     except Exception as exc:
         logger.error("检查查询副作用失败", error=str(exc), exc_info=True)
         raise
-    logger.info("检查查询副作用完成", blocked=bool(result), reason=result)
+    logger.debug("检查查询副作用完成", blocked=bool(result), reason=result)
     return result
 
 
@@ -317,7 +317,7 @@ def validate_sql(sql: str, dialect: str) -> SQLValidationResult:
         dialect=(dialect or "").strip().lower(),
         errors=errors,
     )
-    logger.info(
+    logger.debug(
         "统一 SQL 校验完成",
         dialect=result.dialect,
         valid=result.valid,
@@ -345,7 +345,7 @@ def extract_sql_function_names(sql: str, dialect: str) -> list[str]:
         must_fail_closed(FailureDomain.SQL_SECURITY)
         logger.error("提取 SQL 函数失败", dialect=dialect, error=str(exc), exc_info=True)
         raise
-    logger.info("提取 SQL 函数完成", dialect=dialect, function_count=len(result))
+    logger.debug("提取 SQL 函数完成", dialect=dialect, function_count=len(result))
     return result
 
 
@@ -397,7 +397,7 @@ async def _resolve_sql_target(
             connector = connector.attach_engine(engine)
         resolved.connector = connector
         logger.info("SQL 执行目标补建 Connector", datasource=datasource)
-    logger.info(
+    logger.debug(
         "解析 SQL 执行目标完成",
         datasource=datasource,
         dialect=authoritative_dialect,
@@ -425,7 +425,7 @@ def _failure_result(
         error_type=error_type,
         details=details or [],
     )
-    logger.info("构造 SQL 失败结果完成", dialect=dialect, error_type=error_type)
+    logger.debug("构造 SQL 失败结果完成", dialect=dialect, error_type=error_type)
     return result
 
 
@@ -438,7 +438,7 @@ def _scan_budget_details(
 ) -> list[dict[str, Any]]:
     raw_estimate = plan.get("estimated_scan_rows")
     if raw_estimate is None:
-        logger.info("SQL 扫描预算探针", estimate_available=False, limit=max_scan_rows)
+        logger.debug("SQL 扫描预算探针", estimate_available=False, limit=max_scan_rows)
         return []
     try:
         estimated_scan_rows = max(0, int(float(raw_estimate)))
@@ -446,7 +446,7 @@ def _scan_budget_details(
         logger.warning("SQL 扫描预算估算值无效", estimate=str(raw_estimate)[:100])
         return []
     exceeded = estimated_scan_rows > max_scan_rows
-    logger.info(
+    logger.debug(
         "SQL 扫描预算探针",
         estimate_available=True,
         estimated_scan_rows=estimated_scan_rows,

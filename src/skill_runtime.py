@@ -93,7 +93,7 @@ class SkillRuntime:
         """校验输入，执行工具，再校验大小、脱敏和引用契约。"""
         normalized_payload = _to_json_value(payload)
         validated_payload = SkillToolPayload(payload=normalized_payload).payload
-        logger.info(
+        logger.debug(
             "Skill Runtime 输入规范化边界",
             skill=skill.name,
             tool=tool_name,
@@ -106,7 +106,7 @@ class SkillRuntime:
             raise SkillRuntimeError("Skill 工具输入超过大小限制")
         input_schema = _load_tool_schema(skill, tool_name, "input")
         _validate_json_schema(validated_payload, input_schema, "输入")
-        logger.info(
+        logger.debug(
             "Skill Runtime 执行开始",
             skill=skill.name,
             tool=tool_name,
@@ -254,7 +254,7 @@ class SkillRuntimeTool(BaseTool):
         self._runtime = runtime or SkillRuntime()
         self._trusted_builtin = trusted_builtin
         visible_schema = self.get_input_schema()
-        logger.info(
+        logger.debug(
             "Skill Runtime 工具契约暴露完成",
             skill=skill.name,
             tool=tool_name,
@@ -269,7 +269,7 @@ class SkillRuntimeTool(BaseTool):
     async def _arun(self, run_manager: Any = None, **kwargs: Any) -> Any:
         """把 LangChain 工具参数交给统一 Skill Runtime。"""
         del run_manager
-        logger.info(
+        logger.debug(
             "Skill Runtime 工具调用边界输入",
             skill=self._skill.name,
             tool=self.name,
@@ -472,7 +472,7 @@ def _to_json_value(value: Any) -> Any:
         dumped = value.model_dump(mode="json", exclude_unset=True)
         provided_fields = set(value.model_fields_set)
         omitted_default_fields = sorted(set(value.__class__.model_fields) - set(dumped))
-        logger.info(
+        logger.debug(
             "Skill Runtime Pydantic 参数还原边界",
             model=value.__class__.__name__,
             provided_fields=sorted(provided_fields),

@@ -93,7 +93,7 @@ class SkillManager:
         self._enabled_overrides: dict[str, bool] = {}
         self.all_dirs: list[Path] = []
         self.skills: dict[str, Skill] = {}
-        logger.info("初始化 SkillManager 完成", system_dirs=1 + len(self.extra_dirs))
+        logger.debug("初始化 SkillManager 完成", system_dirs=1 + len(self.extra_dirs))
 
     # 方法作用：扫描系统、租户和个人目录并重建 Skill 缓存。
     # Args: 无。
@@ -541,7 +541,7 @@ class SkillManager:
             has_table_trigger = bool(triggers.get("tables", []))
             if keyword_match or intent_match or has_table_trigger:
                 candidates.append(skill)
-        logger.info(
+        logger.debug(
             "Skill 候选集生成完成",
             intent=intent,
             candidate_count=len(candidates),
@@ -623,7 +623,7 @@ class SkillManager:
                 raise ValueError(f"Skill '{resource_id}' 已禁用")
             seen.add(resource_id)
             selected.append(skill)
-        logger.info(
+        logger.debug(
             "显式 Skill 选择完成",
             selected_count=len(selected),
             tenant_id=resolved_tenant,
@@ -654,7 +654,7 @@ class SkillManager:
                 if not tool_name:
                     logger.warning("Skill 工具声明缺少名称", skill=skill.name)
                     continue
-                logger.info(
+                logger.debug(
                     "Skill 工具装配边界输入",
                     skill=skill.name,
                     tool=tool_name,
@@ -683,7 +683,7 @@ class SkillManager:
                 logger.error("Skill 调用预算非法", skill=skill.name, exc_info=True)
                 budgets.append(0)
         budget = min(budgets) if budgets else 0
-        logger.info("Skill 工具预算完成", skill_count=len(activated_skills), tool_budget=budget)
+        logger.debug("Skill 工具预算完成", skill_count=len(activated_skills), tool_budget=budget)
         return budget
 
     # ── 9.1.8 构建 Prompt ───────────────────────────
