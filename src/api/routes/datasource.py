@@ -162,7 +162,8 @@ async def _with_sync_status(items: list[dict], tenant_id: int) -> list[dict]:
             {**item, "schema_sync": {"status": "unknown", "error": "同步状态暂时不可用，请稍后重试"}}
             for item in items
         ]
-    logger.info("数据源同步状态批量读取完成", tenant_id=tenant_id, count=len(results))
+    # 列表路由被前端轮询，成功明细必须留在 DEBUG，否则每次请求都产生一条 INFO。
+    logger.debug("数据源同步状态批量读取完成", tenant_id=tenant_id, count=len(results))
     return list(results)
 
 
