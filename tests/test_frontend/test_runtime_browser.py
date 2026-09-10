@@ -349,3 +349,40 @@ class TestRuntimeBrowser:
         # Assert
         expect(browser_page.get_by_label("用户名", exact=True)).to_be_visible()
         assert urlparse(browser_page.url).path == "/login"
+
+    # 方法作用：验证数据源页在无进行中同步时不会持续轮询列表接口。
+    # Args: self - 实例；browser_page/frontend_origin - 隔离浏览器和前端。
+    # Returns: 无返回值。
+    def test_idle_datasource_page_stops_polling(self, browser_page: Any, frontend_origin: str) -> None:
+        """空闲页面每 1.5 秒请求一次列表属于无谓负载。"""
+        from playwright.sync_api import expect
+
+        # Arrange
+        page = browser_page
+        calls: list[str] = []
+        rows = [{"name": "sales", "dialect": "sqlite", "schema_sync": {"status": "idle"}}]
+
+        # 方法作用：返回空闲数据源并统计列表请求次数。
+        # Args: route - 拦截的 HTTP 请求。
+        # Returns: 无返回值。
+        def handle(route: Any) -> None:
+            path = urlparse(route.request.url).path.removeprefix("/api/v1")
+            if path == "/auth/me":
+                data = {"authenticated": True, "auth_required": True, "role": "tenant_admin", "tenant_id": 2}
+            elif path == "/datasources":
+                calls.append(route.request.url)
+                data = {"datasources": rows, "total": len(rows)}
+            else:
+                data = {}
+            route.fulfill(json=data)
+
+        page.route("**/api/v1/**", handle)
+        page.goto(f"{frontend_origin}/datasource")
+        expect(page.get_by_role("cell", name="sales", exact=True)).to_be_visible()
+
+        # Act：静置 5 秒，远超原来的 1.5 秒轮询间隔
+        baseline = len(calls)
+        page.wait_for_timeout(5000)
+
+        # Assert
+        assert len(calls) == baseline, f"空闲页面仍在轮询：{calls[baseline:]}"

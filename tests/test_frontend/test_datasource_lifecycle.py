@@ -46,3 +46,19 @@ class TestDatasourcePageLifecycle:
         # Act / Assert
         assert "renamed" in source, "导入响应中的 renamed 未被前端读取"
         assert "因重名已改名" in source, "改名映射未在界面提示"
+
+    # 方法作用：验证数据源页轮询只在存在进行中同步时续期。
+    # Args: self - pytest 测试类实例。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    def test_polling_only_runs_while_sync_in_progress(self) -> None:
+        """空闲页面持续轮询列表接口属于无谓负载，续期必须有可达的停止条件。"""
+        # Arrange
+        source = Path("frontend/src/pages/DatasourcePage.tsx").read_text(encoding="utf-8")
+
+        # Act：轮询必须有进行中同步守卫，并以列表为依赖以便状态变化时启停
+        guarded = "['running', 'cancelling'].includes(item.schema_sync?.status || '')" in source
+        depends_on_list = "}, [datasources]);" in source
+
+        # Assert
+        assert guarded, "轮询缺少「存在 running/cancelling 同步」的守卫"
+        assert depends_on_list, "轮询 effect 未以 datasources 为依赖，状态变化无法启停轮询"

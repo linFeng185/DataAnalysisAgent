@@ -117,11 +117,14 @@ export default function DatasourcePage() {
 
   useEffect(() => { void load(); }, []);
 
-  // 方法作用：顺序轮询共享状态，页面刷新和其他 Worker 发起的同步均可恢复显示。
-  // Args: 无。
-  // Returns: 卸载时停止轮询，旧响应不能覆盖刚提交的状态。
+  // 方法作用：仅在存在进行中的同步时轮询列表，空闲即停。
+  // Args: 无，读取当前列表状态。
+  // Returns: 卸载或进入空闲时停止轮询。
   useEffect(() => {
-    let active = true;
+    const active = datasources.some(item =>
+      ['running', 'cancelling'].includes(item.schema_sync?.status || ''));
+    if (!active) return undefined;
+    let alive = true;
     let timer: number;
     // 方法作用：刷新列表而不打断用户表单，并丢弃跨操作的旧结果。
     // Args: 无。
@@ -130,16 +133,16 @@ export default function DatasourcePage() {
       const currentRevision = revision.current;
       try {
         const items = await fetchDatasourceCatalog();
-        if (active && currentRevision === revision.current) setDatasources(items);
+        if (alive && currentRevision === revision.current) setDatasources(items);
       } catch {
-        if (active && currentRevision === revision.current) setDatasources(items => items.map(item => ({ ...item, schema_sync: { status: 'unknown' } })));
+        if (alive && currentRevision === revision.current) setDatasources(items => items.map(item => ({ ...item, schema_sync: { status: 'unknown' } })));
       } finally {
-        if (active) timer = window.setTimeout(() => void poll(), 1500);
+        if (alive) timer = window.setTimeout(() => void poll(), 1500);
       }
     };
     timer = window.setTimeout(() => void poll(), 1500);
-    return () => { active = false; window.clearTimeout(timer); };
-  }, []);
+    return () => { alive = false; window.clearTimeout(timer); };
+  }, [datasources]);
 
   // 方法作用：以数据源为单位提交启动或终止信号，阻止重复点击与旧轮询覆盖。
   // Args: source - 当前数据源；cancel - 是否终止。

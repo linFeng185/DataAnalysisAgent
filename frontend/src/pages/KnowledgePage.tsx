@@ -189,9 +189,14 @@ export default function KnowledgePage() {
         const states: Record<string, { status: string; chunks: number; error: string }> = {};
         for (const t of (data.tasks || [])) states[t.id] = { status: t.status, chunks: t.chunks_count, error: t.error };
         setTaskStates(states);
-        if (taskIds.every(id => doneStatuses.has(states[id]?.status))) {
+        const finished = taskIds.every(id => {
+          const status = states[id]?.status;
+          // 任务从响应中消失时按终止处理，否则 every 恒为假会导致永不停止的轮询。
+          return status === undefined || doneStatuses.has(status);
+        });
+        if (finished) {
           const doneCount = taskIds.filter(id => states[id]?.status === 'done').length;
-          notification[taskIds.length - doneCount === 0 ? 'success' : 'warning']({
+          notification[doneCount === taskIds.length ? 'success' : 'warning']({
             message: t("文档处理完成"), description: t("{value0} 成功, {value1} 失败", { value0: doneCount, value1: taskIds.length - doneCount }),
           });
           setTaskIds([]); reloadAll();
