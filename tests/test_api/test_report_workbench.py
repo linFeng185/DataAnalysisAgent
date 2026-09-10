@@ -20,11 +20,64 @@ class TestReportWorkbenchApi:
     def isolate_permission_store(self, monkeypatch) -> None:
         """权限库故障应失败关闭，普通 API 用例不依赖开发数据库可用性。"""
         import src.api.routes.report_workbench as route
+        import src.llm.tenant_config as tenant_config
         from src.reporting.quota import ReportPermissionService
         from src.reporting.store import ReportStore
 
         service = ReportPermissionService(store=ReportStore(memory=True))
         monkeypatch.setattr(route, "get_report_permission_service", lambda: service)
+
+        # 单测不访问真实 LLM 配置库，默认视为未配置，预览走规则回退。
+        # 方法作用：模拟租户尚未配置模型时的解析失败。
+        # Args: kwargs - 透传的租户与模型选择参数。
+        # Returns: 不返回，直接抛出未配置异常。
+        async def _no_tenant_llm(**kwargs):
+            raise LookupError("测试环境未配置租户 LLM")
+
+        monkeypatch.setattr(tenant_config, "resolve_tenant_llm_selection", _no_tenant_llm)
+
+    # 方法作用：验证预览路由把客户端显式选择的命名连接与模型透传给模型解析。
+    # Args: self - pytest 测试类实例；monkeypatch - pytest 补丁工具。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    async def test_plan_forwards_selected_model_connection(self, monkeypatch) -> None:
+        """请求显式选择命名连接时，预览必须用该连接而不是租户默认连接。"""
+        # Arrange
+        import src.api.routes.report_workbench as route
+        import src.llm.client as llm_client
+        import src.llm.tenant_config as tenant_config
+        from src.reporting.models import ReportPlanRequest
+
+        captured: list[dict[str, object]] = []
+        identity = SimpleNamespace(tenant_id=3, user_id=7, role="analyst")
+        monkeypatch.setattr(route, "get_current_identity", lambda: identity)
+        monkeypatch.setattr(route, "_resolve_plan_access", AsyncMock(return_value={"sales": {}}))
+        # 关闭模型可用性，确保用例只验证参数透传，不触发任何真实模型调用。
+        monkeypatch.setattr(llm_client, "is_task_llm_available", lambda task: False)
+
+        # 方法作用：记录模型解析入参并返回未配置，避免访问真实配置库。
+        # Args: kwargs - resolve_tenant_llm_selection 的关键字参数。
+        # Returns: 始终为 None，表示未取到可用选择。
+        async def fake_resolve(**kwargs):
+            captured.append(kwargs)
+            return None
+
+        monkeypatch.setattr(tenant_config, "resolve_tenant_llm_selection", fake_resolve)
+
+        # Act
+        await route.preview_plan(
+            ReportPlanRequest(
+                prompt="生成销售报表",
+                datasources=["sales"],
+                model_id="gpt-4o",
+                llm_connection_id=11,
+            )
+        )
+
+        # Assert
+        assert captured, "预览路由必须调用租户模型解析"
+        assert captured[0]["tenant_id"] == 3
+        assert captured[0]["connection_id"] == 11
+        assert captured[0]["model_id"] == "gpt-4o"
 
     # 方法作用：验证计划预览只解析和估算，不创建任务。
     # Args: self - pytest 测试类实例；monkeypatch - pytest 补丁工具。

@@ -19,6 +19,21 @@ from src.reporting.store import ReportStore
 logger = get_logger(__name__)
 
 
+# 方法作用：从数据源访问解析结果中提取授权语义，剔除数据源元数据。
+# Args: resolved - _resolve_plan_access 返回的数据源映射。
+# Returns: 仅含数据源集合、列白名单、行过滤和访问级别的可比较视图。
+def _authorization_view(resolved: dict[str, dict[str, Any]]) -> dict[str, tuple[tuple[str, ...], str, str]]:
+    """执行期间数据源元数据会变化，权限比对只能看授权相关字段。"""
+    return {
+        name: (
+            tuple(sorted(str(column) for column in (entry.get("allowed_columns") or []))),
+            str(entry.get("row_filter_sql", "") or ""),
+            str(entry.get("access_level", "") or ""),
+        )
+        for name, entry in resolved.items()
+    }
+
+
 # 方法作用：按本地日历推进到严格晚于当前时间的下一期，跳过停机积压而不突发补跑。
 # Args: plan - 调度计划；after - 当前时间；runs_started - 已启动次数。
 # Returns: UTC 下次时间；次数、截止日期耗尽或立即任务返回 None。
@@ -182,8 +197,26 @@ class ReportScheduler:
                         if current.role != identity.role or not await permissions.has(current, required):
                             raise PermissionError("发布前业务身份或能力已变更")
                         latest_access = await (self.access_loader or _resolve_plan_access)(current, job.plan)
-                        if latest_access != access:
+                        # 只比对授权语义：数据源摘要里带 updated_at、connected 等易变元数据，
+                        # 整包比对会把执行期间正常的元数据抖动误判成“权限已变更”。
+                        if _authorization_view(latest_access) != _authorization_view(access):
                             raise PermissionError("发布前数据源权限已变更，请按新权限重跑")
+                        if latest_access != access:
+                            changed_sources = sorted(
+                                name for name in set(access) | set(latest_access)
+                                if access.get(name) != latest_access.get(name)
+                            )
+                            changed_fields = sorted({
+                                key
+                                for name in set(access) | set(latest_access)
+                                for key in set(access.get(name) or {}) | set(latest_access.get(name) or {})
+                                if (access.get(name) or {}).get(key) != (latest_access.get(name) or {}).get(key)
+                            })
+                            logger.warning(
+                                "发布前数据源元数据差异探针",
+                                changed_datasources=changed_sources,
+                                changed_fields=changed_fields,
+                            )
 
                     selection = await resolve_tenant_llm_selection(tenant_id=identity.tenant_id) if self.use_llm else None
                     anchored = job.plan.model_copy(update={"run_at": job.plan.run_at or job.created_at})

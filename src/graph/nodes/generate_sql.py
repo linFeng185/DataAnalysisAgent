@@ -38,7 +38,10 @@ from src.security.sql_execution import normalize_sql_dialect
 
 logger = get_logger(__name__)
 
-_PROMPT_SCHEMA_MAX_CHARS = 4400
+# Schema 段字符上限。原值 4400 会把上百张表的库裁到只剩几张，
+# 目标表的列名进不了 Prompt，模型只能按惯例猜列名（曾导致 i.created_at 不存在）。
+# 现代模型窗口足够大，这里按“能装下整库表结构”来设，不再是瓶颈。
+_PROMPT_SCHEMA_MAX_CHARS = 60000
 _COLUMN_SYNONYMS: dict[str, tuple[str, ...]] = {
     "订单": ("order", "orders", "sale", "sales"),
     "金额": ("amount", "amt", "price", "revenue", "sales", "total"),
@@ -585,7 +588,7 @@ async def _llm_generate(
                 f"## 业务与知识上下文\n{grounding_context}",
                 priority=60,
                 min_chars=300,
-                max_chars=2500,
+                max_chars=10000,
             ),
             PromptSection(
                 "history",

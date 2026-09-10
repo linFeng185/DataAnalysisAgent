@@ -35,6 +35,21 @@ import type {
 
 const TERMINAL_STATUSES = new Set(['succeeded', 'partial', 'failed', 'cancelled', 'expired', 'deleted']);
 
+type ModelOption = {
+  id: string;
+  name: string;
+  connection_id?: number;
+  connection_name?: string;
+  capabilities?: Record<string, unknown>;
+};
+
+// 方法作用：生成连接与模型组合的稳定选择值，避免同一模型跨连接重名。
+// Args: option - 当前租户模型选项。
+// Returns: 可用于 Select value 的组合字符串。
+function modelOptionValue(option: ModelOption): string {
+  return `${option.connection_id ?? 0}:${option.id}`;
+}
+
 // 方法作用：把报表任务状态映射为稳定的视觉标签颜色。
 // Args: status - 任务或运行状态。
 // Returns: Ant Design Tag 颜色。
@@ -98,6 +113,9 @@ export default function ReportWorkbenchPage() {
   const [prompt, setPrompt] = useState('');
   const [datasources, setDatasources] = useState<DatasourceConfig[]>([]);
   const [selectedDatasources, setSelectedDatasources] = useState<string[]>([]);
+  const [models, setModels] = useState<ModelOption[]>([]);
+  const [modelId, setModelId] = useState('');
+  const [llmConnectionId, setLlmConnectionId] = useState<number | undefined>();
   const [preview, setPreview] = useState<ReportPlanPreviewResponse | null>(null);
   const [jobs, setJobs] = useState<ReportJob[]>([]);
   const [quota, setQuota] = useState<ReportQuotaResponse | null>(null);
@@ -130,6 +148,17 @@ export default function ReportWorkbenchPage() {
       if (selectedDatasources.length === 0 && datasourceResult.datasources?.[0]?.name) {
         setSelectedDatasources([datasourceResult.datasources[0].name]);
       }
+      // 模型列表单独加载：失败只提示，不影响工作台其余内容；成功时预选租户默认命名连接。
+      get<{ models: ModelOption[]; default: string | { connection_id?: number; model_id?: string } }>('/models')
+        .then(data => {
+          setModels((data.models || []).filter(item => Number(item.connection_id) > 0));
+          const selectedDefault = typeof data.default === 'string' ? undefined : data.default;
+          if (selectedDefault?.connection_id && selectedDefault.model_id) {
+            setLlmConnectionId(selectedDefault.connection_id);
+            setModelId(selectedDefault.model_id);
+          }
+        })
+        .catch(() => message.warning(t("无法加载模型列表")));
     } catch (error) {
       message.error(error instanceof Error ? error.message : t("报表工作台加载失败"));
     } finally {
@@ -165,7 +194,7 @@ export default function ReportWorkbenchPage() {
     }
     setPreviewing(true);
     try {
-      const result = await previewReportPlan(prompt.trim(), selectedDatasources);
+      const result = await previewReportPlan(prompt.trim(), selectedDatasources, undefined, modelId, llmConnectionId);
       setPreview(result);
       creationKey.current = crypto.randomUUID();
     } catch (error) {
@@ -325,6 +354,22 @@ export default function ReportWorkbenchPage() {
             options={datasources.map(item => ({ value: item.name, label: item.name }))}
             style={{ width: '100%', marginTop: 12 }}
           />
+          {models.length > 0 && (
+            <Select
+              value={models.find(m => m.id === modelId && m.connection_id === llmConnectionId)
+                ? modelOptionValue(models.find(m => m.id === modelId && m.connection_id === llmConnectionId)!)
+                : undefined}
+              onChange={value => {
+                const selected = models.find(option => modelOptionValue(option) === value);
+                setLlmConnectionId(selected?.connection_id);
+                setModelId(selected?.id || '');
+                setPreview(null);
+              }}
+              placeholder={t("选择规划模型")}
+              options={models.map(m => ({ value: modelOptionValue(m), label: `${m.connection_name || t("连接")} / ${m.name}` }))}
+              style={{ width: '100%', marginTop: 8 }}
+            />
+          )}
           <Button type="primary" block icon={<SearchOutlined />} loading={previewing} onClick={() => void previewPlan()} style={{ marginTop: 12 }}>
             {t("生成计划")}
           </Button>

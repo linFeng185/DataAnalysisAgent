@@ -132,7 +132,8 @@ class OpenAIProvider(LLMProvider):
             reasoning_effort=reasoning_effort,
             timeout=timeout,
         )
-        logger.info("OpenAIProvider.get_chat_model 完成", model=self._model_id, stream=stream)
+        # 每次建模型都会触发，属于循环内进度，按项目规则只能用 debug
+        logger.debug("OpenAIProvider.get_chat_model 完成", model=self._model_id, stream=stream)
         return model
 
     def _get_llm(

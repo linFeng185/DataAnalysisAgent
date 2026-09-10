@@ -53,7 +53,8 @@ def build_knowledge_filters(
         filters["asset_id"] = asset_id
     if source:
         filters["source"] = source
-    logger.info("构造知识检索过滤完成", filter_keys=sorted(filters))
+    # 每次检索都触发，属于循环内进度，按项目规则只能用 debug
+    logger.debug("构造知识检索过滤完成", filter_keys=sorted(filters))
     return filters
 
 
@@ -103,7 +104,8 @@ def build_accessible_knowledge_filters(
         private_filter["tenant_id"] = current_tenant_id
     private_filter["owner_user_id"] = current_user_id
     filters.extend([tenant_filter, private_filter])
-    logger.info(
+    # 每次检索都触发，属于循环内进度，按项目规则只能用 debug
+    logger.debug(
         "构造可访问知识过滤完成",
         scope_count=len(filters),
         tenant_id=current_tenant_id,
@@ -284,7 +286,8 @@ async def search_knowledge(
     )
     logger.debug("知识证据重排切换线程池", candidates=len(candidates), top_k=bounded_top_k)
     ordered = await asyncio.to_thread(rerank_evidence, candidates, query, bounded_top_k)
-    logger.info(
+    # 每次检索都触发，属于循环内进度，按项目规则只能用 debug
+    logger.debug(
         "安全知识检索完成",
         hits=len(ordered),
         scope_count=len(filter_groups),

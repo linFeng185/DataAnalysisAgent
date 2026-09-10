@@ -372,7 +372,8 @@ class MilvusVectorStore(VectorStore):
                 metadata=metadata,
                 score=round(hit.score, 4)))
         result = hits[:min(top_k, 50)]
-        logger.info("Milvus search 完成", hits=len(result),
+        # 每次向量检索都会触发，属于循环内进度，按项目规则只能用 debug，否则单次报表运行会刷上百行
+        logger.debug("Milvus search 完成", hits=len(result),
                     elapsed_ms=round((time.monotonic()-_start)*1000))
         return result
 

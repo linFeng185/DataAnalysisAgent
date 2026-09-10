@@ -134,3 +134,56 @@ class TestSqlRewriter:
                 exc_info=True,
             )
             raise
+
+    # 验证 SQL Server 方言经映射后能正常加方括号，而不是整条重写静默失效。
+    # Args: self - pytest 测试类实例。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    def test_rewrite_mssql_maps_to_tsql_dialect(self):
+        """mssql 必须映射到 sqlglot 的 tsql，否则报 Unknown dialect 并放弃重写。"""
+        logger.debug("test_rewrite_mssql_maps_to_tsql_dialect 入口")
+        # Arrange：year_month 与 rank 都是 SQL Server 保留字，必须被引用。
+        sql = "SELECT year_month, rank FROM sales"
+
+        # Act：执行 SQL Server 方言重写。
+        rewritten = rewrite_sql(sql, "mssql")
+
+        # Assert：SQL Server 使用方括号引用标识符。
+        assert "[year_month]" in rewritten
+        assert "[rank]" in rewritten
+        logger.info("test_rewrite_mssql_maps_to_tsql_dialect 完成")
+
+    # 验证正确的 ClickHouse 日期截断不会被 sqlglot 归一化改坏。
+    # Args: self - pytest 测试类实例。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    def test_rewrite_clickhouse_keeps_to_start_of_month(self):
+        """sqlglot 会把 toStartOfMonth 渲染回 dateTrunc，而 dateTrunc 在 Date32 列上报 code 43。"""
+        logger.debug("test_rewrite_clickhouse_keeps_to_start_of_month 入口")
+        # Arrange：这正是模型按方言提示写出的正确写法。
+        sql = "SELECT toStartOfMonth(event_date) AS month FROM insight_order_attribution"
+
+        # Act
+        rewritten = rewrite_sql(sql, "clickhouse")
+
+        # Assert：不得被归一化成 dateTrunc
+        assert "toStartOfMonth" in rewritten
+        assert "dateTrunc" not in rewritten
+        logger.info("test_rewrite_clickhouse_keeps_to_start_of_month 完成")
+
+    # 验证模型误写的 dateTrunc 会被确定性地改成 toStartOfX。
+    # Args: self - pytest 测试类实例。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    def test_rewrite_clickhouse_converts_datetrunc(self):
+        """dateTrunc 属于会报错的写法，必须按粒度改写为 toStartOfX。"""
+        logger.debug("test_rewrite_clickhouse_converts_datetrunc 入口")
+        # Arrange
+        sql = "SELECT DATE_TRUNC('MONTH', d) AS m, toStartOfQuarter(d) AS q FROM t"
+
+        # Act
+        rewritten = rewrite_sql(sql, "clickhouse")
+
+        # Assert
+        assert "toStartOfMonth" in rewritten
+        assert "toStartOfQuarter" in rewritten
+        assert "dateTrunc" not in rewritten
+        assert "DATE_TRUNC" not in rewritten
+        logger.info("test_rewrite_clickhouse_converts_datetrunc 完成")

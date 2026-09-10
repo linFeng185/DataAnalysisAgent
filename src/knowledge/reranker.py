@@ -55,7 +55,8 @@ def rerank_evidence(evidence: list[Evidence], query: str, top_k: int = 5) -> lis
         if len(selected) >= top_k:
             break
     selected.sort(key=lambda item: item.scores.get("rerank", 0.0), reverse=True)
-    logger.info("知识证据重排完成", selected=len(selected), sources=len(source_counts))
+    # 每次检索都触发，属于循环内进度，按项目规则只能用 debug
+    logger.debug("知识证据重排完成", selected=len(selected), sources=len(source_counts))
     return selected
 
 

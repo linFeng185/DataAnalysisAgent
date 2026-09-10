@@ -14,6 +14,8 @@ from src.llm.output_contracts import (
     ImageAnalysisOutput,
     IndicatorCatalogReviewOutput,
     PolishOutput,
+    ReportPlanUnitsOutput,
+    ReportUnitRoutesOutput,
     SQLGenerationOutput,
     TaskPlanOutput,
     TextAnswerOutput,
@@ -126,7 +128,9 @@ CHART_RECOMMEND_SYSTEM = """根据数据列类型推荐最优图表类型。
 
 DIALECT_CHEATSHEET = {
     "clickhouse": """ClickHouse 方言:
-- 日期截断: toStartOfDay(dt) / toStartOfMonth(dt)
+- 日期截断: toStartOfDay(dt) / toStartOfMonth(dt)；禁止使用 dateTrunc——它只接受 DateTime，
+  Date32 列会直接报 code 43
+- 季度截断: toStartOfQuarter(dt)
 - 日期格式化: formatDateTime(dt, '%Y-%m-%d')
 - 时间戳转秒: toUnixTimestamp(dt)
 - NULL处理: ifNull(col, default)
@@ -346,13 +350,51 @@ _INITIAL_PROMPTS: dict[str, PromptDefinition] = {
         output_model=DecomposeOutput,
         context_budget=1800,
     ),
+    "report.plan": PromptDefinition(
+        prompt_id="report.plan",
+        version="1.0.0",
+        task="report_plan",
+        template=(
+            "你是报表需求规划器。把用户的整段报表需求拆成可独立取数和分析的业务问题，"
+            "每个问题对应一个分析单元。"
+            "用户显式写出的章节（如 1./2./一、）一个章节只拆一个单元，"
+            "章节内部的并列指标（如订单数、客单价）和并列维度（如地区、渠道）不得拆成多个单元。"
+            "datasource 必须留空字符串：真实数据源要在执行期由知识库定位，禁止凭猜测填写；"
+            "只有用户原文明确写出某个数据源名称时才填写它。"
+            "只输出 JSON：{{\"analysis_units\": [{{\"unit_id\": \"英文小写下划线标识\", "
+            "\"question\": \"完整保留用户原意的业务问题\", \"datasource\": \"\", "
+            "\"priority\": \"primary\", \"dimensions\": [], \"metrics\": []}}]}}。"
+            "最多 12 个单元；确实无法判断时给出一个覆盖整体需求的单元。"
+        ),
+        output_model=ReportPlanUnitsOutput,
+        context_budget=4000,
+    ),
+    "report.route": PromptDefinition(
+        prompt_id="report.route",
+        version="1.0.0",
+        task="report_route",
+        template=(
+            "你是报表数据源路由器。给定若干分析单元和每个数据源的表名清单，"
+            "判断每个单元应该在哪几个数据源上执行。"
+            "只有表名清单确实能支撑该问题的数据源才算命中；"
+            "没有任何数据源能支撑时必须返回空数组，禁止为凑数选择不相关的数据源。"
+            "只输出 JSON：{{\"routes\": [{{\"unit_id\": \"单元标识\", \"datasources\": [\"数据源名称\"]}}]}}。"
+        ),
+        output_model=ReportUnitRoutesOutput,
+        # 路由要看清每个候选源的表清单，5 个源上百张表需要更大的输入预算。
+        context_budget=40000,
+    ),
     "sql.generate": PromptDefinition(
         prompt_id="sql.generate",
         version="1.0.0",
         task="generate_sql",
         template=SQL_GENERATION_SYSTEM,
         output_model=SQLGenerationOutput,
-        context_budget=12000,
+        # 上限跟随模型窗口放宽：schema 段现在允许扩到 60000 字符，
+        # 固定 12000 会让它连自身内容都装不下，等于白扩。
+        # 85000 的取值保证 schema(60000) 与 grounding(10000) 能同时装下——
+        # 否则总预算会再次把 grounding 挤掉，等于把老问题换个地方重现。
+        context_budget=85000,
     ),
     "analysis.result": PromptDefinition(
         prompt_id="analysis.result",

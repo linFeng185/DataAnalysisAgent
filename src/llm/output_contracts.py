@@ -147,6 +147,36 @@ class ImageAnalysisOutput(StrictOutputModel):
     limitations: list[Annotated[str, Field(max_length=500)]] = Field(default_factory=list, max_length=10)
 
 
+class ReportPlanUnit(StrictOutputModel):
+    """大模型对报表需求拆解出的单个分析单元建议。"""
+
+    unit_id: str = Field(default="", max_length=64)
+    question: str = Field(min_length=1, max_length=2000)
+    datasource: str = Field(default="", max_length=64)
+    priority: Literal["primary", "secondary", "evidence"] = "primary"
+    dimensions: list[str] = Field(default_factory=list, max_length=30)
+    metrics: list[str] = Field(default_factory=list, max_length=30)
+
+
+class ReportPlanUnitsOutput(StrictOutputModel):
+    """报表需求拆解输出，只承载业务语义，不承载调度与权限字段。"""
+
+    analysis_units: list[ReportPlanUnit] = Field(default_factory=list, max_length=12)
+
+
+class ReportUnitRoute(StrictOutputModel):
+    """大模型对单个分析单元的数据源命中判定。"""
+
+    unit_id: str = Field(min_length=1, max_length=64)
+    datasources: list[str] = Field(default_factory=list, max_length=20)
+
+
+class ReportUnitRoutesOutput(StrictOutputModel):
+    """分析单元到数据源的命中映射；空列表表示没有数据源能支撑该问题。"""
+
+    routes: list[ReportUnitRoute] = Field(default_factory=list, max_length=12)
+
+
 T = TypeVar("T", bound=BaseModel)
 
 

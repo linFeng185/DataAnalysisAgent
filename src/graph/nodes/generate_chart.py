@@ -57,9 +57,11 @@ def _first_numeric_value(rows: list[dict], column: str):
     for row in rows:
         value = row.get(column)
         if isinstance(value, _NUMERIC_TYPES) and not isinstance(value, bool):
-            logger.info("图表数值样本查找完成", column=column, found=True)
+            # 逐列查找属于循环内进度，按项目规则只能用 debug
+            logger.debug("图表数值样本查找完成", column=column, found=True)
             return value
-    logger.info("图表数值样本查找完成", column=column, found=False)
+    # 逐列查找属于循环内进度，按项目规则只能用 debug
+    logger.debug("图表数值样本查找完成", column=column, found=False)
     return None
 
 

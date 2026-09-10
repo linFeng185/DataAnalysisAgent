@@ -184,6 +184,29 @@ def _plan_response(plan: ReportPlan) -> dict[str, Any]:
     return {"plan": plan.model_dump(mode="json"), "plan_hash": plan.canonical_hash(), "estimated": plan.estimated.model_dump(mode="json"), "job_id": None}
 
 
+# 方法作用：解析预览计划可用的租户模型，未配置时返回 None 交给规则回退。
+# Args: tenant_id - 当前认证租户；connection_id - 客户端显式选择的连接；model_id - 客户端显式选择的模型。
+# Returns: 可用的租户 LLM 选择，或未配置时的 None。
+async def _resolve_plan_llm_selection(tenant_id: int, connection_id: int | None = None, model_id: str = ""):
+    from src.llm.tenant_config import resolve_tenant_llm_selection
+
+    try:
+        # 客户端显式选择命名连接时优先使用；未选择时回退租户默认连接。
+        return await resolve_tenant_llm_selection(
+            tenant_id=int(tenant_id),
+            connection_id=connection_id,
+            model_id=model_id,
+        )
+    except (LookupError, ValueError) as exc:
+        # 未配置模型属于正常状态，规划会自动回退规则拆分，不能因此让预览接口失败。
+        logger.info("报表计划未启用租户模型，按规则拆分", tenant_id=tenant_id, reason=str(exc))
+        return None
+    except Exception:
+        # 配置查询异常必须保留堆栈，便于区分“未配置”和“服务不可用”。
+        logger.error("报表租户模型解析失败", tenant_id=tenant_id, exc_info=True)
+        return None
+
+
 @router.post("/plans")
 # 方法作用：解析自然语言并返回报表计划预览，不产生任务或扣运行配额。
 # Args: request - 计划预览请求。
@@ -192,7 +215,16 @@ async def preview_plan(request: ReportPlanRequest) -> dict[str, Any]:
     identity = get_current_identity()
     await _require_capability(identity, "report.menu")
     planner = ReportPlanner()
-    plan = await planner.parse(request.prompt, datasources=request.datasources, timezone=request.timezone)
+    from src.llm.tenant_config import use_tenant_llm_selection
+
+    # 绑定租户模型后，Planner 才会用大模型做业务语义拆解；未配置时走规则回退。
+    selection = await _resolve_plan_llm_selection(
+        identity.tenant_id,
+        connection_id=request.llm_connection_id,
+        model_id=request.model_id,
+    )
+    with use_tenant_llm_selection(selection):
+        plan = await planner.parse(request.prompt, datasources=request.datasources, timezone=request.timezone)
     await _resolve_plan_access(identity, plan)
     _plan_cache[(int(identity.tenant_id), int(identity.user_id), plan.canonical_hash())] = plan
     logger.info("报表计划预览完成", tenant_id=identity.tenant_id, user_id=identity.user_id, plan_hash=plan.canonical_hash())

@@ -4,9 +4,9 @@
 
 | # | 功能 | 主要文件/模块 | 描述 | Phase | 状态 | 优先级 |
 |---|---|---|---|---|---|---|
-| 23.1 | 自然语言计划解析 | `src/reporting/planner.py`、`src/api/routes/report_workbench.py` | 从文本解析立即/定时、频率、次数、有效期、数据源和分析单元；缺少调度信息默认立即一次 | Phase 1 | 单测完成 | P1 |
+| 23.1 | 自然语言计划解析 | `src/reporting/planner.py`、`src/api/routes/report_workbench.py`、`src/llm/prompts.py` | 从文本解析立即/定时、频率、次数、有效期、数据源和分析单元；缺少调度信息默认立即一次。业务语义拆解走 `report.plan` 结构化 LLM（含租户模型绑定；用户书写的编号章节一个章节一个单元），模型不可用或越权时回退规则拆分并在 `warnings` 标注降级。分析单元默认不绑定数据源，模型在授权集合内的猜测会被清空，只有用户原文点名的数据源才保留 | Phase 1 | 单测完成 | P1 |
 | 23.2 | 报表任务与运行模型 | `src/reporting/models.py`、`src/reporting/store.py`、`migrations/018_report_workbench.sql` | Job/Run/Step/Version 持久化、幂等、状态机和 RLS；SQLite 测试走应用层模拟 | Phase 1 | 单测完成 | P1 |
-| 23.3 | 报表 LangGraph 子图 | `src/graph/subgraphs/report_workbench.py`、`src/graph/contracts.py` | 单数据源多单元拆解、授权 Schema、查询执行、确定性分析、综合洞察和页面发布 | Phase 1 | 单测完成 | P1 |
+| 23.3 | 报表 LangGraph 子图 | `src/graph/subgraphs/report_workbench.py`、`src/graph/contracts.py` | 单数据源多单元拆解、授权 Schema、查询执行、确定性分析、综合洞察和页面发布。执行前由 `report.route` 按各源表清单判定单元命中的数据源，只打命中源；无命中则跳过并说明，不向无关数据源广播 | Phase 1 | 单测完成 | P1 |
 | 23.4 | 多业务关系分析 | `src/reporting/relations.py`、`src/graph/subgraphs/report_workbench.py` | 受控列投影、样本限制、类型/匹配率/基数校验、连接膨胀阻断和跨源降级；只发布可验证关系证据，不宣称因果关系 | Phase 2 | 集成测试完成 | P1 |
 | 23.5 | 动态报表页面 DSL | `src/reporting/document.py`、`frontend/src/components/report/` | 版本化页面 JSON、响应式布局、图表/表格/洞察/质量块和 ECharts 白名单校验 | Phase 1 | 单测完成 | P1 |
 | 23.6 | 交互明细与 Drilldown | `src/reporting/drilldown.py`、`src/api/routes/report_workbench.py` | 私有/分享快照钻取；客户端不能提交任意 SQL，live drilldown 在 Phase 2 | Phase 1 | 单测完成 | P1 |

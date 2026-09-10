@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+from typing import Any
 
 from src.app_context import get_tenant_policy
 from src.config import get_settings
@@ -256,6 +257,70 @@ def _classify_execution_error(message: str) -> str:
     return result
 
 
+# 方法作用：找出“列名在全局白名单存在、却不属于本语句引用表”的错配列。
+# Args: tree - 已解析的 SQL 语法树；tables - 运行时表结构；aliases - SELECT 中定义的别名。
+# Returns: 每个错配列的 column / referenced_table / provided_by 摘要。
+def _columns_by_table(tables: list[dict]) -> dict[str, set[str]]:
+    """把运行时表结构整理成 表名 -> 列名集合。"""
+    result: dict[str, set[str]] = {}
+    for table in tables:
+        name = str(table.get("name", "") or "").lower()
+        if not name:
+            continue
+        result[name] = {
+            str(column.get("name", "") or "").lower()
+            for column in (table.get("columns") or [])
+            if str(column.get("name", "") or "").strip()
+        }
+    return result
+
+
+# 方法作用：把 SQL 里的表别名映射回真实表名。
+# Args: tree - 已解析的 SQL 语法树。
+# Returns: 别名 -> 真实表名（均小写）。
+def _alias_to_table(tree: Any) -> dict[str, str]:
+    from sqlglot import exp
+
+    result: dict[str, str] = {}
+    for table_node in tree.find_all(exp.Table):
+        real_name = str(table_node.name or "").lower()
+        alias_name = str(table_node.alias or "").lower()
+        if alias_name and real_name:
+            result[alias_name] = real_name
+    return result
+
+
+# 方法作用：找出“列名在全局白名单存在、却不属于本语句引用表”的错配列。
+# Args: tree - 已解析的 SQL 语法树；tables - 运行时表结构；aliases - SELECT 中定义的别名。
+# Returns: 每个错配列的 column / referenced_table / provided_by 摘要。
+def find_cross_table_columns(tree: Any, tables: list[dict], aliases: set[str]) -> list[dict[str, Any]]:
+    """暴露表盲校验的漏检形态：列通过了全局白名单，但真正提供它的是另一张表。"""
+    from sqlglot import exp
+
+    columns_by_table = _columns_by_table(tables)
+    alias_to_table = _alias_to_table(tree)
+
+    mismatches: list[dict[str, Any]] = []
+    for node in tree.find_all(exp.Column):
+        col_name = str(node.name or "").lower()
+        if not col_name or col_name in aliases:
+            continue
+        qualifier = str(node.table or "").lower()
+        resolved = alias_to_table.get(qualifier, qualifier)
+        # 只对该列所属的表已知、且表里确实没有这一列的情况告警
+        if resolved not in columns_by_table or col_name in columns_by_table[resolved]:
+            continue
+        providers = sorted(name for name, cols in columns_by_table.items() if col_name in cols)
+        mismatches.append({
+            "column": f"{qualifier}.{col_name}" if qualifier else col_name,
+            "referenced_table": resolved,
+            "provided_by": providers[:10],
+            "provider_count": len(providers),
+            "schema_table_count": len(columns_by_table),
+        })
+    return mismatches
+
+
 def _validate_column_references(
     sql: str,
     tables: list[dict],
@@ -321,6 +386,11 @@ def _validate_column_references(
                 if alias and alias != col.name:
                     aliases.add(alias.lower())
 
+        # 诊断探针：列名通过了全局白名单，但可能并不属于本语句引用的那张表
+        # （典型漏检形态是 alias.column 里的列只在别的表存在）。先看见事实再决定怎么修。
+        for mismatch in find_cross_table_columns(tree, tables, aliases):
+            logger.warning("列归属错配探针", **mismatch)
+
         errors: list[str] = []
         for node in tree.find_all(exp.Column):
             col_name = node.name
@@ -341,6 +411,23 @@ def _validate_column_references(
             result = "列名校验失败: " + "; ".join(errors[:3])
             logger.info("列引用校验完成", result="失败", error_count=len(errors))
             return result
+        # 列引用校验通过探针：把本语句引用表在运行时 schema 中的真实列打出来。
+        # 判断“列信息来自哪份 schema、是否与真实库一致”只能靠它——
+        # 若这里没有某列而验证仍通过，说明漏检；若这里有而真实库没有，说明 schema 源本身错。
+        columns_by_table = _columns_by_table(tables)
+        alias_to_table = _alias_to_table(tree)
+        referenced_names = sorted({
+            alias_to_table.get(str(node.table or "").lower(), str(node.table or "").lower())
+            for node in tree.find_all(exp.Column)
+            if str(node.table or "").strip()
+        })
+        if referenced_names:
+            logger.info(
+                "列引用校验通过探针",
+                referenced_tables={
+                    name: sorted(columns_by_table.get(name, []))[:40] for name in referenced_names[:5]
+                },
+            )
         logger.info("列引用校验完成", result="通过")
         return None
     except Exception as exc:

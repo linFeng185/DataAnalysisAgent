@@ -384,7 +384,8 @@ def get_provider(
         return result
 
     provider = get_app_context().get_or_create(resource_name, factory)
-    logger.info("Provider 路由完成", model_id=mid, provider=resolved_provider)
+    # 每次建模型都会触发，属于循环内进度，按项目规则只能用 debug
+    logger.debug("Provider 路由完成", model_id=mid, provider=resolved_provider)
     return provider
 
 

@@ -193,3 +193,29 @@ class TestReportScheduler:
         runner.run_job.assert_not_awaited()
         assert (await store.get_run(run.id, owner)).status == "succeeded"
         assert (await store.get_job(job.id, owner)).next_run_at > datetime.now(timezone.utc)
+
+    # 方法作用：验证发布前权限比对只认授权字段，忽略数据源元数据抖动。
+    # Args: self - 测试实例。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    def test_authorization_view_ignores_volatile_metadata(self) -> None:
+        """元数据变化不算权限变更，真实 ACL 变化必须被识别。"""
+        from src.reporting.scheduler import _authorization_view
+
+        # Arrange：数据源摘要里带 updated_at / connected 这类易变字段。
+        base = {
+            "sales": {
+                "name": "sales", "allowed_columns": ["amount"],
+                "row_filter_sql": "dept=3", "access_level": "read",
+                "updated_at": "2026-09-11T01:00:00", "connected": False,
+            }
+        }
+        drifted = {"sales": {**base["sales"], "updated_at": "2026-09-11T01:09:00", "connected": True}}
+        granted = {"sales": {**base["sales"], "allowed_columns": ["amount", "order_id"]}}
+        revoked = {"sales": {**base["sales"], "row_filter_sql": "dept=4"}}
+        removed: dict = {}
+
+        # Act / Assert：仅元数据变化视为权限未变，授权面变化必须被识别
+        assert _authorization_view(base) == _authorization_view(drifted)
+        assert _authorization_view(base) != _authorization_view(granted)
+        assert _authorization_view(base) != _authorization_view(revoked)
+        assert _authorization_view(base) != _authorization_view(removed)

@@ -49,14 +49,23 @@ export function updatePageLifecycle(reportId: string, days: number | null): Prom
 }
 
 // 方法作用：解析报表工作台计划预览请求。
-// Args: prompt - 自然语言报表描述；datasources - 当前用户选择的数据源；timezone - 租户时区。
+// Args: prompt - 自然语言报表描述；datasources - 当前用户选择的数据源；timezone - 租户时区；modelId - 显式选择的模型；llmConnectionId - 模型所属命名连接。
 // Returns: 结构化计划、哈希和资源估算。
 export function previewReportPlan(
   prompt: string,
   datasources: string[],
   timezone = 'Asia/Shanghai',
+  modelId = '',
+  llmConnectionId?: number,
 ): Promise<ReportPlanPreviewResponse> {
-  return post<ReportPlanPreviewResponse>(`${REPORT_BASE}/plans`, { prompt, datasources, timezone });
+  // 显式带上命名连接与模型，后端才能用该连接做结构化规划；都不传时回退租户默认连接。
+  return post<ReportPlanPreviewResponse>(`${REPORT_BASE}/plans`, {
+    prompt,
+    datasources,
+    timezone,
+    model_id: modelId,
+    llm_connection_id: llmConnectionId ?? null,
+  });
 }
 
 // 方法作用：按用户确认的计划创建并排队报表任务。

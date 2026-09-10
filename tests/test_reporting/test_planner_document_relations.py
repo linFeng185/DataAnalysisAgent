@@ -103,6 +103,96 @@ class TestReportPlanner:
         assert plan.requested_datasources == ["sales"]
         assert all(unit.datasource in {"", "sales"} for unit in plan.analysis_units)
 
+    # 方法作用：验证用户书写的编号章节被识别为分析单元边界。
+    # Args: self - pytest 测试类实例；monkeypatch - pytest 补丁工具。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    async def test_numbered_sections_become_units(self, monkeypatch) -> None:
+        """编号章节应逐个成为分析单元，章节内的并列词不再被切碎。"""
+        # Arrange
+        import src.llm.client as llm_client
+        from src.reporting.planner import ReportPlanner
+
+        # 规则路径是模型不可用时的唯一回退，必须显式关闭模型才能确定性验证。
+        monkeypatch.setattr(llm_client, "is_task_llm_available", lambda task: False)
+        prompt = (
+            "立即生成一份《2026 年经营全景报表》，不要定时，页面保留 7 天：\n"
+            "1. 销售：按年月、地区、渠道统计订单净销售额、订单数、客单价；\n"
+            "2. 财务：核对订单净额与发票金额的差额，统计退款规模；\n"
+            "3. 履约：对比配送费用、采购加权单位成本与订单量的走势；\n"
+            "4. 营销：广告归因收入与订单净销售额的对比；\n"
+            "5. 数据质量：说明时间覆盖范围与未能建立的关系。"
+        )
+
+        # Act
+        plan = await ReportPlanner().parse(prompt, datasources=["sales"])
+
+        # Assert
+        questions = [unit.question for unit in plan.analysis_units]
+        assert len(questions) == 5
+        assert questions[0].startswith("销售")
+        assert questions[2].startswith("履约")
+        assert questions[4].startswith("数据质量")
+        # 章节内部的并列指标与维度不再被切成独立单元
+        assert "地区" not in questions
+        assert "客单价" not in questions
+        assert "不要" not in questions
+
+    # 方法作用：验证调度描述被清除且不留残片。
+    # Args: self - pytest 测试类实例；monkeypatch - pytest 补丁工具。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    async def test_schedule_noise_leaves_no_fragment(self, monkeypatch) -> None:
+        """“不要定时”“页面保留 30 天”不得残留为分析单元。"""
+        # Arrange
+        import src.llm.client as llm_client
+        from src.reporting.planner import ReportPlanner
+
+        monkeypatch.setattr(llm_client, "is_task_llm_available", lambda task: False)
+
+        # Act
+        plan = await ReportPlanner().parse("立即生成销售报表，不要定时，页面保留 30 天", datasources=["sales"])
+
+        # Assert
+        questions = [unit.question for unit in plan.analysis_units]
+        assert not any(question in {"不要", "页面", "定时"} for question in questions)
+        assert plan.page_ttl_days == 30
+
+    # 方法作用：验证被否定的调度词不会被识别为定时意图。
+    # Args: self - pytest 测试类实例；monkeypatch - pytest 补丁工具。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    async def test_negated_schedule_stays_immediate(self, monkeypatch) -> None:
+        """用户明确说“不要定时”时应按立即执行一次处理。"""
+        # Arrange
+        import src.llm.client as llm_client
+        from src.reporting.planner import ReportPlanner
+
+        monkeypatch.setattr(llm_client, "is_task_llm_available", lambda task: False)
+
+        # Act
+        plan = await ReportPlanner().parse("立即生成销售报表，不要定时，页面保留 7 天", datasources=["sales"])
+
+        # Assert
+        assert plan.execution_mode == "immediate"
+        assert plan.max_runs == 1
+        assert plan.needs_confirmation is False
+        assert not any("频率" in warning for warning in plan.warnings)
+
+
+class TestReportPlannerTextRules:
+    """覆盖功能 23.1：计划解析的文本规则边界。"""
+
+    # 方法作用：验证否定前缀只认多字否定词，不误伤“类别”等常见业务词。
+    # Args: self - pytest 测试类实例。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    def test_negation_prefix_spares_common_words(self) -> None:
+        """“类别每月”“区分每周”不得被当成被否定的调度意图。"""
+        # Arrange
+        from src.reporting.planner import _NEGATED_SCHEDULE_RE
+
+        # Act / Assert：单字“别/不”若进入词表，会把“类别每月”误判为否定调度
+        assert _NEGATED_SCHEDULE_RE.search("按类别每月统计") is None
+        assert _NEGATED_SCHEDULE_RE.search("区分每周数据") is None
+        assert _NEGATED_SCHEDULE_RE.search("不要定时") is not None
+
 
 class TestReportDocument:
     """覆盖功能 23.5：动态页面 DSL 与 ECharts option 白名单。"""

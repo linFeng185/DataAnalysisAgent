@@ -7,7 +7,7 @@ import time
 from dataclasses import dataclass, field
 from uuid import uuid4
 
-from src.knowledge.doc_parser import ChunkConfig, chunk_text, extract_text
+from src.knowledge.doc_parser import ChunkConfig, chunk_text, enforce_chunk_limit, extract_text
 from src.logging_config import get_logger
 from src.memory.vector_store import VectorEntry, get_vector_store
 
@@ -240,6 +240,8 @@ class UploadManager:
                 if not text.strip():
                     raise ValueError("文档内容为空")
                 chunks = chunk_text(text, config, task.file_name)
+            # 无论走哪条解析路径，超长块都必须先切小再写入向量库。
+            chunks = enforce_chunk_limit(chunks)
             task.chunks_count = len(chunks)
             logger.info("分块完成", task_id=task.id, chunks=len(chunks))
             if not chunks:

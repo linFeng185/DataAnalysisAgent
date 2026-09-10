@@ -41,6 +41,15 @@ _MYSQL_FIXES: list[tuple[str, str, str]] = [
 _CLICKHOUSE_FIXES: list[tuple[str, str, str]] = [
     (r"\bGROUP_CONCAT\(([^)]+)\)", r"arrayStringConcat(groupArray(\1), ',')"),
     (r"\bIFNULL\(([^,]+),\s*([^)]+)\)", r"ifNull(\1, \2)"),
+    # ClickHouse 的 dateTrunc 只接受 DateTime，Date32 列会直接抛 code 43
+    # （Illegal type Date32 of 2nd argument）。toStartOf* 接受 Date/Date32/DateTime，
+    # 是等价且更稳的写法，这里按粒度确定性改写，不依赖模型是否遵守方言提示。
+    (r"\bdate_?trunc\(\s*'year'\s*,\s*([^)]+)\)", r"toStartOfYear(\1)"),
+    (r"\bdate_?trunc\(\s*'quarter'\s*,\s*([^)]+)\)", r"toStartOfQuarter(\1)"),
+    (r"\bdate_?trunc\(\s*'month'\s*,\s*([^)]+)\)", r"toStartOfMonth(\1)"),
+    (r"\bdate_?trunc\(\s*'week'\s*,\s*([^)]+)\)", r"toStartOfWeek(\1)"),
+    (r"\bdate_?trunc\(\s*'day'\s*,\s*([^)]+)\)", r"toStartOfDay(\1)"),
+    (r"\bdate_?trunc\(\s*'hour'\s*,\s*([^)]+)\)", r"toStartOfHour(\1)"),
 ]
 
 _POSTGRES_FIXES: list[tuple[str, str, str]] = [
@@ -60,6 +69,18 @@ _MSSQL_FIXES: list[tuple[str, str, str]] = [
     (r"\bIFNULL\(([^,]+),\s*([^)]+)\)", r"ISNULL(\1, \2)"),
     (r"\bGROUP_CONCAT\(([^,]+),\s*SEPARATOR\s+([^)]+)\)",
      r"STRING_AGG(\1, \2)"),
+]
+
+# sqlglot 的 ClickHouse 生成器会把 toStartOfMonth(x) 渲染回 dateTrunc('MONTH', x)，
+# 而 dateTrunc 只接受 DateTime，Date32 列直接抛 code 43。Layer 2 之后必须再撤一次，
+# 否则我们等于把模型写对的函数亲手改成会报错的写法。
+_CLICKHOUSE_DATETRUNC_REVERSAL: list[tuple[str, str]] = [
+    (r"\bdate_?trunc\(\s*'year'\s*,\s*([^)]+)\)", r"toStartOfYear(\1)"),
+    (r"\bdate_?trunc\(\s*'quarter'\s*,\s*([^)]+)\)", r"toStartOfQuarter(\1)"),
+    (r"\bdate_?trunc\(\s*'month'\s*,\s*([^)]+)\)", r"toStartOfMonth(\1)"),
+    (r"\bdate_?trunc\(\s*'week'\s*,\s*([^)]+)\)", r"toStartOfWeek(\1)"),
+    (r"\bdate_?trunc\(\s*'day'\s*,\s*([^)]+)\)", r"toStartOfDay(\1)"),
+    (r"\bdate_?trunc\(\s*'hour'\s*,\s*([^)]+)\)", r"toStartOfHour(\1)"),
 ]
 
 _RULES: dict[str, list[tuple[str, str, str]]] = {
@@ -148,12 +169,26 @@ def rewrite_sql(sql: str, dialect: str) -> str:
     #   MSSQL              → [bracket]
     try:
         import sqlglot
-        quoted = sqlglot.transpile(sql, read=dialect, write=dialect, identify=True)
+
+        # sqlglot 的 SQL Server 方言名是 tsql，必须走统一映射，
+        # 否则直接传 mssql 会报 Unknown dialect 'mssql'，整条重写静默失效。
+        from src.security.sql_execution import normalize_sql_dialect
+
+        sqlglot_dialect = normalize_sql_dialect(dialect)
+        quoted = sqlglot.transpile(sql, read=sqlglot_dialect, write=sqlglot_dialect, identify=True)
         if quoted and quoted[0] != sql:
             sql = quoted[0]
             applied += 1
     except Exception as exc:
         logger.error("SQL 标识符引用重写失败", error=str(exc), exc_info=True)
+
+    # Layer 3: 撤销 sqlglot 对 ClickHouse 日期函数的归一化（见常量处说明）。
+    if dialect.lower() in {"clickhouse", "ch"}:
+        for pattern, replacement in _CLICKHOUSE_DATETRUNC_REVERSAL:
+            sql, count = re.subn(pattern, replacement, sql, flags=re.IGNORECASE)
+            if count > 0:
+                applied += count
+                logger.info("ClickHouse 日期函数归一化回退", count=count)
 
     if applied > 0:
         logger.info("SQL 方言重写", dialect=dialect, fixes=applied,

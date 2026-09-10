@@ -23,6 +23,26 @@ _FREQUENCIES: tuple[tuple[str, str], ...] = (
     ("weekly", "每周"),
     ("monthly", "每月"),
 )
+# 报表规划任务标识，供 LLM 任务路由选择本地或租户配置的模型。
+_PLAN_LLM_TASK = "report_plan"
+# 调度噪声词，否定前缀与词一起删除，避免把“不要定时”的残留“不要”当成分析单元。
+# 否定前缀只收多字词：单字“别/不”会误伤“类别每月”“区分每周”这类常见业务表述。
+_SCHEDULE_NOISE_RE = re.compile(
+    r"(?:(?:不要|不需要|无需|不用|禁止)\s*)?"
+    r"(?:立即|现在|立刻|先跑一次|以后|之后|定时|每小时|每天|每周[^，。 ]*|每月[^，。 ]*"
+    r"|页面\s*保留\s*\d{1,3}\s*天|保留\s*\d{1,3}\s*天|执行\s*\d+\s*次|运行\s*\d+\s*次"
+    r"|永久保存|永久有效|永不过期)"
+)
+# 用户书写的章节编号，支持 1./1、/1) 与 一、/一. 两类。
+_SECTION_MARK_RE = re.compile(r"(?<![\d.])(?:\d{1,2}\s*[.、)](?!\d)|[一二三四五六七八九十]{1,2}\s*[、.])\s*")
+# 片段首尾的并列连接词与标点，仅用于清理边界，不作为切分依据。
+_PIECE_TRIM_RE = re.compile(r"^[\s，,、；;。：:和及以及]+|[\s，,、；;。：:和及以及]+$")
+# 单元标识允许的字符集，与 models.AnalysisUnit 的校验保持一致。
+_UNIT_KEY_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
+# 被否定的调度词，用户说“不要定时”时不能按定时意图处理；同样只认多字否定词。
+_NEGATED_SCHEDULE_RE = re.compile(
+    r"(?:不要|不需要|无需|不用|禁止)\s*(?:定时|以后|之后|周期|每小时|每天|每周|每月)"
+)
 
 
 class ReportPlanner:
@@ -49,8 +69,10 @@ class ReportPlanner:
         if not normalized:
             raise ValueError("报表描述不能为空")
         requested = self._validate_datasources(datasources or [])
-        frequency = self._parse_frequency(normalized)
-        schedule_signal = any(word in normalized for word in ("定时", "以后", "之后", "周期", "每小时", "每天", "每周", "每月"))
+        # 先剔除被否定的调度词，"不要定时" 不能算作定时意图。
+        schedule_text = _NEGATED_SCHEDULE_RE.sub(" ", normalized)
+        frequency = self._parse_frequency(schedule_text)
+        schedule_signal = any(word in schedule_text for word in ("定时", "以后", "之后", "周期", "每小时", "每天", "每周", "每月"))
         immediate_signal = any(word in normalized for word in ("立即", "现在", "立刻", "先跑一次", "执行一次"))
         warnings: list[str] = []
         execution_mode = "scheduled" if schedule_signal or frequency else "immediate"
@@ -93,8 +115,11 @@ class ReportPlanner:
         )
         if execution_mode == "scheduled" and frequency:
             plan.run_at, plan.schedule_day = self.parse_schedule_start(normalized, frequency, timezone)
+        # 业务语义拆解优先交给结构化模型；无注入适配器时走统一 LLM 调用，两者失败都保留规则计划。
         if self._llm is not None:
             plan = await self._merge_structured_llm(plan, normalized)
+        else:
+            plan = await self._plan_units_with_llm(plan, normalized)
         logger.info(
             "报表计划解析完成",
             execution_mode=plan.execution_mode,
@@ -171,21 +196,17 @@ class ReportPlanner:
                 return value
         return None
 
-    # 方法作用：把文本中的业务主题拆成独立分析单元。
+    # 方法作用：按用户书写的章节结构拆分业务主题，缺少章节结构时回退到分句切分。
     # Args: text - 用户报表描述。
     # Returns: 有界且唯一的 AnalysisUnit 列表。
     @staticmethod
     def _build_units(text: str) -> list[AnalysisUnit]:
-        cleaned = re.sub(
-            r"(?:立即|现在|立刻|先跑一次|以后|之后|定时|每小时|每天|每周[^，。 ]*|每月[^，。 ]*|执行\s*\d+\s*次|运行\s*\d+\s*次|保留\s*\d+\s*天|永久保存|永久有效|永不过期)",
-            " ",
-            text,
-        )
-        pieces = [
-            re.sub(r"^[ ，,、和及以及]+|[ ，,、和及以及]+$", "", piece)
-            for piece in re.split(r"[，,、；;]|以及|和|及", cleaned)
-        ]
-        pieces = [piece for piece in pieces if piece]
+        cleaned = _SCHEDULE_NOISE_RE.sub(" ", text)
+        # 用户显式写了编号章节时，章节就是分析单元边界；章节内部的并列词不再切分。
+        pieces = ReportPlanner._split_sections(cleaned)
+        if len(pieces) < 2:
+            pieces = ReportPlanner._split_clauses(cleaned)
+        pieces = [piece for piece in pieces if piece and not ReportPlanner._is_fragment(piece)]
         if not pieces:
             pieces = [text[:4000]]
         units: list[AnalysisUnit] = []
@@ -196,10 +217,55 @@ class ReportPlanner:
             if key in seen:
                 key = f"{key}_{index}"
             seen.add(key)
-            metrics = ReportPlanner._infer_metrics(topic)
-            dimensions = ReportPlanner._infer_dimensions(topic)
-            units.append(AnalysisUnit(unit_id=key, question=topic, metrics=metrics, dimensions=dimensions))
+            units.append(
+                AnalysisUnit(
+                    unit_id=key,
+                    question=topic,
+                    metrics=ReportPlanner._infer_metrics(topic),
+                    dimensions=ReportPlanner._infer_dimensions(topic),
+                )
+            )
         return units or [AnalysisUnit(unit_id="unit_1", question=text[:4000])]
+
+    # 方法作用：按编号章节切分文本，并丢弃编号之前的标题前言。
+    # Args: text - 已去除调度噪声的描述。
+    # Returns: 章节正文列表；识别到的章节不足两段时返回空列表。
+    @staticmethod
+    def _split_sections(text: str) -> list[str]:
+        marks = list(_SECTION_MARK_RE.finditer(text))
+        if len(marks) < 2:
+            return []
+        blocks: list[str] = []
+        for index, mark in enumerate(marks):
+            end = marks[index + 1].start() if index + 1 < len(marks) else len(text)
+            block = ReportPlanner._trim_piece(text[mark.end():end])
+            if block:
+                blocks.append(block)
+        return blocks
+
+    # 方法作用：无章节结构时按分句标点切分，作为旧行为的兼容回退。
+    # Args: text - 已去除调度噪声的描述。
+    # Returns: 分句片段列表。
+    @staticmethod
+    def _split_clauses(text: str) -> list[str]:
+        return [ReportPlanner._trim_piece(piece) for piece in re.split(r"[，,、；;]|以及|和|及", text)]
+
+    # 方法作用：去掉片段首尾的连接词与标点，避免残留“、”“和”等边界字符。
+    # Args: piece - 原始片段。
+    # Returns: 清理并折叠空白后的片段。
+    @staticmethod
+    def _trim_piece(piece: str) -> str:
+        return " ".join(_PIECE_TRIM_RE.sub("", piece).split())
+
+    # 方法作用：识别只由调度噪声残留构成的无意义片段。
+    # Args: piece - 已清理的片段。
+    # Returns: 片段不含业务含义时返回 True。
+    @staticmethod
+    def _is_fragment(piece: str) -> bool:
+        compact = re.sub(r"\s+", "", piece)
+        if len(compact) >= 4:
+            return False
+        return not (ReportPlanner._infer_metrics(compact) or ReportPlanner._infer_dimensions(compact))
 
     # 方法作用：为业务主题生成稳定的安全单元标识。
     # Args: topic - 业务主题；index - 主题序号。
@@ -250,27 +316,138 @@ class ReportPlanner:
             require_code=any(word in text for word in ("授权码", "密码")),
         )
 
-    # 方法作用：让可选结构化模型只补充业务单元，不得覆盖安全和规则字段。
+    # 方法作用：让注入的结构化适配器补充业务单元，不得覆盖安全和规则字段。
     # Args: plan - 规则解析后的计划；prompt - 原始规范文本。
-    # Returns: 保留规则约束的计划。
+    # Returns: 采用模型单元或保留规则单元并标注降级的计划。
     async def _merge_structured_llm(self, plan: ReportPlan, prompt: str) -> ReportPlan:
         try:
             result = self._llm.ainvoke(prompt) if hasattr(self._llm, "ainvoke") else self._llm(prompt)
             if hasattr(result, "__await__"):
                 result = await result
-            if isinstance(result, dict) and isinstance(result.get("analysis_units"), list):
-                proposed = [AnalysisUnit.model_validate(item) for item in result["analysis_units"][:12]]
-                if proposed:
-                    allowed_datasources = set(plan.requested_datasources)
-                    if any(unit.datasource and unit.datasource not in allowed_datasources for unit in proposed):
-                        raise ValueError("结构化模型尝试使用未授权数据源")
-                    # 重新走完整计划校验，避免直接给 Pydantic 实例赋值绕过数据源和 unit_id 约束。
-                    candidate_data = plan.model_dump(mode="json")
-                    candidate_data["analysis_units"] = [unit.model_dump(mode="json") for unit in proposed]
-                    candidate = ReportPlan.model_validate(candidate_data)
-                    if set(candidate.requested_datasources) != allowed_datasources:
-                        raise ValueError("结构化模型改变了已授权数据源集合")
-                    plan = candidate
+            if not isinstance(result, dict):
+                raise ValueError("结构化模型未返回计划对象")
+            raw_units = result.get("analysis_units")
+            if not isinstance(raw_units, list):
+                raise ValueError("结构化模型未返回分析单元列表")
+            proposed = self._coerce_llm_units(
+                [item for item in raw_units if isinstance(item, dict)],
+                allowed_datasources=set(plan.requested_datasources),
+                prompt=prompt,
+            )
+            plan = self._apply_proposed_units(plan, proposed)
         except Exception as exc:
-            logger.warning("报表结构化模型补充失败，回退规则计划", error_type=type(exc).__name__)
+            logger.warning("报表结构化模型补充失败，回退规则计划", error_type=type(exc).__name__, error=str(exc))
+            plan = self._with_planner_warning(plan)
+        return plan
+
+    # 方法作用：调用统一结构化 LLM 完成报表需求的业务语义拆解。
+    # Args: plan - 规则计划；prompt - 用户原始描述。
+    # Returns: 采用模型单元或保留规则单元并标注降级的计划。
+    async def _plan_units_with_llm(self, plan: ReportPlan, prompt: str) -> ReportPlan:
+        try:
+            from src.llm.client import is_task_llm_available
+
+            if not is_task_llm_available(_PLAN_LLM_TASK):
+                raise RuntimeError("报表规划模型不可用")
+            from src.llm.invocation import invoke_structured
+            from src.llm.output_contracts import ReportPlanUnitsOutput
+            from src.llm.prompt_budget import PromptSection
+
+            allowed = plan.requested_datasources
+            output = await invoke_structured(
+                "report.plan",
+                [
+                    PromptSection(
+                        "requirement",
+                        f"## 报表需求\n{prompt}",
+                        priority=100,
+                        min_chars=100,
+                        max_chars=4000,
+                    ),
+                    PromptSection(
+                        "scope",
+                        "## 可用数据源\n" + ("、".join(allowed) if allowed else "未指定，datasource 留空"),
+                        priority=90,
+                        min_chars=20,
+                        max_chars=600,
+                    ),
+                ],
+                output_model=ReportPlanUnitsOutput,
+                task=_PLAN_LLM_TASK,
+                temperature=0.0,
+                metadata={"node": "report_planner"},
+            )
+            proposed = self._coerce_llm_units(
+                [unit.model_dump() for unit in output.analysis_units],
+                allowed_datasources=set(allowed),
+                prompt=prompt,
+            )
+            plan = self._apply_proposed_units(plan, proposed)
+            logger.info("报表规划模型完成拆解", unit_count=len(plan.analysis_units))
+        except Exception as exc:
+            logger.warning("报表规划模型不可用，回退规则拆分", error_type=type(exc).__name__, error=str(exc))
+            plan = self._with_planner_warning(plan)
+        return plan
+
+    # 方法作用：把模型建议的分析单元合并进已通过规则校验的计划。
+    # Args: plan - 规则计划；proposed - 已规范化的分析单元。
+    # Returns: 保留规则安全字段、替换业务单元的计划。
+    @staticmethod
+    def _apply_proposed_units(plan: ReportPlan, proposed: list[AnalysisUnit]) -> ReportPlan:
+        if not proposed:
+            raise ValueError("结构化模型未给出可用分析单元")
+        allowed_datasources = set(plan.requested_datasources)
+        if any(unit.datasource and unit.datasource not in allowed_datasources for unit in proposed):
+            raise ValueError("结构化模型尝试使用未授权数据源")
+        # 重新走完整计划校验，避免直接给 Pydantic 实例赋值绕过数据源和 unit_id 约束。
+        candidate_data = plan.model_dump(mode="json")
+        candidate_data["analysis_units"] = [unit.model_dump(mode="json") for unit in proposed]
+        candidate = ReportPlan.model_validate(candidate_data)
+        if set(candidate.requested_datasources) != allowed_datasources:
+            raise ValueError("结构化模型改变了已授权数据源集合")
+        return candidate
+
+    # 方法作用：把模型给出的原始单元规范化为通过契约校验的 AnalysisUnit。
+    # Args: raw_units - 模型输出的单元字典列表；allowed_datasources - 计划已授权数据源；prompt - 用户原始描述。
+    # Returns: 跳过空问题与无法校验条目的分析单元列表。
+    @staticmethod
+    def _coerce_llm_units(
+        raw_units: list[dict[str, Any]],
+        allowed_datasources: set[str] | None = None,
+        prompt: str = "",
+    ) -> list[AnalysisUnit]:
+        units: list[AnalysisUnit] = []
+        seen: set[str] = set()
+        for index, raw in enumerate(raw_units[:12], start=1):
+            question = str(raw.get("question") or "").strip()
+            if not question:
+                continue
+            key = str(raw.get("unit_id") or "").strip()
+            if not _UNIT_KEY_RE.fullmatch(key):
+                # 模型标识缺失或不合规时退回语义主题键，避免整批计划被拒绝。
+                key = ReportPlanner._topic_key(question, index)
+            if key in seen:
+                key = f"{key}_{index}"
+            seen.add(key)
+            payload = {name: value for name, value in raw.items() if name != "unit_id"}
+            payload.update({"unit_id": key, "question": question})
+            # 模型没有 schema 依据：集合内的数据源若未在用户原文点名，只是猜测，清空后交给执行期定位；
+            # 集合外的数据源保持原样，仍由授权校验拒绝，不能让清理动作绕过安全闸。
+            datasource = str(payload.get("datasource") or "").strip()
+            if datasource and datasource not in prompt and (allowed_datasources is None or datasource in allowed_datasources):
+                payload["datasource"] = ""
+            try:
+                units.append(AnalysisUnit.model_validate(payload))
+            except ValueError:
+                logger.warning("报表规划模型给出的单元未通过校验，已跳过", unit_index=index)
+        return units
+
+    # 方法作用：在降级为规则拆分时补充可读提示，让用户知道当前单元来源。
+    # Args: plan - 保留规则单元的计划。
+    # Returns: 追加降级提示后的计划。
+    @staticmethod
+    def _with_planner_warning(plan: ReportPlan) -> ReportPlan:
+        message = "模型规划不可用，已按规则拆分，建议确认分析单元"
+        if message not in plan.warnings and len(plan.warnings) < 20:
+            plan.warnings.append(message)
         return plan

@@ -23,6 +23,7 @@ class ReportWorkbenchState(TypedDict, total=False):
     plan: ReportPlan
     identity: dict[str, Any]
     authorized_datasources: dict[str, dict[str, Any]]
+    unit_datasources: dict[str, list[str]]
     resolved_units: list[dict[str, Any]]
     query_plans: list[dict[str, Any]]
     unit_results: list[UnitResult]

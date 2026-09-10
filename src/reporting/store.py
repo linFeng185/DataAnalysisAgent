@@ -339,9 +339,15 @@ class ReportStore:
         user_id = int(getattr(identity, "user_id", run.get("user_id", 0)) or 0)
         role = str(getattr(identity, "role", "super_admin") or "super_admin")
         async with pg_pool_connection(pool, tenant_id, user_id, role) as connection:
+            # 持久化模式的 seq 必须由数据库计算：内存计数在 PG 模式下恒为 1，
+            # 第二次写同一节点就会撞 (run_id, seq, attempt) 唯一约束。
+            # 多单元并行执行时重试日志会并发插入，先取事务级 advisory lock 串行化同一 run，
+            # 否则两个并发写入会算出同一个 MAX(seq)+1。
+            await connection.execute("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", f"report-run-steps:{run_id}")
             await connection.execute(
-                "INSERT INTO report_run_steps (id,run_id,seq,node,status,attempt,input_hash,output_ref,error_code,internal_error_message,user_error_message,started_at,finished_at) VALUES ($1::uuid,$2::uuid,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)",
-                row["id"], run_id, row["seq"], node, status, int(attempt), input_hash, output_ref, error_code, internal_error[:2000], user_error[:500], row["started_at"], row["finished_at"],
+                "INSERT INTO report_run_steps (id,run_id,seq,node,status,attempt,input_hash,output_ref,error_code,internal_error_message,user_error_message,started_at,finished_at) "
+                "VALUES ($1::uuid,$2::uuid,(SELECT COALESCE(MAX(seq),0)+1 FROM report_run_steps WHERE run_id=$2::uuid),$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)",
+                row["id"], run_id, node, status, int(attempt), input_hash, output_ref, error_code, internal_error[:2000], user_error[:500], row["started_at"], row["finished_at"],
             )
 
     # 方法作用：列出某次运行的有界节点日志。
@@ -740,7 +746,7 @@ class ReportStore:
         from src.memory.pg_pool import pg_pool_connection
 
         async with pg_pool_connection(pool, tenant_id, user_id, "analyst") as connection:
-            await connection.execute("INSERT INTO report_quota_policies (tenant_id,user_id,timezone,max_jobs_created,max_runs_started,max_concurrent_runs,max_analysis_units_per_run,max_queries_per_run,max_rows_per_query,max_llm_tokens,max_page_bytes,max_share_links) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) ON CONFLICT (tenant_id,user_id) DO UPDATE SET timezone=EXCLUDED.timezone,max_jobs_created=EXCLUDED.max_jobs_created,max_runs_started=EXCLUDED.max_runs_started,max_concurrent_runs=EXCLUDED.max_concurrent_runs,max_analysis_units_per_run=EXCLUDED.max_analysis_units_per_run,max_queries_per_run=EXCLUDED.max_queries_per_run,max_rows_per_query=EXCLUDED.max_rows_per_query,max_llm_tokens=EXCLUDED.max_llm_tokens,max_page_bytes=EXCLUDED.max_page_bytes,max_share_links=EXCLUDED.max_share_links,updated_at=NOW()", tenant_id, user_id, timezone_name, fields.get("max_jobs_created", 20), fields.get("max_runs_started", 50), fields.get("max_concurrent_runs", 2), fields.get("max_analysis_units_per_run", 12), fields.get("max_queries_per_run", 16), fields.get("max_rows_per_query", 100000), fields.get("max_llm_tokens", 200000), fields.get("max_page_bytes", 2097152), fields.get("max_share_links", 20))
+            await connection.execute("INSERT INTO report_quota_policies (tenant_id,user_id,timezone,max_jobs_created,max_runs_started,max_concurrent_runs,max_analysis_units_per_run,max_queries_per_run,max_rows_per_query,max_llm_tokens,max_page_bytes,max_share_links) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) ON CONFLICT (tenant_id,user_id) DO UPDATE SET timezone=EXCLUDED.timezone,max_jobs_created=EXCLUDED.max_jobs_created,max_runs_started=EXCLUDED.max_runs_started,max_concurrent_runs=EXCLUDED.max_concurrent_runs,max_analysis_units_per_run=EXCLUDED.max_analysis_units_per_run,max_queries_per_run=EXCLUDED.max_queries_per_run,max_rows_per_query=EXCLUDED.max_rows_per_query,max_llm_tokens=EXCLUDED.max_llm_tokens,max_page_bytes=EXCLUDED.max_page_bytes,max_share_links=EXCLUDED.max_share_links", tenant_id, user_id, timezone_name, fields.get("max_jobs_created", 20), fields.get("max_runs_started", 50), fields.get("max_concurrent_runs", 2), fields.get("max_analysis_units_per_run", 12), fields.get("max_queries_per_run", 16), fields.get("max_rows_per_query", 100000), fields.get("max_llm_tokens", 200000), fields.get("max_page_bytes", 2097152), fields.get("max_share_links", 20))
 
     # 方法作用：用 PostgreSQL 条件 UPDATE 原子预占周期配额，避免多 Worker 超额。
     # Args: identity - 当前身份；increments - jobs/runs/concurrent/queries/rows/tokens/shares 增量；policy - 当前限制；period_start/period_end - 周期边界。
@@ -761,9 +767,11 @@ class ReportStore:
                 "concurrent_runs=concurrent_runs+$5,analysis_units=analysis_units+$6,queries=queries+$7,"
                 "rows=rows+$8,llm_tokens=llm_tokens+$9,share_links=share_links+$10 "
                 "WHERE tenant_id=$1 AND user_id=$2 AND period_start=$11 "
-                "AND jobs_created+$3 <= $12 AND runs_started+$4 <= $13 AND concurrent_runs+$5 <= $14 "
-                "AND $6 <= $15 AND $7 <= $16 AND $8 <= $17 "
-                "AND llm_tokens+$9 <= $18 AND share_links+$10 <= $19 RETURNING *",
+                # 上限参数必须显式转型：$6 <= $15 这类占位符互比没有列上下文，
+                # PostgreSQL 会把它们推断成 text，与 jobs_created+$3 的整数用法冲突。
+                "AND jobs_created+$3 <= $12::bigint AND runs_started+$4 <= $13::bigint AND concurrent_runs+$5 <= $14::bigint "
+                "AND $6::bigint <= $15::bigint AND $7::bigint <= $16::bigint AND $8::bigint <= $17::bigint "
+                "AND llm_tokens+$9 <= $18::bigint AND share_links+$10 <= $19::bigint RETURNING *",
                 tenant_id, user_id, int(increments.get("jobs", 0)), int(increments.get("runs", 0)),
                 int(increments.get("concurrent", 0)), int(increments.get("units", 0)),
                 int(increments.get("queries", 0)), int(increments.get("rows", 0)),
@@ -972,7 +980,8 @@ class ReportStore:
         async with pg_pool_connection(await self._pool(), identity.tenant_id, identity.user_id, identity.role) as connection:
             row = await connection.fetchrow("SELECT quota_held,quota_period_start FROM report_runs WHERE id=$1::uuid AND tenant_id=$2 FOR UPDATE", run_id, identity.tenant_id)
             if row and row["quota_held"]:
-                await connection.execute("UPDATE report_quota_usage SET concurrent_runs=GREATEST(0,concurrent_runs-1),updated_at=NOW() WHERE tenant_id=$1 AND user_id=$2 AND period_start=$3", identity.tenant_id, identity.user_id, row["quota_period_start"])
+                # report_quota_usage 没有 updated_at 列，写它会直接报 UndefinedColumnError。
+                await connection.execute("UPDATE report_quota_usage SET concurrent_runs=GREATEST(0,concurrent_runs-1) WHERE tenant_id=$1 AND user_id=$2 AND period_start=$3", identity.tenant_id, identity.user_id, row["quota_period_start"])
                 await connection.execute("UPDATE report_runs SET quota_held=FALSE WHERE id=$1::uuid AND tenant_id=$2", run_id, identity.tenant_id)
 
     # 方法作用：取得独占执行锁后终结旧进程遗留运行并释放可确认的配额租约。

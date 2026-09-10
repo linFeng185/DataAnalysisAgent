@@ -74,7 +74,7 @@
 | # | 功能 | 文件 | 描述 | 状态 | 优先级 |
 |---|------|------|------|------|--------|
 | 6.7.1 | 多格式解析 | `src/knowledge/doc_parser.py`、`src/knowledge/document_assets.py` | PDF (PyPDF2) / Word / TXT / MD 文本提取，并保留页码、段落、标题和表格定位 | 单测完成 | P2 |
-| 6.7.2 | 智能分块引擎 | 同上 | 4 种策略 + 重叠 + 最小块配置 | 开发完成 | P2 |
+| 6.7.2 | 智能分块引擎 | 同上 | 4 种策略 + 重叠 + 最小块配置；修正 `### 表:` 数据字典的策略优先级，新增超长块写入前兜底切分 | 单测完成 | P2 |
 | 6.7.3 | 异步上传任务 | `src/knowledge/upload_manager.py` | 有界 UploadTask 状态 + 终态 TTL 清理 + asyncio 后台 VectorStore 写入 | 单测完成 | P2 |
 | 6.7.4 | 上传/查询 API | `src/api/routes.py` | POST upload + GET status + GET content + GET raw | 开发完成 | P2 |
 | 6.7.5 | 删除保护 | 同上 | 系统条目/文档禁止删除 | 开发完成 | P2 |

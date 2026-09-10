@@ -70,7 +70,8 @@ def normalize_tag_slug(name: str) -> str:
     if not result:
         logger.error("规范化知识标签失败", name=name, error="标签名称为空")
         raise ValueError("标签名称不能为空")
-    logger.info("规范化知识标签完成", slug=result)
+    # 每次检索都触发，属于循环内进度，按项目规则只能用 debug
+    logger.debug("规范化知识标签完成", slug=result)
     return result
 
 

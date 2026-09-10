@@ -1,6 +1,7 @@
 """覆盖 16.5.5 的中文文档和私有资料隔离。"""
 
 import json
+import re
 from pathlib import Path
 
 from src.testdata.catalog import build_catalog
@@ -22,14 +23,31 @@ class TestKnowledgeFixtures:
             (output / "knowledge_upload_manifest.json").read_text(encoding="utf-8")
         )
         schemas = [entry for entry in entries if entry["category"] == "表结构"]
-        assert len(schemas) == 625
+        assert len(schemas) == 5
         subjects = [entry for entry in entries if entry["category"] == "业务主题"]
         assert len(subjects) == 50
+        catalog = build_catalog()
         for entry in schemas:
             body = (output / entry["file"]).read_text(encoding="utf-8")
             assert "字段含义" in body and "关联" in body
-            for column in build_catalog()[entry["table"]].columns:
-                assert f"`{column.name}`" in body
+            # 合并文档按行首的 "### 表: <表名> — <中文名>" 分节，逐节校验字段无遗漏。
+            # 只认行首，避开文档头部说明里行内引用的同样字面量。
+            sections = re.split(r"\n### 表: ", body)[1:]
+            assert len(sections) == 125
+            assert entry["tables"] == [s.split(" ", 1)[0] for s in sections]
+            for section in sections:
+                table_name = section.split(" ", 1)[0]
+                table = catalog[table_name]
+                assert section.startswith(f"{table_name} — {table.description}")
+                for column in table.columns:
+                    assert f"`{column.name}`" in section
+        assert {entry["datasource"] for entry in schemas} == {
+            "retail",
+            "finance",
+            "supply",
+            "workforce",
+            "insight",
+        }
         private = [entry for entry in entries if entry["knowledge_scope"] == "private"]
         shared = [entry for entry in entries if entry["knowledge_scope"] == "tenant"]
         assert len(private) >= 6

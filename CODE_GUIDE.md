@@ -281,7 +281,7 @@ checksum。执行器同时兼容历史 LF/CRLF 登记值，避免 Git 跨平台�
 
 ### 报表工作台 — `src/reporting/`
 
-`planner.py` 将自然语言解析为可确认的 `ReportPlan`；`store.py` 持久化 Job/Run/Step/Version/Share、配额策略和访问审计，并按 PostgreSQL/SQLite 方言选择认领策略；`runner.py` 与 `src/graph/subgraphs/report_workbench.py` 执行单数据源多分析单元；`relations.py` 只消费授权投影和有界样本生成关系证据，阻断低匹配率或多对多膨胀；`document.py` 校验动态页面 DSL 和 ECharts 白名单；`drilldown.py` 仅允许服务端签发的快照过滤；`sharing.py` 负责 token、授权码和用户范围访问控制；`quota.py` 执行菜单能力、周期次数、并发、查询、Token 与分享限额。
+`planner.py` 将自然语言解析为可确认的 `ReportPlan`：调度、次数、有效期和数据源由确定性规则抽取，业务分析单元优先由 `report.plan` 结构化 LLM 拆解（经租户模型绑定，按用户书写的编号章节划分），模型不可用或尝试越权数据源时回退规则拆分并在 `warnings` 标注降级；`store.py` 持久化 Job/Run/Step/Version/Share、配额策略和访问审计，并按 PostgreSQL/SQLite 方言选择认领策略；`runner.py` 与 `src/graph/subgraphs/report_workbench.py` 执行多分析单元：分析单元绑定了数据源则单源执行；未绑定时由 `report.route` 结构化 LLM 依据各源表清单判定命中的数据源，只对命中源执行，判定无命中则跳过该单元并说明原因（不计入失败）；路由模型不可用才退回全源检索；`relations.py` 只消费授权投影和有界样本生成关系证据，阻断低匹配率或多对多膨胀；`document.py` 校验动态页面 DSL 和 ECharts 白名单；`drilldown.py` 仅允许服务端签发的快照过滤；`sharing.py` 负责 token、授权码和用户范围访问控制；`quota.py` 执行菜单能力、周期次数、并发、查询、Token 与分享限额。
 
 任务创建通过 `ReportStore.create_job_with_quota()` 将幂等检查、配额预占和写入纳入同一事务，仅首次创建才入队。运行线程包含显式租户、用户和运行 ID；取消落库后在统一清理路径释放原周期并发槽。单次资源上限不与月度累计量混用。生产权限以持久化记录为准，权限库异常失败关闭，不能被 Worker 内旧授权覆盖遮蔽。存量任务的完整调度与恢复仍见功能清单中的待开发项，不由内存 asyncio.Task 替代。
 

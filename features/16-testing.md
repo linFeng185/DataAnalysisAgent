@@ -63,7 +63,7 @@
 | 16.5.2 | 确定性大规模生成 | `src/testdata/generator.py` | 每源百万行、前后十年、金额一致性与有界内存 | 单测完成 |
 | 16.5.3 | 数据产物与验收清单 | `src/testdata/exporter.py` | CSV/JSONL/SQL、DDL、行数、校验和与问答样例 | 集成测试完成 |
 | 16.5.4 | 安全导入与命令入口 | `src/connectors/seed_writer.py`、`src/testdata/cli.py` | 测试库确认、分批提交、旧脚本入口兼容；SQLite/Fake 契约与真实五库 125 表、5,019,603 行导入核验通过；修复 Oracle DBAPI 建表分号 | 集成测试完成 |
-| 16.5.5 | 中文分级知识库资料 | `src/testdata/knowledge.py` | 逐表结构、业务关系、指标字典及分拥有者的 private 文件和上传清单 | 单测完成 |
+| 16.5.5 | 中文分级知识库资料 | `src/testdata/knowledge.py` | 按源合并的表结构总览、业务关系、指标字典及分拥有者的 private 文件和上传清单 | 单测完成 |
 
 ### 16.6 每源百表纠正与扩容
 
@@ -74,7 +74,7 @@
 | 16.6.1 | 每源 125 张专属表 | `src/testdata/expanded_catalog.py` | 每源新增 100 张不同业务表，显式中文字段和多层关联 | 单测完成 |
 | 16.6.2 | 固定旧数据扩容 | `src/testdata/generator.py` | 旧计数和内容不变，新增池各百万行，全局千万级 | 单测完成 |
 | 16.6.3 | 增量导入及独立核验 | `src/connectors/seed_writer.py`、`src/connectors/seed_verifier.py` | 全源旧数据预检、只创建差集、导入后逐表验收 | 集成测试完成 |
-| 16.6.4 | 完整中文知识及实库验收 | `src/testdata/knowledge.py` | 625 表结构、50 业务主题、强弱关联和私有资料 | 集成测试完成 |
+| 16.6.4 | 完整中文知识及实库验收 | `src/testdata/knowledge.py` | 每源 1 份表结构总览（共 625 表）、50 业务主题、强弱关联和私有资料 | 集成测试完成 |
 
 ### 模块收尾
 

@@ -92,7 +92,60 @@ def chunk_text(text: str, config: ChunkConfig, file_name: str = "") -> list[DocC
     return enriched
 
 
+# 向量库 content 字段为 VARCHAR(65535)，留出余量作为单块硬上限。
+MAX_CHUNK_CHARS = 60000
+
+
+# 方法作用：把超过向量库单字段上限的分块强制切小，避免插入时抛底层 ParamError。
+# Args: chunks - 原始分块列表；max_chars - 单块最大字符数。
+# Returns: 每块均不超过 max_chars 的新分块列表，元数据沿用原块。
+def enforce_chunk_limit(
+    chunks: list[DocChunk], max_chars: int = MAX_CHUNK_CHARS
+) -> list[DocChunk]:
+    logger.debug("分块长度兜底入口", chunk_count=len(chunks), max_chars=max_chars)
+    result: list[DocChunk] = []
+    split_chunks = 0
+    for chunk in chunks:
+        if len(chunk.content) <= max_chars:
+            result.append(chunk)
+            continue
+        # 策略选择失误或极端长文都可能产出超长块，这里兜底而不是让底层报错。
+        split_chunks += 1
+        logger.warning(
+            "分块超过单字段上限，强制切分",
+            chunk_length=len(chunk.content),
+            max_chars=max_chars,
+        )
+        for piece in _split_by_length(chunk.content, max_chars):
+            result.append(DocChunk(content=piece, metadata=dict(chunk.metadata)))
+    logger.info(
+        "分块长度兜底完成",
+        before=len(chunks),
+        after=len(result),
+        split_chunks=split_chunks,
+    )
+    return result
+
+
 # ── 内部实现 ──
+
+# 方法作用：优先在换行处切断长文本，找不到合适断点则按字符硬切。
+# Args: text - 待切分文本；max_chars - 每段最大字符数。
+# Returns: 切分后的文本片段列表。
+def _split_by_length(text: str, max_chars: int) -> list[str]:
+    pieces: list[str] = []
+    while len(text) > max_chars:
+        cut = text.rfind("\n", 0, max_chars)
+        # 断点过于靠前时放弃换行，直接按长度硬切，避免产出大量碎块。
+        if cut < max_chars // 2:
+            cut = max_chars
+        pieces.append(text[:cut])
+        text = text[cut:]
+    if text:
+        pieces.append(text)
+    logger.debug("长文本切分完成", pieces=len(pieces), max_chars=max_chars)
+    return pieces
+
 
 def _extract_pdf(content: bytes) -> str:
     from PyPDF2 import PdfReader
@@ -120,7 +173,7 @@ def _extract_docx(content: bytes) -> str:
 def _auto_detect(text: str, file_name: str = "") -> ChunkStrategy:
     """自动检测最佳分块策略。
 
-    优先级: CSV > DDL > REFERENCE > table > heading > paragraph > line(原fixed)
+    优先级: CSV > DDL > table > REFERENCE > heading > paragraph > line(原fixed)
     """
     # CSV 文件按行切，避免固定字节切分行内数据
     if file_name.lower().endswith(".csv"):
@@ -130,16 +183,18 @@ def _auto_detect(text: str, file_name: str = "") -> ChunkStrategy:
     if create_count >= 2:
         return ChunkStrategy.SQL_DDL
 
-    # 2) REFERENCE: 密集的行内代码标记或函数签名（官方文档特征）
+    # 2) TABLE: 多个 '### 表:' 或 '### 表名 —'。
+    # 必须排在 REFERENCE 之前：数据字典正文反引号密集，若让 REFERENCE 先命中，
+    # 它找不到 '####' 锚点会把整篇当成单块，超出向量库单字段上限导致插入失败。
+    table_marks = len(re.findall(r'^###\s+表[:\s]', text, re.MULTILINE))
+    if table_marks >= 2:
+        return ChunkStrategy.TABLE
+
+    # 3) REFERENCE: 密集的行内代码标记或函数签名（官方文档特征）
     code_spans = len(re.findall(r'`[^`]+`', text))
     func_sigs = len(re.findall(r'\*\*\w+\([^)]*\)\*\*', text))
     if code_spans >= 15 or func_sigs >= 5:
         return ChunkStrategy.REFERENCE
-
-    # 3) TABLE: 多个 '### 表:' 或 '### 表名 —'
-    table_marks = len(re.findall(r'^###\s+表[:\s]', text, re.MULTILINE))
-    if table_marks >= 2:
-        return ChunkStrategy.TABLE
 
     # 4) HEADING: 多个 Markdown 标题
     headings = len(re.findall(r"^#{1,4}\s", text, re.MULTILINE))

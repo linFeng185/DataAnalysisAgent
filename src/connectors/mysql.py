@@ -30,7 +30,8 @@ class MySQLConnector(ConnectorBase):
         """
         logger.debug("MySQL 超时 SQL 入口", datasource=self.config.name)
         result = f"SET SESSION max_execution_time = {get_settings().max_execution_time * 1000}"
-        logger.info("MySQL 超时 SQL 完成", datasource=self.config.name)
+        # 每次执行查询都会触发，属于循环内进度，按项目规则只能用 debug
+        logger.debug("MySQL 超时 SQL 完成", datasource=self.config.name)
         return result
 
     def _build_url(self) -> URL:

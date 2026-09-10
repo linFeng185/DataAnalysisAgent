@@ -196,13 +196,11 @@ def relationship_manifest() -> dict[str, Any]:
     return {"strong": strong, "weak": weak}
 
 
-# 渲染一张表的字段与引用，避免文档和 DDL 漂移。
+# 渲染单张表的字段、粒度与口径正文，供合并文档按表分节复用。
 # Args: table - 表规格；config - 生成配置；count - 目标行数。
-# Returns: 中文 Markdown。
-def _schema_document(table: TableSpec, config: GenerationConfig, count: int) -> str:
+# Returns: 不含顶层标题的中文 Markdown 正文。
+def _schema_body(table: TableSpec, config: GenerationConfig, count: int) -> str:
     lines = [
-        f"# {table.description}（{table.name}）",
-        "",
         f"数据源：{SOURCES[table.source][1]}（{table.source} / {SOURCES[table.source][0]}）",
         f"业务主题：{table.subject or '基础经营'}。业务粒度：{table.description}。",
         f"模拟行数：{count:,}。主键：`id`。时间：{config.start_date} 至 {config.end_date}。",
@@ -256,6 +254,39 @@ def _schema_document(table: TableSpec, config: GenerationConfig, count: int) -> 
         "比率为 0—1；评分为 1—5；备注 CSV 空值使用 \\N；空备注与空字符串不等价。",
     ]
     return "\n".join(lines) + "\n"
+
+
+# 把一个数据源的全部表结构合并为单份按表分节的文档，降低上传文件数。
+# Args: source - 数据源标识；tables - 该源的全部表规格；config - 生成配置；counts - 逐表行数。
+# Returns: 可直接上传的中文 Markdown，每张表以 "### 表: <表名> — <中文名>" 开头。
+def _merged_schema_document(
+    source: str,
+    tables: list[TableSpec],
+    config: GenerationConfig,
+    counts: dict[str, int],
+) -> str:
+    logger.debug("合并数据源表结构文档入口", source=source, table_count=len(tables))
+    lines = [
+        f"# {SOURCES[source][1]}表结构总览",
+        "",
+        f"数据源：{SOURCES[source][1]}（{source} / {SOURCES[source][0]}）",
+        f"本文件收录该源全部 {len(tables)} 张表的完整结构定义，每张表以 `### 表: <表名> — <中文名>` 开头。",
+        "上传本文件必须显式指定 table 分块策略（strategy=table），否则整篇会被当作单个分块，语义检索失效。",
+        "",
+    ]
+    for table in tables:
+        lines.append(f"### 表: {table.name} — {table.description}")
+        lines.append("")
+        lines.append(_schema_body(table, config, counts[table.name]))
+        lines.append("")
+    content = "\n".join(lines)
+    logger.info(
+        "合并数据源表结构文档完成",
+        source=source,
+        table_count=len(tables),
+        chars=len(content),
+    )
+    return content
 
 
 # 生成不依赖自然语言输出的跨域测试问题和可执行聚合 SQL。
@@ -458,15 +489,15 @@ def generate_knowledge(
 
     for source in manifest["sources"]:
         tables = [table for table in catalog.values() if table.source == source]
-        for table in tables:
-            save(
-                f"tenant/{source}/{table.name}_表结构.md",
-                _schema_document(table, config, counts[table.name]),
-                "tenant",
-                "表结构",
-                datasource=source,
-                table=table.name,
-            )
+        # 每源合并为单份表结构文档，625 份逐表文件降为 5 份，向量分块粒度不变。
+        save(
+            f"tenant/{source}/表结构总览.md",
+            _merged_schema_document(source, tables, config, counts),
+            "tenant",
+            "表结构",
+            datasource=source,
+            tables=[table.name for table in tables],
+        )
         overview = [
             f"# {SOURCES[source][1]}业务词典",
             "",
@@ -623,7 +654,7 @@ def generate_knowledge(
             )
     save(
         "上传操作说明.md",
-        "# 知识资料上传操作\n\n所有正文均为模拟资料，不含真实敏感信息。\n\n1. 按 knowledge_upload_manifest.json 的 knowledge_scope 分批处理，不要批量混传全部目录。\n2. tenant 文件用租户管理员账号上传；private 文件必须切换到 intended_owner 对应账号，选择私有范围。私有归属由服务端当前身份决定，不由文件名决定。\n3. 使用知识库页面或 POST /api/v1/knowledge/docs/upload，并设置 knowledge_scope=tenant 或 private；datasource 绑定为本租户已注册的数据源实际名称，不能盲用域别名。\n4. 跨源关系、通用口径与问答样例不绑定单一数据源；每个表结构文件绑定所属源。\n5. 上传后分别用拥有者、同租户非拥有者和其他租户身份测试私有召回隔离。不要把私有文件合并进公共词典。\n6. 不要将百万行数据文件上传到知识库；数据库导入用数据文件，知识库只上传此清单中的 Markdown。\n7. 本脚本不执行自动上传，也不提升到 system 级别。\n",
+        "# 知识资料上传操作\n\n所有正文均为模拟资料，不含真实敏感信息。\n\n1. 按 knowledge_upload_manifest.json 的 knowledge_scope 分批处理，不要批量混传全部目录。\n2. tenant 文件用租户管理员账号上传；private 文件必须切换到 intended_owner 对应账号，选择私有范围。私有归属由服务端当前身份决定，不由文件名决定。\n3. 使用知识库页面或 POST /api/v1/knowledge/docs/upload，并设置 knowledge_scope=tenant 或 private；datasource 绑定为本租户已注册的数据源实际名称，不能盲用域别名。\n4. 每个源的 125 张表结构已合并为 tenant/<源>/表结构总览.md 单份文档，上传时必须选择 table 分块策略（strategy=table），保证每张表各占一个分块；跨源关系、通用口径与问答样例不绑定单一数据源。\n5. 上传后分别用拥有者、同租户非拥有者和其他租户身份测试私有召回隔离。不要把私有文件合并进公共词典。\n6. 不要将百万行数据文件上传到知识库；数据库导入用数据文件，知识库只上传此清单中的 Markdown。\n7. 本脚本不执行自动上传，也不提升到 system 级别。\n",
         "tenant",
         "使用说明",
     )
