@@ -74,6 +74,24 @@ class TestTableIndex:
         assert len(index) == 2
         logger.info("test_empty_whitelist_skips_source_filter 完成")
 
+    # 方法作用：锁定多源白名单下未声明数据源的表仍按首项回落，但必须留 warning 痕迹。
+    # Args: self - pytest 用例实例。
+    # Returns: 无返回值，断言失败由 pytest 报告。
+    def test_multi_source_missing_datasource_falls_back_to_first(self) -> None:
+        """多源白名单 + 表缺 datasource → 仍落到 datasources[0]，行为不变只留痕。"""
+        logger.debug("test_multi_source_missing_datasource_falls_back_to_first 入口")
+        from src.security.sql_schema_validation import build_table_index
+
+        # Arrange：两颗源在册，orders 未声明归属
+        tables = [{"name": "orders", "columns": [{"name": "id"}]}]
+
+        # Act
+        index = build_table_index(tables, ["pg_a", "pg_b"])
+
+        # Assert：回落行为保持不变，只落到首项源键下
+        assert index == {("pg_a", "orders"): frozenset({"id"})}
+        logger.info("test_multi_source_missing_datasource_falls_back_to_first 完成")
+
     # 方法作用：验证单源归属唯一、多源同名判为 ambiguous、不存在返回 None。
     # Args: self - pytest 用例实例。
     # Returns: 无返回值，断言失败由 pytest 报告。
@@ -134,6 +152,7 @@ class TestValidationIssue:
     # Returns: 无返回值，断言失败由 pytest 报告。
     def test_describe_parse_error(self) -> None:
         """parse_error 必须可被既有回归用例识别。"""
+        logger.debug("test_describe_parse_error 入口")
         from src.security.sql_schema_validation import ValidationIssue
 
         # Arrange & Act
@@ -141,3 +160,421 @@ class TestValidationIssue:
 
         # Assert
         assert "解析失败" in text
+        logger.info("test_describe_parse_error 完成")
+
+
+class TestUnknownTable:
+    """覆盖表级校验（spec/39 §5.1 步骤 4、证据 3）。"""
+
+    # 方法作用：验证引用不存在的表被拦为高置信。
+    # Args: self - pytest 用例实例。
+    # Returns: 无返回值，断言失败由 pytest 报告。
+    def test_unknown_table_blocked(self) -> None:
+        """不存在的表 → unknown_table，high 置信。"""
+        logger.debug("test_unknown_table_blocked 入口")
+        from src.security.sql_schema_validation import validate_sql_schema
+
+        # Arrange
+        tables = [{"name": "orders", "columns": [{"name": "id"}]}]
+
+        # Act
+        issues = validate_sql_schema(
+            "SELECT id FROM ghost_table",
+            datasources=["pg_main"],
+            dialect="postgres",
+            tables=tables,
+        )
+
+        # Assert
+        assert len(issues) == 1
+        assert issues[0].type == "unknown_table"
+        assert issues[0].table == "ghost_table"
+        assert issues[0].confidence == "high"
+        logger.info("test_unknown_table_blocked 完成")
+
+    # 方法作用：验证 CTE 名不被误判为不存在的表。
+    # Args: self - pytest 用例实例。
+    # Returns: 无返回值，断言失败由 pytest 报告。
+    def test_cte_name_not_treated_as_unknown_table(self) -> None:
+        """CTE 名会出现在 find_all(Table) 中，必须排除。"""
+        logger.debug("test_cte_name_not_treated_as_unknown_table 入口")
+        from src.security.sql_schema_validation import validate_sql_schema
+
+        # Arrange
+        tables = [{"name": "orders", "columns": [{"name": "id"}]}]
+        sql = "WITH x AS (SELECT id FROM orders) SELECT x.id FROM x"
+
+        # Act
+        issues = validate_sql_schema(
+            sql, datasources=["pg_main"], dialect="postgres", tables=tables
+        )
+
+        # Assert
+        assert issues == []
+        logger.info("test_cte_name_not_treated_as_unknown_table 完成")
+
+    # 方法作用：验证派生表别名不被误判。
+    # Args: self - pytest 用例实例。
+    # Returns: 无返回值，断言失败由 pytest 报告。
+    def test_derived_table_alias_not_treated_as_table(self) -> None:
+        """派生表别名不出现在 find_all(Table) 中。"""
+        logger.debug("test_derived_table_alias_not_treated_as_table 入口")
+        from src.security.sql_schema_validation import validate_sql_schema
+
+        # Arrange
+        tables = [{"name": "orders", "columns": [{"name": "a"}]}]
+
+        # Act
+        issues = validate_sql_schema(
+            "SELECT d.a FROM (SELECT a FROM orders) d",
+            datasources=["pg_main"],
+            dialect="postgres",
+            tables=tables,
+        )
+
+        # Assert
+        assert issues == []
+        logger.info("test_derived_table_alias_not_treated_as_table 完成")
+
+
+class TestQualifiedColumn:
+    """覆盖带限定符的列引用校验（spec/39 §5.1 步骤 3、§5.4）。"""
+
+    # 方法作用：验证限定符指向真实表时能查出该表缺失的列。
+    # Args: self - pytest 用例实例。
+    # Returns: 无返回值，断言失败由 pytest 报告。
+    def test_unknown_column_on_known_table(self) -> None:
+        """表存在但列不存在 → unknown_column，high 置信。"""
+        logger.debug("test_unknown_column_on_known_table 入口")
+        from src.security.sql_schema_validation import validate_sql_schema
+
+        # Arrange
+        tables = [{"name": "orders", "columns": [{"name": "id"}]}]
+
+        # Act
+        issues = validate_sql_schema(
+            'SELECT "o"."bogus" FROM "orders" AS "o"',
+            datasources=["pg_main"],
+            dialect="postgres",
+            tables=tables,
+        )
+
+        # Assert
+        assert len(issues) == 1
+        assert issues[0].type == "unknown_column"
+        assert issues[0].column == "bogus"
+        assert issues[0].table == "orders"
+        assert issues[0].confidence == "high"
+        logger.info("test_unknown_column_on_known_table 完成")
+
+    # 方法作用：验证列名在别的表存在但不属于被引用表时判为跨表错配。
+    # Args: self - pytest 用例实例。
+    # Returns: 无返回值，断言失败由 pytest 报告。
+    def test_cross_table_column_detected(self) -> None:
+        """created_at 只属于 audit_log，却挂在 finance_invoices 的别名上。"""
+        logger.debug("test_cross_table_column_detected 入口")
+        from src.security.sql_schema_validation import validate_sql_schema
+
+        # Arrange
+        tables = [
+            {"name": "finance_invoices", "columns": [{"name": "event_date"}]},
+            {"name": "audit_log", "columns": [{"name": "created_at"}]},
+        ]
+
+        # Act
+        issues = validate_sql_schema(
+            "SELECT DATE_TRUNC('MONTH', \"i\".\"created_at\") "
+            'FROM "finance_invoices" AS "i"',
+            datasources=["pg_main"],
+            dialect="postgres",
+            tables=tables,
+        )
+
+        # Assert
+        assert len(issues) == 1
+        assert issues[0].type == "cross_table_column"
+        assert issues[0].table == "finance_invoices"
+        assert issues[0].provided_by == ("audit_log",)
+        assert "不属于表" in issues[0].describe()
+        logger.info("test_cross_table_column_detected 完成")
+
+    # 方法作用：验证列真属于被引用表时不误报。
+    # Args: self - pytest 用例实例。
+    # Returns: 无返回值，断言失败由 pytest 报告。
+    def test_valid_qualified_column_passes(self) -> None:
+        """合法列必须放行。"""
+        logger.debug("test_valid_qualified_column_passes 入口")
+        from src.security.sql_schema_validation import validate_sql_schema
+
+        # Arrange
+        tables = [{"name": "finance_invoices", "columns": [{"name": "year_month"}]}]
+
+        # Act
+        issues = validate_sql_schema(
+            'SELECT "i"."year_month" FROM "finance_invoices" AS "i"',
+            datasources=["pg_main"],
+            dialect="postgres",
+            tables=tables,
+        )
+
+        # Assert
+        assert issues == []
+        logger.info("test_valid_qualified_column_passes 完成")
+
+    # 方法作用：验证限定符指向 CTE 时判为无法判定而非幻觉。
+    # Args: self - pytest 用例实例。
+    # Returns: 无返回值，断言失败由 pytest 报告。
+    def test_cte_qualifier_is_not_blocked(self) -> None:
+        """CTE 列不在物理表快照中，不得判为幻觉。"""
+        logger.debug("test_cte_qualifier_is_not_blocked 入口")
+        from src.security.sql_schema_validation import validate_sql_schema
+
+        # Arrange
+        tables = [{"name": "orders", "columns": [{"name": "id"}]}]
+        sql = "WITH t AS (SELECT id FROM orders) SELECT t.id FROM t"
+
+        # Act
+        issues = validate_sql_schema(
+            sql, datasources=["pg_main"], dialect="postgres", tables=tables
+        )
+
+        # Assert
+        assert [item for item in issues if item.confidence == "high"] == []
+        logger.info("test_cte_qualifier_is_not_blocked 完成")
+
+
+class TestUnqualifiedColumn:
+    """覆盖未限定列的归属判定（spec/39 §5.3）。"""
+
+    # 方法作用：验证单表场景下未限定列能正确匹配。
+    # Args: self - pytest 用例实例。
+    # Returns: 无返回值，断言失败由 pytest 报告。
+    def test_unqualified_single_table_passes(self) -> None:
+        """单表未限定列命中即通过。"""
+        logger.debug("test_unqualified_single_table_passes 入口")
+        from src.security.sql_schema_validation import validate_sql_schema
+
+        # Arrange
+        tables = [{"name": "orders", "columns": [{"name": "amount"}]}]
+
+        # Act
+        issues = validate_sql_schema(
+            "SELECT amount FROM orders",
+            datasources=["pg_main"],
+            dialect="postgres",
+            tables=tables,
+        )
+
+        # Assert
+        assert issues == []
+        logger.info("test_unqualified_single_table_passes 完成")
+
+    # 方法作用：验证未限定列在多表同时存在时判为歧义列。
+    # Args: self - pytest 用例实例。
+    # Returns: 无返回值，断言失败由 pytest 报告。
+    def test_unqualified_ambiguous_column(self) -> None:
+        """id 在 orders 与 customers 同时存在 → ambiguous_column。"""
+        logger.debug("test_unqualified_ambiguous_column 入口")
+        from src.security.sql_schema_validation import validate_sql_schema
+
+        # Arrange
+        tables = [
+            {"name": "orders", "columns": [{"name": "id"}, {"name": "cid"}]},
+            {"name": "customers", "columns": [{"name": "id"}, {"name": "name"}]},
+        ]
+
+        # Act
+        issues = validate_sql_schema(
+            "SELECT id FROM orders o JOIN customers c ON o.cid = c.id",
+            datasources=["pg_main"],
+            dialect="postgres",
+            tables=tables,
+        )
+
+        # Assert
+        assert len(issues) == 1
+        assert issues[0].type == "ambiguous_column"
+        assert issues[0].column == "id"
+        logger.info("test_unqualified_ambiguous_column 完成")
+
+    # 方法作用：验证未限定列在纯物理表作用域中零命中时判为幻觉。
+    # Args: self - pytest 用例实例。
+    # Returns: 无返回值，断言失败由 pytest 报告。
+    def test_unqualified_zero_hit_is_hallucination(self) -> None:
+        """全物理表 scope 中找不到该列 → unknown_column，high 置信。"""
+        logger.debug("test_unqualified_zero_hit_is_hallucination 入口")
+        from src.security.sql_schema_validation import validate_sql_schema
+
+        # Arrange
+        tables = [{"name": "orders", "columns": [{"name": "amount"}]}]
+
+        # Act
+        issues = validate_sql_schema(
+            "SELECT bogus FROM orders",
+            datasources=["pg_main"],
+            dialect="postgres",
+            tables=tables,
+        )
+
+        # Assert
+        assert len(issues) == 1
+        assert issues[0].type == "unknown_column"
+        assert issues[0].confidence == "high"
+        assert issues[0].column == "bogus"
+        logger.info("test_unqualified_zero_hit_is_hallucination 完成")
+
+    # 方法作用：验证含 CTE 时未限定列零命中降级为低置信，不拦截。
+    # Args: self - pytest 用例实例。
+    # Returns: 无返回值，断言失败由 pytest 报告。
+    def test_zero_hit_with_cte_is_low_confidence(self) -> None:
+        """含 CTE 时零命中可能来自派生列，不得拦截。"""
+        logger.debug("test_zero_hit_with_cte_is_low_confidence 入口")
+        from src.security.sql_schema_validation import validate_sql_schema
+
+        # Arrange
+        tables = [{"name": "orders", "columns": [{"name": "amount"}]}]
+        sql = "WITH t AS (SELECT amount AS derived FROM orders) SELECT derived FROM t"
+
+        # Act
+        issues = validate_sql_schema(
+            sql, datasources=["pg_main"], dialect="postgres", tables=tables
+        )
+
+        # Assert
+        assert [item for item in issues if item.confidence == "high"] == []
+        logger.info("test_zero_hit_with_cte_is_low_confidence 完成")
+
+
+class TestKnownBlindSpots:
+    """覆盖 spec/39 §10 盲区必须显式标记而非静默通过。"""
+
+    # 方法作用：验证 SELECT * 产出低置信标记而不是「校验通过」。
+    # Args: self - pytest 用例实例。
+    # Returns: 无返回值，断言失败由 pytest 报告。
+    def test_select_star_is_marked_low_confidence(self) -> None:
+        """星号无法展开，必须留痕。"""
+        logger.debug("test_select_star_is_marked_low_confidence 入口")
+        from src.security.sql_schema_validation import validate_sql_schema
+
+        # Arrange
+        tables = [{"name": "orders", "columns": [{"name": "id"}]}]
+
+        # Act
+        issues = validate_sql_schema(
+            "SELECT * FROM orders",
+            datasources=["pg_main"],
+            dialect="postgres",
+            tables=tables,
+        )
+
+        # Assert
+        assert len(issues) == 1
+        assert issues[0].confidence == "low"
+        assert issues[0].column == "*"
+        logger.info("test_select_star_is_marked_low_confidence 完成")
+
+    # 方法作用：验证 COUNT(*) 不被误判为星号盲区（证据 2）。
+    # Args: self - pytest 用例实例。
+    # Returns: 无返回值，断言失败由 pytest 报告。
+    def test_count_star_is_not_flagged_as_blind_spot(self) -> None:
+        """COUNT(*) 的星号在函数参数内，属合法用法。"""
+        logger.debug("test_count_star_is_not_flagged_as_blind_spot 入口")
+        from src.security.sql_schema_validation import validate_sql_schema
+
+        # Arrange
+        tables = [{"name": "orders", "columns": [{"name": "id"}]}]
+
+        # Act
+        issues = validate_sql_schema(
+            "SELECT COUNT(*) FROM orders",
+            datasources=["pg_main"],
+            dialect="postgres",
+            tables=tables,
+        )
+
+        # Assert
+        assert issues == []
+        logger.info("test_count_star_is_not_flagged_as_blind_spot 完成")
+
+    # 方法作用：验证 SELECT t.* 被标记。
+    # Args: self - pytest 用例实例。
+    # Returns: 无返回值，断言失败由 pytest 报告。
+    def test_qualified_star_is_marked(self) -> None:
+        """t.* 同样是无法展开的星号投影。"""
+        logger.debug("test_qualified_star_is_marked 入口")
+        from src.security.sql_schema_validation import validate_sql_schema
+
+        # Arrange
+        tables = [{"name": "orders", "columns": [{"name": "id"}]}]
+
+        # Act
+        issues = validate_sql_schema(
+            "SELECT t.* FROM orders t",
+            datasources=["pg_main"],
+            dialect="postgres",
+            tables=tables,
+        )
+
+        # Assert
+        assert len(issues) == 1
+        assert issues[0].column == "*"
+        assert issues[0].confidence == "low"
+        logger.info("test_qualified_star_is_marked 完成")
+
+
+class TestMultiSourceIsolation:
+    """覆盖多源隔离契约（spec/39 §4.4）。"""
+
+    # 方法作用：验证跨源同名表不串味，判为不可判定而非幻觉。
+    # Args: self - pytest 用例实例。
+    # Returns: 无返回值，断言失败由 pytest 报告。
+    def test_same_table_name_across_sources(self) -> None:
+        """a 源 orders 只有 id；b 源 orders 只有 amount。"""
+        logger.debug("test_same_table_name_across_sources 入口")
+        from src.security.sql_schema_validation import validate_sql_schema
+
+        # Arrange
+        tables = [
+            {"name": "orders", "datasource": "pg_a", "columns": [{"name": "id"}]},
+            {"name": "orders", "datasource": "pg_b", "columns": [{"name": "amount"}]},
+        ]
+
+        # Act
+        issues = validate_sql_schema(
+            'SELECT "o"."amount" FROM "orders" AS "o"',
+            datasources=["pg_a", "pg_b"],
+            dialect="postgres",
+            tables=tables,
+        )
+
+        # Assert：同名歧义 → 归属不可判定 → 低置信，不得拦成幻觉
+        assert [item for item in issues if item.confidence == "high"] == []
+        logger.info("test_same_table_name_across_sources 完成")
+
+    # 方法作用：验证未授权源的表不参与校验，不作为「列存在」的证据。
+    # Args: self - pytest 用例实例。
+    # Returns: 无返回值，断言失败由 pytest 报告。
+    def test_unauthorized_source_column_not_evidence(self) -> None:
+        """pg_other 的列不得让 pg_main 的引用通过校验。"""
+        logger.debug("test_unauthorized_source_column_not_evidence 入口")
+        from src.security.sql_schema_validation import validate_sql_schema
+
+        # Arrange
+        tables = [
+            {"name": "orders", "datasource": "pg_main", "columns": [{"name": "id"}]},
+            {"name": "orders", "datasource": "pg_other", "columns": [{"name": "secret_col"}]},
+        ]
+
+        # Act
+        issues = validate_sql_schema(
+            'SELECT "o"."secret_col" FROM "orders" AS "o"',
+            datasources=["pg_main"],
+            dialect="postgres",
+            tables=tables,
+        )
+
+        # Assert
+        assert len(issues) == 1
+        assert issues[0].type == "unknown_column"
+        assert issues[0].datasource == "pg_main"
+        logger.info("test_unauthorized_source_column_not_evidence 完成")

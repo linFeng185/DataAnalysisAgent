@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 from typing import Any, Literal, Mapping, Sequence
 
@@ -97,7 +98,15 @@ def build_table_index(
             logger.warning("表索引跳过空表名条目")
             skipped_malformed += 1
             continue
-        source = str(table.get("datasource", "") or "").strip() or default_source
+        declared_source = str(table.get("datasource", "") or "").strip()
+        # 多源白名单下缺省归属不可靠（同名表可能被归到错误的源），必须留痕说明回落依据
+        if not declared_source and len(allowed) > 1:
+            logger.warning(
+                "表未声明数据源，按白名单首项回落",
+                table=name,
+                default_source=default_source,
+            )
+        source = declared_source or default_source
         if allowed_set and source not in allowed_set:
             logger.warning("表索引跳过未授权源", table=name, datasource=source)
             skipped += 1
@@ -147,3 +156,294 @@ def resolve_table_owner(
         logger.warning("多源同名表归属歧义", table=target, owners=owners)
         return "ambiguous"
     return owners[0]
+
+
+# 方法作用：作用域感知地校验 SQL 引用的表与列是否存在于权威快照。
+# Args: sql - 待校验 SQL；datasources - 权威数据源白名单；dialect - 解析方言；tables - 权威快照。
+# Returns: 结构化问题清单；空列表表示高置信通过。
+def validate_sql_schema(
+    sql: str,
+    *,
+    datasources: Sequence[str],
+    dialect: str = "",
+    tables: Sequence[Mapping[str, Any]] = (),
+) -> list[ValidationIssue]:
+    """逐 scope 校验表与列引用；无法判定的场景给 low 置信而不是拦截。"""
+    logger.debug(
+        "Schema 校验入口",
+        sql_chars=len(sql),
+        datasource_count=len(datasources),
+        table_count=len(tables),
+        dialect=dialect,
+    )
+    _start = time.monotonic()
+    default_source = next(
+        (str(item).strip() for item in datasources if str(item).strip()), ""
+    )
+    index = build_table_index(tables, datasources)
+    try:
+        import sqlglot
+
+        from src.security.sql_execution import normalize_sql_dialect
+
+        # 必须用 parse_one：execute_sql 的方言回归用例 monkeypatch 的即此函数。
+        tree = sqlglot.parse_one(sql, read=normalize_sql_dialect(dialect) or None)
+    except Exception as exc:
+        logger.error("Schema 校验解析失败", error=str(exc), exc_info=True)
+        return [ValidationIssue(type="parse_error", datasource=default_source)]
+    if tree is None:
+        logger.error("Schema 校验解析失败", error="解析结果为空")
+        return [ValidationIssue(type="parse_error", datasource=default_source)]
+
+    issues = _collect_unknown_tables(tree, index, default_source)
+    issues.extend(_collect_column_issues(tree, index, default_source))
+    high_count = sum(1 for item in issues if item.confidence == "high")
+    logger.info(
+        "Schema 校验完成",
+        result="拦截" if high_count else "通过",
+        high_count=high_count,
+        low_count=len(issues) - high_count,
+        elapsed_ms=round((time.monotonic() - _start) * 1000),
+    )
+    return issues
+
+
+# 方法作用：收集 SQL 中引用了未知表的问题。
+# Args: tree - 已解析语法树；index - 权威索引；default_source - issue 归属源。
+# Returns: unknown_table 问题列表（多源同名表为 low 置信）。
+def _collect_unknown_tables(
+    tree: Any,
+    index: Mapping[tuple[str, str], frozenset[str]],
+    default_source: str,
+) -> list[ValidationIssue]:
+    """校验 FROM / JOIN 引用的物理表是否存在；CTE 名必须排除。"""
+    from sqlglot import exp
+
+    issues: list[ValidationIssue] = []
+    # 证据 3：CTE 名会出现在 find_all(exp.Table) 中，必须显式排除，否则被误判为幻觉表。
+    cte_names = {
+        str(cte.alias_or_name).strip().lower()
+        for cte in tree.find_all(exp.CTE)
+        if cte.alias_or_name
+    }
+    seen: set[str] = set()
+    for node in tree.find_all(exp.Table):
+        name = str(node.name or "").strip().lower()
+        if not name or name in cte_names or name in seen:
+            continue
+        seen.add(name)
+        owner = resolve_table_owner(index, name)
+        if owner == "ambiguous":
+            logger.warning("表引用无法判定", reason="ambiguous_table", table=name)
+            issues.append(
+                ValidationIssue(
+                    type="unknown_table",
+                    datasource=default_source,
+                    table=name,
+                    confidence="low",
+                )
+            )
+        elif owner is None:
+            logger.warning("表引用不存在", table=name)
+            issues.append(
+                ValidationIssue(type="unknown_table", datasource=default_source, table=name)
+            )
+    return issues
+
+
+# 方法作用：逐作用域校验列引用的归属。
+# Args: tree - 已解析语法树；index - 权威索引；default_source - issue 归属源。
+# Returns: 列级问题列表。
+def _collect_column_issues(
+    tree: Any,
+    index: Mapping[tuple[str, str], frozenset[str]],
+    default_source: str,
+) -> list[ValidationIssue]:
+    """按 scope 校验限定列与未限定列，并标记 SELECT * 盲区。"""
+    from sqlglot import exp
+    from sqlglot.optimizer.scope import traverse_scope
+
+    issues: list[ValidationIssue] = []
+    for scope in traverse_scope(tree):
+        # 证据 1：CTE 与派生表在 sources 中是 Scope 类型，天然被排除，不会误判为物理表。
+        local_tables = {
+            str(alias).lower(): str(node.name or "").lower()
+            for alias, node in scope.sources.items()
+            if isinstance(node, exp.Table)
+        }
+        has_cte_or_derived = len(local_tables) < len(scope.sources)
+        owners = {
+            table: resolve_table_owner(index, table) for table in local_tables.values()
+        }
+        resolved = {
+            table: owner
+            for table, owner in owners.items()
+            if owner is not None and owner != "ambiguous"
+        }
+        # 证据 2 + 4：星号不进入 scope.columns，必须直接检查 SELECT 投影顶层，
+        # 且不能用 find_all(exp.Star)（会把 COUNT(*) 误报为无法校验）。
+        for select in scope.expression.find_all(exp.Select):
+            for projection in select.expressions:
+                if _is_star_projection(projection):
+                    logger.warning("列引用无法判定", reason="select_star")
+                    issues.append(
+                        ValidationIssue(
+                            type="unknown_column",
+                            datasource=default_source,
+                            column="*",
+                            confidence="low",
+                        )
+                    )
+        seen: set[tuple[str, str]] = set()
+        for column in scope.columns:
+            column_name = str(column.name or "").strip().lower()
+            qualifier = str(column.table or "").strip().lower()
+            if not column_name or (qualifier, column_name) in seen:
+                continue
+            seen.add((qualifier, column_name))
+            if qualifier:
+                issues.extend(
+                    _check_qualified_column(
+                        column_name, qualifier, local_tables, owners, index
+                    )
+                )
+            else:
+                issues.extend(
+                    _check_unqualified_column(
+                        column_name, resolved, len(local_tables), has_cte_or_derived, index
+                    )
+                )
+    return issues
+
+
+# 方法作用：判断投影表达式是否为星号（SELECT * 或 SELECT t.*），排除函数参数内的星号。
+# Args: node - SELECT 投影表达式节点。
+# Returns: 是星号投影返回 True。
+def _is_star_projection(node: Any) -> bool:
+    """只认投影顶层星号，COUNT(*) 属函数参数不算。"""
+    from sqlglot import exp
+
+    if isinstance(node, exp.Star):
+        return True
+    if isinstance(node, exp.Alias):
+        return _is_star_projection(node.this)
+    if isinstance(node, exp.Column) and isinstance(node.this, exp.Star):
+        return True
+    return False
+
+
+# 方法作用：校验带限定符的列是否属于限定符指向的真实表。
+# Args: column_name - 列名（小写）；qualifier - 限定符（小写）；local_tables - 别名 -> 真实表；
+#       owners - 真实表 -> 归属源；index - 权威索引。
+# Returns: 问题列表；限定符指向 CTE 或归属不明时返回空。
+def _check_qualified_column(
+    column_name: str,
+    qualifier: str,
+    local_tables: Mapping[str, str],
+    owners: Mapping[str, str | None],
+    index: Mapping[tuple[str, str], frozenset[str]],
+) -> list[ValidationIssue]:
+    """按表归属校验限定列，跨表错配与未知列分别成 issue。"""
+    real_table = local_tables.get(qualifier)
+    if real_table is None:
+        # 限定符指向 CTE 或派生表：无法判定，放行并记 warning。
+        logger.warning("列引用无法判定", reason="cte_qualifier", qualifier=qualifier)
+        return []
+    owner = owners.get(real_table)
+    if owner is None or owner == "ambiguous":
+        return []
+    columns = index.get((owner, real_table), frozenset())
+    if column_name in columns:
+        return []
+    providers = sorted(
+        table
+        for (source, table) in index
+        if source == owner and column_name in index[(source, table)]
+    )
+    available = tuple(sorted(columns)[:MAX_AVAILABLE_COLUMNS])
+    if providers:
+        logger.warning(
+            "列归属错配拦截",
+            table=real_table,
+            column=column_name,
+            qualifier=qualifier,
+            provided_by=providers[:5],
+        )
+        return [
+            ValidationIssue(
+                type="cross_table_column",
+                datasource=owner,
+                table=real_table,
+                column=column_name,
+                qualifier=qualifier,
+                provided_by=tuple(providers[:10]),
+                available_columns=available,
+            )
+        ]
+    logger.warning("列引用不存在", table=real_table, column=column_name, qualifier=qualifier)
+    return [
+        ValidationIssue(
+            type="unknown_column",
+            datasource=owner,
+            table=real_table,
+            column=column_name,
+            qualifier=qualifier,
+            available_columns=available,
+        )
+    ]
+
+
+# 方法作用：校验未限定列的归属，区分唯一命中、歧义与真幻觉。
+# Args: column_name - 列名（小写）；resolved - 归属已确定的表 -> 源；
+#       total_table_count - 本 scope 物理表总数；has_cte_or_derived - 是否存在 CTE 或派生表；
+#       index - 权威索引。
+# Returns: 问题列表；唯一命中或无法判定时返回空。
+def _check_unqualified_column(
+    column_name: str,
+    resolved: Mapping[str, str],
+    total_table_count: int,
+    has_cte_or_derived: bool,
+    index: Mapping[tuple[str, str], frozenset[str]],
+) -> list[ValidationIssue]:
+    """未限定列按本 scope 物理表查找归属。"""
+    hits = sorted(
+        table
+        for table, owner in resolved.items()
+        if column_name in index.get((owner, table), frozenset())
+    )
+    if len(hits) == 1:
+        return []
+    if len(hits) > 1:
+        logger.warning("列引用歧义拦截", column=column_name, candidate_tables=hits[:5])
+        return [
+            ValidationIssue(
+                type="ambiguous_column",
+                datasource=resolved[hits[0]],
+                table=", ".join(hits[:5]),
+                column=column_name,
+            )
+        ]
+    # 零命中：只有本 scope 全是物理表、且归属全部确定时，才能判为真幻觉。
+    # 否则列可能来自 CTE / 派生表，或来自归属不明的表 → 无法判定。
+    if has_cte_or_derived or len(resolved) != total_table_count or not resolved:
+        logger.warning(
+            "列引用无法判定",
+            reason="cte_or_unresolved",
+            column=column_name,
+            resolved_count=len(resolved),
+            total_table_count=total_table_count,
+        )
+        return []
+    table, owner = next(iter(resolved.items()))
+    logger.warning("列引用不存在", table=table, column=column_name, unqualified=True)
+    return [
+        ValidationIssue(
+            type="unknown_column",
+            datasource=owner,
+            table=table,
+            column=column_name,
+            available_columns=tuple(
+                sorted(index.get((owner, table), frozenset()))[:MAX_AVAILABLE_COLUMNS]
+            ),
+        )
+    ]
