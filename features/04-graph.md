@@ -69,7 +69,7 @@
 
 | # | 功能 | 文件 | 描述 | 状态 |
 |---|------|------|------|------|
-| 4.5.1 | layer3_validate_node() | `src/graph/nodes/layer3_validate.py` | sqlglot AST 语法校验与只读语句白名单；列引用归属校验前移到本节点，幻觉列在此失败并把可用列清单喂回 `generate_sql` 重试（失败类型 `column_reference`） | 单测完成 | P0 |
+| 4.5.1 | layer3_validate_node() | `src/graph/nodes/layer3_validate.py` | sqlglot AST 语法校验与只读语句白名单；列引用归属校验前移到本节点，判定逻辑收敛到 `src/security/sql_schema_validation.py`（作用域感知，`issue` 按置信度分层：high 拦截 / low 放行留痕）。取数采用两阶段方案：阶段一用 `state["relevant_tables"]` 零 IO 校验，出现 high 置信问题或阶段一无基准（`relevant_tables` 为空，不再静默跳过）时才进入阶段二，用 `get_or_fetch_schema(ds, user_query="")` 权威全量快照复核后再定拦截，消除裁剪误杀；复核不可用时回落阶段一结果。幻觉列在此失败并把可用列清单喂回 `generate_sql` 重试（失败类型 `column_reference`） | 单测完成 | P0 |
 | 4.5.2 | SQL 安全拦截 | 同上 | 仅允许 SELECT / SHOW / DESCRIBE / EXPLAIN，拒绝嵌套写语句 | 单测完成 | P0 |
 | 4.5.3 | sqlglot 语法解析校验 | 同上 | 解析失败时关闭执行路径 | 单测完成 | P0 |
 | 4.5.7 | 输出: sql_valid / errors / transpiled | 同上 | | 单测完成 | P0 |
@@ -87,7 +87,7 @@
 |---|------|------|------|------|
 | 4.7.1 | execute_sql_node() | `src/graph/nodes/execute_sql.py` | 对接全局 Registry 并执行真实数据源查询 | 单测完成 | P0 |
 | 4.7.2 | 错误信息简洁化 | `src/graph/nodes/execute_sql.py:82-91` | 从 DB 原始错误提取错误码和消息 | 开发完成 | P1 |
-| 4.7.3 | 列名预检验证 (Layer 2) | `src/graph/nodes/execute_sql.py:_validate_column_references()` | 按实际方言解析列引用，对照 schema；MSSQL 使用 tsql，解析失败阻断并触发 retry。**按表归属校验**：列白名单是所有表的并集，仅比对列名会漏掉跨表错配（`created_at` 只属于 A 源的 orders，却挂在 B 源表别名上），必须解析别名后判断该列是否真属于被引用表。本节点保留为最后防线，主路径已前移到 4.5.1 | 单测完成 | P0 |
+| 4.7.3 | 列名预检验证 (Layer 2) | `src/graph/nodes/execute_sql.py:_validate_column_references()` | 按实际方言解析列引用，对照 schema；MSSQL 使用 tsql，解析失败阻断并触发 retry。**按表归属校验**：列白名单是所有表的并集，仅比对列名会漏掉跨表错配（`created_at` 只属于 A 源的 orders，却挂在 B 源表别名上），必须解析别名后判断该列是否真属于被引用表。本节点保留为最后防线，主路径已前移到 4.5.1；判定逻辑已收敛到 `src/security/sql_schema_validation.py`——`_validate_column_references` 与 `find_cross_table_columns` 现为**兼容适配器**，只做签名/dict 结构转换，不再保留独立实现（`_columns_by_table`、`_alias_to_table` 已删除） | 单测完成 | P0 |
 | 4.7.4 | float→Decimal 精度 `[P1]` | `src/connectors/base.py` | 所有业务查询在连接器边界把有限 float 转为 Decimal，非有限数值转为空值 | 单测完成 |
 | 4.7.5 | sync/async 引擎兼容 `[P1]` | 同上 | 检测 AsyncEngine→async with，否则在线程池中执行 sync Engine（Oracle/MSSQL支持） | 单测完成 |
 

@@ -37,7 +37,7 @@ LLM 驱动的数据分析智能体。用自然语言提问，自动完成：轮�
 │   ├── market/           ⑩ 行情 Provider 与 PostgreSQL 持久化（当前 Tushare/A 股）
 │   ├── actions/          ⑪ 受控外部动作（人工确认、幂等、审计）
 │   ├── reporting/        ⑧.1 报表工作台 — 自然语言计划、任务运行、关系证据、动态 DSL、分享与配额
-│   ├── security/         ⑫ 安全模块 — API/IP 策略 + SQL 统一执行 + 脱敏 + 限流 + 审计 + 出站策略
+│   ├── security/         ⑫ 安全模块 — API/IP 策略 + SQL 统一执行 + Schema 校验 + 脱敏 + 限流 + 审计 + 出站策略
 │   ├── db/               ⑬ 状态库基础设施 — 版本化迁移 + URL 工具
 │   ├── mcp_client/       ⑭ MCP 集成 — 客户端管理 + 工具暴露
 │   ├── mcp/              ⑭.1 MCP Server 稳定模块入口（python -m src.mcp）
@@ -78,7 +78,7 @@ POST /api/v1/chat {"query": "本月 GMV 排名？", "stream": true}
   ├─ restore_previous_result  仅 meta 且数据源一致时从 HistoryStore 恢复上轮富结果
   ├─ retrieve_schema     SchemaManager 三级回退 → 表结构 + 知识上下文 + Skill 精确激活
   ├─ generate_sql        LLM 生成 SQL（对话历史注入 + 重试上下文 + Pydantic 契约）
-  ├─ layer3_validate     委托统一 SQL 服务做 AST 只读安全校验 + 列引用归属校验
+  ├─ layer3_validate     委托统一 SQL 服务做 AST 只读安全校验 + 列引用归属校验（两阶段取数：先 relevant_tables 零 IO，出现 high 置信问题或阶段一无基准时才用权威全量快照复核）
   ├─ layer4_explain      统一 SQL 服务按 Registry 权威方言执行 EXPLAIN
   ├─ execute_sql         统一有界执行（权限 / 限流 / 脱敏 / 审计）
   ├─ analyze_result      确定性统计 + 业务关联/影响/原因/建议 + 证据充分性判断
@@ -134,9 +134,9 @@ POST /api/v1/chat {"query": "本月 GMV 排名？", "stream": true}
 | `subgraphs/report.py` | custom-report 工具执行和 report Artifact 数据准备 |
 | `subgraphs/action.py` | 人工确认、幂等和默认拒绝的外部动作分发 |
 | `nodes/retrieve_schema.py` | Schema 检索 + 知识库上下文 + 按真实表名再次激活 Skill |
-| `nodes/generate_sql.py` | LLM SQL 生成（独立表名白名单、分类重试、结构化补参）与行式指标目录确定性 SQL |
-| `nodes/layer3_validate.py` | sqlglot AST 只读白名单与危险语句阻断；列引用归属校验前移到 EXPLAIN 之前，幻觉列在此处失败并把可用列清单喂回重试 |
-| `nodes/execute_sql.py` | SQL 执行（空 SQL 跳过保护）；列引用校验与列归属探针作为最后一道防线 |
+| `nodes/generate_sql.py` | LLM SQL 生成（独立表名白名单、分类重试、结构化补参）与行式指标目录确定性 SQL；重试回喂按错误类型分流，schema 幻觉分支不回注失败 SQL 只回喂可用列清单 |
+| `nodes/layer3_validate.py` | sqlglot AST 只读白名单与危险语句阻断；列引用归属校验前移到 EXPLAIN 之前，判定委托 `security/sql_schema_validation.py`；两阶段取数（阶段一 `relevant_tables` 零 IO，出现 high 置信问题或阶段一无基准时才用 `get_or_fetch_schema(ds, user_query="")` 全量快照复核，复核不可用回落阶段一结果），幻觉列在此处失败并把可用列清单喂回重试 |
+| `nodes/execute_sql.py` | SQL 执行（空 SQL 跳过保护）；列引用校验与列归属探针作为最后一道防线，已收敛为委托 `security/sql_schema_validation.py` 的兼容适配器 |
 | `nodes/multi_source.py` | 契约化多源 worker、并行执行、维度/指标列对齐和来源失败隔离 |
 | `nodes/analyze_result.py` | 确定性统计处理器 + 证据化业务关联、影响、原因假设和行动建议分析 |
 | `nodes/supplemental_query.py` | 证据不足时在当前权限内复用完整 SQL 安全链补查，并把脱敏证据回注分析节点 |
@@ -223,6 +223,7 @@ POST /api/v1/chat {"query": "本月 GMV 排名？", "stream": true}
 | `security/network.py` | 数据库出站 DNS/IP 校验，私网默认拒绝并支持部署 allowlist |
 | `security/api_access_policy.py` | YAML 基线 + PostgreSQL 动态策略原子快照、模板匹配、可信代理与 CIDR 黑白名单 |
 | `security/sql_execution.py` | 权威方言解析、AST 只读校验、EXPLAIN 与有界执行唯一入口 |
+| `security/sql_schema_validation.py` | 作用域感知的 SQL↔Schema 校验唯一实现：表索引、归属解析、置信度分层与结构化 issue，供 layer3 / execute_sql / generate_sql 共用；不依赖 `src.graph` |
 | `failure_policy.py` | SQL/数据库 fail-closed 与 LLM/知识/处理器 fail-open 决策矩阵 |
 | `mcp_client/client_manager.py` | MCP Client 独立连接栈、自动迁移、system/tenant/private 请求级工具过滤 |
 | `mcp_client/server.py` | MCP Server（暴露 4 个工具，内部异常返回稳定脱敏协议） |
@@ -306,7 +307,7 @@ checksum。执行器同时兼容历史 LF/CRLF 登记值，避免 Git 跨平台�
 - **计算与解读分层**：数据处理器负责确定性数值计算但不得提前终止分析；LLM 负责关联指标、业务影响、待验证原因和条件化建议，模型不可用时用显式“待验证”规则回退
 - **有限证据补查**：分析模型只声明证据状态和自然语言补查问题；单源普通分析最多补查两轮，每轮一个问题，完整复用 SQL 安全链，失败保留主查询结果
 - **确定性图表资格**：元数据、直接问答和无数据不画图；单行单值展示核心值；两行以上时间/分类加数值默认绘图；模型推荐 `table` 仍需列语义复核，失败原因进入公开响应
-- **表名幻觉收敛**：完整物理表白名单独立于可裁剪 Schema；幻觉不回注完整失败 SQL，初次生成后最多纠正一次
+- **表名幻觉收敛**：完整物理表白名单独立于可裁剪 Schema，表名比对复用 `security/sql_schema_validation.py` 的统一表索引与归属解析；幻觉不回注完整失败 SQL，初次生成后最多纠正一次
 - **应用级依赖容器**：每个 FastAPI 应用持有独立 `AppContext`；`get_settings()` 无绑定时不隐式创建 Context，兼容 `get_*()` 委托当前 Context，异步资源并发单次初始化并按创建逆序关闭
 - **租户策略集中化**：`TenantPolicy` 统一认证门禁、数据源/知识隔离、身份校验和三级作用域写权限，业务模块不直接读取 `settings.multi_tenant`
 - **租户 LLM 失败关闭**：所有对话必须解析当前租户启用的命名连接和模型；显式跨租户、停用或缺失选择返回冲突，不回退其他租户或平台全局凭证
@@ -319,7 +320,7 @@ checksum。执行器同时兼容历史 LF/CRLF 登记值，避免 Git 跨平台�
 - **最终 SQL 展示**：多源 worker 返回 execute_sql 方言重写/权限注入后的 SQL，响应通过 sql_statements 按来源展示
 - **并行流隔离**：SSE 使用 LangChain run_id 派生 stream_id，前端按调用实例缓冲 token；原始 reasoning_content 仅做服务端受控诊断
 - **安全阻断**：layer3 使用 sqlglot AST 只读白名单，阻断 DDL/DML、SELECT INTO 和状态变更函数；表/列解析异常失败关闭
-- **列引用归属校验**：列白名单是所有表列名的并集，只看列名会漏掉跨表错配（`created_at` 只存在于 A 源 orders，却写成 B 源 finance_invoices 的别名前缀 `i.created_at`，能通过白名单直到 EXPLAIN 打库才报错）。校验必须解析别名后按表归属判断，且前移到 `layer3_validate`——幻觉列在那里失败才能把可用列清单喂回重试，`execute_sql` 的同类校验只作最后防线
+- **列引用归属校验**：列白名单是所有表列名的并集，只看列名会漏掉跨表错配（`created_at` 只存在于 A 源 orders，却写成 B 源 finance_invoices 的别名前缀 `i.created_at`，能通过白名单直到 EXPLAIN 打库才报错）。校验必须解析别名后按表归属判断，且前移到 `layer3_validate`——幻觉列在那里失败才能把可用列清单喂回重试，`execute_sql` 的同类校验只作最后防线。判定逻辑唯一实现于 `security/sql_schema_validation.py`（按 `(datasource, table)` 建索引、作用域感知），产出分级 `ValidationIssue`：high 拦截重试，low 放行留痕（`SELECT *`、CTE 限定符等盲区显式标记，不得静默当作通过）。基准按数据源取权威快照：layer3 阶段一用 `relevant_tables` 零 IO 校验，出现 high 置信问题或阶段一无基准时才进入阶段二，用 `get_or_fetch_schema(ds, user_query="")` 全量快照复核后定拦截，消除裁剪假阳性；schema 幻觉重试不回注失败 SQL，只按表回喂可用列清单（issue 上限 3、每表列上限 10）
 - **后处理层不得改坏正确输入**：`sql_rewriter` 的 sqlglot 归一化会把 ClickHouse 的 `toStartOfMonth(x)` 渲染回 `dateTrunc('MONTH', x)`，而后者只接受 DateTime，Date32 列直接报 code 43——等于把模型按方言提示写对的函数改坏。ClickHouse 必须在其后再做一次 `dateTrunc → toStartOfX` 回退；凡是自加的后处理层，都要验证它不破坏正确输入
 - **提示预算跟随模型窗口**：`context_budget` 不是与模型窗口无关的常数。固定 4400 的 schema 上限会把上百张表的库裁到只剩几张，目标表列名进不了 Prompt，模型只能按惯例猜列名（曾导致 `created_at` 不存在）。schema 段按"能装下整库表结构"设置，总预算需同时容纳 schema 与业务上下文，否则会把问题从一段挤到另一段
 - **高权限连接告警**：DataSourceRegistry 识别 Oracle `SYS/SYSTEM` 和 SQL Server `sa` 时记录 warning 但继续连接；数据库账号权限不改变 layer3 的只读失败关闭策略
