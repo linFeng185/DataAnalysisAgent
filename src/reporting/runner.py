@@ -61,6 +61,11 @@ class ReportRunner:
         run = await self.store.create_run(job_id, identity, attempt=attempt)
         plan = job.plan
         reservation = None
+        # 真实计数在运行作用域内累计；LLM 回调挂载时按引用捕获该对象，
+        # 因此不需要依赖 contextvar 穿过 LangGraph 内部的 task。
+        from src.reporting.run_stats import activate, deactivate
+
+        stats, stats_token = activate()
         try:
             # 先按表结构判断每个单元命中的数据源：它决定真实的查询扇出，
             # 必须早于配额预占，否则预占拿到的仍是"只数单元数"的低报估算。
@@ -128,7 +133,8 @@ class ReportRunner:
             writer = version_store or self.store
             version = await writer.persist_version(job_id, run.id, identity, artifact.document.model_dump(mode="json"), artifact.data_manifest, expires_at, require_active_job=version_store is not None)
             final_status = "partial" if run_status == "partial" else "succeeded"
-            await self.store.update_run(run.id, identity, status=final_status, partial=final_status == "partial", row_count=row_count, query_count=plan.estimated.query_count, token_usage=plan.estimated.llm_tokens, finished_at=datetime.now(timezone.utc))
+            # query_count 保持配额计费口径的估算值；真实计数与 token 用量在 finally 中统一落库。
+            await self.store.update_run(run.id, identity, status=final_status, partial=final_status == "partial", row_count=row_count, query_count=plan.estimated.query_count, finished_at=datetime.now(timezone.utc))
             if version_store is None:
                 await self.store.update_job_status(job_id, identity, final_status)
             logger.info("报表运行完成", job_id=job_id, run_id=run.id, status=final_status, report_id=version.report_id, version=version.version)
@@ -154,6 +160,23 @@ class ReportRunner:
                 await self.store.update_job_status(job_id, identity, "failed")
             return {"status": "failed", "run_id": run.id, "error_code": "INTERNAL_ERROR", "error_message": message}
         finally:
+            # 真实计数覆盖成功、部分成功、失败、取消与配额不足全部出口：
+            # 已经发生的调用不应因为运行失败而丢失。
+            try:
+                await self.store.update_run(
+                    run.id,
+                    identity,
+                    llm_call_count=stats.llm_call_count,
+                    llm_failure_count=stats.llm_failure_count,
+                    token_usage=stats.llm_token_usage,
+                    sql_query_count=stats.sql_query_count,
+                    sql_success_count=stats.sql_success_count,
+                    sql_failure_count=stats.sql_failure_count,
+                )
+            except Exception:
+                # 统计是观测数据，落库失败不得影响报表发布。
+                logger.error("报表运行计数落库失败", job_id=job_id, run_id=run.id, exc_info=True)
+            deactivate(stats_token)
             if reservation is not None:
                 try:
                     await self.store.release_run_quota(run.id, identity, self.quota)

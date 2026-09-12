@@ -145,11 +145,13 @@ class LLMMetricsCallback(BaseCallbackHandler):
     """仅采集模型名、耗时和 token，不保存 Prompt 或响应正文。"""
 
     # 方法作用：初始化指定任务的 LLM 指标回调。
-    # Args: self - 当前回调；metrics - 指标注册器；task - 节点任务名。
+    # Args: self - 当前回调；metrics - 指标注册器；task - 节点任务名；stats - 报表运行计数器，非报表路径为 None。
     # Returns: 无返回值。
-    def __init__(self, metrics: MetricsRegistry, task: str) -> None:
+    def __init__(self, metrics: MetricsRegistry, task: str, stats: Any = None) -> None:
         self.metrics = metrics
         self.task = task
+        # 报表运行计数器在挂载时按引用捕获，不依赖 contextvar 穿过 LangChain 内部 task。
+        self.stats = stats
         self._runs: dict[UUID, tuple[float, str]] = {}
 
     # 方法作用：记录 LLM 调用起点和低基数模型名，不保留 prompts。
@@ -194,6 +196,7 @@ class LLMMetricsCallback(BaseCallbackHandler):
             prompt_tokens=prompt_tokens,
             completion_tokens=completion_tokens,
         )
+        _record_run_stats(self.stats, failed=False, tokens=prompt_tokens + completion_tokens)
 
     # 方法作用：记录 LLM 异常次数和失败前耗时，不记录异常正文。
     # Args: self - 当前回调；error - 模型异常；run_id - 调用 ID；kwargs - 扩展字段。
@@ -213,6 +216,7 @@ class LLMMetricsCallback(BaseCallbackHandler):
             status="error",
             duration=time.monotonic() - started_at,
         )
+        _record_run_stats(self.stats, failed=True)
 
 
 class PrometheusMiddleware:
@@ -266,12 +270,27 @@ def get_metrics_registry() -> MetricsRegistry:
     return _metrics_registry
 
 
+# 方法作用：把一次 LLM 终态写入报表运行计数器；不在报表运行作用域内时是空操作。
+# Args: stats - 挂载回调时捕获的计数器，非报表路径为 None；failed - 本次调用是否失败；tokens - token 总量。
+# Returns: 无返回值。
+def _record_run_stats(stats: Any, *, failed: bool, tokens: int = 0) -> None:
+    if stats is None:
+        return
+    # 写入挂载时捕获的对象，而不是读取 contextvar：回调可能运行在与挂载不同的 task 上。
+    from src.reporting.run_stats import record_llm_call_for
+
+    record_llm_call_for(stats, failed=failed, tokens=tokens)
+
+
 # 方法作用：给现有 ChatModel 附加指标 callback 并保持对象身份不变。
 # Args: model - Provider 返回模型；task - 节点任务名。
 # Returns: 原模型对象。
 def attach_llm_metrics(model: Any, task: str) -> Any:
     try:
-        callback = LLMMetricsCallback(get_metrics_registry(), task)
+        from src.reporting.run_stats import current as _current_run_stats
+
+        # 挂载发生在发起该次调用的运行上下文内，按引用捕获即可，无需依赖后续传播。
+        callback = LLMMetricsCallback(get_metrics_registry(), task, stats=_current_run_stats())
         callbacks = list(getattr(model, "callbacks", None) or [])
         callbacks.append(callback)
         model.callbacks = callbacks

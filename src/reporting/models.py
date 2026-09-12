@@ -308,12 +308,34 @@ class ReportRunRecord(BaseModel):
     query_count: int = 0
     row_count: int = 0
     token_usage: int = 0
+    # 以下为运行期真实计数，与 query_count 的配额估算口径相互独立。
+    llm_call_count: int = 0
+    llm_failure_count: int = 0
+    sql_query_count: int = 0
+    sql_success_count: int = 0
+    sql_failure_count: int = 0
     partial: bool = False
     error_code: str = ""
     user_error_message: str = ""
     trace_id: str = ""
     started_at: datetime | None = None
     finished_at: datetime | None = None
+
+    # 方法作用：把运行记录转换为前端可直接消费的计数汇总。
+    # Args: self - 运行记录。
+    # Returns: 含 LLM 与 SQL 成败计数、以及预估查询数的字典。
+    def stats_summary(self) -> dict[str, int]:
+        """返回运行计数汇总，供页面同时展示预估与实际。"""
+        return {
+            "llm_call_count": self.llm_call_count,
+            "llm_failure_count": self.llm_failure_count,
+            "llm_success_count": max(0, self.llm_call_count - self.llm_failure_count),
+            "llm_token_usage": self.token_usage,
+            "sql_query_count": self.sql_query_count,
+            "sql_success_count": self.sql_success_count,
+            "sql_failure_count": self.sql_failure_count,
+            "estimated_query_count": self.query_count,
+        }
 
 
 class ReportVersionRecord(BaseModel):

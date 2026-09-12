@@ -236,7 +236,7 @@ class ReportStore:
             raise LookupError("报表任务不存在")
         run_id = str(uuid4())
         now = datetime.now(timezone.utc)
-        row = {"id": run_id, "job_id": str(job_id), "tenant_id": job.tenant_id, "user_id": job.user_id, "status": "queued", "attempt": int(attempt), "last_node": "", "query_count": 0, "row_count": 0, "token_usage": 0, "partial": False, "error_code": "", "internal_error_message": "", "user_error_message": "", "trace_id": run_id, "created_at": now, "started_at": None, "finished_at": None}
+        row = {"id": run_id, "job_id": str(job_id), "tenant_id": job.tenant_id, "user_id": job.user_id, "status": "queued", "attempt": int(attempt), "last_node": "", "query_count": 0, "row_count": 0, "token_usage": 0, "llm_call_count": 0, "llm_failure_count": 0, "sql_query_count": 0, "sql_success_count": 0, "sql_failure_count": 0, "partial": False, "error_code": "", "internal_error_message": "", "user_error_message": "", "trace_id": run_id, "created_at": now, "started_at": None, "finished_at": None}
         if self._memory:
             self._runs[run_id] = row
             self._steps[run_id] = []
@@ -259,7 +259,7 @@ class ReportStore:
     # Args: run_id - 运行 ID；identity - 当前身份；updates - 允许更新的字段。
     # Returns: 更新后的 ReportRunRecord，越权或不存在返回 None。
     async def update_run(self, run_id: str, identity: Any, **updates: Any) -> ReportRunRecord | None:
-        allowed = {"status", "last_node", "query_count", "row_count", "token_usage", "partial", "error_code", "internal_error_message", "user_error_message", "started_at", "finished_at"}
+        allowed = {"status", "last_node", "query_count", "row_count", "token_usage", "llm_call_count", "llm_failure_count", "sql_query_count", "sql_success_count", "sql_failure_count", "partial", "error_code", "internal_error_message", "user_error_message", "started_at", "finished_at"}
         data = {key: value for key, value in updates.items() if key in allowed}
         if self._memory:
             row = self._runs.get(str(run_id))
@@ -1075,7 +1075,7 @@ class ReportStore:
     # Returns: ReportRunRecord。
     @staticmethod
     def _to_run(row: Any) -> ReportRunRecord:
-        return ReportRunRecord(id=str(row["id"]), job_id=str(row["job_id"]), status=str(row.get("status", "queued")), attempt=int(row.get("attempt", 1) or 1), last_node=str(row.get("last_node", "") or ""), query_count=int(row.get("query_count", 0) or 0), row_count=int(row.get("row_count", 0) or 0), token_usage=int(row.get("token_usage", 0) or 0), partial=bool(row.get("partial", False)), error_code=str(row.get("error_code", "") or ""), user_error_message=str(row.get("user_error_message", "") or ""), trace_id=str(row.get("trace_id", "") or ""), started_at=row.get("started_at"), finished_at=row.get("finished_at"))
+        return ReportRunRecord(id=str(row["id"]), job_id=str(row["job_id"]), status=str(row.get("status", "queued")), attempt=int(row.get("attempt", 1) or 1), last_node=str(row.get("last_node", "") or ""), query_count=int(row.get("query_count", 0) or 0), row_count=int(row.get("row_count", 0) or 0), token_usage=int(row.get("token_usage", 0) or 0), llm_call_count=int(row.get("llm_call_count", 0) or 0), llm_failure_count=int(row.get("llm_failure_count", 0) or 0), sql_query_count=int(row.get("sql_query_count", 0) or 0), sql_success_count=int(row.get("sql_success_count", 0) or 0), sql_failure_count=int(row.get("sql_failure_count", 0) or 0), partial=bool(row.get("partial", False)), error_code=str(row.get("error_code", "") or ""), user_error_message=str(row.get("user_error_message", "") or ""), trace_id=str(row.get("trace_id", "") or ""), started_at=row.get("started_at"), finished_at=row.get("finished_at"))
 
     # 方法作用：把数据库行转换为安全的版本模型。
     # Args: row - asyncpg Record 或内存字典。

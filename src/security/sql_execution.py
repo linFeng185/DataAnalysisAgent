@@ -560,10 +560,37 @@ async def validate_and_explain_sql(
     return result
 
 
+# 方法作用：统一 SQL 执行入口，记录报表运行计数后透传实现结果。
+# Args: 同 _run_validate_and_execute_sql。
+# Returns: 数据、截断状态或明确错误的 SQLExecutionResult。
+async def validate_and_execute_sql(
+    sql: str,
+    datasource: str,
+    dialect: str = "",
+    *,
+    explain: bool = True,
+    max_rows: int | None = None,
+    tenant_id: int | None = None,
+) -> SQLExecutionResult:
+    result = await _run_validate_and_execute_sql(
+        sql,
+        datasource,
+        dialect,
+        explain=explain,
+        max_rows=max_rows,
+        tenant_id=tenant_id,
+    )
+    # 校验未通过而未提交执行的调用同样计数——它确实被尝试过。
+    from src.reporting.run_stats import record_sql_execution
+
+    record_sql_execution(failed=not result.success)
+    return result
+
+
 # 方法作用：按真实数据源方言完成只读校验、可选 EXPLAIN 和有界执行。
 # Args: sql - 待执行 SQL；datasource - 数据源名；dialect - 调用方提示方言；explain - 是否执行 EXPLAIN；max_rows - 结果上限；tenant_id - 可选显式租户 ID。
 # Returns: 数据、截断状态或明确错误的 SQLExecutionResult。
-async def validate_and_execute_sql(
+async def _run_validate_and_execute_sql(
     sql: str,
     datasource: str,
     dialect: str = "",
