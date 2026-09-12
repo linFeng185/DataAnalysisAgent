@@ -36,3 +36,5 @@
 | [37-runtime-platform-and-ui.md](37-runtime-platform-and-ui.md) | 平台动态配置、连接器热插拔、双语界面与表结构同步 | 动态 |
 | [38-datasource-transfer-and-polling.md](38-datasource-transfer-and-polling.md) | 数据源导出选择、导入改名、列表排序与轮询修复的实施计划 | 动态 |
 | [36-large-test-datasets.md](36-large-test-datasets.md) | 每源 125 表、五业务域与千万级中文模拟数据 | 动态 |
+| [39-sql-schema-validation.md](39-sql-schema-validation.md) | SQL Schema 校验层设计（生成后 · 打库前） | 动态 |
+| [40-sql-schema-validation-implementation-plan.md](40-sql-schema-validation-implementation-plan.md) | SQL Schema 校验层实施计划（8 个 Task，阶段 A/B） | 动态 |

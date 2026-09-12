@@ -29,4 +29,5 @@
 | [23-report-workbench.md](23-report-workbench.md) | 23. 报表工作台 | 动态 |
 | [24-tenant-governance-audit.md](24-tenant-governance-audit.md) | 平台与租户职责治理及部署验收边界 | 动态 |
 | [25-runtime-platform-and-ui.md](25-runtime-platform-and-ui.md) | 平台运行时配置、动态数据库类型、双语界面与同步任务 | 动态 |
+| [26-sql-schema-validation.md](26-sql-schema-validation.md) | SQL Schema 校验层（生成后 · 打库前） | 动态 |
 | [99-summary.md](99-summary.md) | 附录 | 145 行 |
