@@ -50,6 +50,30 @@ class TestTableIndex:
         assert ("pg_other", "secret") not in index
         logger.info("test_index_skips_unauthorized_datasource 完成")
 
+    # 方法作用：锁定空白名单契约——空白名单不做数据源过滤，快照条目全部进索引。
+    # Args: self - pytest 用例实例。
+    # Returns: 无返回值，断言失败由 pytest 报告。
+    def test_empty_whitelist_skips_source_filter(self) -> None:
+        """空白名单表示不做数据源过滤，调用方自带单一数据源快照。"""
+        logger.debug("test_empty_whitelist_skips_source_filter 入口")
+        from src.security.sql_schema_validation import build_table_index
+
+        # Arrange
+        # 空白名单表示「调用方提供的是单一数据源快照，不按源过滤」
+        tables = [
+            {"name": "orders", "columns": [{"name": "id"}, {"name": "amount"}]},
+            {"name": "customers", "columns": [{"name": "name"}]},
+        ]
+
+        # Act
+        index = build_table_index(tables, [])
+
+        # Assert：白名单没有过滤掉任何条目，两条都落在缺省（空串）源键下
+        assert index[("", "orders")] == frozenset({"id", "amount"})
+        assert index[("", "customers")] == frozenset({"name"})
+        assert len(index) == 2
+        logger.info("test_empty_whitelist_skips_source_filter 完成")
+
     # 方法作用：验证单源归属唯一、多源同名判为 ambiguous、不存在返回 None。
     # Args: self - pytest 用例实例。
     # Returns: 无返回值，断言失败由 pytest 报告。

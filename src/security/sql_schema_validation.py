@@ -64,23 +64,38 @@ class ValidationIssue:
 
 # 方法作用：把权威快照整理成 (数据源, 表名) -> 列名集合 的索引。
 # Args: tables - 权威快照，每张表可带可选 datasource 字段；datasources - 允许的数据源白名单。
-# Returns: 索引字典；datasource 不在白名单内的表被整体跳过。
+# Returns: 索引字典；非空白名单时 datasource 不在白名单内的表被整体跳过。
+# 契约：空白名单表示不做数据源过滤，调用方须自行保证传入的快照只含单一数据源；
+#       非空白名单时越界源的表整体跳过。
 def build_table_index(
     tables: Sequence[Mapping[str, Any]],
     datasources: Sequence[str],
 ) -> dict[tuple[str, str], frozenset[str]]:
-    """构建 (datasource, table) -> columns 索引，越界源整体跳过。"""
+    """构建 (datasource, table) -> columns 索引。
+
+    空白名单表示不做数据源过滤，调用方须自行保证传入的快照只含单一数据源；
+    非空白名单时越界源的表整体跳过。
+    """
     logger.debug("建表索引入口", table_count=len(tables), datasource_count=len(datasources))
-    allowed = [str(item).strip() for item in datasources if str(item).strip()]
+    # 白名单只接受真实字符串项，避免 None / 数字被字符串化成 "None" / "5" 之类的伪源名
+    allowed = [item.strip() for item in datasources if isinstance(item, str) and item.strip()]
     allowed_set = set(allowed)
     default_source = allowed[0] if allowed else ""
     index: dict[tuple[str, str], frozenset[str]] = {}
     skipped = 0
+    skipped_malformed = 0
+    empty_column_tables = 0
     for table in tables:
+        # 非 Mapping 条目取不出字段，记 warning 后丢弃，避免上游畸形快照无声消失
         if not isinstance(table, Mapping):
+            logger.warning("表索引跳过非法表条目", entry_type=type(table).__name__)
+            skipped_malformed += 1
             continue
         name = str(table.get("name", "") or "").strip().lower()
+        # 表名为空的条目无法建键，记 warning 后丢弃
         if not name:
+            logger.warning("表索引跳过空表名条目")
+            skipped_malformed += 1
             continue
         source = str(table.get("datasource", "") or "").strip() or default_source
         if allowed_set and source not in allowed_set:
@@ -92,8 +107,25 @@ def build_table_index(
             for column in (table.get("columns") or [])
             if isinstance(column, Mapping) and str(column.get("name", "") or "").strip()
         )
+        # 列全部被丢弃（缺失 / 非 Mapping / 空名）时按表留 debug 痕迹，表仍录入但列集为空
+        if not columns:
+            empty_column_tables += 1
+            logger.debug("表索引录入空列集", table=name, datasource=source)
         index[(source, name)] = columns
-    logger.info("建表索引完成", entries=len(index), skipped=skipped)
+    # 空白名单是合法调用模式（调用方自带单一数据源快照），但必须留痕说明按源过滤被跳过
+    if not allowed_set:
+        logger.warning(
+            "未提供数据源白名单，跳过按源过滤",
+            table_count=len(tables),
+            entries=len(index),
+        )
+    logger.info(
+        "建表索引完成",
+        entries=len(index),
+        skipped=skipped,
+        skipped_malformed=skipped_malformed,
+        empty_column_tables=empty_column_tables,
+    )
     return index
 
 
