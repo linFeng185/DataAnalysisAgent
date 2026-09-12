@@ -357,6 +357,10 @@ def _collect_column_issues(
                             confidence="low",
                         )
                     )
+        # GROUP BY <输出别名> 会被 sqlglot 当作普通列收进 scope.columns，必须按别名放行。
+        projection_aliases = (
+            _collect_projection_aliases(select) if isinstance(select, exp.Select) else set()
+        )
         seen: set[tuple[str, str]] = set()
         for column in scope.columns:
             column_name = str(column.name or "").strip().lower()
@@ -373,10 +377,31 @@ def _collect_column_issues(
             else:
                 issues.extend(
                     _check_unqualified_column(
-                        column_name, resolved, len(local_tables), has_cte_or_derived, index
+                        column_name,
+                        resolved,
+                        len(local_tables),
+                        has_cte_or_derived,
+                        projection_aliases,
+                        index,
                     )
                 )
     return issues
+
+
+# 方法作用：收集本 scope SELECT 投影中 AS 定义的输出别名。
+# Args: select - 本 scope 的 Select 节点。
+# Returns: 小写别名集合。
+def _collect_projection_aliases(select: Any) -> set[str]:
+    """收集投影别名：未限定列零命中但命中别名时，它是引用输出列而非幻觉。"""
+    from sqlglot import exp
+
+    aliases = {
+        str(projection.alias).strip().lower()
+        for projection in select.expressions
+        if isinstance(projection, exp.Alias) and str(projection.alias or "").strip()
+    }
+    logger.debug("投影别名收集完成", alias_count=len(aliases))
+    return aliases
 
 
 # 方法作用：判断投影表达式是否为星号（SELECT * 或 SELECT t.*），排除函数参数内的星号。
@@ -459,13 +484,14 @@ def _check_qualified_column(
 # 方法作用：校验未限定列的归属，区分唯一命中、歧义与真幻觉。
 # Args: column_name - 列名（小写）；resolved - 归属已确定的表 -> 源；
 #       total_table_count - 本 scope 物理表总数；has_cte_or_derived - 是否存在 CTE 或派生表；
-#       index - 权威索引。
-# Returns: 问题列表；唯一命中或无法判定时返回空。
+#       projection_aliases - 本 scope SELECT 投影别名集合；index - 权威索引。
+# Returns: 问题列表；唯一命中、命中投影别名或无法判定时返回空。
 def _check_unqualified_column(
     column_name: str,
     resolved: Mapping[str, str],
     total_table_count: int,
     has_cte_or_derived: bool,
+    projection_aliases: set[str],
     index: Mapping[tuple[str, str], frozenset[str]],
 ) -> list[ValidationIssue]:
     """未限定列按本 scope 物理表查找归属。"""
@@ -486,6 +512,12 @@ def _check_unqualified_column(
                 column=column_name,
             )
         ]
+    # 零命中的列可能是 GROUP BY / 其它子句对 SELECT 输出别名的引用（sqlglot 会把
+    # GROUP BY <别名> 当作普通列收进 scope.columns）。别名是 SQL 自己定义的输出列，
+    # 不是幻觉列，必须放行，否则合法的聚合查询会被高置信误拦并误导重试。
+    if column_name in projection_aliases:
+        logger.debug("列引用命中投影别名", column=column_name, scope_alias=True)
+        return []
     # 零命中：只有本 scope 全是物理表、且归属全部确定时，才能判为真幻觉。
     # 否则列可能来自 CTE / 派生表，或来自归属不明的表 → 无法判定。
     if has_cte_or_derived or len(resolved) != total_table_count or not resolved:

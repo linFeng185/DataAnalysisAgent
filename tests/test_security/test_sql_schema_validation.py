@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import logging
 
+import pytest
+
 logger = logging.getLogger(__name__)
 
 
@@ -573,6 +575,143 @@ class TestKnownBlindSpots:
         ]
         assert len(star_issues) == 2
         logger.info("test_nested_select_star_not_double_counted 完成")
+
+
+class TestProjectionAliasReferences:
+    """覆盖 GROUP BY / HAVING 引用 SELECT 输出别名的合法形态（三种方言）。"""
+
+    # 方法作用：验证 GROUP BY 引用投影别名不再被误判为幻觉列。
+    # Args: self - pytest 用例实例；dialect - 参数化方言名。
+    # Returns: 无返回值，断言失败由 pytest 报告。
+    @pytest.mark.parametrize("dialect", ["postgres", "mysql", "clickhouse"])
+    def test_group_by_alias_is_not_hallucination(self, dialect: str) -> None:
+        """GROUP BY <输出别名> 是合法语法，不得高置信拦截。"""
+        logger.debug(f"test_group_by_alias_is_not_hallucination 入口 dialect={dialect}")
+        from src.security.sql_schema_validation import validate_sql_schema
+
+        # Arrange
+        tables = [
+            {"name": "orders", "columns": [{"name": "id"}, {"name": "amount"}]}
+        ]
+
+        # Act
+        issues = validate_sql_schema(
+            "SELECT SUM(amount) AS total FROM orders GROUP BY total",
+            datasources=["pg_main"],
+            dialect=dialect,
+            tables=tables,
+        )
+
+        # Assert
+        assert issues == []
+        logger.info(f"test_group_by_alias_is_not_hallucination 完成 dialect={dialect}")
+
+    # 方法作用：验证 ORDER BY 引用投影别名的既有行为不回退。
+    # Args: self - pytest 用例实例。
+    # Returns: 无返回值，断言失败由 pytest 报告。
+    def test_order_by_alias_still_passes(self) -> None:
+        """ORDER BY <别名> 一直放行，防回退。"""
+        logger.debug("test_order_by_alias_still_passes 入口")
+        from src.security.sql_schema_validation import validate_sql_schema
+
+        # Arrange
+        tables = [{"name": "orders", "columns": [{"name": "amount"}]}]
+
+        # Act
+        issues = validate_sql_schema(
+            "SELECT SUM(amount) AS total FROM orders ORDER BY total",
+            datasources=["pg_main"],
+            dialect="postgres",
+            tables=tables,
+        )
+
+        # Assert
+        assert issues == []
+        logger.info("test_order_by_alias_still_passes 完成")
+
+    # 方法作用：验证「真实列 GROUP BY + 别名 ORDER BY」形态不回退。
+    # Args: self - pytest 用例实例。
+    # Returns: 无返回值，断言失败由 pytest 报告。
+    def test_group_by_real_column_with_alias_order_by_passes(self) -> None:
+        """GROUP BY 真实列、ORDER BY 别名的既有形态必须放行。"""
+        logger.debug("test_group_by_real_column_with_alias_order_by_passes 入口")
+        from src.security.sql_schema_validation import validate_sql_schema
+
+        # Arrange
+        tables = [
+            {
+                "name": "orders",
+                "columns": [
+                    {"name": "amount"},
+                    {"name": "customer_id"},
+                    {"name": "order_month"},
+                ],
+            }
+        ]
+
+        # Act
+        issues = validate_sql_schema(
+            "SELECT order_month, SUM(amount) AS total FROM orders "
+            "GROUP BY order_month ORDER BY total",
+            datasources=["pg_main"],
+            dialect="postgres",
+            tables=tables,
+        )
+
+        # Assert
+        assert issues == []
+        logger.info("test_group_by_real_column_with_alias_order_by_passes 完成")
+
+    # 方法作用：验证放行别名不会把既非物理列也非别名的真幻觉一起放过。
+    # Args: self - pytest 用例实例。
+    # Returns: 无返回值，断言失败由 pytest 报告。
+    def test_group_by_alias_does_not_mask_real_hallucination(self) -> None:
+        """GROUP BY 的真幻觉列仍必须高置信拦截。"""
+        logger.debug("test_group_by_alias_does_not_mask_real_hallucination 入口")
+        from src.security.sql_schema_validation import validate_sql_schema
+
+        # Arrange：ghost_col 既不在 orders 的列里，也不是任何投影别名
+        tables = [{"name": "orders", "columns": [{"name": "amount"}]}]
+
+        # Act
+        issues = validate_sql_schema(
+            "SELECT SUM(amount) AS total FROM orders GROUP BY ghost_col",
+            datasources=["pg_main"],
+            dialect="postgres",
+            tables=tables,
+        )
+
+        # Assert
+        assert len(issues) == 1
+        assert issues[0].type == "unknown_column"
+        assert issues[0].column == "ghost_col"
+        assert issues[0].confidence == "high"
+        logger.info("test_group_by_alias_does_not_mask_real_hallucination 完成")
+
+    # 方法作用：验证 HAVING 引用投影别名的合法形态放行。
+    # Args: self - pytest 用例实例。
+    # Returns: 无返回值，断言失败由 pytest 报告。
+    def test_alias_reference_in_having_passes(self) -> None:
+        """HAVING <别名> 是合法聚合过滤，不得拦截。"""
+        logger.debug("test_alias_reference_in_having_passes 入口")
+        from src.security.sql_schema_validation import validate_sql_schema
+
+        # Arrange
+        tables = [
+            {"name": "orders", "columns": [{"name": "amount"}, {"name": "customer_id"}]}
+        ]
+
+        # Act
+        issues = validate_sql_schema(
+            "SELECT SUM(amount) AS total FROM orders GROUP BY customer_id HAVING total > 100",
+            datasources=["pg_main"],
+            dialect="postgres",
+            tables=tables,
+        )
+
+        # Assert
+        assert issues == []
+        logger.info("test_alias_reference_in_having_passes 完成")
 
 
 class TestMultiSourceIsolation:
