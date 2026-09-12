@@ -199,26 +199,18 @@ def validate_sql_schema(
         tree = sqlglot.parse_one(sql, read=normalize_sql_dialect(dialect) or None)
     except Exception as exc:
         logger.error("Schema 校验解析失败", error=str(exc), exc_info=True)
-        return [ValidationIssue(type="parse_error", datasource=default_source)]
+        issues = [ValidationIssue(type="parse_error", datasource=default_source)]
+        _record_issues(issues, dialect, "stage1")
+        return issues
     if tree is None:
         logger.error("Schema 校验解析失败", error="解析结果为空")
-        return [ValidationIssue(type="parse_error", datasource=default_source)]
+        issues = [ValidationIssue(type="parse_error", datasource=default_source)]
+        _record_issues(issues, dialect, "stage1")
+        return issues
 
     issues = _collect_unknown_tables(tree, index, default_source)
     issues.extend(_collect_column_issues(tree, index, default_source))
-    for item in issues:
-        try:
-            from src.observability import get_metrics_registry
-
-            get_metrics_registry().record_schema_validation(
-                issue_type=item.type,
-                confidence=item.confidence,
-                dialect=dialect,
-                stage="stage1",
-            )
-        except Exception as exc:
-            # 指标不可用不得影响校验主流程
-            logger.debug("校验指标上报跳过", error=str(exc))
+    _record_issues(issues, dialect, "stage1")
     high_count = sum(1 for item in issues if item.confidence == "high")
     logger.info(
         "Schema 校验完成",
@@ -228,6 +220,38 @@ def validate_sql_schema(
         elapsed_ms=round((time.monotonic() - _start) * 1000),
     )
     return issues
+
+
+# 方法作用：把本次校验的问题清单上报到指标计数器，失败不得影响校验主流程。
+# Args: issues - 本次产生的问题清单；dialect - 解析方言；stage - 校验阶段。
+# Returns: 无返回值。
+def _record_issues(
+    issues: Sequence[ValidationIssue],
+    dialect: str,
+    stage: str,
+) -> None:
+    """逐条上报指标；指标不可用时只记 debug，不中断校验。"""
+    logger.debug("校验指标上报入口", issue_count=len(issues), dialect=dialect, stage=stage)
+    if not issues:
+        # 无问题属高频正常路径，只记 debug，避免每次校验多一行 INFO 噪音
+        logger.debug("校验指标上报跳过", reason="no_issues")
+        return
+    reported = 0
+    for item in issues:
+        try:
+            from src.observability import get_metrics_registry
+
+            get_metrics_registry().record_schema_validation(
+                issue_type=item.type,
+                confidence=item.confidence,
+                dialect=dialect,
+                stage=stage,
+            )
+            reported += 1
+        except Exception as exc:
+            # 指标不可用不得影响校验主流程
+            logger.debug("校验指标上报跳过", error=str(exc))
+    logger.info("校验指标上报完成", reported=reported, total=len(issues))
 
 
 # 方法作用：收集 SQL 中引用了未知表的问题。

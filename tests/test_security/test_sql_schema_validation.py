@@ -631,3 +631,41 @@ class TestValidationMetrics:
         # Assert
         assert b"data_agent_sql_schema_validation_total" in registry.render()
         logger.info("test_record_schema_validation 完成")
+
+    # 方法作用：验证解析失败的 SQL 也会上报 parse_error 指标。
+    # Args: self - pytest 用例实例；monkeypatch - pytest 补丁工具。
+    # Returns: 无返回值，断言失败由 pytest 报告。
+    def test_parse_error_is_counted(self, monkeypatch) -> None:
+        """解析失败的 SQL 必须计入指标，否则拦截率观测漏掉一整类。"""
+        logger.debug("test_parse_error_is_counted 入口")
+        from src.security import sql_schema_validation as module
+
+        # Arrange：捕获上报调用，避免断言全局注册表导致用例互相污染
+        recorded: list[dict] = []
+
+        class _Recorder:
+            """捕获指标上报入参的测试替身。"""
+
+            # 方法作用：把一次上报的关键字参数追加到 recorded。
+            # Args: self - 替身实例；kwargs - 上报关键字参数。
+            # Returns: 无返回值。
+            def record_schema_validation(self, **kwargs) -> None:
+                logger.debug("_Recorder.record_schema_validation 入口")
+                recorded.append(kwargs)
+                logger.info("_Recorder.record_schema_validation 完成")
+
+        monkeypatch.setattr(
+            "src.observability.get_metrics_registry", lambda: _Recorder()
+        )
+
+        # Act：故意传入无法解析的 SQL
+        module.validate_sql_schema(
+            "SELECT * FROM (",
+            datasources=["pg_main"],
+            dialect="postgres",
+            tables=[{"name": "orders", "columns": [{"name": "id"}]}],
+        )
+
+        # Assert
+        assert any(item["issue_type"] == "parse_error" for item in recorded)
+        logger.info("test_parse_error_is_counted 完成")
