@@ -521,6 +521,32 @@ class TestKnownBlindSpots:
         assert issues[0].confidence == "low"
         logger.info("test_qualified_star_is_marked 完成")
 
+    # 方法作用：验证嵌套派生表里的星号不被多个 scope 重复留痕。
+    # Args: self - pytest 用例实例。
+    # Returns: 无返回值，断言失败由 pytest 报告。
+    def test_nested_select_star_not_double_counted(self) -> None:
+        """内外各一个星号必须恰好留 2 条痕迹，而不是 3 条。"""
+        logger.debug("test_nested_select_star_not_double_counted 入口")
+        from src.security.sql_schema_validation import validate_sql_schema
+
+        # Arrange：外层 scope 若用 find_all(exp.Select) 会下探到内层，把内层星号再数一遍
+        tables = [{"name": "orders", "columns": [{"name": "id"}]}]
+
+        # Act
+        issues = validate_sql_schema(
+            "SELECT * FROM (SELECT * FROM orders) x",
+            datasources=["pg_main"],
+            dialect="postgres",
+            tables=tables,
+        )
+
+        # Assert：每个星号各留一条低置信痕迹
+        star_issues = [
+            item for item in issues if item.column == "*" and item.confidence == "low"
+        ]
+        assert len(star_issues) == 2
+        logger.info("test_nested_select_star_not_double_counted 完成")
+
 
 class TestMultiSourceIsolation:
     """覆盖多源隔离契约（spec/39 §4.4）。"""

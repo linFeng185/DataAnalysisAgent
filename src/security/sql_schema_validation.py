@@ -63,6 +63,16 @@ class ValidationIssue:
         return f"列 '{reference}' 不在表 {self.table} 的可用列中"
 
 
+# 方法作用：把数据源白名单归一化为去空白的字符串列表，过滤非字符串项。
+# Args: datasources - 调用方传入的数据源集合。
+# Returns: 归一化后的非空字符串列表，保持原顺序。
+def _normalize_datasources(datasources: Sequence[str]) -> list[str]:
+    """只保留非空白的字符串项，避免 None / 数字被字符串化成伪源名。"""
+    result = [item.strip() for item in datasources if isinstance(item, str) and item.strip()]
+    logger.debug("数据源白名单归一化完成", input_count=len(datasources), kept=len(result))
+    return result
+
+
 # 方法作用：把权威快照整理成 (数据源, 表名) -> 列名集合 的索引。
 # Args: tables - 权威快照，每张表可带可选 datasource 字段；datasources - 允许的数据源白名单。
 # Returns: 索引字典；非空白名单时 datasource 不在白名单内的表被整体跳过。
@@ -79,7 +89,7 @@ def build_table_index(
     """
     logger.debug("建表索引入口", table_count=len(tables), datasource_count=len(datasources))
     # 白名单只接受真实字符串项，避免 None / 数字被字符串化成 "None" / "5" 之类的伪源名
-    allowed = [item.strip() for item in datasources if isinstance(item, str) and item.strip()]
+    allowed = _normalize_datasources(datasources)
     allowed_set = set(allowed)
     default_source = allowed[0] if allowed else ""
     index: dict[tuple[str, str], frozenset[str]] = {}
@@ -177,9 +187,8 @@ def validate_sql_schema(
         dialect=dialect,
     )
     _start = time.monotonic()
-    default_source = next(
-        (str(item).strip() for item in datasources if str(item).strip()), ""
-    )
+    allowed = _normalize_datasources(datasources)
+    default_source = allowed[0] if allowed else ""
     index = build_table_index(tables, datasources)
     try:
         import sqlglot
@@ -280,9 +289,11 @@ def _collect_column_issues(
             for table, owner in owners.items()
             if owner is not None and owner != "ambiguous"
         }
-        # 证据 2 + 4：星号不进入 scope.columns，必须直接检查 SELECT 投影顶层，
+        # 证据 2 + 4：星号不进入 scope.columns，必须直接检查本 scope 的 SELECT 投影顶层；
         # 且不能用 find_all(exp.Star)（会把 COUNT(*) 误报为无法校验）。
-        for select in scope.expression.find_all(exp.Select):
+        # 也不用 find_all(exp.Select)——它会下探子查询，使同一星号被多个 scope 重复留痕。
+        select = scope.expression
+        if isinstance(select, exp.Select):
             for projection in select.expressions:
                 if _is_star_projection(projection):
                     logger.warning("列引用无法判定", reason="select_star")
