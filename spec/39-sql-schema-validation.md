@@ -300,7 +300,12 @@ def validate_sql_schema(sql, *, datasources, dialect, tables): ...
 
 **依据**：`src/knowledge/schema_manager.py:104,130` 确认 `user_query` 为空时不触发 `_filter_relevant_tables`；`get_or_fetch_schema`（`src/knowledge/schema_manager.py:69`）有四级回退，且带 7 天 TTL 的连接级共享缓存（`src/knowledge/datasource_cache.py`），通常命中内存或本地 JSON，不打库。
 
-**收益**：合法 SQL 零额外开销；消除两条链路的基准差异与误杀；同时修掉空窗 #1（阶段一为空 → 直接进阶段二；阶段二也拿不到 → fail-closed 报 `unknown_table`，不再静默放行）。
+**收益**：合法 SQL 零额外开销；消除两条链路的基准差异与误杀；同时修掉空窗 #1：
+
+- **阶段一为空（无基准）→ 仍然进入阶段二复核**。触发条件是「有 high 置信 issue **或** 阶段一没有基准可比对」（`need_recheck = bool(high_issues) or not tables_hint`），不是只看 high issue——否则空基准会直接放行，空窗依旧。
+- **阶段二也拿不到权威快照 → 按低置信放行 + warning 留痕**。
+
+> 注：此处**不**采用 fail-closed 报 `unknown_table`。空基准下「表不存在」不是可确认的结论——若按 high 置信上报，会对 SQL 里的**每一张表**都给出误导性诊断（模型据此改表名只会越改越错），且违背 §5.4「无法判定 → 不拦截」的分层原则。`_collect_unknown_tables` 以 `has_baseline = bool(index)` 区分「无基准」与「表确实不在基准里」，前者降 low、后者仍 high。
 
 **待验证假设**：阶段二的缓存命中率。实现时必须加日志确认，不允许该假设默默存在。
 
