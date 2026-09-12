@@ -350,6 +350,29 @@ class TestQualifiedColumn:
         assert issues == []
         logger.info("test_valid_qualified_column_passes 完成")
 
+    # 方法作用：验证表在索引中但列集为空时限定列判定降级，不产出 high 置信拦截。
+    # Args: self - pytest 用例实例。
+    # Returns: 无返回值，断言失败由 pytest 报告。
+    def test_qualified_column_degrades_when_table_has_no_columns(self) -> None:
+        """快照只知道表存在、未携带列信息时，不得把该表上的列判为幻觉列。"""
+        logger.debug("test_qualified_column_degrades_when_table_has_no_columns 入口")
+        from src.security.sql_schema_validation import validate_sql_schema
+
+        # Arrange：orders 在册但列集为空（快照未展开列详情）
+        tables = [{"name": "orders", "columns": []}]
+
+        # Act
+        issues = validate_sql_schema(
+            'SELECT "o"."amount" FROM "orders" AS "o"',
+            datasources=["pg_main"],
+            dialect="postgres",
+            tables=tables,
+        )
+
+        # Assert：无列信息即无法确认列不存在，必须降级而不是 high 拦截
+        assert [item for item in issues if item.confidence == "high"] == []
+        logger.info("test_qualified_column_degrades_when_table_has_no_columns 完成")
+
     # 方法作用：验证限定符指向 CTE 时判为无法判定而非幻觉。
     # Args: self - pytest 用例实例。
     # Returns: 无返回值，断言失败由 pytest 报告。
@@ -451,6 +474,55 @@ class TestUnqualifiedColumn:
         assert issues[0].confidence == "high"
         assert issues[0].column == "bogus"
         logger.info("test_unqualified_zero_hit_is_hallucination 完成")
+
+    # 方法作用：验证表在索引中但列集为空时未限定列零命中不判为 high 置信幻觉。
+    # Args: self - pytest 用例实例。
+    # Returns: 无返回值，断言失败由 pytest 报告。
+    def test_column_check_degrades_when_table_has_no_columns(self) -> None:
+        """快照只知道表存在、未携带列信息时，零命中不得判为幻觉列（否则所有查询都被误拦）。"""
+        logger.debug("test_column_check_degrades_when_table_has_no_columns 入口")
+        from src.security.sql_schema_validation import validate_sql_schema
+
+        # Arrange：orders 在册但列集为空
+        tables = [{"name": "orders", "columns": []}]
+
+        # Act
+        issues = validate_sql_schema(
+            "SELECT amount FROM orders",
+            datasources=["pg_main"],
+            dialect="postgres",
+            tables=tables,
+        )
+
+        # Assert：没有列信息就没有比对基准，不得产出 high 置信的 unknown_column
+        assert [item for item in issues if item.confidence == "high"] == []
+        logger.info("test_column_check_degrades_when_table_has_no_columns 完成")
+
+    # 方法作用：验证列信息已知时未知列仍被 high 置信拦截，空列集降级不开洞。
+    # Args: self - pytest 用例实例。
+    # Returns: 无返回值，断言失败由 pytest 报告。
+    def test_column_check_still_blocks_when_columns_are_known(self) -> None:
+        """列集已知且列不在其中时，必须继续产出 high 置信 unknown_column。"""
+        logger.debug("test_column_check_still_blocks_when_columns_are_known 入口")
+        from src.security.sql_schema_validation import validate_sql_schema
+
+        # Arrange：orders 的列信息完整（只有 id）
+        tables = [{"name": "orders", "columns": [{"name": "id"}]}]
+
+        # Act
+        issues = validate_sql_schema(
+            "SELECT amount FROM orders",
+            datasources=["pg_main"],
+            dialect="postgres",
+            tables=tables,
+        )
+
+        # Assert：降级只针对无列信息的表，列信息已知的表照旧拦截
+        assert len(issues) == 1
+        assert issues[0].type == "unknown_column"
+        assert issues[0].confidence == "high"
+        assert issues[0].column == "amount"
+        logger.info("test_column_check_still_blocks_when_columns_are_known 完成")
 
     # 方法作用：验证含 CTE 时未限定列零命中降级为低置信，不拦截。
     # Args: self - pytest 用例实例。

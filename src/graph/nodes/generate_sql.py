@@ -931,17 +931,23 @@ def _check_table_hallucination(
     """12.1.6 检查 SQL 中引用的表名是否在 relevant_tables 中存在。
 
     使用 sqlglot 提取 FROM/JOIN 子句中的表引用，与已知表名比对，拦截 LLM 幻觉。
+    表名判定复用 src.security.sql_schema_validation 的表索引与归属解析，
+    与 layer3 / execute_sql 共用同一实现，避免多处判定各自漂移。
     """
     if not tables:
         logger.info("表名幻觉校验跳过", reason="Schema 表为空")
         return []
-    known = {t["name"].lower() for t in tables if t.get("name")}
-    known_bases = {name.rsplit(".", 1)[-1] for name in known}
+    # 表名判定统一走共享校验模块，避免与 layer3 / execute_sql 的表名判定各自漂移
+    from src.security.sql_schema_validation import build_table_index, resolve_table_owner
+
+    # 空白名单表示不按数据源过滤：本函数只面对单条 SQL 对应的单一 Schema 快照
+    index = build_table_index(tables, [""])
+    known_names = sorted({t["name"].lower() for t in tables if t.get("name")})
     unknown: list[str] = []
     parser_dialect = normalize_sql_dialect(dialect)
     logger.debug(
         "表名幻觉校验边界输入",
-        known_tables=sorted(known),
+        known_tables=known_names,
         parser_dialect=parser_dialect or "default",
         sql=sql,
     )
@@ -954,37 +960,34 @@ def _check_table_hallucination(
             "表名幻觉校验解析完成",
             parsed_type=type(parsed).__name__,
             statement_count=len(parsed),
-            has_walk=hasattr(parsed, "walk"),
             parser_dialect=parser_dialect or "default",
         )
         for statement in parsed:
+            if statement is None:
+                continue
+            # CTE 名会出现在 find_all(exp.Table) 中，必须显式排除，否则 CTE 查询全被误拦
             cte_names = {
                 str(cte.alias_or_name).lower()
                 for cte in statement.find_all(exp.CTE)
                 if cte.alias_or_name
             }
             for table in statement.find_all(exp.Table):
-                table_name = str(table.name or "").lower()
-                qualified_name = ".".join(
-                    str(part).lower()
-                    for part in (table.catalog, table.db, table.name)
-                    if part
-                )
-                if not table_name or table_name in cte_names:
+                table_name = str(table.name or "").strip().lower()
+                if not table_name or table_name in cte_names or table_name in unknown:
                     continue
-                if table_name in known_bases or qualified_name in known:
-                    continue
-                if table_name not in unknown:
+                # 统一判定：归属唯一即合法；不存在才算幻觉候选
+                if resolve_table_owner(index, table_name) is None:
                     unknown.append(table_name)
     except Exception as exc:
         logger.error(
             "表名幻觉校验异常",
             error=str(exc),
             parser_dialect=parser_dialect or "default",
-            known_tables=sorted(known),
+            known_tables=known_names,
             exc_info=True,
         )
-        unknown.append("SQL 解析失败，已阻断执行")
+        # 失败关闭：解析异常不得当作「无幻觉」放行，调用方见非空结果即拦截并触发重试
+        return ["SQL 解析失败，已阻断执行"]
     logger.debug("表名幻觉校验完成", unknown_tables=unknown, unknown_count=len(unknown))
     return unknown
 

@@ -423,7 +423,7 @@ def _is_star_projection(node: Any) -> bool:
 # 方法作用：校验带限定符的列是否属于限定符指向的真实表。
 # Args: column_name - 列名（小写）；qualifier - 限定符（小写）；local_tables - 别名 -> 真实表；
 #       owners - 真实表 -> 归属源；index - 权威索引。
-# Returns: 问题列表；限定符指向 CTE 或归属不明时返回空。
+# Returns: 问题列表；限定符指向 CTE、归属不明或该表列信息为空时返回空。
 def _check_qualified_column(
     column_name: str,
     qualifier: str,
@@ -442,6 +442,18 @@ def _check_qualified_column(
         return []
     columns = index.get((owner, real_table), frozenset())
     if column_name in columns:
+        return []
+    # 表在索引中但列集为空（快照只证明表存在、未携带列信息）：没有任何列可比对，
+    # 「该列不属于此表」无法确认。此时必须降级放行并留痕，否则该表上所有合法列
+    # 都会被判为幻觉列，误导重试去改本来正确的列名。
+    if not columns:
+        logger.warning(
+            "列引用无法判定",
+            reason="table_has_no_columns",
+            table=real_table,
+            column=column_name,
+            qualifier=qualifier,
+        )
         return []
     providers = sorted(
         table
@@ -527,6 +539,16 @@ def _check_unqualified_column(
             column=column_name,
             resolved_count=len(resolved),
             total_table_count=total_table_count,
+        )
+        return []
+    # 本 scope 所有候选表的列集都为空（快照未携带列信息）：零命中不是可确认的结论，
+    # 降级放行并留痕。只要有一张候选表列信息已知，就保留原有 high 置信判定。
+    if not any(index.get((owner, table), frozenset()) for table, owner in resolved.items()):
+        logger.warning(
+            "列引用无法判定",
+            reason="tables_have_no_columns",
+            column=column_name,
+            candidate_tables=sorted(resolved)[:5],
         )
         return []
     table, owner = next(iter(resolved.items()))
