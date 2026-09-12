@@ -245,7 +245,7 @@ class TestLayer3TwoStageValidation:
 # Args: tables - (表名, 列名序列) 二元组序列。
 # Returns: 带 tables 属性的 SimpleNamespace 快照桩。
 def _build_snapshot_stub(tables: list[tuple[str, list[str]]]) -> SimpleNamespace:
-    logger.debug("构造快照桩入口", table_count=len(tables))
+    logger.debug(f"构造快照桩入口 table_count={len(tables)}")
     result = SimpleNamespace(
         tables=[
             SimpleNamespace(
@@ -255,7 +255,7 @@ def _build_snapshot_stub(tables: list[tuple[str, list[str]]]) -> SimpleNamespace
             for name, columns in tables
         ]
     )
-    logger.info("构造快照桩完成", table_count=len(tables))
+    logger.info(f"构造快照桩完成 table_count={len(tables)}")
     return result
 
 
@@ -265,7 +265,7 @@ def _build_snapshot_stub(tables: list[tuple[str, list[str]]]) -> SimpleNamespace
 def _stage_one_high_issues(tables: list[dict]) -> list:
     from src.security.sql_schema_validation import validate_sql_schema
 
-    logger.debug("复现阶段一校验入口", table_count=len(tables))
+    logger.debug(f"复现阶段一校验入口 table_count={len(tables)}")
     issues = validate_sql_schema(
         STAGE_TWO_SQL,
         datasources=[STAGE_TWO_DATASOURCE],
@@ -273,7 +273,7 @@ def _stage_one_high_issues(tables: list[dict]) -> list:
         tables=tables,
     )
     high = [item for item in issues if item.confidence == "high"]
-    logger.info("复现阶段一校验完成", high_issue_count=len(high))
+    logger.info(f"复现阶段一校验完成 high_issue_count={len(high)}")
     return high
 
 
@@ -294,9 +294,8 @@ class _StubSchemaManager:
         # 记录每次取数的数据源名，供用例断言阶段二确实被触发
         self.calls: list[str] = []
         logger.debug(
-            "桩 SchemaManager 构造",
-            has_snapshot=snapshot is not None,
-            error=type(error).__name__ if error else "",
+            f"桩 SchemaManager 构造 has_snapshot={snapshot is not None} "
+            f"error={type(error).__name__ if error else ''}"
         )
 
     # 方法作用：模拟 SchemaManager 取数，按构造参数返回快照或抛异常。
@@ -305,11 +304,13 @@ class _StubSchemaManager:
     async def get_or_fetch_schema(
         self, datasource: str, user_query: str = ""
     ) -> SimpleNamespace | None:
-        logger.debug("桩取数入口", datasource=datasource, user_query=user_query)
+        logger.debug(
+            f"桩取数入口 datasource={datasource} user_query={user_query}"
+        )
         self.calls.append(datasource)
         if self._error is not None:
             raise self._error
-        logger.info("桩取数完成", datasource=datasource)
+        logger.info(f"桩取数完成 datasource={datasource}")
         return self._snapshot
 
 
