@@ -192,6 +192,33 @@ class TestUnknownTable:
         assert issues[0].confidence == "high"
         logger.info("test_unknown_table_blocked 完成")
 
+    # 方法作用：验证空基准时表引用降级为低置信，不误报「表不存在」。
+    # Args: self - pytest 用例实例。
+    # Returns: 无返回值，断言失败由 pytest 报告。
+    def test_unknown_table_is_low_confidence_without_baseline(self) -> None:
+        """没有任何权威基准时不得断言表不存在（设计 §5.4 无法判定不拦截）。"""
+        logger.debug("test_unknown_table_is_low_confidence_without_baseline 入口")
+        from src.security.sql_schema_validation import validate_sql_schema
+
+        # Arrange：空基准——真实原因是快照不可得，而不是表不存在
+        tables: list[dict] = []
+
+        # Act
+        issues = validate_sql_schema(
+            "SELECT id FROM ghost_table",
+            datasources=["pg_main"],
+            dialect="postgres",
+            tables=tables,
+        )
+
+        # Assert：仍留痕但降为低置信，避免误导重试去改表名，也不得产出任何 high 拦截
+        table_issues = [item for item in issues if item.type == "unknown_table"]
+        assert len(table_issues) == 1
+        assert table_issues[0].table == "ghost_table"
+        assert table_issues[0].confidence == "low"
+        assert [item for item in issues if item.confidence == "high"] == []
+        logger.info("test_unknown_table_is_low_confidence_without_baseline 完成")
+
     # 方法作用：验证 CTE 名不被误判为不存在的表。
     # Args: self - pytest 用例实例。
     # Returns: 无返回值，断言失败由 pytest 报告。

@@ -256,7 +256,7 @@ def _record_issues(
 
 # 方法作用：收集 SQL 中引用了未知表的问题。
 # Args: tree - 已解析语法树；index - 权威索引；default_source - issue 归属源。
-# Returns: unknown_table 问题列表（多源同名表为 low 置信）。
+# Returns: unknown_table 问题列表（多源同名表与空基准均为 low 置信）。
 def _collect_unknown_tables(
     tree: Any,
     index: Mapping[tuple[str, str], frozenset[str]],
@@ -266,6 +266,9 @@ def _collect_unknown_tables(
     from sqlglot import exp
 
     issues: list[ValidationIssue] = []
+    # 索引为空说明本次没有任何权威基准可比对：此时「表不存在」不是可确认的结论，
+    # 按 low 置信放行（设计 §5.4「无法判定不拦截」），但仍记 warning 留痕，避免静默。
+    has_baseline = bool(index)
     # 证据 3：CTE 名会出现在 find_all(exp.Table) 中，必须显式排除，否则被误判为幻觉表。
     cte_names = {
         str(cte.alias_or_name).strip().lower()
@@ -290,10 +293,22 @@ def _collect_unknown_tables(
                 )
             )
         elif owner is None:
-            logger.warning("表引用不存在", table=name)
-            issues.append(
-                ValidationIssue(type="unknown_table", datasource=default_source, table=name)
-            )
+            if not has_baseline:
+                # 空基准下的「表不存在」不可确认，只降级留痕，不产出 high 置信拦截
+                logger.warning("表引用无法判定", reason="empty_snapshot", table=name)
+                issues.append(
+                    ValidationIssue(
+                        type="unknown_table",
+                        datasource=default_source,
+                        table=name,
+                        confidence="low",
+                    )
+                )
+            else:
+                logger.warning("表引用不存在", table=name)
+                issues.append(
+                    ValidationIssue(type="unknown_table", datasource=default_source, table=name)
+                )
     return issues
 
 

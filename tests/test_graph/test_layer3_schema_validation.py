@@ -56,6 +56,7 @@ class TestLayer3TwoStageValidation:
     # Returns: 无返回值，断言失败由 pytest 报告。
     def test_validation_errors_carry_structured_issues(self) -> None:
         """issues 必须含 table / available_columns，否则无法生成有效回喂。"""
+        logger.debug("test_validation_errors_carry_structured_issues 入口")
         from src.graph.nodes.layer3_validate import layer3_validate_node
 
         # Arrange
@@ -76,6 +77,51 @@ class TestLayer3TwoStageValidation:
         issues = result["validation_errors"][0]["issues"]
         assert issues[0]["table"] == "finance_invoices"
         assert "event_date" in issues[0]["available_columns"]
+        logger.info("test_validation_errors_carry_structured_issues 完成")
+
+    # 方法作用：验证节点采纳阶段二复核结果，假阳性被消除后最终放行。
+    # Args: self - pytest 用例实例；monkeypatch - pytest 补丁工具。
+    # Returns: 无返回值，断言失败由 pytest 报告。
+    def test_layer3_stage_two_false_positive_is_cleared(self, monkeypatch) -> None:
+        """阶段一在裁剪基准上报出的 high issue，经全量快照复核后必须被节点采纳清除。"""
+        logger.debug("test_layer3_stage_two_false_positive_is_cleared 入口")
+        from src.graph.nodes.layer3_validate import layer3_validate_node
+
+        # Arrange：注入节点实际读取的上下文字段（routing.datasource / execution.dialect）
+        contexts = SimpleNamespace(
+            routing=SimpleNamespace(datasource=STAGE_TWO_DATASOURCE),
+            execution=SimpleNamespace(dialect=STAGE_TWO_DIALECT),
+        )
+        monkeypatch.setattr(
+            "src.graph.context.read_contexts", lambda state: contexts, raising=False
+        )
+        # 前置条件：阶段一基准是被裁剪过的表（缺 created_at），必然报出 high issue
+        assert _stage_one_high_issues(STAGE_TWO_TRIMMED_TABLES), (
+            "前置条件：裁剪快照必须让阶段一报出 high issue"
+        )
+        # 全量快照里 finance_invoices 含 created_at → 阶段二应消除该假阳性
+        manager = _StubSchemaManager(
+            _build_snapshot_stub(
+                [("finance_invoices", ["event_date", "year_month", "created_at"])]
+            )
+        )
+        monkeypatch.setattr(
+            "src.knowledge.schema_manager.get_schema_manager",
+            lambda: manager,
+            raising=False,
+        )
+        state = {
+            "generated_sql": STAGE_TWO_SQL,
+            "relevant_tables": STAGE_TWO_TRIMMED_TABLES,
+        }
+
+        # Act
+        result = asyncio.run(layer3_validate_node(state))
+
+        # Assert：节点必须采纳复核结果（删掉采纳赋值这行，本用例会因 sql_valid 为 False 变红）
+        assert result["sql_valid"] is True
+        assert result["validation_errors"] == []
+        logger.info("test_layer3_stage_two_false_positive_is_cleared 完成")
 
 
 # 方法作用：构造极简权威快照桩，只保留阶段二复核所需的 tables 属性。
