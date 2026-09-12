@@ -18,6 +18,13 @@
 | 23.12 | 登录用户实时 Drilldown | `src/reporting/live_drilldown.py`、私有模板表、API、查看器 | 服务端模板、当前 ACL、字面量过滤、EXPLAIN、限流、配额、脱敏；公开分享不下发 live 定义 | Phase 2 | 集成测试完成 | P1 |
 | 23.13 | 页面延期与永久策略管理 | 报表 Store、API、查看器 | 已过期但未清理页面可延期；每次最多 30 天；永久能力独立校验；旧分享不自动续期或恢复 | Phase 2 | 集成测试完成 | P1 |
 | 23.14 | 跨源聚合分析完善 | `src/reporting/aggregation.py`、报表子图 | 明确共同粒度、独立来源样本统计、行数/分组/字节预算与安全降级；不冒充全量业务总额 | Phase 2/3 | 集成测试完成 | P2 |
+| 23.15 | 报表视觉模板与生成期选择 | `migrations/027_report_job_template.sql`、`src/reporting/models.py`、`src/reporting/store.py`、`src/reporting/runner.py`、`src/reporting/document.py`、`src/api/routes/report_workbench.py`、`frontend/src/report/templates.ts`、`frontend/src/components/report/TemplateScope.tsx`、`frontend/src/components/report/chartBase.ts`、`frontend/src/hooks/useReportTemplate.ts` | 四套内置模板（洞察/墨玉/纸感/商务）的配色·字体·密度 token 体系；模板在创建任务时选定并存入 `report_jobs.template_id`（**不进 `ReportPlan`、不进 `canonical_hash`**，故换模板不触发重新预览与重新确认），发布时写入 `document.theme.template_id`；阅读端与分享页可临时切换而不改版本；CSS 变量 + 嵌套 antd ConfigProvider + ECharts 基线三面注入，作用域限定报表容器。前端为视觉唯一真源，后端只校格式不持清单。设计见 `spec/41-report-visual-templates.md` | Phase 3 | 待开发 | P2 |
+| 23.16 | 确定性深挖分析 | `src/reporting/profiling.py`（仅适配层）、`src/tools/processors.py`、`src/graph/subgraphs/report_workbench.py` | **复用** `src/tools/processors.py` 既有统计能力（同比/环比/趋势/异常/贡献度/分布/帕累托），报表侧只加约 100 行适配层做参数推导与 `ProcessorResult → UnitFinding` 转换，**不重写统计逻辑**；补报表级严谨性：IQR 1.5 倍 + MAD 修正 z-score 双判据、R² < 0.3 不给方向性措辞、样本截断披露、`method` 必填、时间列识别优先 schema 类型而非列名猜测。**同时修 `processors.yoy` 的既有 bug**（其 `process()` 与 `mom` 逐字相同，算的是环比却输出"同比均值"）| Phase 3 | 待开发 | P1 |
+| 23.17 | 两阶段发散与档位额度 | `src/reporting/models.py`、`src/reporting/planner.py`、`src/llm/prompts.py`、`src/llm/output_contracts.py`、`src/graph/subgraphs/report_workbench.py`、`src/reporting/runner.py` | 计划期发散（`report.diverge`，schema 驱动，取数前只看得到表名清单）与运行期发散（`report.supplement` + `report_decide_supplement` 受控回路，数据驱动，基于实际取回数据加工出的显著发现决定补查）两阶段；档位是**一次性总授权额度**（保守 0 / 标准 3 / 深度 6）而非每轮授权，两阶段共享同一份额度；回路轮数 0/1/2、单轮上限 0/2/3；回路进入前先走确定性前置筛选（无 high/moderate finding 则不消耗 LLM 调用）；服务端重分配 `unit_id`、清空越权数据源、硬校验因果措辞、运行期建议必须带 `supports_finding`；`runner` 按最坏情况预占配额，`limitations` 强制披露运行期追加数量 | Phase 3 | 待开发 | P1 |
+| 23.18 | 跨源分布级关联与影响判定 | `src/reporting/relations.py`、`src/reporting/document.py` | 新增 `analyze_cross_source`：两侧各自独立聚合，有时间列则内连接对齐后做 Spearman 秩相关（对齐后观测点 < 8 判 `insufficient`），无时间列则做分布级秩相关；**不做行级 join、不做键匹配、不估算连接行数、不伪造 match_rate**；产出 `cross_source_statistical` 证据并强制附"不构成因果"局限；关系块派生 direction/strength 展示，证据层不存冗余字段 | Phase 3 | 待开发 | P1 |
+| 23.19 | 指标口径溯源 | `src/knowledge/metric_catalog.py`、`src/graph/subgraphs/report_workbench.py`、`src/reporting/document.py` | 复用既有 `resolve_metric_reference()`（`metric_catalog.py:250-276`）把单元指标对应到租户指标目录的**已批准口径版本**，产出 `source_citation` block（该 block 类型此前"定义了无产出"，本项填上）；**不做数值对照** —— 指标目录只有 code/name/datasource/dialect/expression/description/unit，**没有目标值字段**；不解析 `description` 自由文本；未命中即不产出 | Phase 3 | 待开发 | P2 |
+| 23.20 | 预览裁剪与计划单调删减 | `src/reporting/models.py`、`src/reporting/store.py`、`src/api/routes/report_workbench.py`、`migrations/028_report_job_preview_hash.sql` | `POST /jobs` 新增 `accepted_unit_ids`（`None` = 全部接受，`[]` = 422），服务端校验其为预览计划 `unit_ids` 的子集后重建 effective plan（重新走全部既有校验）；**只允许删减不允许新增**，故不构成越权；被删 id 记入 `ReportPlan.excluded_unit_ids` 保留审计线索；`plan_json` 存 effective、`plan_hash` 语义不变、新增 `preview_hash` 存审计凭证；与 `plan_override` 互斥。裁剪只作用于计划期单元，运行期追加由档位额度约束 | Phase 3 | 待开发 | P1 |
+| 23.21 | 报表运行计数统计 | `src/reporting/run_stats.py`、`src/llm/client.py`、`src/security/sql_execution.py`、`src/reporting/runner.py`、`src/reporting/store.py`、`src/reporting/models.py`、`migrations/029_report_run_stats.sql`、`frontend/src/pages/ReportWorkbenchPage.tsx` | 修复既有缺陷：`report_runs` 的 `query_count`/`token_usage` 写入的是 `plan.estimated` 的**估算值**而非实际发生值。新增五列真实计数 `llm_call_count`/`llm_failure_count`/`sql_query_count`/`sql_success_count`/`sql_failure_count`。用 contextvar 持有**可变**计数器对象（asyncio task 复制上下文后仍共享同一引用，若存不可变 int 会丢失子任务计数，这是必须避开的陷阱）。LLM 埋点在 `src/llm/client.py` 工厂层——唯一全覆盖层，`generate_sql` 等直连 `get_task_llm` 不走 `invocation.py`；SQL 埋点在 `validate_and_execute_sql()` 这一唯一执行入口。非报表路径无活动计数器时埋点为 no-op。既有 `query_count` 配额语义**保持不变**，界面可对比展示预估 vs 实际。设计见 `spec/43-report-run-statistics.md` | Phase 3 | 待开发 | P2 |
 
 ## 依赖关系
 
@@ -42,11 +49,18 @@
 
 ## 模块收尾
 
-模块总计 14 项，已完成 14 项，待开发 0 项。这里的完成指当前编号描述的实现与测试状态，不表示真实 PostgreSQL、容灾演练或外部模型的生产验收完成。
+模块总计 21 项，已完成 14 项，待开发 7 项。这里的完成指当前编号描述的实现与测试状态，不表示真实 PostgreSQL、容灾演练或外部模型的生产验收完成。
 
 | 待开发项 | 不开发原因 | 可开发条件 | 预计开发时机 |
 |---|---|---|---|
-| 无 | 本轮编号范围内均已实现 | 生产验收见下文，不另伪造开发完成状态 | — |
+| 23.15 报表视觉模板与生成期选择 | 2026-09-12 完成设计评审，尚未进入实现；设计见 `spec/41-report-visual-templates.md` | 无外部依赖（不新增接口），设计已定稿即可开工；需先确认四套模板的 token 取值符合预期观感 | Phase 3，与 23.16–23.20 无前后依赖，可并行 |
+| 23.16 确定性深挖分析 | 2026-09-12 完成设计评审；设计见 `spec/42-report-divergent-analysis.md` 第 5 节 | 无外部依赖（pandas/numpy 已在 `requirements.txt:16-17`）；复用 `processors.py` 需先跑 `tests/test_tools/` 回归确认 `yoy` 修复无破坏 | Phase 3，与 23.15 并行 |
+| 23.17 两阶段发散与档位额度 | 同 23.16；设计见 `spec/42` 第 4、6 节 | 需要 `report_diverge` 与 `report_supplement` 任务的可用模型；模型不可用时按设计只写 warning 降级，不阻塞开发。**依赖阶段 A 先关闭旧补查回环**，否则两套回路叠加导致成本失控 | Phase 3，依赖 23.16 |
+| 23.18 跨源分布级关联与影响判定 | 同 23.16；设计见 `spec/42` 第 7 节 | 无外部依赖；真实跨源样本可用测试数据构造 | Phase 3 |
+| 23.19 指标口径溯源 | 同 23.16；设计见 `spec/42` 第 8 节 | 依赖租户指标目录中存在已批准生效版本；目录为空时按设计不产出，不阻塞开发 | Phase 3 |
+| 23.20 预览裁剪与计划单调删减 | 同 23.16；设计见 `spec/42` 第 9 节 | 无外部依赖；需应用迁移 `028_report_job_preview_hash.sql`（真实 PostgreSQL 验收另行执行） | Phase 3 |
+| （阶段 A 前置修复） | 未单列功能点，属 23.16/23.17 的实施前置：`runner` 注入 `capability="report"`、修 `processors.yoy` 既有 bug、`UnitResult.total_rows`、`query_count` 上限 16→64 | 无外部依赖，**必须最先做** | Phase 3，最先 |
+| （其余项） | 本轮编号范围内均已实现 | 生产验收见下文，不另伪造开发完成状态 | — |
 
 ### 续开发交付与验收边界
 

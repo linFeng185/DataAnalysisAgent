@@ -38,3 +38,6 @@
 | [36-large-test-datasets.md](36-large-test-datasets.md) | 每源 125 表、五业务域与千万级中文模拟数据 | 动态 |
 | [39-sql-schema-validation.md](39-sql-schema-validation.md) | SQL Schema 校验层设计（生成后 · 打库前） | 动态 |
 | [40-sql-schema-validation-implementation-plan.md](40-sql-schema-validation-implementation-plan.md) | SQL Schema 校验层实施计划（8 个 Task，阶段 A/B） | 动态 |
+| [41-report-visual-templates.md](41-report-visual-templates.md) | 报表视觉模板体系设计（配色 · 字体 · 密度） | 动态 |
+| [42-report-divergent-analysis.md](42-report-divergent-analysis.md) | 报表智能发散分析设计（扩单元 · 深挖 · 关联 · 基准） | 动态 |
+| [43-report-run-statistics.md](43-report-run-statistics.md) | 报表运行计数统计设计（LLM 调用 · SQL 执行 · 成败） | 动态 |

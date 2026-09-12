@@ -127,9 +127,17 @@
 | 18.12.5 | 对话推理开关与深度 | `ChatPage.tsx`、`useChat.ts`、`client.ts` | 按模型能力启用推理开关并动态展示有效深度，统一随请求传递 | 单测完成 | P0 |
 | 18.12.6 | 租户管理员展开治理 | `AdminPage.tsx` | 超级管理员租户列表展示编码，展开行按需查看管理员并重置密码 | 单测完成 | P0 |
 
+### 18.13 报表视觉模板渲染
+
+| # | 功能 | 文件 | 描述 | 状态 | 优先级 |
+|---|------|------|------|------|--------|
+| 18.13.1 | 报表模板渲染与切换 → 见 23.15 | `frontend/src/report/templates.ts`、`frontend/src/components/report/TemplateScope.tsx`、`frontend/src/components/report/chartBase.ts`、`frontend/src/hooks/useReportTemplate.ts`、`frontend/src/index.css` | 四套内置模板的 token 注册表与解析回退；CSS 变量 + 嵌套 antd ConfigProvider + ECharts 基线三面注入，作用域限定报表容器；渲染器消费 `document.theme.template_id`；阅读端与分享页可临时切换。设计见 `spec/41-report-visual-templates.md` | 待开发（→ 见 23.15） | P2 |
+
+> 18.13 是 23.15 的渲染侧视角，主实现与完成状态在 `features/23-report-workbench.md` 下跟踪，本页不重复计数。
+
 ### 模块收尾
 
-模块功能点共 64 项，已完成 64 项，待开发 0 项。
+模块功能点共 64 项，已完成 64 项，待开发 0 项。18.13 为渲染侧指针，其实现在 23.15 下跟踪，不计入本页待开发数。
 
 | 功能点 | 不开发原因 | 可开发条件 | 预计开发时机 |
 |--------|------------|------------|--------------|
