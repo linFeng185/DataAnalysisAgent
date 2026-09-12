@@ -42,8 +42,8 @@
 | 26.4.2 | 命名空间（schema/database） | `TableSchema.name` 不含命名空间；`analytics.orders` 的 `analytics` 落在 `node.db` 被丢弃 | 当前仅按表名匹配；实测 `SELECT analytics.created_at FROM analytics.orders` 返回 `[]`，只留 reason=`cte_qualifier` 的 warning（无独立命名空间判定、不产出低置信 issue）；设计契约在 `tables` 入参上预留可选 `schema` 字段（校验器尚未读取） |
 | 26.4.3 | 方言特有表函数 / `UNNEST` / `LATERAL` | 未纳入本设计承诺范围 | 后续按方言实测补充 |
 | 26.4.4 | 快照与真实库漂移 | 基准来自各级缓存 | 独立议题 |
-| 26.4.5 | `HAVING <未限定幻觉列>` | sqlglot 把 HAVING 未限定引用当输出列引用，不进 `scope.columns` | 实测零 issue 放行，只留 reason=`cte_or_unresolved` warning（spec/39 §10.6） |
-| 26.4.6 | `UNION` 末尾 `ORDER BY <幻觉列>` | 外层 Union scope `sources={}`，走 `not resolved` 分支放行 | 实测零 issue **且零 warning，完全静默**（spec/39 §10.7）；不得当作已校验通过 |
+| 26.4.5 | `HAVING <未限定幻觉列>` | sqlglot 把 HAVING 未限定引用当输出列引用，不进 `scope.columns`，连 warning 分支都到不了 | 实测零 issue **且零相关 warning，完全静默**（spec/39 §10.6）；日志无任何线索，不得当作已校验通过 |
+| 26.4.6 | `UNION` 末尾 `ORDER BY <幻觉列>` | 外层 Union scope `sources={}`，走 `not resolved` 分支放行（该分支留痕） | 实测零 issue，但留 reason=`cte_or_unresolved` warning（`resolved_count=0 total_table_count=0`，spec/39 §10.7）；日志可查，不得当作已校验通过 |
 
 ### 26.5 依赖关系
 

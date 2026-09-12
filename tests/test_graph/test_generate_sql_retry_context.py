@@ -337,41 +337,7 @@ class TestRetryContextSchemaHallucination:
         from src.graph.nodes.layer3_validate import layer3_validate_node
 
         # Arrange：两张表都有 id，SQL 未加限定符引用 id → 真实校验路径判为歧义（high）
-        contexts = SimpleNamespace(
-            routing=SimpleNamespace(datasource="pg_main"),
-            execution=SimpleNamespace(dialect="postgres"),
-        )
-        monkeypatch.setattr(
-            "src.graph.context.read_contexts", lambda state: contexts, raising=False
-        )
-        tables = [
-            {"name": "customers", "columns": [{"name": "id"}, {"name": "name"}]},
-            {"name": "orders", "columns": [{"name": "id"}, {"name": "amount"}]},
-        ]
-        # 权威快照与阶段一一致 → 阶段二复核确认歧义，不会被假阳性清除
-        manager = _SnapshotStub(
-            SimpleNamespace(
-                tables=[
-                    SimpleNamespace(
-                        name=table["name"],
-                        columns=[
-                            SimpleNamespace(name=column["name"])
-                            for column in table["columns"]
-                        ],
-                    )
-                    for table in tables
-                ]
-            )
-        )
-        monkeypatch.setattr(
-            "src.knowledge.schema_manager.get_schema_manager",
-            lambda: manager,
-            raising=False,
-        )
-        state = {
-            "generated_sql": "SELECT id FROM customers JOIN orders ON customers.id = orders.id",
-            "relevant_tables": tables,
-        }
+        state, tables = _arrange_ambiguous_column_case(monkeypatch)
 
         # Act：先跑真实 layer3 节点产出 validation_errors，再进重试上下文渲染
         result = asyncio.run(layer3_validate_node(state))
@@ -387,6 +353,89 @@ class TestRetryContextSchemaHallucination:
         assert "customers" in context
         assert "orders" in context
         logger.info("test_ambiguous_column_renders_qualifier_guidance 完成")
+
+    # 方法作用：验证 retry=2 的歧义列场景不出现指向不存在列清单的悬挂引用。
+    # Args: self - pytest 用例实例；monkeypatch - pytest 补丁工具。
+    # Returns: 无返回值，断言失败由 pytest 报告。
+    def test_ambiguous_column_at_last_attempt_has_no_dangling_list_reference(
+        self, monkeypatch
+    ) -> None:
+        """retry=2 时下方没有可用列清单，最后通牒行不得说「使用下列明确列出的标识符」。
+
+        回归：修复前最后通牒行不按 has_column_lists 分派，歧义列场景会指向一段
+        并不存在的列清单（与 A1 修复的首指令行悬挂引用同类）。
+        """
+        logger.debug(
+            "test_ambiguous_column_at_last_attempt_has_no_dangling_list_reference 入口"
+        )
+        import asyncio
+
+        from src.graph.nodes.generate_sql import build_retry_context
+        from src.graph.nodes.layer3_validate import layer3_validate_node
+
+        # Arrange：真实 layer3 产出歧义列 issue（available_columns 为空）
+        state, tables = _arrange_ambiguous_column_case(monkeypatch)
+
+        # Act：retry=2（最后一次尝试）渲染重试上下文
+        result = asyncio.run(layer3_validate_node(state))
+        context = build_retry_context(
+            {**state, "validation_errors": result["validation_errors"]}, 2, tables
+        )
+
+        # Assert：最后通牒必须存在，但不得引用未渲染的列清单；限定符指引仍在
+        assert "最后一次尝试" in context
+        assert "必须使用下列明确列出的标识符" not in context
+        assert "实际可用列" not in context
+        assert "这是最后一次尝试，必须严格按上述问题逐条修正后重新生成。" in context
+        assert "表限定符" in context
+        logger.info(
+            "test_ambiguous_column_at_last_attempt_has_no_dangling_list_reference 完成"
+        )
+
+
+# 方法作用：搭建「两张表都有 id、SQL 未加限定符引用 id」的真实 layer3 校验现场。
+# Args: monkeypatch - pytest 补丁工具，用于注入上下文与 SchemaManager 桩。
+# Returns: (state, tables) 元组：待校验 state 与合法表清单。
+def _arrange_ambiguous_column_case(monkeypatch) -> tuple[dict, list[dict]]:
+    """两张表都有 id 且 SQL 未限定引用 id → 真实校验路径判为歧义（high）。"""
+    logger.debug("歧义列校验现场搭建入口")
+    contexts = SimpleNamespace(
+        routing=SimpleNamespace(datasource="pg_main"),
+        execution=SimpleNamespace(dialect="postgres"),
+    )
+    monkeypatch.setattr(
+        "src.graph.context.read_contexts", lambda state: contexts, raising=False
+    )
+    tables = [
+        {"name": "customers", "columns": [{"name": "id"}, {"name": "name"}]},
+        {"name": "orders", "columns": [{"name": "id"}, {"name": "amount"}]},
+    ]
+    # 权威快照与阶段一一致 → 阶段二复核确认歧义，不会被假阳性清除
+    manager = _SnapshotStub(
+        SimpleNamespace(
+            tables=[
+                SimpleNamespace(
+                    name=table["name"],
+                    columns=[
+                        SimpleNamespace(name=column["name"])
+                        for column in table["columns"]
+                    ],
+                )
+                for table in tables
+            ]
+        )
+    )
+    monkeypatch.setattr(
+        "src.knowledge.schema_manager.get_schema_manager",
+        lambda: manager,
+        raising=False,
+    )
+    state = {
+        "generated_sql": "SELECT id FROM customers JOIN orders ON customers.id = orders.id",
+        "relevant_tables": tables,
+    }
+    logger.info("歧义列校验现场搭建完成")
+    return state, tables
 
 
 # 方法作用：为歧义列回归用例提供阶段二取数桩，返回固定快照且不触碰真实连接。

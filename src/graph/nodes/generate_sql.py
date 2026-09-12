@@ -483,7 +483,14 @@ def build_retry_context(state: AnalysisState, retry: int, tables: list[dict]) ->
             else "禁止复用上一轮 SQL，必须按下列问题逐条修正后重新生成。",
         ]
         if retry >= 2:
-            lines.append("这是最后一次尝试，必须使用下列明确列出的标识符。")
+            # 最后通牒行与首指令行同源：只有真的渲染了可用列清单才说「使用下列
+            # 明确列出的标识符」；歧义列等问题场景下方没有清单，沿用该表述会
+            # 指向不存在的内容（悬挂引用），与前波修复的缺陷同类。
+            lines.append(
+                "这是最后一次尝试，必须使用下列明确列出的标识符。"
+                if has_column_lists
+                else "这是最后一次尝试，必须严格按上述问题逐条修正后重新生成。"
+            )
         # 每表收集：可用列清单 + 真实总数（available_columns 可能被校验器
         # 按 MAX_AVAILABLE_COLUMNS 截断，报「共 N 个」必须用真实总数）。
         grouped: dict[str, tuple[list[str], int]] = {}

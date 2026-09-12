@@ -381,8 +381,8 @@ def validate_sql_schema(sql, *, datasources, dialect, tables): ...
 3. **方言特有表函数 / `UNNEST` / `LATERAL`**：需按方言实测补充，不在本设计承诺范围内。
 4. **快照与真实库漂移**：校验基准是各级缓存拼出的快照，若快照本身与真实库不一致，校验无法发现。属独立议题。
 5. **未限定列的 CTE 歧义**：scope 内存在 CTE/派生表时，未限定列零命中只能判为低置信。
-6. **`HAVING <未限定幻觉列>`**：实测 sqlglot 把 HAVING 中的未限定引用当作输出列引用，不进入 `scope.columns`，因此该幻觉列永不参与校验 → 实测 PASS（`SELECT SUM(amount) AS total FROM orders GROUP BY customer_id HAVING ghost_col > 100` 零 issue，只留 reason=`cte_or_unresolved` 的 warning，`resolved_count=0 total_table_count=0`）。投影别名放行机制的同源代价，接受。
-7. **`UNION` 末尾 `ORDER BY <幻觉列>`**：实测外层 Union scope 的 `sources={}`，未限定列走"零命中且无物理表候选（`not resolved`）"分支直接放行 → 实测 PASS（`SELECT id FROM orders UNION ALL SELECT id FROM orders ORDER BY ghost_col` 零 issue **且零 warning，完全静默**）。属未限定列归属判定的边界缺口，接受；补基底判定前不得当作"已校验通过"。
+6. **`HAVING <未限定幻觉列>`**：实测 sqlglot 把 HAVING 中的未限定引用当作输出列引用，不进入 `scope.columns`，因此该幻觉列永不参与校验，连"无法判定"的 warning 分支都到不了 → **实测 PASS 且完全静默**（`SELECT SUM(amount) AS total FROM orders GROUP BY customer_id HAVING ghost_col > 100` 零 issue、零相关 warning，日志里无任何线索；与第 7 条的 UNION 盲区不同，那条至少留 warning）。投影别名放行机制的同源代价，接受。
+7. **`UNION` 末尾 `ORDER BY <幻觉列>`**：实测外层 Union scope 的 `sources={}`（`resolved_count=0 total_table_count=0`），未限定列走"零命中且无物理表候选（`not resolved`）"分支放行，但该分支**会留痕** → 实测 PASS（`SELECT id FROM orders UNION ALL SELECT id FROM orders ORDER BY ghost_col` 零 issue，但有 1 条 `列引用无法判定` warning，reason=`cte_or_unresolved`）。即"零 issue"不等于"零留痕"：本条可在日志中查到，第 6 条 HAVING 盲区则查不到任何东西。属未限定列归属判定的边界缺口，接受；补基底判定前不得当作"已校验通过"。
 
 ---
 
