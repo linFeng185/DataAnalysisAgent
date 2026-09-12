@@ -403,7 +403,17 @@ def build_retry_context(state: AnalysisState, retry: int, tables: list[dict]) ->
     ]
     if schema_issues:
         rendered_issues = schema_issues[:_RETRY_MAX_SCHEMA_ISSUES]
-        lines = [f"## 第 {retry} 次生成：纠正字段引用错误"]
+        # 指令必须前置：retry_error section 的预算是「硬上限 + 尾部截断」
+        # （prompt_budget._truncate_text 保留前缀），放在尾部时一旦超预算
+        # 会被整行砍掉，模型就看不到「禁止复用上一轮 SQL」这条核心契约。
+        # 因此把必须送达的指令紧跟标题，可截断的字段证据放在后面，
+        # 截断代价只是信息变少，而不是契约失效。
+        lines = [
+            f"## 第 {retry} 次生成：纠正字段引用错误",
+            "禁止复用上一轮 SQL，必须仅基于下列可用列重新生成。",
+        ]
+        if retry >= 2:
+            lines.append("这是最后一次尝试，必须使用下列明确列出的标识符。")
         grouped: dict[str, list[str]] = {}
         for issue in rendered_issues:
             table = str(issue.get("table", "") or "").strip()
@@ -430,9 +440,6 @@ def build_retry_context(state: AnalysisState, retry: int, tables: list[dict]) ->
                 f"（另有 {len(schema_issues) - _RETRY_MAX_SCHEMA_ISSUES} 个字段引用错误未列出，"
                 "请按可用列清单自行核对）"
             )
-        lines.append("禁止复用上一轮 SQL，必须仅基于上述列重新生成。")
-        if retry >= 2:
-            lines.append("这是最后一次尝试，必须使用上述明确列出的标识符。")
         logger.info(
             "SQL 重试上下文 schema 分支完成",
             retry=retry,

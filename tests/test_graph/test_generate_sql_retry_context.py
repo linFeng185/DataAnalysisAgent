@@ -153,6 +153,55 @@ class TestRetryContextSchemaHallucination:
         assert "（仅列出前 20 个，共 30 个）" in context
         logger.info("test_available_columns_are_bounded_with_truncation_notice 完成")
 
+    # 方法作用：验证关键指令在 retry_error 段预算截断后仍落在前 1800 字符内。
+    # Args: self - pytest 用例实例。
+    # Returns: 无返回值，断言失败由 pytest 报告。
+    def test_retry_instructions_survive_section_budget_truncation(self) -> None:
+        """该段是硬上限 + 尾部截断，核心指令必须前置，否则超预算时被整行砍掉。"""
+        logger.debug("test_retry_instructions_survive_section_budget_truncation 入口")
+        from src.graph.nodes.generate_sql import build_retry_context
+
+        # Arrange：3 条 issue、3 张表、每表 25 个长列名（超过每表 20 个上限），
+        # 既必然超出 1800 字符预算，也会触发列清单截断提示
+        issues = [
+            {
+                "type": "unknown_column",
+                "datasource": "pg_main",
+                "table": table,
+                "column": f"legacy_amount_{index}",
+                "qualifier": "",
+                "provided_by": [],
+                "available_columns": [
+                    f"column_with_a_long_descriptive_name_{position:02d}"
+                    for position in range(1, 26)
+                ],
+            }
+            for index, table in enumerate(
+                ("finance_invoices", "finance_orders", "finance_refunds"), start=1
+            )
+        ]
+        state = {
+            "generated_sql": "SELECT legacy_amount_1 FROM finance_invoices",
+            "validation_errors": [
+                {"type": "column_reference", "message": "列名校验失败", "issues": issues}
+            ],
+        }
+        # _llm_generate 中 retry_error section 的硬上限
+        section_max_chars = 1800
+
+        # Act
+        context = build_retry_context(state, 1, [{"name": "finance_invoices"}])
+        context_last_attempt = build_retry_context(state, 2, [{"name": "finance_invoices"}])
+
+        # Assert：超预算前提下，指令与第一批事实/截断提示仍必须在可见前缀内
+        assert len(context) > section_max_chars
+        budgeted = context[:section_max_chars]
+        assert "禁止复用上一轮 SQL" in budgeted
+        assert "finance_invoices" in budgeted
+        assert "仅列出前" in budgeted or "未列出" in budgeted
+        assert "最后一次尝试" in context_last_attempt[:section_max_chars]
+        logger.info("test_retry_instructions_survive_section_budget_truncation 完成")
+
     # 方法作用：验证表名幻觉分支输出逐字节不变。
     # Args: self - pytest 用例实例。
     # Returns: 无返回值，断言失败由 pytest 报告。
