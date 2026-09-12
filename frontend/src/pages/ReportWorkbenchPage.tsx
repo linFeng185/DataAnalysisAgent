@@ -430,6 +430,26 @@ export default function ReportWorkbenchPage() {
       </div>
     </div>
     <Drawer title={t("节点运行日志")} open={logOpen} onClose={() => setLogOpen(false)} width={440}>
+      {runs.length > 0 && <Space direction="vertical" size={2} className="report-run-stats">
+        <Typography.Text strong>{t("本次运行计数")}</Typography.Text>
+        <Typography.Text type={runs[0].llm_failure_count > 0 ? "danger" : "secondary"}>
+          {t("大模型调用 {value0} 次：成功 {value1}，失败 {value2}", {
+            value0: runs[0].llm_call_count,
+            value1: Math.max(0, runs[0].llm_call_count - runs[0].llm_failure_count),
+            value2: runs[0].llm_failure_count,
+          })}
+        </Typography.Text>
+        <Typography.Text type={runs[0].sql_failure_count > 0 ? "danger" : "secondary"}>
+          {t("SQL 执行 {value0} 次：成功 {value1}，失败 {value2}", {
+            value0: runs[0].sql_query_count,
+            value1: runs[0].sql_success_count,
+            value2: runs[0].sql_failure_count,
+          })}
+        </Typography.Text>
+        <Typography.Text type="secondary">
+          {t("预估查询 {value0} 次 · token 用量 {value1}", { value0: runs[0].query_count, value1: runs[0].token_usage })}
+        </Typography.Text>
+      </Space>}
       {runSteps.length === 0 ? <Empty description={t("暂无节点日志")} /> : <List
         size="small"
         dataSource={runSteps}

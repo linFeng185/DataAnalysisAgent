@@ -24,7 +24,7 @@
 | 23.18 | 跨源分布级关联与影响判定 | `src/reporting/relations.py`、`src/reporting/document.py` | 新增 `analyze_cross_source`：两侧各自独立聚合，有时间列则内连接对齐后做 Spearman 秩相关（对齐后观测点 < 8 判 `insufficient`），无时间列则做分布级秩相关；**不做行级 join、不做键匹配、不估算连接行数、不伪造 match_rate**；产出 `cross_source_statistical` 证据并强制附"不构成因果"局限；关系块派生 direction/strength 展示，证据层不存冗余字段 | Phase 3 | 待开发 | P1 |
 | 23.19 | 指标口径溯源 | `src/knowledge/metric_catalog.py`、`src/graph/subgraphs/report_workbench.py`、`src/reporting/document.py` | 复用既有 `resolve_metric_reference()`（`metric_catalog.py:250-276`）把单元指标对应到租户指标目录的**已批准口径版本**，产出 `source_citation` block（该 block 类型此前"定义了无产出"，本项填上）；**不做数值对照** —— 指标目录只有 code/name/datasource/dialect/expression/description/unit，**没有目标值字段**；不解析 `description` 自由文本；未命中即不产出 | Phase 3 | 待开发 | P2 |
 | 23.20 | 预览裁剪与计划单调删减 | `src/reporting/models.py`、`src/reporting/store.py`、`src/api/routes/report_workbench.py`、`migrations/028_report_job_preview_hash.sql` | `POST /jobs` 新增 `accepted_unit_ids`（`None` = 全部接受，`[]` = 422），服务端校验其为预览计划 `unit_ids` 的子集后重建 effective plan（重新走全部既有校验）；**只允许删减不允许新增**，故不构成越权；被删 id 记入 `ReportPlan.excluded_unit_ids` 保留审计线索；`plan_json` 存 effective、`plan_hash` 语义不变、新增 `preview_hash` 存审计凭证；与 `plan_override` 互斥。裁剪只作用于计划期单元，运行期追加由档位额度约束 | Phase 3 | 待开发 | P1 |
-| 23.21 | 报表运行计数统计 | `src/reporting/run_stats.py`、`src/llm/client.py`、`src/security/sql_execution.py`、`src/reporting/runner.py`、`src/reporting/store.py`、`src/reporting/models.py`、`migrations/029_report_run_stats.sql`、`frontend/src/pages/ReportWorkbenchPage.tsx` | 修复既有缺陷：`report_runs` 的 `query_count`/`token_usage` 写入的是 `plan.estimated` 的**估算值**而非实际发生值。新增五列真实计数 `llm_call_count`/`llm_failure_count`/`sql_query_count`/`sql_success_count`/`sql_failure_count`。用 contextvar 持有**可变**计数器对象（asyncio task 复制上下文后仍共享同一引用，若存不可变 int 会丢失子任务计数，这是必须避开的陷阱）。LLM 埋点在 `src/llm/client.py` 工厂层——唯一全覆盖层，`generate_sql` 等直连 `get_task_llm` 不走 `invocation.py`；SQL 埋点在 `validate_and_execute_sql()` 这一唯一执行入口。非报表路径无活动计数器时埋点为 no-op。既有 `query_count` 配额语义**保持不变**，界面可对比展示预估 vs 实际。设计见 `spec/43-report-run-statistics.md` | Phase 3 | 待开发 | P2 |
+| 23.21 | 报表运行计数统计 | `src/reporting/run_stats.py`、`src/llm/client.py`、`src/security/sql_execution.py`、`src/reporting/runner.py`、`src/reporting/store.py`、`src/reporting/models.py`、`migrations/029_report_run_stats.sql`、`frontend/src/pages/ReportWorkbenchPage.tsx` | 修复既有缺陷：`report_runs` 的 `query_count`/`token_usage` 写入的是 `plan.estimated` 的**估算值**而非实际发生值。新增五列真实计数 `llm_call_count`/`llm_failure_count`/`sql_query_count`/`sql_success_count`/`sql_failure_count`。用 contextvar 持有**可变**计数器对象（asyncio task 复制上下文后仍共享同一引用，若存不可变 int 会丢失子任务计数，这是必须避开的陷阱）。LLM 埋点在 `src/llm/client.py` 工厂层——唯一全覆盖层，`generate_sql` 等直连 `get_task_llm` 不走 `invocation.py`；SQL 埋点在 `validate_and_execute_sql()` 这一唯一执行入口。非报表路径无活动计数器时埋点为 no-op。既有 `query_count` 配额语义**保持不变**，界面可对比展示预估 vs 实际。设计见 `spec/43-report-run-statistics.md` | Phase 3 | 单测完成 | P2 |
 
 ## 依赖关系
 
@@ -49,7 +49,7 @@
 
 ## 模块收尾
 
-模块总计 21 项，已完成 14 项，待开发 7 项。这里的完成指当前编号描述的实现与测试状态，不表示真实 PostgreSQL、容灾演练或外部模型的生产验收完成。
+模块总计 21 项，已完成 15 项，待开发 6 项。这里的完成指当前编号描述的实现与测试状态，不表示真实 PostgreSQL、容灾演练或外部模型的生产验收完成。
 
 | 待开发项 | 不开发原因 | 可开发条件 | 预计开发时机 |
 |---|---|---|---|
@@ -61,6 +61,13 @@
 | 23.20 预览裁剪与计划单调删减 | 同 23.16；设计见 `spec/42` 第 9 节 | 无外部依赖；需应用迁移 `028_report_job_preview_hash.sql`（真实 PostgreSQL 验收另行执行） | Phase 3 |
 | （阶段 A 前置修复） | 未单列功能点，属 23.16/23.17 的实施前置：`runner` 注入 `capability="report"`、修 `processors.yoy` 既有 bug、`UnitResult.total_rows`、`query_count` 上限 16→64 | 无外部依赖，**必须最先做** | Phase 3，最先 |
 | （其余项） | 本轮编号范围内均已实现 | 生产验收见下文，不另伪造开发完成状态 | — |
+
+### 2026-09-12 运行计数批次
+
+- 23.21 修复既有缺陷：`report_runs` 的 `query_count` 与 `token_usage` 原先写入 `plan.estimated` 的**估算值**，界面显示的是计划预测而非实际发生值。新增五列真实计数并把 `token_usage` 改为真实 token 数；`query_count` 保持配额计费口径的估算语义不变。
+- 必须应用迁移 `029_report_run_stats.sql`。**该迁移未执行到任何用户数据库**，本地与测试均走应用层模拟，真实 PostgreSQL 验收另行执行。迁移编号 027/028 由 `spec/41`（模板）与 `spec/42`（preview_hash）预留，本次刻意空号。
+- 验证：`tests/test_reporting/test_run_stats.py` 14 例、`tests/test_reporting/` + `tests/test_observability.py` 119 例、`tests/test_api/test_grafana.py` + `tests/test_automation/test_runner.py` 13 例、`tests/test_security/`（排除另一并行任务在改的 `test_sql_schema_validation.py`）108 例全部通过；前端 `tsc -b` 通过。
+- 未覆盖：真实 LangGraph 运行下的端到端计数（单元执行经 `app.ainvoke` 触发内部 task，contextvar 传播路径已有专门单测覆盖，但未做真机链路计数核对）；真实 PostgreSQL 上的迁移应用。
 
 ### 续开发交付与验收边界
 

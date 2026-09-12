@@ -1,5 +1,9 @@
 // 静态界面词典；业务数据、SQL 和模型原文不进入翻译通道。
 const en: Record<string, string> = {
+  "本次运行计数": "Counts for this run",
+  "大模型调用 {value0} 次：成功 {value1}，失败 {value2}": "LLM calls: {value0} (ok {value1}, failed {value2})",
+  "SQL 执行 {value0} 次：成功 {value1}，失败 {value2}": "SQL executions: {value0} (ok {value1}, failed {value2})",
+  "预估查询 {value0} 次 · token 用量 {value1}": "Estimated queries {value0} · token usage {value1}",
   "暂时无法确认登录状态": "Unable to verify your session right now",
   "重试验证": "Retry verification",
   "请求超时，请检查服务状态后重试": "Request timed out. Check the service and try again.",

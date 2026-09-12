@@ -102,3 +102,22 @@ class TestReportWorkbenchFrontend:
         assert "--report-tablet-span" in styles
         assert "--report-mobile-span" in styles
         assert ".report-workbench-grid" in styles
+
+    # 方法作用：验证运行日志展示真实计数而不是估算值。
+    # Args: self - pytest 测试类实例。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    def test_workbench_displays_real_run_counts(self) -> None:
+        """页面必须展示 LLM 与 SQL 的真实成败计数，并把预估口径区分开。"""
+        # Arrange
+        page = Path("frontend/src/pages/ReportWorkbenchPage.tsx").read_text(encoding="utf-8")
+        types = Path("frontend/src/types/report.ts").read_text(encoding="utf-8")
+        styles = Path("frontend/src/index.css").read_text(encoding="utf-8")
+
+        # Act / Assert
+        for field in ("llm_call_count", "llm_failure_count", "sql_query_count", "sql_success_count", "sql_failure_count"):
+            assert field in types
+        assert "本次运行计数" in page
+        assert "llm_failure_count" in page
+        assert "sql_success_count" in page
+        assert "query_count" in page
+        assert ".report-run-stats" in styles

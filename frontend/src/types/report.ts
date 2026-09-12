@@ -81,9 +81,17 @@ export interface ReportRun {
   status: 'queued' | 'running' | 'succeeded' | 'partial' | 'failed' | 'cancelled';
   attempt: number;
   last_node: string;
+  /** 配额计费口径的估算值，不是实际执行次数。 */
   query_count: number;
   row_count: number;
+  /** 真实 token 用量（prompt + completion）。 */
   token_usage: number;
+  /** 以下为运行期真实计数，与 query_count 的估算口径相互独立。 */
+  llm_call_count: number;
+  llm_failure_count: number;
+  sql_query_count: number;
+  sql_success_count: number;
+  sql_failure_count: number;
   partial: boolean;
   error_code: string;
   user_error_message: string;
