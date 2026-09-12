@@ -95,6 +95,9 @@ class ReportPlanner:
             warnings.append("永久有效需要 report.permanent 权限，服务端将再次校验")
         if share.scope == "user":
             warnings.append("团队成员授权首期仅支持指定用户或租户成员范围，不开放实时钻取")
+        # 未绑定数据源的单元按“每个已选源各一次”计上界；已绑定源按 1 次计。
+        source_upper_bound = max(1, len(requested))
+        fanout = sum(1 if unit.datasource else source_upper_bound for unit in units)
         plan = ReportPlan(
             execution_mode=execution_mode,
             frequency=frequency,
@@ -108,9 +111,12 @@ class ReportPlanner:
             warnings=warnings,
             needs_confirmation=execution_mode == "scheduled" or permanent or share.enabled,
             estimated=EstimatedResources(
-                query_count=min(16, max(1, len(units))),
-                llm_tokens=min(2_000_000, max(1000, len(units) * 1200)),
-                estimated_seconds=min(3600, max(5, len(units) * 8)),
+                # 多源扇出：未绑定数据源的单元会在每个已选数据源上各跑一次查询，
+                # 估算按 单元数 × 源数 的上界计算。只数单元数会低报约 N 倍，
+                # 既误导预览，也让配额预占失真。实际命中数由执行期路由收窄。
+                query_count=min(1000, max(1, fanout)),
+                llm_tokens=min(2_000_000, max(1000, fanout * 1200)),
+                estimated_seconds=min(3600, max(5, fanout * 8)),
             ),
         )
         if execution_mode == "scheduled" and frequency:

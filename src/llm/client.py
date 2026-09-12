@@ -203,7 +203,7 @@ def is_task_llm_available(task: str) -> bool:
     selection = get_current_tenant_llm_selection()
     if selection is not None:
         available = bool(selection.model_id.strip() and selection.api_key.strip())
-        logger.info(
+        logger.debug(
             "租户 LLM 可用性检查边界",
             task=task,
             tenant_id=selection.tenant_id,
@@ -222,7 +222,7 @@ def is_task_llm_available(task: str) -> bool:
             available=available,
             source="local_only",
         )
-    logger.info("LLM 任务可用性检查完成", task=task, available=available)
+    logger.debug("LLM 任务可用性检查完成", task=task, available=available)
     return available
 
 
@@ -253,7 +253,7 @@ def get_task_llm(
             if effective_reasoning
             else None
         )
-        logger.info(
+        logger.debug(
             "租户任务 LLM 路由完成",
             task=task,
             tenant_id=tenant_selection.tenant_id,
@@ -332,7 +332,7 @@ def get_provider(
 ) -> "LLMProvider":
     s = get_settings()
     mid = model_id or s.llm_model
-    logger.info(
+    logger.debug(
         "Provider 路由边界输入",
         model_id=mid,
         explicit_provider=provider_name or "",
@@ -347,7 +347,7 @@ def get_provider(
             logger.error("Provider 路由失败", model_id=mid, reason="模型未注册")
             raise ValueError(f"未知模型: {mid}")
         resolved_provider = info.provider
-    logger.info("Provider 模型解析完成", model_id=mid, provider=resolved_provider)
+    logger.debug("Provider 模型解析完成", model_id=mid, provider=resolved_provider)
 
     from src.app_context import get_app_context
     from src.llm.provider_registry import create_provider
@@ -380,7 +380,7 @@ def get_provider(
             base_url or "",
             api_key or "",
         )
-        logger.info("Provider 资源工厂完成", provider=resolved_provider, model_id=mid)
+        logger.debug("Provider 资源工厂完成", provider=resolved_provider, model_id=mid)
         return result
 
     provider = get_app_context().get_or_create(resource_name, factory)

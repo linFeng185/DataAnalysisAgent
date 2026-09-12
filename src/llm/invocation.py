@@ -78,7 +78,9 @@ def prepare_invocation(
     ]))
     if hasattr(selected_model, "with_config"):
         selected_model = selected_model.with_config(call_config)
-    logger.info(
+    # 每次 LLM 调用都会触发，属于调用内基础设施细节；
+    # 对回测推理有价值的是 Prompt 统一预算完成（含 truncated_sections）与调用完成。
+    logger.debug(
         "统一 LLM 调用准备完成",
         prompt_id=prompt_id,
         prompt_version=definition.version,

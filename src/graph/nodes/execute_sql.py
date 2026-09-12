@@ -386,12 +386,19 @@ def _validate_column_references(
                 if alias and alias != col.name:
                     aliases.add(alias.lower())
 
-        # 诊断探针：列名通过了全局白名单，但可能并不属于本语句引用的那张表
-        # （典型漏检形态是 alias.column 里的列只在别的表存在）。先看见事实再决定怎么修。
-        for mismatch in find_cross_table_columns(tree, tables, aliases):
-            logger.warning("列归属错配探针", **mismatch)
-
+        # 列归属校验：valid_cols 是所有表列名的并集，只看列名会漏掉跨表错配——
+        # 例如 created_at 只存在于 orders，却写成 finance_invoices 的别名前缀 i.created_at，
+        # 照样能通过白名单，直到 EXPLAIN 打库才报 column does not exist。这里按表归属拒绝。
         errors: list[str] = []
+        for mismatch in find_cross_table_columns(tree, tables, aliases):
+            logger.warning("列归属错配拦截", **mismatch)
+            providers = mismatch["provided_by"]
+            err = (
+                f"列 '{mismatch['column']}' 不属于表 {mismatch['referenced_table']}"
+                + (f"（该列属于: {', '.join(providers[:5])}）" if providers else "")
+            )
+            if err not in errors:
+                errors.append(err)
         for node in tree.find_all(exp.Column):
             col_name = node.name
             if col_name == "*" or col_name == "1":
@@ -422,7 +429,8 @@ def _validate_column_references(
             if str(node.table or "").strip()
         })
         if referenced_names:
-            logger.info(
+            # 诊断已完成使命（跨表错配已改为拦截），保留为 debug 供排查 schema 来源问题
+            logger.debug(
                 "列引用校验通过探针",
                 referenced_tables={
                     name: sorted(columns_by_table.get(name, []))[:40] for name in referenced_names[:5]

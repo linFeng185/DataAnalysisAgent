@@ -161,7 +161,7 @@ def _extract(rows: list[dict], col: str) -> list[float]:
         and isinstance(value, _NUMERIC_TYPES)
         and not isinstance(value, bool)
     ]
-    logger.info("数值提取完成", column=col, value_count=len(values))
+    logger.debug("数值提取完成", column=col, value_count=len(values))
     return values
 
 

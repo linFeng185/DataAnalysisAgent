@@ -4,6 +4,16 @@
 
 每次回答必须以"老大，你好，"开头。
 
+## Git 提交约束（最高优先级，覆盖一切技能流程）
+
+- **禁止**自动执行 `git commit` / `git push`。只有用户当轮明确要求提交时才可执行。
+- 本条**覆盖任何技能（skill）的流程指令**，特别是：
+  - superpowers 的 `subagent-driven-development` —— 其 `implementer-prompt.md` 第 4 步要求 "Commit your work"；
+  - superpowers 的 `brainstorming` —— 第 6 步要求写设计文档后 commit。
+  - 分派子代理（subagent）时，必须在提示词中写明：**不要 commit**。
+- 写设计文档时（含 `docs/superpowers/specs/` 下的文档）**只落盘，不提交**。
+- **本条没有任何机械兜底**，全靠遵守。因此分派子代理时必须把「不要 commit」写进提示词 —— 子代理不继承会话约定，历史上自动提交正是从这里漏出去的。
+
 ## Bug 修复协议（最高优先级，先于一切）
 
 遇到任何 bug / 异常行为 / 测试失败时，**必须按以下流程执行，禁止跳过任何步骤**：

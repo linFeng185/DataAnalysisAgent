@@ -156,6 +156,44 @@ class TestReportRunnerDatasourceFanout:
         assert "未找到相关数据" in result.user_error_message
         assert captured == []
 
+    # 方法作用：验证预占用计划按路由命中数修正，而不是沿用低报的单元数。
+    # Args: self - pytest 测试类实例。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    async def test_reserve_plan_scales_with_routed_sources(self) -> None:
+        """多源扇出的预占量必须等于 单元数 × 命中源数，不能只数单元数。"""
+        from src.reporting.models import AnalysisUnit, ReportPlan
+        from src.reporting.runner import ReportRunner
+
+        # Arrange
+        unit_a = AnalysisUnit(question="销售")
+        unit_b = AnalysisUnit(question="财务")
+        plan = ReportPlan(requested_datasources=["a", "b", "c"], analysis_units=[unit_a, unit_b])
+
+        # Act：unit_a 命中 1 个源，unit_b 命中 2 个源
+        adjusted = ReportRunner._reserve_plan(plan, {unit_a.unit_id: ["a"], unit_b.unit_id: ["a", "b"]})
+
+        # Assert
+        assert adjusted.estimated.query_count == 3
+        # 未路由时保持原估计，不做二次打折
+        assert ReportRunner._reserve_plan(plan, {}).estimated.query_count == plan.estimated.query_count
+
+    # 方法作用：验证计划估算按多源扇出取上界，不低报。
+    # Args: self - pytest 测试类实例；monkeypatch - pytest 补丁工具。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    async def test_planner_estimate_scales_with_fanout(self, monkeypatch) -> None:
+        """未绑定数据源的单元按 单元数 × 源数 计上界，只数单元数会低报 N 倍。"""
+        # Arrange
+        import src.llm.client as llm_client
+        from src.reporting.planner import ReportPlanner
+
+        monkeypatch.setattr(llm_client, "is_task_llm_available", lambda task: False)
+
+        # Act
+        plan = await ReportPlanner().parse("生成销售报表和库存报表", datasources=["a", "b", "c"])
+
+        # Assert
+        assert plan.estimated.query_count == len(plan.analysis_units) * 3
+
     # 方法作用：验证路由只接受已授权数据源，模型越权返回被忽略。
     # Args: self - pytest 测试类实例；monkeypatch - pytest 补丁工具。
     # Returns: 无返回值，断言失败时由 pytest 报告。

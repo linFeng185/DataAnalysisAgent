@@ -78,7 +78,7 @@ POST /api/v1/chat {"query": "本月 GMV 排名？", "stream": true}
   ├─ restore_previous_result  仅 meta 且数据源一致时从 HistoryStore 恢复上轮富结果
   ├─ retrieve_schema     SchemaManager 三级回退 → 表结构 + 知识上下文 + Skill 精确激活
   ├─ generate_sql        LLM 生成 SQL（对话历史注入 + 重试上下文 + Pydantic 契约）
-  ├─ layer3_validate     委托统一 SQL 服务做 AST 只读安全校验
+  ├─ layer3_validate     委托统一 SQL 服务做 AST 只读安全校验 + 列引用归属校验
   ├─ layer4_explain      统一 SQL 服务按 Registry 权威方言执行 EXPLAIN
   ├─ execute_sql         统一有界执行（权限 / 限流 / 脱敏 / 审计）
   ├─ analyze_result      确定性统计 + 业务关联/影响/原因/建议 + 证据充分性判断
@@ -135,8 +135,8 @@ POST /api/v1/chat {"query": "本月 GMV 排名？", "stream": true}
 | `subgraphs/action.py` | 人工确认、幂等和默认拒绝的外部动作分发 |
 | `nodes/retrieve_schema.py` | Schema 检索 + 知识库上下文 + 按真实表名再次激活 Skill |
 | `nodes/generate_sql.py` | LLM SQL 生成（独立表名白名单、分类重试、结构化补参）与行式指标目录确定性 SQL |
-| `nodes/layer3_validate.py` | sqlglot AST 只读白名单与危险语句阻断 |
-| `nodes/execute_sql.py` | SQL 执行（空 SQL 跳过保护） |
+| `nodes/layer3_validate.py` | sqlglot AST 只读白名单与危险语句阻断；列引用归属校验前移到 EXPLAIN 之前，幻觉列在此处失败并把可用列清单喂回重试 |
+| `nodes/execute_sql.py` | SQL 执行（空 SQL 跳过保护）；列引用校验与列归属探针作为最后一道防线 |
 | `nodes/multi_source.py` | 契约化多源 worker、并行执行、维度/指标列对齐和来源失败隔离 |
 | `nodes/analyze_result.py` | 确定性统计处理器 + 证据化业务关联、影响、原因假设和行动建议分析 |
 | `nodes/supplemental_query.py` | 证据不足时在当前权限内复用完整 SQL 安全链补查，并把脱敏证据回注分析节点 |
@@ -312,12 +312,16 @@ checksum。执行器同时兼容历史 LF/CRLF 登记值，避免 Git 跨平台�
 - **租户 LLM 失败关闭**：所有对话必须解析当前租户启用的命名连接和模型；显式跨租户、停用或缺失选择返回冲突，不回退其他租户或平台全局凭证
 - **LLM 协议扩展**：Provider 目录保存协议元数据，`openai_compatible` 映射到统一 OpenAI Adapter；增加同协议厂商或模型只需配置目录，新增协议才实现并注册 Adapter
 - **异常回退可见性**：可恢复回退保留原返回契约但必须记录完整堆栈；Provider 等基础设施故障不得伪装成空数据
+- **日志粒度以"可回测推理"为准**：INFO 只留主要节点的边界、关键决策（路由/选源）、结论（生成/校验/执行/发布）与错误；每次调用都会触发的调用内基础设施细节（LLM provider 解析链、可用性检查、方言重写、逐列数值提取）一律 debug。常规读请求的访问日志由 `api_access.default_access_log` 收敛为 `none`，异常仍走 `API 访问异常`，登录/注册/分享/数据源与 Schema 变更等安全路由保留 `security`/`audit` 审计。单次报表运行由此减少约 35% 的 INFO 记录
 - **覆盖率门禁**：`coverage run -m pytest -q -m "not live_llm"` 后执行 `coverage report`，branch coverage 最低 67%，生产模块禁止 0% 覆盖
 - **多源失败隔离**：每个 worker 独立执行 Schema/SQL/Layer3/EXPLAIN/Execute，不可达来源返回来源级错误
 - **跨源列契约**：按全部结果行识别 dimension/metric 角色，角色序列兼容时按位置统一任意数量列；冲突时保留原字段
 - **最终 SQL 展示**：多源 worker 返回 execute_sql 方言重写/权限注入后的 SQL，响应通过 sql_statements 按来源展示
 - **并行流隔离**：SSE 使用 LangChain run_id 派生 stream_id，前端按调用实例缓冲 token；原始 reasoning_content 仅做服务端受控诊断
 - **安全阻断**：layer3 使用 sqlglot AST 只读白名单，阻断 DDL/DML、SELECT INTO 和状态变更函数；表/列解析异常失败关闭
+- **列引用归属校验**：列白名单是所有表列名的并集，只看列名会漏掉跨表错配（`created_at` 只存在于 A 源 orders，却写成 B 源 finance_invoices 的别名前缀 `i.created_at`，能通过白名单直到 EXPLAIN 打库才报错）。校验必须解析别名后按表归属判断，且前移到 `layer3_validate`——幻觉列在那里失败才能把可用列清单喂回重试，`execute_sql` 的同类校验只作最后防线
+- **后处理层不得改坏正确输入**：`sql_rewriter` 的 sqlglot 归一化会把 ClickHouse 的 `toStartOfMonth(x)` 渲染回 `dateTrunc('MONTH', x)`，而后者只接受 DateTime，Date32 列直接报 code 43——等于把模型按方言提示写对的函数改坏。ClickHouse 必须在其后再做一次 `dateTrunc → toStartOfX` 回退；凡是自加的后处理层，都要验证它不破坏正确输入
+- **提示预算跟随模型窗口**：`context_budget` 不是与模型窗口无关的常数。固定 4400 的 schema 上限会把上百张表的库裁到只剩几张，目标表列名进不了 Prompt，模型只能按惯例猜列名（曾导致 `created_at` 不存在）。schema 段按"能装下整库表结构"设置，总预算需同时容纳 schema 与业务上下文，否则会把问题从一段挤到另一段
 - **高权限连接告警**：DataSourceRegistry 识别 Oracle `SYS/SYSTEM` 和 SQL Server `sa` 时记录 warning 但继续连接；数据库账号权限不改变 layer3 的只读失败关闭策略
 - **向量过滤精确化**：Milvus LIKE 仅缩小候选集，解析 metadata 后再次精确校验，搜索、计数和删除共享同一过滤语义
 - **阻塞 SDK 隔离**：Milvus 集合操作及嵌入模型导入统一通过工作线程执行，RPC 有限超时；取消写任务等待线程退出后才释放写锁。规范表结构先发布，派生索引刷新有独立超时和异常收束。

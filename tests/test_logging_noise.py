@@ -86,7 +86,10 @@ class TestRequestLoggingNoise:
             if entry.get("log_level") == "info"
         ]
         assert response.status_code == 200
-        assert info_events == ["Skill 列表完成", "API 访问完成"]
+        # default_access_log 已收敛为 none：常规读请求不再逐条记访问日志，
+        # 只保留业务节点自身的结论。异常仍由 "API 访问异常" 以 error 级记录，
+        # 登录/注册/分享/数据源与 Schema 变更等安全路由另配 security/audit 保留审计。
+        assert info_events == ["Skill 列表完成"]
 
     # 方法作用：验证处理器注册阶段只保留 DEBUG 明细，避免启动 INFO 被逐项淹没。
     # Args: self - pytest 测试类实例。

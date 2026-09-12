@@ -307,7 +307,9 @@ class Settings(BaseSettings):
     report_max_ttl_days: int = Field(default=90, ge=1, le=3650)
     report_default_timezone: str = "Asia/Shanghai"
     report_max_units_per_run: int = Field(default=12, ge=1, le=12)
-    report_max_queries_per_run: int = Field(default=16, ge=1, le=16)
+    # 上界原为 16，但多源扇出让单个单元在 N 个源上各跑一次查询，
+    # 12 个单元 × 5 个源就会超出，上限必须能容纳真实扇出。
+    report_max_queries_per_run: int = Field(default=16, ge=1, le=1000)
     report_max_concurrency: int = Field(default=4, ge=1, le=100)
     report_max_page_bytes: int = Field(default=2_097_152, ge=1024, le=50_000_000)
     report_max_public_share_days: int = Field(default=30, ge=1, le=3650)

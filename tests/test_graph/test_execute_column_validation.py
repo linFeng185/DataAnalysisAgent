@@ -123,6 +123,28 @@ class TestColumnReferenceValidation:
         # Assert
         assert mismatches == []
 
+    # 方法作用：验证跨表列错配会被拒绝，而不是只告警后放行到 EXPLAIN。
+    # Args: self - pytest 测试类实例。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    def test_cross_table_column_is_rejected(self) -> None:
+        """created_at 只在 orders 上存在时，finance_invoices 的 i.created_at 必须被拒绝。"""
+        from src.graph.nodes.execute_sql import _validate_column_references
+
+        # Arrange：这正是实库复现过的形态——created_at 只属于另一个数据源的 orders 表
+        tables = [
+            {"name": "finance_invoices", "columns": [{"name": "event_date"}, {"name": "year_month"}]},
+            {"name": "orders", "columns": [{"name": "created_at"}]},
+        ]
+        sql = "SELECT DATE_TRUNC('MONTH', \"i\".\"created_at\") FROM \"finance_invoices\" AS \"i\""
+
+        # Act
+        result = _validate_column_references(sql, tables, "postgres")
+
+        # Assert：必须拒绝，且错误信息要点明真实归属，便于模型改正
+        assert result is not None
+        assert "不属于表" in result
+        assert "orders" in result
+
     # 方法作用：验证列引用校验已前移到 EXPLAIN 之前，幻觉列在 layer3 就被拦截。
     # Args: self - pytest 测试类实例。
     # Returns: 无返回值，断言失败时由 pytest 报告。

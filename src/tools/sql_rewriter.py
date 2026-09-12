@@ -191,7 +191,8 @@ def rewrite_sql(sql: str, dialect: str) -> str:
                 logger.info("ClickHouse 日期函数归一化回退", count=count)
 
     if applied > 0:
-        logger.info("SQL 方言重写", dialect=dialect, fixes=applied,
-                    result=sql[:150])
-    logger.info("rewrite_sql 完成", dialect=dialect, fixes=applied, sql_chars=len(sql))
+        # 每次执行 SQL 都会触发；重写结论只在排查方言问题时需要
+        logger.debug("SQL 方言重写", dialect=dialect, fixes=applied,
+                     result=sql[:150])
+    logger.debug("rewrite_sql 完成", dialect=dialect, fixes=applied, sql_chars=len(sql))
     return sql

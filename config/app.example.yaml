@@ -65,7 +65,8 @@ report_default_ttl_days: 7
 report_max_ttl_days: 90
 report_default_timezone: Asia/Shanghai
 report_max_units_per_run: 12
-report_max_queries_per_run: 16
+# 多源扇出下单次运行的查询数 = 单元数 × 命中源数，需要能容纳整库扇出
+report_max_queries_per_run: 100
 report_max_concurrency: 4
 report_max_page_bytes: 2097152
 report_max_public_share_days: 30
@@ -99,7 +100,9 @@ cors_allowed_origins: ""
 security_hsts_seconds: 31536000
 api_access:
   default_auth: jwt
-  default_access_log: standard
+  # 只保留主要节点日志：常规读请求（前端轮询状态接口）不再逐条记录。
+  # 异常仍由 "API 访问异常" 以 error 级记录；安全路由另配 security/audit 保留审计。
+  default_access_log: none
   trusted_proxy_cidrs:
     - 172.30.0.0/24
   emergency_ip_deny: []

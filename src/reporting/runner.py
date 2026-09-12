@@ -62,7 +62,16 @@ class ReportRunner:
         plan = job.plan
         reservation = None
         try:
-            quota = await self.store.reserve_run_quota(run.id, identity, plan, self.quota)
+            # 先按表结构判断每个单元命中的数据源：它决定真实的查询扇出，
+            # 必须早于配额预占，否则预占拿到的仍是"只数单元数"的低报估算。
+            unit_datasources = await self._route_units(
+                plan,
+                [str(item) for item in (plan.requested_datasources or [])],
+                int(getattr(identity, "tenant_id", 0) or 0),
+            )
+            quota = await self.store.reserve_run_quota(
+                run.id, identity, self._reserve_plan(plan, unit_datasources), self.quota
+            )
             reservation = quota
             await self.store.update_run(run.id, identity, status="running", started_at=datetime.now(timezone.utc), last_node="report_load_policy")
             await self.store.update_job_status(job_id, identity, "running")
@@ -98,12 +107,7 @@ class ReportRunner:
             }
             if effective_authorized is not None:
                 graph_state["authorized_datasources"] = effective_authorized
-            # 先按表结构判断每个单元命中的数据源，避免把问题广播给无关数据源而必然失败。
-            unit_datasources = await self._route_units(
-                plan,
-                [str(item) for item in (plan.requested_datasources or [])],
-                int(getattr(identity, "tenant_id", 0) or 0),
-            )
+            # 路由结果在预占前已算出，这里只把它传给子图，避免向无关数据源广播查询。
             if unit_datasources:
                 graph_state["unit_datasources"] = unit_datasources
             result = await graph.ainvoke(graph_state)
@@ -294,6 +298,30 @@ class ReportRunner:
             # 路由失败允许退回全源检索，但必须保留堆栈以便与“确实没有命中”区分。
             logger.warning("报表分析单元路由失败，退回全源检索", error_type=type(exc).__name__, error=str(exc), exc_info=True)
             return {}
+
+    # 方法作用：按路由命中数重算预占用计划，避免按“单元数”低报真实查询扇出。
+    # Args: plan - 原始报表计划；routed - unit_id 到命中数据源的映射，None 表示未路由。
+    # Returns: estimated.query_count / llm_tokens 已按真实扇出修正的计划副本。
+    @staticmethod
+    def _reserve_plan(plan: Any, routed: dict[str, list[str]] | None) -> Any:
+        if not routed:
+            return plan
+        fallback = max(1, len(getattr(plan, "requested_datasources", []) or []))
+        actual = 0
+        for unit in plan.analysis_units:
+            if unit.datasource:
+                actual += 1
+                continue
+            matched = routed.get(str(unit.unit_id))
+            # 未出现在路由结果里的单元会退回全源检索，按 fallback 计入才不会低报。
+            actual += len(matched) if matched is not None else fallback
+        actual = max(1, actual)
+        estimated = plan.estimated.model_copy(update={
+            "query_count": min(1000, actual),
+            "llm_tokens": min(2_000_000, max(1000, actual * 1200)),
+        })
+        logger.info("报表配额按路由扇出修正", query_count=actual, unit_count=len(plan.analysis_units))
+        return plan.model_copy(update={"estimated": estimated})
 
 
 # 方法作用：从 AppContext 获取共享 ReportRunner。

@@ -249,7 +249,8 @@ class QuotaPolicyRequest(BaseModel):
     max_runs_started: int = Field(default=50, ge=0, le=100_000)
     max_concurrent_runs: int = Field(default=2, ge=0, le=100)
     max_analysis_units_per_run: int = Field(default=12, ge=1, le=12)
-    max_queries_per_run: int = Field(default=16, ge=1, le=16)
+    # 与管理端上限保持一致：多源扇出的真实查询数是 单元数 × 命中源数。
+    max_queries_per_run: int = Field(default=16, ge=1, le=1000)
     max_rows_per_query: int = Field(default=100_000, ge=1, le=10_000_000)
     max_llm_tokens: int = Field(default=200_000, ge=0, le=10_000_000)
     max_page_bytes: int = Field(default=2_097_152, ge=1024, le=50_000_000)
