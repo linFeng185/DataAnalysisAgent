@@ -59,9 +59,12 @@ async def layer3_validate_node(state: AnalysisState) -> dict:
         )
         high_issues = [item for item in issues if item.confidence == "high"]
 
-        # 阶段二复核：阶段一的基准可能被 _filter_relevant_tables 裁剪过（单源问答链路必然裁剪），
-        # high 置信问题不可直接上报，必须用权威全量快照再判一次，避免误杀合法 SQL。
-        if high_issues and datasource:
+        # 阶段二触发条件：有 high 置信问题，或阶段一根本没有基准可比对。
+        # relevant_tables 为空时索引为空，「表不存在」只是无法判定的推断，
+        # 必须用权威快照复核一次；这正是设计 §6 修掉「空 tables 静默跳过」空窗的方式。
+        tables_hint = state.get("relevant_tables", []) or []
+        need_recheck = bool(high_issues) or not tables_hint
+        if need_recheck and datasource:
             confirmed = await _recheck_with_full_snapshot(
                 sql, datasource, dialect_value, high_issues
             )

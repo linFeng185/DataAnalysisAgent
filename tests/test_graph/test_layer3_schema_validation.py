@@ -123,6 +123,81 @@ class TestLayer3TwoStageValidation:
         assert result["validation_errors"] == []
         logger.info("test_layer3_stage_two_false_positive_is_cleared 完成")
 
+    # 方法作用：验证空基准时节点仍走阶段二，权威快照补回基准后合法 SQL 被放行。
+    # Args: self - pytest 用例实例；monkeypatch - pytest 补丁工具。
+    # Returns: 无返回值，断言失败由 pytest 报告。
+    def test_layer3_rechecks_when_baseline_is_empty(self, monkeypatch) -> None:
+        """relevant_tables 为空时不得静默放行，必须用权威快照复核（设计 §6）。"""
+        logger.debug("test_layer3_rechecks_when_baseline_is_empty 入口")
+        from src.graph.nodes.layer3_validate import layer3_validate_node
+
+        # Arrange：阶段一无基准（relevant_tables 为空），但本轮有确定数据源
+        contexts = SimpleNamespace(
+            routing=SimpleNamespace(datasource=STAGE_TWO_DATASOURCE),
+            execution=SimpleNamespace(dialect=STAGE_TWO_DIALECT),
+        )
+        monkeypatch.setattr(
+            "src.graph.context.read_contexts", lambda state: contexts, raising=False
+        )
+        # 权威全量快照里有该表该列 → 复核后应放行
+        manager = _StubSchemaManager(
+            _build_snapshot_stub([("finance_invoices", ["created_at", "year_month"])])
+        )
+        monkeypatch.setattr(
+            "src.knowledge.schema_manager.get_schema_manager",
+            lambda: manager,
+            raising=False,
+        )
+        state = {"generated_sql": STAGE_TWO_SQL, "relevant_tables": []}
+
+        # Act
+        result = asyncio.run(layer3_validate_node(state))
+
+        # Assert：阶段二确实被触发（否则本用例空转），且合法 SQL 不被误杀
+        assert manager.calls == [STAGE_TWO_DATASOURCE]
+        assert result["sql_valid"] is True
+        assert result["validation_errors"] == []
+        logger.info("test_layer3_rechecks_when_baseline_is_empty 完成")
+
+    # 方法作用：验证空基准 + 权威快照也无该表时拦截，空窗不再放行。
+    # Args: self - pytest 用例实例；monkeypatch - pytest 补丁工具。
+    # Returns: 无返回值，断言失败由 pytest 报告。
+    def test_layer3_blocks_when_empty_baseline_recheck_finds_hallucination(
+        self, monkeypatch
+    ) -> None:
+        """权威快照确认表不存在时，节点必须拦截（设计 §6 堵住空 tables 静默放行）。"""
+        logger.debug(
+            "test_layer3_blocks_when_empty_baseline_recheck_finds_hallucination 入口"
+        )
+        from src.graph.nodes.layer3_validate import layer3_validate_node
+
+        # Arrange：阶段一无基准，权威快照里只有 orders，没有 SQL 引用的 finance_invoices
+        contexts = SimpleNamespace(
+            routing=SimpleNamespace(datasource=STAGE_TWO_DATASOURCE),
+            execution=SimpleNamespace(dialect=STAGE_TWO_DIALECT),
+        )
+        monkeypatch.setattr(
+            "src.graph.context.read_contexts", lambda state: contexts, raising=False
+        )
+        manager = _StubSchemaManager(_build_snapshot_stub([("orders", ["id"])]))
+        monkeypatch.setattr(
+            "src.knowledge.schema_manager.get_schema_manager",
+            lambda: manager,
+            raising=False,
+        )
+        state = {"generated_sql": STAGE_TWO_SQL, "relevant_tables": []}
+
+        # Act
+        result = asyncio.run(layer3_validate_node(state))
+
+        # Assert：阶段二确认真幻觉 → 拦截走既有重试路由
+        assert manager.calls == [STAGE_TWO_DATASOURCE]
+        assert result["sql_valid"] is False
+        assert result["validation_errors"][0]["type"] == "column_reference"
+        logger.info(
+            "test_layer3_blocks_when_empty_baseline_recheck_finds_hallucination 完成"
+        )
+
 
 # 方法作用：构造极简权威快照桩，只保留阶段二复核所需的 tables 属性。
 # Args: tables - (表名, 列名序列) 二元组序列。
@@ -174,6 +249,8 @@ class _StubSchemaManager:
     ) -> None:
         self._snapshot = snapshot
         self._error = error
+        # 记录每次取数的数据源名，供用例断言阶段二确实被触发
+        self.calls: list[str] = []
         logger.debug(
             "桩 SchemaManager 构造",
             has_snapshot=snapshot is not None,
@@ -187,6 +264,7 @@ class _StubSchemaManager:
         self, datasource: str, user_query: str = ""
     ) -> SimpleNamespace | None:
         logger.debug("桩取数入口", datasource=datasource, user_query=user_query)
+        self.calls.append(datasource)
         if self._error is not None:
             raise self._error
         logger.info("桩取数完成", datasource=datasource)
