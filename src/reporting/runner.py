@@ -238,6 +238,10 @@ class ReportRunner:
             "user_id": int(identity.get("user_id", 0) or 0),
             "user_role": str(identity.get("role", "") or ""),
             "session_id": session_id,
+            # 显式声明报表能力：否则 classify_intent 会把单元问句判成 sql_analysis，
+            # 从而允许触发旧的自主补查回环（workflow.py:237-281）。该回环没有配额
+            # 预占与档位控制，与报表自身的受控发散回路叠加会让成本失控。
+            "capability": "report",
             "request_rate_limit_checked": True,
         }, {"configurable": {"thread_id": thread_id}})
         final = dict(result.get("final_response", {}) or {})
@@ -253,7 +257,13 @@ class ReportRunner:
 
             owner = RequestIdentity(tenant_id=int(identity.get("tenant_id", 0)), user_id=int(identity.get("user_id", 0)), role=str(identity.get("role", "")))
             live_query_id = await self.store.save_live_query(run_id, owner, datasource, str(result.get("dialect", "") or access.get("dialect", "")), sql)
-        return UnitResult(unit_id=unit.unit_id, datasource=datasource, live_query_id=live_query_id, rows=[dict(row) for row in rows if isinstance(row, dict)], summary=str((final.get("analysis") or {}).get("summary", "") or ""))
+        # 透传旧工作流已有的截断信号，供确定性深挖披露样本局限。
+        statistics = result.get("query_result_statistics")
+        truncated = bool(
+            (statistics.get("truncated") if isinstance(statistics, dict) else False)
+            or result.get("query_result_truncated")
+        )
+        return UnitResult(unit_id=unit.unit_id, datasource=datasource, live_query_id=live_query_id, rows=[dict(row) for row in rows if isinstance(row, dict)], truncated=truncated, summary=str((final.get("analysis") or {}).get("summary", "") or ""))
 
     # 方法作用：读取各数据源的表名清单，供路由模型判断命中关系。
     # Args: requested - 已授权数据源名称；tenant_id - 当前租户。

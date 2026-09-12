@@ -150,3 +150,86 @@ class TestDecimalProcessors:
         assert len(result.data) == 5
         assert result.data[-1]["predicted"] is True
         assert "R²=1.00" in result.summary
+
+
+class TestYearOverYearProcessor:
+    """覆盖 23.16：同比处理器必须与去年同期比较，不能退化成环比。"""
+
+    # 方法作用：构造跨两个年度的月度序列。
+    # Args: self - pytest 测试类实例。
+    # Returns: 24 期行数据，每年每月金额固定。
+    def _two_year_months(self) -> list[dict]:
+        return [
+            {"month": f"{year}-{month:02d}", "amount": Decimal(str(amount))}
+            for year, amount in ((2025, 100), (2026, 150))
+            for month in range(1, 13)
+        ]
+
+    # 方法作用：验证 yoy 与去年同期比较而不是与上一期比较。
+    # Args: self - pytest 测试类实例。
+    # Returns: 无返回值，断言同比数值取自去年同期。
+    def test_yoy_compares_same_period_last_year(self) -> None:
+        """月度序列的同比必须用本期对去年同月，而非本期对上一期。"""
+        # Arrange
+        from src.tools.processors import YoYProcessor
+
+        # Act
+        result = YoYProcessor().process(self._two_year_months(), {"time_col": "month", "value_col": "amount"})
+
+        # Assert
+        assert result.confidence == "high"
+        first = next(item for item in result.data if item["period"] == "2026-01")
+        # 2026-01 对 2025-01：(150-100)/100 = +50%。
+        assert first["prev_period"] == "2025-01"
+        assert first["change_pct"] == Decimal("50.0")
+
+    # 方法作用：验证期数不足一个完整年度时返回数据不足。
+    # Args: self - pytest 测试类实例。
+    # Returns: 无返回值，断言不再给出同比数值。
+    def test_yoy_returns_insufficient_without_full_cycle(self) -> None:
+        """只有本年 12 期时无法回看一年，必须返回数据不足而不是退化成环比。"""
+        # Arrange
+        from src.tools.processors import YoYProcessor
+
+        rows = [{"month": f"2026-{month:02d}", "amount": Decimal(str(100 + month))} for month in range(1, 13)]
+
+        # Act
+        result = YoYProcessor().process(rows, {"time_col": "month", "value_col": "amount"})
+
+        # Assert
+        assert result.confidence == "low"
+        assert "数据不足" in result.summary
+
+    # 方法作用：验证时间列无法解析时不做同比猜测。
+    # Args: self - pytest 测试类实例。
+    # Returns: 无返回值，断言返回数据不足。
+    def test_yoy_returns_insufficient_for_unparseable_periods(self) -> None:
+        """非日期标签不得被当成可比周期。"""
+        # Arrange
+        from src.tools.processors import YoYProcessor
+
+        rows = [{"month": "第一期", "amount": Decimal("10")}, {"month": "第二期", "amount": Decimal("20")}]
+
+        # Act
+        result = YoYProcessor().process(rows, {"time_col": "month", "value_col": "amount"})
+
+        # Assert
+        assert result.confidence == "low"
+        assert "数据不足" in result.summary
+
+    # 方法作用：验证修复 yoy 时未改动 mom 的环比语义。
+    # Args: self - pytest 测试类实例。
+    # Returns: 无返回值，断言 mom 仍与上一期比较。
+    def test_mom_still_compares_previous_period(self) -> None:
+        """环比必须保持与上一期比较，不能跟随同比改为年度对齐。"""
+        # Arrange
+        from src.tools.processors import MoMProcessor
+
+        rows = [{"month": "2026-01", "amount": Decimal("100")}, {"month": "2026-02", "amount": Decimal("150")}]
+
+        # Act
+        result = MoMProcessor().process(rows, {"time_col": "month", "value_col": "amount"})
+
+        # Assert
+        assert result.data[0]["period"] == "2026-02"
+        assert result.data[0]["change_pct"] == Decimal("50.0")

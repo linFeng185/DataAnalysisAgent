@@ -39,7 +39,7 @@
 | 2 | **`report_profile_results` 只做 `len(rows)` 计数**（`spec/30:215` 声称算数值列/时间粒度/缺失/异常/代表性） | `report_workbench.py:225-236` | 规格与代码不符 |
 | 3 | **报表路径未注入 `capability="report"`**，`classify_intent`（`contracts.py:275-282`）把单元问句判为 `sql_analysis`，旧的自主补查回环（`workflow.py:237-281`）**实际可达**（`spec/30:264` 声称不可达） | `runner.py:207-219` | 发散会让单元数上升，放大了这个未受控回环的代价 |
 | 4 | **`yoy` 与 `mom` 的 `process()` 实现完全相同**（都是 `v[i] vs v[i-1]`），但 `yoy` 输出被标为"同比均值" —— 它算的是**环比** | `processors.py:13` 与 `:26` | 复用 processors 会把错误标签带进 23.16 的"同比"数字 |
-| 5 | **`UnitResult` 不记录原始行数**，`rows` 上限 1000（`models.py:267`） | — | 无法判断样本是否被截断，统计结论的样本披露没有依据 |
+| 5 | **`UnitResult` 不携带截断信号**，`rows` 上限 1000（`models.py:267`） | — | 无法判断样本是否被截断，统计结论的样本披露没有依据。**截断信号在旧工作流 state 里其实已经存在**（`query_result_statistics.truncated`、`query_result_truncated`，见 `execute_sql.py:182-183`），只是 `runner._default_execute_unit` 构造 `UnitResult` 时丢弃了它 |
 | 6 | **图表硬编码 `bar`** | `document.py:256` | 时间序列与分布结果用柱状图表达不合理 |
 
 ### 1.4 关键约束（不可突破）
@@ -192,7 +192,7 @@ _DIVERGENCE_UNITS_PER_ROUND: dict[str, int] = {
 | `AnalysisUnit`（`models.py:36`） | `origin: Literal["user", "diverged"] = "user"` | 同样进哈希 |
 | `AnalysisUnit` | `rationale: str = Field(default="", max_length=500)` | **仅 `origin="diverged"` 时非空**：为什么建议分析这个 |
 | `AnalysisUnit` | `decided_by: Literal["", "plan", "runtime"] = ""` | 发散单元是计划期还是运行期产生的；`origin="user"` 时必须为空 |
-| `UnitResult`（`models.py:260`） | `total_rows: int = Field(default=0, ge=0)` | 执行器返回的**原始行数**（截断前），见 5.2 |
+| `UnitResult`（`models.py:260`） | `truncated: bool = False` | 旧工作流已给出截断信号，执行器需透传而非丢弃，见 5.2 |
 
 不变量校验加在 `AnalysisUnit.normalize_unit`（`models.py:50-59`）：
 
@@ -293,9 +293,10 @@ class UnitFinding(BaseModel):
 
 **样本披露**：
 
-- `truncated = UnitResult.total_rows > len(UnitResult.rows)`。这要求执行器写入 `total_rows`（1.3 第 5 条）。
-- 若 `truncated=True`，**每个 finding 强制携带** `caveats: ["样本被截断：本次仅基于 {len(rows)}/{total_rows} 行计算"]`。沿用 `RelationEvidence.sampled`（`relations.py:35`）的既有做法。
-- `total_rows` 为 0（执行器未提供）→ 不判截断，只在 `method` 里写"基于 N 行"。
+- `truncated = UnitResult.truncated`，直接取自旧工作流 state 的 `query_result_statistics.truncated`（`execute_sql.py:182`）。
+- **不新增 `total_rows` 字段**：原始行数在现有链路里不可得（`rows` 已被连接器上限截过），而截断信号本就存在，只是 `runner` 构造 `UnitResult` 时丢弃了它。为拿不到的精确分母去下钻 `sql_execution.py` 与 `execute_sql.py` 得不偿失，且这两个文件正被另一条并行开发线修改。
+- 若 `truncated=True`，**每个 finding 强制携带** `caveats: ["样本被截断：结论仅基于返回的 N 行计算"]`。沿用 `RelationEvidence.sampled`（`relations.py:35`）的既有做法。
+- 截断信号缺失时按 `False` 处理，`method` 里仍写明"基于 N 行"。
 
 **每个 finding 的 `method` 必填**，且必须包含：用了哪些列、按什么分组、用了什么聚合、用了什么判据。这是零幻觉与可解释性的底线。
 
@@ -661,7 +662,7 @@ ALTER TABLE report_jobs ADD COLUMN IF NOT EXISTS preview_hash VARCHAR(80);
 | 深挖：数值列无法识别 | 跳过数值类加工，不产出 |
 | 深挖：观测点不足 | 该类 finding 不产出，**不降级到猜测** |
 | 深挖：`processors` 返回"数据不足" | 该条不产出（沿用处理器既有出口） |
-| `UnitResult.total_rows` 为 0 | 不判截断，`method` 里写"基于 N 行" |
+| 截断信号缺失（`query_result_statistics` 无 `truncated`） | 按未截断处理，`method` 里仍写明"基于 N 行" |
 | 行集被截断 | `truncated=True`，每个 finding 携带样本披露 |
 | 跨源：无共同指标 / 时间重合 < 8 / 方差为 0 | `evidence_level = "insufficient"` + 说明 |
 | 指标目录查询异常 | 写 `warnings`，主链路继续 |
@@ -684,7 +685,7 @@ src/reporting/
 │                                                        ReportPlan.divergence/excluded_unit_ids、
 │                                                        ReportPlanRequest.divergence、
 │                                                        ReportJobCreateRequest.accepted_unit_ids、
-│                                                        UnitResult.total_rows、
+│                                                        UnitResult.truncated、
 │                                                        EstimatedResources.query_count 上限 16→64
 ├── planner.py                                   [修改] diverge() 与 _coerce_diverge_units()；按档位额度估算
 ├── profiling.py                                 [新增] 适配层：参数推导 + ProcessorResult → UnitFinding
@@ -800,8 +801,8 @@ frontend/src/
 | `test_contribution_skips_high_cardinality` | 维度基数 > 50 → 不产出 |
 | `test_distribution_reports_percentiles_not_concentration` | `distribution` 产出 P25/P50/P75 + 偏度，**不产出 CR3/HHI** |
 | `test_internal_error_is_adapted_not_propagated` | `processors` 抛异常 → 该条不产出，不中断整份报表 |
-| `test_truncated_input_marks_every_finding` | `total_rows > len(rows)` → 每个 finding 带样本披露 |
-| `test_zero_total_rows_skips_truncation_disclosure` | `total_rows=0` → 不判截断，`method` 写行数 |
+| `test_truncated_input_marks_every_finding` | `truncated=True` → 每个 finding 带样本披露 |
+| `test_missing_truncation_signal_is_treated_as_not_truncated` | 信号缺失 → 不判截断，`method` 写行数 |
 | `test_findings_carry_method_description` | `method` 必填且非空 |
 | `test_chart_type_comes_from_processor_result` | `chart_type` 直接取自 `ProcessorResult`，不自行映射 |
 | `test_unknown_chart_type_falls_back_to_bar` | 非法 `chart_type` → `bar` |
@@ -874,7 +875,7 @@ frontend/src/
 
 | 阶段 | 内容 | 依赖 |
 |---|---|---|
-| **A（前置修复）** | 1) `runner` 注入 `capability="report"`；2) 修 `processors.yoy` 的既有 bug；3) `UnitResult.total_rows`；4) `query_count` 上限 | 无，**必须最先做** |
+| **A（前置修复）** | 1) `runner` 注入 `capability="report"`；2) 修 `processors.yoy` 的既有 bug；3) `UnitResult.truncated` 透传；4) `query_count` 上限 | 无，**必须最先做** |
 | B | 契约与档位额度（`models.py` + planner 估算 + `test_divergence.py` 契约部分） | 无，与 A 并行 |
 | C | 深挖适配层（`profiling.py` + `report_analyze_units` 节点 + `test_profiling_adapter.py`） | A、B |
 | D | 计划期发散（`prompts.py` `report.diverge` + `planner.diverge`） | B |
@@ -926,7 +927,7 @@ C / D / F / G / H 之间无相互依赖，可并行；E 依赖 C 与 D。
 | `spec/30:215` `report_profile_results` 只数行数 | **补齐**：由 `report_analyze_units` 承担真实深挖；`report_profile_results` 保留其行数统计职责或并入前者，实现时二选一并更新 `spec/30` |
 | `spec/30:264` 报表路径不进补查回环 | **修正代码 + 修订规格**：11.1 注入 `capability="report"`；补充限定语见 18.1 |
 | `processors.yoy` 实为环比 | **修 bug**：阶段 A |
-| `UnitResult` 无原始行数 | **新增 `total_rows`**：阶段 A |
+| `UnitResult` 丢弃了旧工作流已有的截断信号 | **透传 `truncated`**：阶段 A。不新增 `total_rows`——原始行数在现有链路不可得 |
 | 图表硬编码 `bar` | **修正**：用 `ProcessorResult.chart_type`，回退仍为 `bar` |
 | `source_citation` 定义了无产出 | **补齐**：口径溯源产出该 block |
 | `document.navigation` / `document.sources` 未消费 | 仍不在本文范围，见 `spec/41` 第 16 节 |

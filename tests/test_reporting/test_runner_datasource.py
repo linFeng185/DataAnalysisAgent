@@ -226,3 +226,99 @@ class TestReportRunnerDatasourceFanout:
 
         # Assert
         assert routes == {unit.unit_id: ["oracle"]}
+
+    # 方法作用：验证单元执行显式声明报表能力，关闭旧的自主补查回环。
+    # Args: self - pytest 测试类实例；monkeypatch - pytest 补丁工具。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    async def test_execute_unit_declares_report_capability(self, monkeypatch) -> None:
+        """不声明 capability 会让单元问句被判为 sql_analysis，从而进入无配额控制的旧回环。"""
+        # Arrange
+        import src.graph.workflow as workflow_module
+        from src.reporting.models import AnalysisUnit, ReportPlan
+        from src.reporting.runner import ReportRunner
+        from src.reporting.store import ReportStore
+
+        captured: list[dict] = []
+        monkeypatch.setattr(workflow_module, "app", _fake_workflow(captured))
+        runner = ReportRunner(store=ReportStore(memory=True))
+        unit = AnalysisUnit(question="各地区销售额趋势")
+        plan = ReportPlan(requested_datasources=["oracle"], analysis_units=[unit])
+        state = {
+            "plan": plan,
+            "run_id": "run-5",
+            "identity": {"tenant_id": 3, "user_id": 3, "role": "tenant_admin"},
+            "authorized_datasources": {"oracle": {}},
+        }
+
+        # Act
+        await runner._default_execute_unit(unit, state)
+
+        # Assert
+        assert captured[0]["capability"] == "report"
+
+    # 方法作用：验证执行器透传旧工作流已有的截断信号。
+    # Args: self - pytest 测试类实例；monkeypatch - pytest 补丁工具。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    async def test_execute_unit_passes_through_truncation_signal(self, monkeypatch) -> None:
+        """丢弃截断信号会让统计结论无从披露样本局限。"""
+        # Arrange
+        import src.graph.workflow as workflow_module
+        from src.reporting.models import AnalysisUnit, ReportPlan
+        from src.reporting.runner import ReportRunner
+        from src.reporting.store import ReportStore
+
+        class TruncatingApp:
+            # 方法作用：返回带截断标记的成功结果。
+            # Args: payload - 工作流状态；config - 线程配置。
+            # Returns: 含 query_result_statistics 的固定结果。
+            async def ainvoke(self, payload, config):
+                return {
+                    "final_response": {"success": True, "data": [{"v": 1}]},
+                    "query_result_statistics": {"row_count": 1, "truncated": True},
+                }
+
+        monkeypatch.setattr(workflow_module, "app", TruncatingApp())
+        runner = ReportRunner(store=ReportStore(memory=True))
+        unit = AnalysisUnit(question="明细")
+        plan = ReportPlan(requested_datasources=["oracle"], analysis_units=[unit])
+        state = {
+            "plan": plan,
+            "run_id": "run-6",
+            "identity": {"tenant_id": 3, "user_id": 3, "role": "tenant_admin"},
+            "authorized_datasources": {"oracle": {}},
+        }
+
+        # Act
+        result = await runner._default_execute_unit(unit, state)
+
+        # Assert
+        assert result.truncated is True
+
+    # 方法作用：验证缺失截断信号时按未截断处理。
+    # Args: self - pytest 测试类实例；monkeypatch - pytest 补丁工具。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    async def test_missing_truncation_signal_defaults_to_false(self, monkeypatch) -> None:
+        """无信号时不得凭空判为截断。"""
+        # Arrange
+        import src.graph.workflow as workflow_module
+        from src.reporting.models import AnalysisUnit, ReportPlan
+        from src.reporting.runner import ReportRunner
+        from src.reporting.store import ReportStore
+
+        captured: list[dict] = []
+        monkeypatch.setattr(workflow_module, "app", _fake_workflow(captured))
+        runner = ReportRunner(store=ReportStore(memory=True))
+        unit = AnalysisUnit(question="明细")
+        plan = ReportPlan(requested_datasources=["oracle"], analysis_units=[unit])
+        state = {
+            "plan": plan,
+            "run_id": "run-7",
+            "identity": {"tenant_id": 3, "user_id": 3, "role": "tenant_admin"},
+            "authorized_datasources": {"oracle": {}},
+        }
+
+        # Act
+        result = await runner._default_execute_unit(unit, state)
+
+        # Assert
+        assert result.truncated is False

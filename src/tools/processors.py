@@ -3,17 +3,72 @@
 from src.tools.data_processor import DataProcessor, ProcessorResult, register
 
 
+# 方法作用：把周期标签解析为可比日期，支持年、年月与常见日期写法。
+# Args: label - 时间列取值文本。
+# Returns: 解析出的日期；无法识别时返回 None，由调用方跳过该周期。
+def _parse_period(label: str):
+    from datetime import datetime
+
+    text = str(label or "").strip()
+    if not text:
+        return None
+    for fmt in ("%Y-%m-%d", "%Y/%m/%d", "%Y-%m", "%Y/%m", "%Y"):
+        try:
+            return datetime.strptime(text, fmt).date()
+        except ValueError:
+            continue
+    return None
+
+
+# 方法作用：按年平移日期，闰年 2 月 29 日退到 2 月 28 日。
+# Args: value - 原日期；years - 平移年数，负数为回看。
+# Returns: 平移后的日期；无法平移时返回 None。
+def _shift_years(value, years: int):
+    try:
+        return value.replace(year=value.year + years)
+    except ValueError:
+        try:
+            return value.replace(year=value.year + years, day=28)
+        except ValueError:
+            return None
+
+
 @register
 class YoYProcessor(DataProcessor):
     name = "yoy"; intents = ["trend", "attribution"]; prefer_sql = True
+
+    # 方法作用：按同周期去年计算同比增长率，与环比严格区分。
+    # Args: self - 处理器实例；rows - 查询结果；params - 含 time_col 与 value_col 的配置。
+    # Returns: 逐期同比变化与均值；不足一个完整年度时返回数据不足。
     def process(self, rows, params):
         vc, tc = params.get("value_col",""), params.get("time_col","")
         if not vc or not tc or len(rows)<2: return ProcessorResult("数据不足",[],"table",rows,"low")
-        vals=[self._f(r.get(vc)) for r in rows]; times=[self._s(r.get(tc)) for r in rows]
-        ch=[{"period":times[i],"value":vals[i],"prev":vals[i-1],"change_pct":round((vals[i]-vals[i-1])/max(abs(vals[i-1]),1)*100,1)} for i in range(1,len(vals))]
-        avg=round(sum(c["change_pct"] for c in ch)/len(ch),1) if ch else 0
+        # 保留原始标签，使输出周期文本与输入一致；无法解析的周期不参与同比。
+        series: dict = {}
+        for row in rows:
+            label = self._s(row.get(tc))
+            parsed = _parse_period(label)
+            if parsed is not None:
+                series[parsed] = (label, self._f(row.get(vc)))
+        ch = []
+        for current in sorted(series):
+            previous = _shift_years(current, -1)
+            if previous is None or previous not in series:
+                continue
+            cur_label, cur_value = series[current]
+            prev_label, prev_value = series[previous]
+            ch.append({
+                "period": cur_label,
+                "value": cur_value,
+                "prev": prev_value,
+                "prev_period": prev_label,
+                "change_pct": round((cur_value - prev_value) / max(abs(prev_value), 1) * 100, 1),
+            })
+        if not ch:
+            return ProcessorResult("数据不足",[],"table",rows,"low")
+        avg=round(sum(c["change_pct"] for c in ch)/len(ch),1)
         d="上升" if avg>0 else "下降" if avg<0 else "持平"
-        return ProcessorResult(f"同比均值{avg}%，{d}",[f"最大增幅{max(c['change_pct'] for c in ch) if ch else 0}%"],"line",ch)
+        return ProcessorResult(f"同比均值{avg}%，{d}",[f"最大增幅{max(c['change_pct'] for c in ch)}%"],"line",ch)
 
 
 @register

@@ -92,7 +92,9 @@ class SharePlan(BaseModel):
 class EstimatedResources(BaseModel):
     """计划阶段的有界资源估算。"""
 
-    query_count: int = Field(default=1, ge=0, le=16)
+    # 上限 64 = 18 个单元（用户 12 + 档位额度 6）× 单单元平均命中 4 个源的保守估计。
+    # 该值只影响预占的保守程度，实际扣费仍由 runner 按真实扇出修正。
+    query_count: int = Field(default=1, ge=0, le=64)
     llm_tokens: int = Field(default=1000, ge=0, le=2_000_000)
     estimated_seconds: int = Field(default=5, ge=0, le=3600)
 
@@ -265,6 +267,8 @@ class UnitResult(BaseModel):
     live_query_id: str = ""
     status: Literal["success", "partial", "failed"] = "success"
     rows: list[dict[str, Any]] = Field(default_factory=list, max_length=1000)
+    # 旧工作流已给出截断信号，执行器必须透传：统计结论需要据此披露样本局限。
+    truncated: bool = False
     columns: list[str] = Field(default_factory=list, max_length=100)
     summary: str = ""
     warnings: list[str] = Field(default_factory=list, max_length=20)

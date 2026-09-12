@@ -59,7 +59,7 @@
 | 23.18 跨源分布级关联与影响判定 | 同 23.16；设计见 `spec/42` 第 7 节 | 无外部依赖；真实跨源样本可用测试数据构造 | Phase 3 |
 | 23.19 指标口径溯源 | 同 23.16；设计见 `spec/42` 第 8 节 | 依赖租户指标目录中存在已批准生效版本；目录为空时按设计不产出，不阻塞开发 | Phase 3 |
 | 23.20 预览裁剪与计划单调删减 | 同 23.16；设计见 `spec/42` 第 9 节 | 无外部依赖；需应用迁移 `028_report_job_preview_hash.sql`（真实 PostgreSQL 验收另行执行） | Phase 3 |
-| （阶段 A 前置修复） | 未单列功能点，属 23.16/23.17 的实施前置：`runner` 注入 `capability="report"`、修 `processors.yoy` 既有 bug、`UnitResult.total_rows`、`query_count` 上限 16→64 | 无外部依赖，**必须最先做** | Phase 3，最先 |
+| （阶段 A 前置修复）**已完成** | 未单列功能点，属 23.16/23.17 的实施前置，四项均已落地：① `runner._default_execute_unit` 注入 `capability="report"` 关闭旧补查回环；② 修 `processors.yoy` 既有 bug（原先与 `mom` 逐字相同、算的是环比却输出同比，现改为按年平移对齐去年同期）；③ `UnitResult.truncated` 透传旧工作流已有信号（**未新增 `total_rows`**：原始行数在现有链路不可得，为拿不到的分母下钻 `sql_execution.py` 与 `execute_sql.py` 不划算，且这两个文件正被另一条并行开发线修改）；④ `EstimatedResources.query_count` 上限 16→64（18 个单元 × 平均 4 源） | — | Phase 3，已完成 |
 | （其余项） | 本轮编号范围内均已实现 | 生产验收见下文，不另伪造开发完成状态 | — |
 
 ### 2026-09-12 运行计数批次
