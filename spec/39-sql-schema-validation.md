@@ -250,7 +250,8 @@ def validate_sql_schema(sql, *, datasources, dialect, tables): ...
 | 派生表 `FROM (SELECT a FROM orders) x` | `x` 为 `Scope` → 可排除；内部 `orders` 正确 |
 | 窗口函数 `ROW_NUMBER() OVER (PARTITION BY o.customer_id ORDER BY o.created_at)` | PARTITION / ORDER BY 内的列**全部提取，无遗漏** |
 | 嵌套函数 `DATE_TRUNC('MONTH', o.created_at)` | 只提取 `o.created_at`；字符串 `'MONTH'` 未被误当列 |
-| 聚合 + 列别名 `SUM(o.amount) AS total ... ORDER BY total` | 只提取 `o.amount`；别名 `total` 未被误当列 |
+| 聚合 + 列别名 `SUM(o.amount) AS total ... ORDER BY total` | 只提取 `o.amount`；`ORDER BY` 的别名 sqlglot 识别为输出列引用，**不进 `scope.columns`** |
+| **`GROUP BY <投影别名>`** `SELECT SUM(amount) AS total FROM orders GROUP BY total` | **`GROUP BY` 的别名会被当作普通列收进 `scope.columns`**（与 `ORDER BY` 行为不同）。若不做处理，零命中会判成 `unknown_column` 高置信，导致 PG/MySQL/ClickHouse 合法的聚合查询被误拦（实测三方言全部中招）。**实现必须收集本 scope 的投影别名并在零命中时先行排除**；`GROUP BY <序号>`、`GROUP BY <真实列>`、`HAVING <别名>` 三种形态实测均正常 |
 | CTE 内幻觉列 `WITH t AS (SELECT o.bogus_col FROM orders o)` | **可检出**（现有实现漏检的形态） |
 | JOIN 多表 | 各列归属正确 |
 | UNION / WHERE 子查询 / 引号标识符 `"Order Date"` | 分 scope 各自正确 |
