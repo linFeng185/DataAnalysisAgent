@@ -257,187 +257,73 @@ def _classify_execution_error(message: str) -> str:
     return result
 
 
-# 方法作用：找出“列名在全局白名单存在、却不属于本语句引用表”的错配列。
-# Args: tree - 已解析的 SQL 语法树；tables - 运行时表结构；aliases - SELECT 中定义的别名。
-# Returns: 每个错配列的 column / referenced_table / provided_by 摘要。
-def _columns_by_table(tables: list[dict]) -> dict[str, set[str]]:
-    """把运行时表结构整理成 表名 -> 列名集合。"""
-    result: dict[str, set[str]] = {}
-    for table in tables:
-        name = str(table.get("name", "") or "").lower()
-        if not name:
+# 方法作用：找出「列名在全局白名单存在、却不属于本语句引用表」的错配列（兼容适配器）。
+# Args: tree - 已解析的 SQL 语法树；tables - 运行时表结构；
+#       aliases - SELECT 中定义的别名（作用域感知实现已不再使用，仅为保持签名兼容保留）。
+# Returns: 每个错配列的 column / referenced_table / provided_by 摘要；结构与旧实现一致。
+def find_cross_table_columns(
+    tree: Any, tables: list[dict], aliases: set[str]
+) -> list[dict[str, Any]]:
+    """保留旧 dict 契约，判定逻辑委托 src.security.sql_schema_validation 统一实现。"""
+    from src.security.sql_schema_validation import (
+        _collect_column_issues,
+        build_table_index,
+    )
+
+    logger.debug("跨表列错配检测入口", table_count=len(tables))
+    # 单源快照统一落到默认源名下，白名单因此真实生效：越界源的表会被跳过，
+    # 而不是退化成空白名单的 fail-open 放行，也避免每次校验都打白名单缺失告警。
+    index = build_table_index(tables, ["__local__"])
+    by_table: dict[str, int] = {}
+    for (_source, name) in index:
+        by_table[name] = by_table.get(name, 0) + 1
+    result: list[dict[str, Any]] = []
+    for issue in _collect_column_issues(tree, index, "__local__"):
+        if issue.type != "cross_table_column":
             continue
-        result[name] = {
-            str(column.get("name", "") or "").lower()
-            for column in (table.get("columns") or [])
-            if str(column.get("name", "") or "").strip()
-        }
+        qualifier = issue.qualifier
+        providers = list(issue.provided_by)
+        result.append(
+            {
+                "column": f"{qualifier}.{issue.column}" if qualifier else issue.column,
+                "referenced_table": issue.table,
+                "provided_by": providers[:10],
+                "provider_count": len(providers),
+                "schema_table_count": len(by_table),
+            }
+        )
+    logger.info("跨表列错配检测完成", mismatch_count=len(result))
     return result
 
 
-# 方法作用：把 SQL 里的表别名映射回真实表名。
-# Args: tree - 已解析的 SQL 语法树。
-# Returns: 别名 -> 真实表名（均小写）。
-def _alias_to_table(tree: Any) -> dict[str, str]:
-    from sqlglot import exp
-
-    result: dict[str, str] = {}
-    for table_node in tree.find_all(exp.Table):
-        real_name = str(table_node.name or "").lower()
-        alias_name = str(table_node.alias or "").lower()
-        if alias_name and real_name:
-            result[alias_name] = real_name
-    return result
-
-
-# 方法作用：找出“列名在全局白名单存在、却不属于本语句引用表”的错配列。
-# Args: tree - 已解析的 SQL 语法树；tables - 运行时表结构；aliases - SELECT 中定义的别名。
-# Returns: 每个错配列的 column / referenced_table / provided_by 摘要。
-def find_cross_table_columns(tree: Any, tables: list[dict], aliases: set[str]) -> list[dict[str, Any]]:
-    """暴露表盲校验的漏检形态：列通过了全局白名单，但真正提供它的是另一张表。"""
-    from sqlglot import exp
-
-    columns_by_table = _columns_by_table(tables)
-    alias_to_table = _alias_to_table(tree)
-
-    mismatches: list[dict[str, Any]] = []
-    for node in tree.find_all(exp.Column):
-        col_name = str(node.name or "").lower()
-        if not col_name or col_name in aliases:
-            continue
-        qualifier = str(node.table or "").lower()
-        resolved = alias_to_table.get(qualifier, qualifier)
-        # 只对该列所属的表已知、且表里确实没有这一列的情况告警
-        if resolved not in columns_by_table or col_name in columns_by_table[resolved]:
-            continue
-        providers = sorted(name for name, cols in columns_by_table.items() if col_name in cols)
-        mismatches.append({
-            "column": f"{qualifier}.{col_name}" if qualifier else col_name,
-            "referenced_table": resolved,
-            "provided_by": providers[:10],
-            "provider_count": len(providers),
-            "schema_table_count": len(columns_by_table),
-        })
-    return mismatches
-
-
+# 方法作用：执行前验证 SQL 中的列引用是否都存在于表结构中（最后防线，委托统一校验器）。
+# Args: sql - 待验证 SQL；tables - relevant_tables 列表；dialect - 数据库方言。
+# Returns: 错误消息字符串，None 表示通过。
 def _validate_column_references(
     sql: str,
     tables: list[dict],
     dialect: str = "",
 ) -> str | None:
-    """执行前验证 SQL 中的列引用是否都存在于表结构中。
+    """委托 src.security.sql_schema_validation，保留原签名与错误消息契约。
 
     与 should_retry 配合：验证失败 → execution_error → retry → LLM 修正。
-    跳过 SELECT 中 AS 定义的别名（如 SUM(x) AS total_sales），这些不是表列。
-
-    Args:
-        sql - 待验证的 SQL
-        tables - relevant_tables 列表
-        dialect - 数据库方言
-
-    Returns: 错误消息字符串，None 表示通过
     """
-    logger.debug(
-        "列引用校验入口",
-        dialect=dialect,
-        table_count=len(tables),
-    )
-    if not tables:
-        logger.info("列引用校验完成", result="无表结构，跳过")
-        return None
+    logger.debug("列引用校验入口", dialect=dialect, table_count=len(tables))
+    from src.security.sql_schema_validation import validate_sql_schema
+
     try:
-        import sqlglot
-        from sqlglot import exp
-
-        valid_cols: set[str] = set()
-        valid_tables: set[str] = set()
-        for t in tables:
-            tname = t.get("name", "")
-            if tname:
-                valid_tables.add(tname.lower())
-                valid_tables.add(tname)
-            for c in t.get("columns", []):
-                cname = c.get("name", "")
-                if cname:
-                    valid_cols.add(cname.lower())
-                    valid_cols.add(cname)
-                    if tname:
-                        valid_cols.add(f"{tname.lower()}.{cname.lower()}")
-
-        if not valid_cols:
-            return None
-
-        normalized_dialect = (dialect or "").strip().lower()
-        parser_dialect = {
-            "mssql": "tsql",
-            "postgresql": "postgres",
-        }.get(normalized_dialect, normalized_dialect)
-        tree = sqlglot.parse_one(sql, read=parser_dialect or None)
-        if not tree:
-            logger.error("列引用校验失败", error="SQL 解析结果为空")
-            return "列名校验解析失败: SQL 解析结果为空"
-
-        # 收集 SELECT 中 AS 定义的别名，这些不是表列，不校验
-        aliases: set[str] = set()
-        for sel in tree.find_all(exp.Select):
-            for col in sel.expressions:
-                alias = col.alias_or_name if hasattr(col, 'alias_or_name') else col.alias
-                if alias and alias != col.name:
-                    aliases.add(alias.lower())
-
-        # 列归属校验：valid_cols 是所有表列名的并集，只看列名会漏掉跨表错配——
-        # 例如 created_at 只存在于 orders，却写成 finance_invoices 的别名前缀 i.created_at，
-        # 照样能通过白名单，直到 EXPLAIN 打库才报 column does not exist。这里按表归属拒绝。
-        errors: list[str] = []
-        for mismatch in find_cross_table_columns(tree, tables, aliases):
-            logger.warning("列归属错配拦截", **mismatch)
-            providers = mismatch["provided_by"]
-            err = (
-                f"列 '{mismatch['column']}' 不属于表 {mismatch['referenced_table']}"
-                + (f"（该列属于: {', '.join(providers[:5])}）" if providers else "")
-            )
-            if err not in errors:
-                errors.append(err)
-        for node in tree.find_all(exp.Column):
-            col_name = node.name
-            if col_name == "*" or col_name == "1":
-                continue
-            # 跳过 SELECT 中定义的别名
-            if col_name.lower() in aliases:
-                continue
-            if col_name.lower() not in valid_cols:
-                table_name = node.table
-                full_ref = f"{table_name}.{col_name}" if table_name else col_name
-                if full_ref.lower() not in valid_cols:
-                    err = f"列 '{full_ref}' 不在可用列中（可用: {sorted(valid_cols)[:15]}）"
-                    if err not in errors:
-                        errors.append(err)
-
-        if errors:
-            result = "列名校验失败: " + "; ".join(errors[:3])
-            logger.info("列引用校验完成", result="失败", error_count=len(errors))
-            return result
-        # 列引用校验通过探针：把本语句引用表在运行时 schema 中的真实列打出来。
-        # 判断“列信息来自哪份 schema、是否与真实库一致”只能靠它——
-        # 若这里没有某列而验证仍通过，说明漏检；若这里有而真实库没有，说明 schema 源本身错。
-        columns_by_table = _columns_by_table(tables)
-        alias_to_table = _alias_to_table(tree)
-        referenced_names = sorted({
-            alias_to_table.get(str(node.table or "").lower(), str(node.table or "").lower())
-            for node in tree.find_all(exp.Column)
-            if str(node.table or "").strip()
-        })
-        if referenced_names:
-            # 诊断已完成使命（跨表错配已改为拦截），保留为 debug 供排查 schema 来源问题
-            logger.debug(
-                "列引用校验通过探针",
-                referenced_tables={
-                    name: sorted(columns_by_table.get(name, []))[:40] for name in referenced_names[:5]
-                },
-            )
-        logger.info("列引用校验完成", result="通过")
-        return None
+        # 单源快照统一落到默认源名下：白名单真实生效（越界源的表被跳过，不再 fail-open），
+        # 同时避开空白名单在热路径上每次校验都打「未提供数据源白名单」告警的噪音。
+        issues = validate_sql_schema(
+            sql, datasources=["__local__"], dialect=dialect, tables=tables
+        )
     except Exception as exc:
         logger.error("列引用校验解析失败", error=str(exc), exc_info=True)
         return "列名校验解析失败"
+    high_issues = [item for item in issues if item.confidence == "high"]
+    if not high_issues:
+        logger.info("列引用校验完成", result="通过")
+        return None
+    result = "列名校验失败: " + "; ".join(item.describe() for item in high_issues[:3])
+    logger.info("列引用校验完成", result="失败", error_count=len(high_issues))
+    return result
