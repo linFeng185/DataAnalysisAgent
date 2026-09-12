@@ -120,6 +120,41 @@ class TestTableIndex:
         assert resolve_table_owner(multi, "orders") == "ambiguous"
         logger.info("test_resolve_owner_single_and_ambiguous 完成")
 
+    # 方法作用：验证 columns 容器畸形（不可迭代）时降级为空列集并留 warning，不抛异常。
+    # Args: self - pytest 用例实例。
+    # Returns: 无返回值，断言失败由 pytest 报告。
+    def test_index_skips_malformed_columns_container(self) -> None:
+        """B1 回归：columns=5 之类的畸形容器必须降级，不得让异常击穿校验主流程。
+
+        校验器的 layer3 调用点没有 try/except，这里一旦抛 TypeError 就是图节点崩溃，
+        因此畸形数据必须与「非 Mapping 列条目」同策略：只丢列集并留痕。
+        """
+        logger.debug("test_index_skips_malformed_columns_container 入口")
+        from structlog.testing import capture_logs
+
+        from src.security.sql_schema_validation import build_table_index
+
+        # Arrange：columns 为 int（不可迭代），另有一张正常表作对照
+        tables = [
+            {"name": "broken_table", "columns": 5},
+            {"name": "orders", "columns": [{"name": "id"}]},
+        ]
+
+        # Act：不得抛异常
+        with capture_logs() as events:
+            index = build_table_index(tables, ["pg_main"])
+
+        # Assert：畸形表降级为空列集仍进索引，正常表不受影响，且留下 warning
+        assert index[("pg_main", "broken_table")] == frozenset()
+        assert index[("pg_main", "orders")] == frozenset({"id"})
+        assert any(
+            event.get("event") == "表索引跳过畸形列容器"
+            and event.get("table") == "broken_table"
+            and event.get("container_type") == "int"
+            for event in events
+        )
+        logger.info("test_index_skips_malformed_columns_container 完成")
+
 
 class TestValidationIssue:
     """覆盖 ValidationIssue 描述渲染（spec/39 §4.3）。"""
@@ -393,6 +428,36 @@ class TestQualifiedColumn:
         # Assert
         assert [item for item in issues if item.confidence == "high"] == []
         logger.info("test_cte_qualifier_is_not_blocked 完成")
+
+    # 方法作用：验证目标表列集为空时跨表错配判定同样降级，不产出 high 拦截。
+    # Args: self - pytest 用例实例。
+    # Returns: 无返回值，断言失败由 pytest 报告。
+    def test_cross_table_column_degrades_when_target_has_no_columns(self) -> None:
+        """B5 回归：空列集降级必须也覆盖 cross_table_column，否则同样误拦。
+
+        场景：finance_invoices 在册但列集为空、audit_log 有 created_at。
+        没有目标表的列信息就无法确认「不属于该表」，必须与 unknown_column 一样降级。
+        """
+        logger.debug("test_cross_table_column_degrades_when_target_has_no_columns 入口")
+        from src.security.sql_schema_validation import validate_sql_schema
+
+        # Arrange
+        tables = [
+            {"name": "finance_invoices", "columns": []},
+            {"name": "audit_log", "columns": [{"name": "created_at"}]},
+        ]
+
+        # Act
+        issues = validate_sql_schema(
+            'SELECT "i"."created_at" FROM "finance_invoices" AS "i"',
+            datasources=["pg_main"],
+            dialect="postgres",
+            tables=tables,
+        )
+
+        # Assert：跨表错配不得在目标表无列信息时升级为 high 拦截
+        assert [item for item in issues if item.confidence == "high"] == []
+        logger.info("test_cross_table_column_degrades_when_target_has_no_columns 完成")
 
 
 class TestUnqualifiedColumn:
@@ -844,6 +909,137 @@ class TestMultiSourceIsolation:
         logger.info("test_unauthorized_source_column_not_evidence 完成")
 
 
+class TestAvailableColumnsTotal:
+    """覆盖可用列清单截断后的真实总数下传（B4）。"""
+
+    # 方法作用：验证 available_columns 被上限截断时真实总数仍完整可读。
+    # Args: self - pytest 用例实例。
+    # Returns: 无返回值，断言失败由 pytest 报告。
+    def test_available_columns_capped_but_total_kept(self) -> None:
+        """B4 回归：60 列表截断到 40 后，available_columns_total 必须报 60。
+
+        回喂文案的「共 N 个」若用截断后的条数，模型会把 40 当成全部列，
+        剩余 20 个合法列会被误判为不存在。
+        """
+        logger.debug("test_available_columns_capped_but_total_kept 入口")
+        from src.security.sql_schema_validation import (
+            MAX_AVAILABLE_COLUMNS,
+            validate_sql_schema,
+        )
+
+        # Arrange：60 张三表，超过 MAX_AVAILABLE_COLUMNS
+        tables = [
+            {"name": "wide_table", "columns": [{"name": f"col_{i:02d}"} for i in range(1, 61)]}
+        ]
+
+        # Act
+        issues = validate_sql_schema(
+            "SELECT missing_col FROM wide_table",
+            datasources=["pg_main"],
+            dialect="postgres",
+            tables=tables,
+        )
+
+        # Assert：清单被截断，真实总数不被截断
+        assert len(issues) == 1
+        assert len(issues[0].available_columns) == MAX_AVAILABLE_COLUMNS
+        assert issues[0].available_columns_total == 60
+        logger.info("test_available_columns_capped_but_total_kept 完成")
+
+    # 方法作用：验证未截断时总数与清单长度一致，避免回退路径报错误总数。
+    # Args: self - pytest 用例实例。
+    # Returns: 无返回值，断言失败由 pytest 报告。
+    def test_available_columns_total_matches_list_below_cap(self) -> None:
+        """未截断时 available_columns_total 必须等于清单长度。"""
+        logger.debug("test_available_columns_total_matches_list_below_cap 入口")
+        from src.security.sql_schema_validation import validate_sql_schema
+
+        # Arrange
+        tables = [{"name": "orders", "columns": [{"name": "id"}, {"name": "amount"}]}]
+
+        # Act
+        issues = validate_sql_schema(
+            'SELECT "o"."bogus" FROM "orders" AS "o"',
+            datasources=["pg_main"],
+            dialect="postgres",
+            tables=tables,
+        )
+
+        # Assert
+        assert issues[0].available_columns_total == len(issues[0].available_columns) == 2
+        logger.info("test_available_columns_total_matches_list_below_cap 完成")
+
+
+class TestDegradationWarnings:
+    """覆盖降级判定的 warning 留痕（B5，spec/39 §10 盲区必须留痕不得静默）。
+
+    这里用 structlog.testing.capture_logs 而不是 pytest 的 caplog：
+    校验器走 structlog（默认路由到 stdout），且 setup_logging() 会清空 root
+    handlers —— 实测 caplog 既看不到 structlog 输出，也看不到 setup_logging
+    之后注入的 stdlib handler，断言会退化成「永远通过」。
+    """
+
+    # 方法作用：验证空列集表的未限定列零命中留 warning（reason=tables_have_no_columns）。
+    # Args: self - pytest 用例实例。
+    # Returns: 无返回值，断言失败由 pytest 报告。
+    def test_unqualified_degradation_leaves_warning_trail(self) -> None:
+        """删掉 warning 这行本用例必须变红：降级不能静默。"""
+        logger.debug("test_unqualified_degradation_leaves_warning_trail 入口")
+        from structlog.testing import capture_logs
+
+        from src.security.sql_schema_validation import validate_sql_schema
+
+        # Arrange
+        tables = [{"name": "orders", "columns": []}]
+
+        # Act
+        with capture_logs() as events:
+            validate_sql_schema(
+                "SELECT amount FROM orders",
+                datasources=["pg_main"],
+                dialect="postgres",
+                tables=tables,
+            )
+
+        # Assert
+        assert any(
+            event.get("event") == "列引用无法判定"
+            and event.get("reason") == "tables_have_no_columns"
+            for event in events
+        ), f"缺少降级留痕，捕获事件: {[e.get('event') for e in events]}"
+        logger.info("test_unqualified_degradation_leaves_warning_trail 完成")
+
+    # 方法作用：验证空列集表的限定列判定留 warning（reason=table_has_no_columns）。
+    # Args: self - pytest 用例实例。
+    # Returns: 无返回值，断言失败由 pytest 报告。
+    def test_qualified_degradation_leaves_warning_trail(self) -> None:
+        """限定列路径的降级同样必须留痕，不能静默放行。"""
+        logger.debug("test_qualified_degradation_leaves_warning_trail 入口")
+        from structlog.testing import capture_logs
+
+        from src.security.sql_schema_validation import validate_sql_schema
+
+        # Arrange
+        tables = [{"name": "orders", "columns": []}]
+
+        # Act
+        with capture_logs() as events:
+            validate_sql_schema(
+                'SELECT "o"."amount" FROM "orders" AS "o"',
+                datasources=["pg_main"],
+                dialect="postgres",
+                tables=tables,
+            )
+
+        # Assert
+        assert any(
+            event.get("event") == "列引用无法判定"
+            and event.get("reason") == "table_has_no_columns"
+            for event in events
+        ), f"缺少降级留痕，捕获事件: {[e.get('event') for e in events]}"
+        logger.info("test_qualified_degradation_leaves_warning_trail 完成")
+
+
 class TestValidationMetrics:
     """覆盖校验指标计数（spec/39 §9）。"""
 
@@ -879,21 +1075,9 @@ class TestValidationMetrics:
         from src.security import sql_schema_validation as module
 
         # Arrange：捕获上报调用，避免断言全局注册表导致用例互相污染
-        recorded: list[dict] = []
-
-        class _Recorder:
-            """捕获指标上报入参的测试替身。"""
-
-            # 方法作用：把一次上报的关键字参数追加到 recorded。
-            # Args: self - 替身实例；kwargs - 上报关键字参数。
-            # Returns: 无返回值。
-            def record_schema_validation(self, **kwargs) -> None:
-                logger.debug("_Recorder.record_schema_validation 入口")
-                recorded.append(kwargs)
-                logger.info("_Recorder.record_schema_validation 完成")
-
+        recorder = _MetricRecorder()
         monkeypatch.setattr(
-            "src.observability.get_metrics_registry", lambda: _Recorder()
+            "src.observability.get_metrics_registry", lambda: recorder
         )
 
         # Act：故意传入无法解析的 SQL
@@ -905,5 +1089,62 @@ class TestValidationMetrics:
         )
 
         # Assert
-        assert any(item["issue_type"] == "parse_error" for item in recorded)
+        assert any(item["issue_type"] == "parse_error" for item in recorder.recorded)
         logger.info("test_parse_error_is_counted 完成")
+
+    # 方法作用：验证 stage 标签默认 stage1，调用方可显式传入 stage2 覆写。
+    # Args: self - pytest 用例实例；monkeypatch - pytest 补丁工具。
+    # Returns: 无返回值，断言失败由 pytest 报告。
+    def test_metric_stage_label_comes_from_caller(self, monkeypatch) -> None:
+        """B3 回归：阶段二复核必须上报 stage2，否则观测里阶段一/二无法区分。"""
+        logger.debug("test_metric_stage_label_comes_from_caller 入口")
+        from src.security import sql_schema_validation as module
+
+        # Arrange
+        recorder = _MetricRecorder()
+        monkeypatch.setattr(
+            "src.observability.get_metrics_registry", lambda: recorder
+        )
+        tables = [{"name": "orders", "columns": [{"name": "id"}]}]
+
+        # Act：一次默认（stage1），一次显式 stage2
+        module.validate_sql_schema(
+            "SELECT bogus FROM orders",
+            datasources=["pg_main"],
+            dialect="postgres",
+            tables=tables,
+        )
+        module.validate_sql_schema(
+            "SELECT bogus FROM orders",
+            datasources=["pg_main"],
+            dialect="postgres",
+            tables=tables,
+            stage="stage2",
+        )
+
+        # Assert
+        stages = [item["stage"] for item in recorder.recorded]
+        assert stages == ["stage1", "stage2"]
+        logger.info("test_metric_stage_label_comes_from_caller 完成")
+
+
+# 方法作用：捕获指标上报入参的测试替身，避免断言全局注册表导致用例互相污染。
+# Args: 无。
+# Returns: 无返回值。
+class _MetricRecorder:
+    """指标上报替身：把每次 record_schema_validation 的入参记入 recorded。"""
+
+    # 方法作用：初始化空的上报记录列表。
+    # Args: self - 替身实例。
+    # Returns: 无返回值。
+    def __init__(self) -> None:
+        self.recorded: list[dict] = []
+        logger.debug("_MetricRecorder 构造完成")
+
+    # 方法作用：把一次上报的关键字参数追加到 recorded。
+    # Args: self - 替身实例；kwargs - 上报关键字参数。
+    # Returns: 无返回值。
+    def record_schema_validation(self, **kwargs) -> None:
+        logger.debug("_MetricRecorder.record_schema_validation 入口")
+        self.recorded.append(kwargs)
+        logger.info("_MetricRecorder.record_schema_validation 完成")

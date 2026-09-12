@@ -1730,7 +1730,7 @@ class TestRetryContextSchemaHallucination:
 
 - [ ] **Step 2: 改造实现**
 
-把 `_check_table_hallucination` 中「构建 `known` / `known_bases` + 逐表比对」的循环体替换为统一判定（保留函数签名、`if not tables: return []` 短路、以及解析失败返回 `__parse_failed__` 的失败关闭语义）：
+把 `_check_table_hallucination` 中「构建 `known` / `known_bases` + 逐表比对」的循环体替换为统一判定（保留函数签名、`if not tables: return []` 短路、以及解析失败返回 `["SQL 解析失败，已阻断执行"]` 的失败关闭语义）：
 
 ```python
     from src.security.sql_schema_validation import build_table_index, resolve_table_owner
@@ -1766,12 +1766,16 @@ class TestRetryContextSchemaHallucination:
                     unknown.append(name)
     except Exception as exc:
         logger.error("表名幻觉校验解析失败", error=str(exc), exc_info=True)
-        return ["__parse_failed__"]
+        return ["SQL 解析失败，已阻断执行"]
     logger.info("表名幻觉校验完成", unknown_count=len(unknown), unknown=unknown[:10])
     return unknown
 ```
 
 > **注意**：此函数保持 `sqlglot.parse`（复数）不变——它的既有测试不依赖 `parse_one`；`parse_one` 的要求仅适用于 `src/security/sql_schema_validation.py`。
+>
+> **不要"恢复"旧哨兵值**：本计划早期版本此处写的是 `__parse_failed__`，该字符串在仓库中**并不存在**；真实失败关闭哨兵是 `["SQL 解析失败，已阻断执行"]`（`src/graph/nodes/generate_sql.py`，由 `tests/test_graph/test_generate_sql_hallucination.py::test_parser_failure_is_closed` 以 `"解析失败" in result[0]` 断言）。改回 `__parse_failed__` 会让失败关闭语义失效、该用例变红。
+>
+> **白名单入参同理**：片段里的 `build_table_index(tables, [""])` 是计划初稿写法，实装已收敛为 `build_table_index(tables, ["__local__"])`（与 `execute_sql._validate_column_references` 同一约定）——空白名单会在每次 SQL 生成时打「未提供数据源白名单」告警，不要改回 `[""]`。
 
 - [ ] **Step 3: 运行回归确认行为一致**
 

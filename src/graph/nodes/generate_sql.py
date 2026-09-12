@@ -45,8 +45,13 @@ _PROMPT_SCHEMA_MAX_CHARS = 60000
 # 重试回喂预算：字段错误很多时 issues 量与每表可用列量都会线性放大 Prompt，
 # 这里与 message 的 high_issues[:3] 约定保持一致（issue 上限 3），
 # 并把每表可用列收紧到 10（模块内 MAX_AVAILABLE_COLUMNS=40 是入库上限，
-# 重试 Prompt 不需要那么多；按 retry_error 段 1800 字符预算实算，
-# 3 表 × 10 列长列名约 1050 字符，仍留有余量）。
+# 重试 Prompt 不需要那么多）。
+# 不要按「3 表 × 10 列 ≈ 1050 字符，仍有富余」估算后贸然上调这两个上限：
+# tests/test_graph/test_generate_sql_retry_context.py 的
+# test_retry_instructions_survive_section_budget_truncation 用极端 fixture
+# （3 条 issue、每条 8 个长提供方表名 + 每表 25 个长列名）实测整段 3362 字符，
+# 约为 1800 预算的 1.9 倍；契约靠「指令与截断提示前置」保住，而不是靠明细够短。
+# 上调上限前必须重算该用例的可见前缀。
 # 截断处必须显式提示数量，且提示前置在行首，避免与清单一起被尾部截断。
 _RETRY_MAX_SCHEMA_ISSUES = 3
 _RETRY_MAX_AVAILABLE_COLUMNS = 10
@@ -358,6 +363,62 @@ def build_table_whitelist_context(tables: list[dict]) -> str:
     )
 
 
+# 方法作用：把单条结构化 schema 问题渲染成与问题类型相符的重试指令行。
+# Args: issue - layer3 写入 validation_errors 的单条 issue 字典。
+# Returns: 该问题的指令行列表；结构化字段不足时回退到 issue 自带的 message 文案。
+def _render_schema_issue_lines(issue: dict) -> list[str]:
+    """按问题类型分派渲染，避免把「真实存在的列」谎报成「不存在的字段」。"""
+    issue_type = str(issue.get("type", "") or "").strip()
+    datasource = str(issue.get("datasource", "") or "").strip()
+    table = str(issue.get("table", "") or "").strip()
+    column = str(issue.get("column", "") or "").strip()
+    qualifier = str(issue.get("qualifier", "") or "").strip()
+    reference = f"{qualifier}.{column}" if qualifier else column
+    key = f"{datasource}.{table}" if datasource and table else (table or datasource)
+    message = str(issue.get("message", "") or "").strip()
+    if issue_type == "ambiguous_column":
+        # 歧义列的 table 字段是多张候选表名的逗号列表，且 provided_by / available_columns
+        # 均为空：绝不能套用「引用了不存在的字段」模板，否则模型会去改一个本来正确的列名。
+        # 正确指令是让模型补表限定符，并把候选表原样告知。
+        candidates = table or "多张表"
+        logger.debug("重试上下文渲染歧义列", table=table, column=column)
+        return [
+            f"上一轮未加表限定符引用列 '{column}'，该列在以下候选表中同时存在：{candidates}。"
+            "必须为该列补上表限定符（表名.列名）后重新生成，不得修改列名。"
+        ]
+    if issue_type == "unknown_table":
+        logger.debug("重试上下文渲染未知表", table=table)
+        return [
+            f"上一轮引用了不存在的表：{key or table or '未知'}，"
+            "必须改用下方白名单中的物理表。"
+        ]
+    if issue_type == "parse_error":
+        logger.debug("重试上下文渲染解析失败", datasource=datasource)
+        return [f"上一轮 SQL 无法解析：{message or '解析失败'}，必须重新生成语法正确的 SQL。"]
+    if issue_type == "cross_table_column":
+        # 该列真实存在但属于别的表：文案必须写明「实际属于」，不能笼统说列不存在
+        provided = ", ".join(str(item) for item in (issue.get("provided_by") or [])) or "未知"
+        logger.debug("重试上下文渲染跨表列", table=table, column=column, provided_by=provided)
+        return [
+            f"上一轮引用的字段 {key}.{reference} 不属于表 {table}"
+            f"（该列实际属于: {provided}），必须改用它真正所属的表或修正别名。"
+        ]
+    if issue_type == "unknown_column":
+        logger.debug("重试上下文渲染未知列", table=table, column=column)
+        return [f"上一轮引用了不存在的字段：{key}.{reference}"]
+    # 未知类型：结构化字段不足，回退到上游已算好的准确文案（message 携带描述）
+    logger.warning(
+        "重试上下文遇到未知问题类型",
+        issue_type=issue_type,
+        table=table,
+        column=column,
+    )
+    return [
+        message
+        or f"上一轮 SQL 的字段引用有误（类型: {issue_type or '未知'}），必须按可用列清单重新生成。"
+    ]
+
+
 # 方法作用：按错误类型构造 SQL 重试上下文，防止幻觉 SQL 被完整回注强化。
 # Args: state - 当前执行状态；retry - 当前重试序号；tables - Schema 合法表列表。
 # Returns: 首次调用返回空文本；表名幻觉仅返回未知表和白名单，字段引用错误
@@ -410,34 +471,44 @@ def build_retry_context(state: AnalysisState, retry: int, tables: list[dict]) ->
         # 会被整行砍掉，模型就看不到「禁止复用上一轮 SQL」这条核心契约。
         # 因此把必须送达的指令紧跟标题，可截断的字段证据放在后面，
         # 截断代价只是信息变少，而不是契约失效。
+        # 有可用列清单时才说「仅基于下列可用列」；歧义列等问题场景没有列清单，
+        # 该表述会误导模型（列清单为空却让它照清单改），改为「逐条修正」。
+        has_column_lists = any(
+            (issue.get("available_columns") or []) for issue in rendered_issues
+        )
         lines = [
             f"## 第 {retry} 次生成：纠正字段引用错误",
-            "禁止复用上一轮 SQL，必须仅基于下列可用列重新生成。",
+            "禁止复用上一轮 SQL，必须仅基于下列可用列重新生成。"
+            if has_column_lists
+            else "禁止复用上一轮 SQL，必须按下列问题逐条修正后重新生成。",
         ]
         if retry >= 2:
             lines.append("这是最后一次尝试，必须使用下列明确列出的标识符。")
-        grouped: dict[str, list[str]] = {}
+        # 每表收集：可用列清单 + 真实总数（available_columns 可能被校验器
+        # 按 MAX_AVAILABLE_COLUMNS 截断，报「共 N 个」必须用真实总数）。
+        grouped: dict[str, tuple[list[str], int]] = {}
         for issue in rendered_issues:
             table = str(issue.get("table", "") or "").strip()
             datasource = str(issue.get("datasource", "") or "").strip()
             key = f"{datasource}.{table}" if datasource else table
-            column = str(issue.get("column", "") or "").strip()
-            qualifier = str(issue.get("qualifier", "") or "").strip()
-            reference = f"{qualifier}.{column}" if qualifier else column
-            provided = ", ".join(issue.get("provided_by") or []) or "未知"
-            lines.append(f"上一轮引用了不存在的字段：{key}.{reference}（该列属于: {provided}）")
+            lines.extend(_render_schema_issue_lines(issue))
             available = [str(item) for item in (issue.get("available_columns") or [])]
             if available and key not in grouped:
-                grouped[key] = available
-        for key, available in grouped.items():
+                try:
+                    total = int(issue.get("available_columns_total") or 0)
+                except (TypeError, ValueError):
+                    total = 0
+                # 总数缺失时退化为清单长度；不得把未知总数谎报成更小的数
+                grouped[key] = (available, max(total, len(available)))
+        for key, (available, total) in grouped.items():
             shown = available[:_RETRY_MAX_AVAILABLE_COLUMNS]
-            if len(available) > _RETRY_MAX_AVAILABLE_COLUMNS:
+            if total > _RETRY_MAX_AVAILABLE_COLUMNS:
                 # 截断提示必须与表名同行前置：section 是尾部截断，提示若挂在
                 # 清单末尾会与清单一起被砍，模型只能拿到「无标记的残缺列清单」，
                 # 进而把没列出的列当成不存在。提示与事实同生共死才安全。
                 lines.append(
                     f"表 {key} 实际可用列（仅列出前 {_RETRY_MAX_AVAILABLE_COLUMNS} 个，"
-                    f"共 {len(available)} 个）：{', '.join(shown)}"
+                    f"共 {total} 个）：{', '.join(shown)}"
                 )
             else:
                 lines.append(f"表 {key} 实际可用列：{', '.join(shown)}")
@@ -940,8 +1011,10 @@ def _check_table_hallucination(
     # 表名判定统一走共享校验模块，避免与 layer3 / execute_sql 的表名判定各自漂移
     from src.security.sql_schema_validation import build_table_index, resolve_table_owner
 
-    # 空白名单表示不按数据源过滤：本函数只面对单条 SQL 对应的单一 Schema 快照
-    index = build_table_index(tables, [""])
+    # 单源快照统一落到默认源名下：白名单真实生效（越界源的表被跳过，不再 fail-open），
+    # 同时避开空白名单在热路径上每次校验都打「未提供数据源白名单」告警的噪音。
+    # 与 execute_sql._validate_column_references 保持同一约定，不得改回 [""]。
+    index = build_table_index(tables, ["__local__"])
     known_names = sorted({t["name"].lower() for t in tables if t.get("name")})
     unknown: list[str] = []
     parser_dialect = normalize_sql_dialect(dialect)

@@ -35,7 +35,7 @@ def validate_readonly_sql(sql: str, dialect: str) -> list[dict]:
 # Returns: 状态增量，含 sql_valid、validation_errors、transpiled_sql 与执行上下文。
 async def layer3_validate_node(state: AnalysisState) -> dict:
     """安全拦截 + sqlglot 语法校验。"""
-    from src.graph.context import read_contexts
+    from src.graph.context import read_contexts, resolve_request_identity
 
     contexts = read_contexts(state)
     _start = time.monotonic()
@@ -66,8 +66,11 @@ async def layer3_validate_node(state: AnalysisState) -> dict:
         # 必须用权威快照复核一次；这正是设计 §6 修掉「空 tables 静默跳过」空窗的方式。
         need_recheck = bool(high_issues) or not tables_hint
         if need_recheck and datasource:
+            # 阶段二取数必须带上显式租户：与 retrieve_schema 的调用约定一致，
+            # 不带租户会落到平台级回落，多租户下可能读到别家数据源的 Schema 缓存。
+            tenant_id, _ = resolve_request_identity(state)
             confirmed = await _recheck_with_full_snapshot(
-                sql, datasource, dialect_value, high_issues
+                sql, datasource, dialect_value, high_issues, tenant_id
             )
             if confirmed is not None:
                 high_issues = confirmed
@@ -87,6 +90,9 @@ async def layer3_validate_node(state: AnalysisState) -> dict:
                             "qualifier": item.qualifier,
                             "provided_by": list(item.provided_by),
                             "available_columns": list(item.available_columns),
+                            # 真实列总数随 issue 下传，回喂文案报「共 N 个」时必须用它，
+                            # 不能拿被 MAX_AVAILABLE_COLUMNS 截断后的条数冒充总数。
+                            "available_columns_total": item.available_columns_total,
                         }
                         for item in high_issues
                     ],
@@ -112,20 +118,29 @@ async def layer3_validate_node(state: AnalysisState) -> dict:
 
 
 # 方法作用：用权威全量快照复核阶段一的高置信问题，消除裁剪造成的假阳性。
-# Args: sql - 待校验 SQL；datasource - 数据源名；dialect - 方言；high_issues - 阶段一问题。
+# Args: sql - 待校验 SQL；datasource - 数据源名；dialect - 方言；high_issues - 阶段一问题；
+#       tenant_id - 显式租户编号，供取数走租户隔离路径。
 # Returns: 复核后仍存在的问题列表；复核不可用时返回 None（回落阶段一结果）。
 async def _recheck_with_full_snapshot(
     sql: str,
     datasource: str,
     dialect: str,
     high_issues: list,
+    tenant_id: int | None = None,
 ) -> list | None:
     """失败安全：任何异常都回落阶段一结果，不因复核失败阻断链路。"""
-    logger.debug("阶段二复核入口", datasource=datasource, high_issue_count=len(high_issues))
+    logger.debug(
+        "阶段二复核入口",
+        datasource=datasource,
+        high_issue_count=len(high_issues),
+        tenant_id=tenant_id,
+    )
     try:
         from src.knowledge.schema_manager import get_schema_manager
 
-        snapshot = await get_schema_manager().get_or_fetch_schema(datasource, user_query="")
+        snapshot = await get_schema_manager().get_or_fetch_schema(
+            datasource, user_query="", tenant_id=tenant_id
+        )
         tables = [
             {
                 "name": table.name,
@@ -139,7 +154,11 @@ async def _recheck_with_full_snapshot(
         from src.security.sql_schema_validation import validate_sql_schema
 
         issues = validate_sql_schema(
-            sql, datasources=[datasource], dialect=dialect, tables=tables
+            sql,
+            datasources=[datasource],
+            dialect=dialect,
+            tables=tables,
+            stage="stage2",
         )
         confirmed = [item for item in issues if item.confidence == "high"]
         logger.info(

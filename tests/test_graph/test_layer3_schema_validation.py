@@ -148,13 +148,15 @@ class TestLayer3TwoStageValidation:
             lambda: manager,
             raising=False,
         )
-        state = {"generated_sql": STAGE_TWO_SQL, "relevant_tables": []}
+        state = {"generated_sql": STAGE_TWO_SQL, "relevant_tables": [], "tenant_id": 7}
 
         # Act
         result = asyncio.run(layer3_validate_node(state))
 
-        # Assert：阶段二确实被触发（否则本用例空转），且合法 SQL 不被误杀
+        # Assert：阶段二确实被触发（否则本用例空转），且合法 SQL 不被误杀；
+        # 租户必须原样下传，否则多租户下会落到平台级 Schema 缓存读到别家数据源
         assert manager.calls == [STAGE_TWO_DATASOURCE]
+        assert manager.tenants == [7]
         assert result["sql_valid"] is True
         assert result["validation_errors"] == []
         logger.info("test_layer3_rechecks_when_baseline_is_empty 完成")
@@ -291,26 +293,30 @@ class _StubSchemaManager:
     ) -> None:
         self._snapshot = snapshot
         self._error = error
-        # 记录每次取数的数据源名，供用例断言阶段二确实被触发
+        # 记录每次取数的数据源名与租户，供用例断言阶段二确实被触发、租户确实下传
         self.calls: list[str] = []
+        self.tenants: list[int | None] = []
         logger.debug(
             f"桩 SchemaManager 构造 has_snapshot={snapshot is not None} "
             f"error={type(error).__name__ if error else ''}"
         )
 
     # 方法作用：模拟 SchemaManager 取数，按构造参数返回快照或抛异常。
-    # Args: datasource - 数据源名；user_query - 语义筛选问题（阶段二固定传空串）。
+    # Args: datasource - 数据源名；user_query - 语义筛选问题（阶段二固定传空串）；
+    #       tenant_id - 显式租户编号（关键字参数，与真实签名一致）。
     # Returns: 快照桩；构造时给了异常则抛出。
     async def get_or_fetch_schema(
-        self, datasource: str, user_query: str = ""
+        self, datasource: str, user_query: str = "", *, tenant_id: int | None = None
     ) -> SimpleNamespace | None:
         logger.debug(
-            f"桩取数入口 datasource={datasource} user_query={user_query}"
+            f"桩取数入口 datasource={datasource} user_query={user_query} "
+            f"tenant_id={tenant_id}"
         )
         self.calls.append(datasource)
+        self.tenants.append(tenant_id)
         if self._error is not None:
             raise self._error
-        logger.info(f"桩取数完成 datasource={datasource}")
+        logger.info(f"桩取数完成 datasource={datasource} tenant_id={tenant_id}")
         return self._snapshot
 
 
@@ -339,16 +345,17 @@ class TestStageTwoRecheck:
             raising=False,
         )
 
-        # Act
+        # Act：显式传入租户，钉住它被原样转发给 SchemaManager（与 retrieve_schema 约定一致）
         result = asyncio.run(
             _recheck_with_full_snapshot(
-                STAGE_TWO_SQL, STAGE_TWO_DATASOURCE, STAGE_TWO_DIALECT, high_issues
+                STAGE_TWO_SQL, STAGE_TWO_DATASOURCE, STAGE_TWO_DIALECT, high_issues, 42
             )
         )
 
-        # Assert：全量快照确认该列存在，high 置信问题清零
+        # Assert：全量快照确认该列存在，high 置信问题清零；租户原样下传
         assert result is not None
         assert [item for item in result if item.confidence == "high"] == []
+        assert manager.tenants == [42]
         logger.info("test_recheck_clears_false_positive 完成")
 
     # 方法作用：验证全量快照也没有该列时幻觉被确认保留。

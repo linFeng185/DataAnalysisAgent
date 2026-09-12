@@ -30,7 +30,9 @@ MAX_AVAILABLE_COLUMNS = 40
 # 方法作用：承载单条 Schema 校验问题，供调用方拦截与结构化回喂重试。
 # Args: type - 问题类型；datasource - 归属数据源；table - 解析别名后的真实表名；
 #       column - 列名；qualifier - SQL 中写的限定符；provided_by - 真正提供该列的表；
-#       available_columns - 该表实际可用列；confidence - 置信度。
+#       available_columns - 该表实际可用列（可能被 MAX_AVAILABLE_COLUMNS 截断）；
+#       available_columns_total - 截断前的真实列数；
+#       confidence - 置信度。
 # Returns: 不可变的问题记录。
 @dataclass(frozen=True, slots=True)
 class ValidationIssue:
@@ -43,6 +45,9 @@ class ValidationIssue:
     qualifier: str = ""
     provided_by: tuple[str, ...] = ()
     available_columns: tuple[str, ...] = ()
+    # 该表列的真实总数：available_columns 被 MAX_AVAILABLE_COLUMNS 截断时，
+    # 回喂文案必须报真实总数，否则「共 N 个」会把截断后的条数说成全部，误导模型。
+    available_columns_total: int = 0
     confidence: Confidence = "high"
 
     # 方法作用：把问题渲染成可读中文描述，供 validation_errors.message 与回喂使用。
@@ -71,6 +76,28 @@ def _normalize_datasources(datasources: Sequence[str]) -> list[str]:
     result = [item.strip() for item in datasources if isinstance(item, str) and item.strip()]
     logger.debug("数据源白名单归一化完成", input_count=len(datasources), kept=len(result))
     return result
+
+
+# 方法作用：安全抽取单表条目的列清单，畸形 columns 容器降级为空列表。
+# Args: table - 快照中的单表条目（Mapping）；table_name - 表名，仅用于日志定位。
+# Returns: 列条目列表；容器不可迭代（如 columns=5）时记 warning 并返回空列表。
+def _safe_columns_container(table: Mapping[str, Any], table_name: str) -> list[Any]:
+    """columns 容器畸形时降级为空列表，避免异常击穿校验主流程。"""
+    logger.debug("列清单抽取入口", table=table_name)
+    raw_columns = table.get("columns")
+    try:
+        columns = list(raw_columns or [])
+    except TypeError:
+        # layer3 的调用点没有 try/except，这里不降级就会直接炸掉图节点；
+        # 与「非 Mapping 列条目被跳过」的处置保持一致：畸形数据只丢列集不抛异常。
+        logger.warning(
+            "表索引跳过畸形列容器",
+            table=table_name,
+            container_type=type(raw_columns).__name__,
+        )
+        columns = []
+    logger.debug("列清单抽取完成", table=table_name, column_count=len(columns))
+    return columns
 
 
 # 方法作用：把权威快照整理成 (数据源, 表名) -> 列名集合 的索引。
@@ -123,7 +150,7 @@ def build_table_index(
             continue
         columns = frozenset(
             str(column.get("name", "") or "").strip().lower()
-            for column in (table.get("columns") or [])
+            for column in _safe_columns_container(table, name)
             if isinstance(column, Mapping) and str(column.get("name", "") or "").strip()
         )
         # 列全部被丢弃（缺失 / 非 Mapping / 空名）时按表留 debug 痕迹，表仍录入但列集为空
@@ -169,7 +196,8 @@ def resolve_table_owner(
 
 
 # 方法作用：作用域感知地校验 SQL 引用的表与列是否存在于权威快照。
-# Args: sql - 待校验 SQL；datasources - 权威数据源白名单；dialect - 解析方言；tables - 权威快照。
+# Args: sql - 待校验 SQL；datasources - 权威数据源白名单；dialect - 解析方言；
+#       tables - 权威快照；stage - 校验阶段（stage1 常规 / stage2 权威复核），仅用于指标标签。
 # Returns: 结构化问题清单；空列表表示高置信通过。
 def validate_sql_schema(
     sql: str,
@@ -177,6 +205,7 @@ def validate_sql_schema(
     datasources: Sequence[str],
     dialect: str = "",
     tables: Sequence[Mapping[str, Any]] = (),
+    stage: str = "stage1",
 ) -> list[ValidationIssue]:
     """逐 scope 校验表与列引用；无法判定的场景给 low 置信而不是拦截。"""
     logger.debug(
@@ -185,6 +214,7 @@ def validate_sql_schema(
         datasource_count=len(datasources),
         table_count=len(tables),
         dialect=dialect,
+        stage=stage,
     )
     _start = time.monotonic()
     allowed = _normalize_datasources(datasources)
@@ -200,17 +230,17 @@ def validate_sql_schema(
     except Exception as exc:
         logger.error("Schema 校验解析失败", error=str(exc), exc_info=True)
         issues = [ValidationIssue(type="parse_error", datasource=default_source)]
-        _record_issues(issues, dialect, "stage1")
+        _record_issues(issues, dialect, stage)
         return issues
     if tree is None:
         logger.error("Schema 校验解析失败", error="解析结果为空")
         issues = [ValidationIssue(type="parse_error", datasource=default_source)]
-        _record_issues(issues, dialect, "stage1")
+        _record_issues(issues, dialect, stage)
         return issues
 
     issues = _collect_unknown_tables(tree, index, default_source)
     issues.extend(_collect_column_issues(tree, index, default_source))
-    _record_issues(issues, dialect, "stage1")
+    _record_issues(issues, dialect, stage)
     high_count = sum(1 for item in issues if item.confidence == "high")
     logger.info(
         "Schema 校验完成",
@@ -478,6 +508,7 @@ def _check_qualified_column(
                 qualifier=qualifier,
                 provided_by=tuple(providers[:10]),
                 available_columns=available,
+                available_columns_total=len(columns),
             )
         ]
     logger.warning("列引用不存在", table=real_table, column=column_name, qualifier=qualifier)
@@ -489,6 +520,7 @@ def _check_qualified_column(
             column=column_name,
             qualifier=qualifier,
             available_columns=available,
+            available_columns_total=len(columns),
         )
     ]
 
@@ -552,6 +584,7 @@ def _check_unqualified_column(
         )
         return []
     table, owner = next(iter(resolved.items()))
+    table_columns = index.get((owner, table), frozenset())
     logger.warning("列引用不存在", table=table, column=column_name, unqualified=True)
     return [
         ValidationIssue(
@@ -559,8 +592,7 @@ def _check_unqualified_column(
             datasource=owner,
             table=table,
             column=column_name,
-            available_columns=tuple(
-                sorted(index.get((owner, table), frozenset()))[:MAX_AVAILABLE_COLUMNS]
-            ),
+            available_columns=tuple(sorted(table_columns)[:MAX_AVAILABLE_COLUMNS]),
+            available_columns_total=len(table_columns),
         )
     ]

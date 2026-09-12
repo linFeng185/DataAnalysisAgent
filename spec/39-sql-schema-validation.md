@@ -325,6 +325,8 @@ def validate_sql_schema(sql, *, datasources, dialect, tables): ...
 
 改为薄调用（最后防线）。`_validate_column_references` 与 `find_cross_table_columns` 均作为兼容适配器保留（签名与返回结构不变，内部委托新模块），避免破坏既有调用方与 7 个回归用例。
 
+**已知局限（C2，显式记录）**：这一层仍以调用方传入的 `relevant_tables` 为基准（可能已被裁剪），且不执行阶段二权威复核——两阶段复核只在 layer3 实现。若上游传入的基准与真实库有偏差，最后防线会与阶段一犯同样的假阳性/假阴性；当前主链路 layer3 已先复核并拦截，该路径不可达，属潜在风险而非现存缺陷。放宽 `relevant_tables` 生成或新增绕过 layer3 的调用方时，必须同步在此层补阶段二复核。
+
 ### 7.3 `src/graph/nodes/generate_sql.py:851` 表级校验收敛（决策 D3）
 
 `_check_table_hallucination` 的表名比对逻辑改为调用新模块导出的表名比对函数，**保留其"生成后立即校验"的早失败位置**。避免表级判定在两处出现不一致。
@@ -359,7 +361,7 @@ def validate_sql_schema(sql, *, datasources, dialect, tables): ...
 
 - 入口 `debug`：`sql_chars`、`datasource_count`、`table_count`、`dialect`
 - 拦截 `warning`：`issue_type`、`table`、`column`、`qualifier`、`provided_by`
-- 无法判定 `warning`：`reason`（`select_star` / `cte_qualifier` / `namespace_unknown`）
+- 无法判定 `warning`：`reason`（实装值：`select_star` / `cte_qualifier` / `table_has_no_columns` / `tables_have_no_columns` / `cte_or_unresolved` / `ambiguous_table` / `empty_snapshot`）。命名空间前缀（`analytics.created_at`）实测落入 `cte_qualifier` 分支，不存在 `namespace_unknown` reason
 - 出口 `info`：`result`、`high_count`、`low_count`、`stage`（`stage1` / `stage2`）
 
 **指标计数**（接入 `src/observability.py:27` 的 `MetricsRegistry`，仿 `:107-111` 的 `record_schema_warning` 先例）：
@@ -375,10 +377,12 @@ def validate_sql_schema(sql, *, datasources, dialect, tables): ...
 必须显式记录，且在实现中以 warning 呈现，**不得静默当作"校验通过"**：
 
 1. **`SELECT *` / `SELECT t.*`**：AST 不展开星号（实测 `columns=[]`）。无法校验列。
-2. **命名空间**：`TableSchema.name`（`src/datasource/schema_snapshot.py:30-40`）不含 schema/database；实跑 `analytics.orders` 时 `analytics` 落在 `node.db` 被丢弃。**当前仅按表名匹配**，多 schema 同名表无法区分。为此在 `tables` 上预留可选 `schema` 字段。
+2. **命名空间**：`TableSchema.name`（`src/datasource/schema_snapshot.py:30-40`）不含 schema/database；实跑 `analytics.orders` 时 `analytics` 落在 `node.db` 被丢弃。**当前仅按表名匹配**，多 schema 同名表无法区分。为此在 `tables` 上预留可选 `schema` 字段。实测：`SELECT analytics.created_at FROM analytics.orders` 返回 `[]`（不产出任何低置信 issue），只留 `reason=cte_qualifier` 的 warning——命名空间前缀走的是"限定符无法判定"分支，而不是独立的命名空间判定（见 §9 reason 清单）。
 3. **方言特有表函数 / `UNNEST` / `LATERAL`**：需按方言实测补充，不在本设计承诺范围内。
 4. **快照与真实库漂移**：校验基准是各级缓存拼出的快照，若快照本身与真实库不一致，校验无法发现。属独立议题。
 5. **未限定列的 CTE 歧义**：scope 内存在 CTE/派生表时，未限定列零命中只能判为低置信。
+6. **`HAVING <未限定幻觉列>`**：实测 sqlglot 把 HAVING 中的未限定引用当作输出列引用，不进入 `scope.columns`，因此该幻觉列永不参与校验 → 实测 PASS（`SELECT SUM(amount) AS total FROM orders GROUP BY customer_id HAVING ghost_col > 100` 零 issue，只留 reason=`cte_or_unresolved` 的 warning，`resolved_count=0 total_table_count=0`）。投影别名放行机制的同源代价，接受。
+7. **`UNION` 末尾 `ORDER BY <幻觉列>`**：实测外层 Union scope 的 `sources={}`，未限定列走"零命中且无物理表候选（`not resolved`）"分支直接放行 → 实测 PASS（`SELECT id FROM orders UNION ALL SELECT id FROM orders ORDER BY ghost_col` 零 issue **且零 warning，完全静默**）。属未限定列归属判定的边界缺口，接受；补基底判定前不得当作"已校验通过"。
 
 ---
 
