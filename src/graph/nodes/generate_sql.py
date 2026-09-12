@@ -44,10 +44,12 @@ logger = get_logger(__name__)
 _PROMPT_SCHEMA_MAX_CHARS = 60000
 # 重试回喂预算：字段错误很多时 issues 量与每表可用列量都会线性放大 Prompt，
 # 这里与 message 的 high_issues[:3] 约定保持一致（issue 上限 3），
-# 并把每表可用列收紧到 20（模块内 MAX_AVAILABLE_COLUMNS=40 是入库上限，
-# 重试 Prompt 不需要那么多）；截断处必须显式提示数量。
+# 并把每表可用列收紧到 10（模块内 MAX_AVAILABLE_COLUMNS=40 是入库上限，
+# 重试 Prompt 不需要那么多；按 retry_error 段 1800 字符预算实算，
+# 3 表 × 10 列长列名约 1050 字符，仍留有余量）。
+# 截断处必须显式提示数量，且提示前置在行首，避免与清单一起被尾部截断。
 _RETRY_MAX_SCHEMA_ISSUES = 3
-_RETRY_MAX_AVAILABLE_COLUMNS = 20
+_RETRY_MAX_AVAILABLE_COLUMNS = 10
 _COLUMN_SYNONYMS: dict[str, tuple[str, ...]] = {
     "订单": ("order", "orders", "sale", "sales"),
     "金额": ("amount", "amt", "price", "revenue", "sales", "total"),
@@ -429,12 +431,16 @@ def build_retry_context(state: AnalysisState, retry: int, tables: list[dict]) ->
                 grouped[key] = available
         for key, available in grouped.items():
             shown = available[:_RETRY_MAX_AVAILABLE_COLUMNS]
-            truncated = (
-                f"（仅列出前 {_RETRY_MAX_AVAILABLE_COLUMNS} 个，共 {len(available)} 个）"
-                if len(available) > _RETRY_MAX_AVAILABLE_COLUMNS
-                else ""
-            )
-            lines.append(f"表 {key} 实际可用列：{', '.join(shown)}{truncated}")
+            if len(available) > _RETRY_MAX_AVAILABLE_COLUMNS:
+                # 截断提示必须与表名同行前置：section 是尾部截断，提示若挂在
+                # 清单末尾会与清单一起被砍，模型只能拿到「无标记的残缺列清单」，
+                # 进而把没列出的列当成不存在。提示与事实同生共死才安全。
+                lines.append(
+                    f"表 {key} 实际可用列（仅列出前 {_RETRY_MAX_AVAILABLE_COLUMNS} 个，"
+                    f"共 {len(available)} 个）：{', '.join(shown)}"
+                )
+            else:
+                lines.append(f"表 {key} 实际可用列：{', '.join(shown)}")
         if len(schema_issues) > _RETRY_MAX_SCHEMA_ISSUES:
             lines.append(
                 f"（另有 {len(schema_issues) - _RETRY_MAX_SCHEMA_ISSUES} 个字段引用错误未列出，"

@@ -113,7 +113,7 @@ class TestRetryContextSchemaHallucination:
         assert "另有 2 个字段引用错误未列出" in context
         logger.info("test_issue_list_is_bounded_with_truncation_notice 完成")
 
-    # 方法作用：验证单表可用列超过上限时只列出前 20 个并提示总列数。
+    # 方法作用：验证单表可用列超过上限时只列出前 10 个并提示总列数。
     # Args: self - pytest 用例实例。
     # Returns: 无返回值，断言失败由 pytest 报告。
     def test_available_columns_are_bounded_with_truncation_notice(self) -> None:
@@ -147,10 +147,10 @@ class TestRetryContextSchemaHallucination:
         # Act
         context = build_retry_context(state, 1, [{"name": "wide_table"}])
 
-        # Assert
-        assert "col_20" in context
-        assert "col_21" not in context
-        assert "（仅列出前 20 个，共 30 个）" in context
+        # Assert：截断提示前置在行首、与表名同行，避免它自己被尾部截断砍掉
+        assert "col_10" in context
+        assert "col_11" not in context
+        assert "实际可用列（仅列出前 10 个，共 30 个）：" in context
         logger.info("test_available_columns_are_bounded_with_truncation_notice 完成")
 
     # 方法作用：验证关键指令在 retry_error 段预算截断后仍落在前 1800 字符内。
@@ -161,18 +161,24 @@ class TestRetryContextSchemaHallucination:
         logger.debug("test_retry_instructions_survive_section_budget_truncation 入口")
         from src.graph.nodes.generate_sql import build_retry_context
 
-        # Arrange：3 条 issue、3 张表、每表 25 个长列名（超过每表 20 个上限），
-        # 既必然超出 1800 字符预算，也会触发列清单截断提示
+        # Arrange：极端场景——3 条 cross_table_column issue（每条 8 个长提供方表名）
+        # 把「表行之前」的明细撑到约 1300 字符，使首条表行起点约 1416；
+        # 每表 25 个 58 字符长列名（超过每表 10 个上限），首条表行约 455 字符。
+        # 实测总长 3362 > 1800：截断提示若挂在行尾（约 1871）会被尾部砍掉，
+        # 前置到行首（约 1416）则仍在可见前缀内——正是本用例要钉住的差异。
         issues = [
             {
-                "type": "unknown_column",
+                "type": "cross_table_column",
                 "datasource": "pg_main",
                 "table": table,
                 "column": f"legacy_amount_{index}",
-                "qualifier": "",
-                "provided_by": [],
+                "qualifier": "t" * 12,
+                "provided_by": [
+                    f"cross_source_provider_table_with_long_name_{position:03d}"
+                    for position in range(8)
+                ],
                 "available_columns": [
-                    f"column_with_a_long_descriptive_name_{position:02d}"
+                    f"column_with_an_extremely_long_descriptive_business_name_{position:02d}"
                     for position in range(1, 26)
                 ],
             }
@@ -193,12 +199,14 @@ class TestRetryContextSchemaHallucination:
         context = build_retry_context(state, 1, [{"name": "finance_invoices"}])
         context_last_attempt = build_retry_context(state, 2, [{"name": "finance_invoices"}])
 
-        # Assert：超预算前提下，指令与第一批事实/截断提示仍必须在可见前缀内
+        # Assert：超预算前提下，指令、第一批事实与「截断提示」都必须在可见前缀内
         assert len(context) > section_max_chars
         budgeted = context[:section_max_chars]
         assert "禁止复用上一轮 SQL" in budgeted
         assert "finance_invoices" in budgeted
-        assert "仅列出前" in budgeted or "未列出" in budgeted
+        # 截断提示若挂在清单末尾会与清单一起被尾部截断，模型将拿到无标记的
+        # 残缺列清单并误判列不存在——这里钉住它必须前置可见。
+        assert "仅列出前" in budgeted
         assert "最后一次尝试" in context_last_attempt[:section_max_chars]
         logger.info("test_retry_instructions_survive_section_budget_truncation 完成")
 
