@@ -198,6 +198,48 @@ class TestLayer3TwoStageValidation:
             "test_layer3_blocks_when_empty_baseline_recheck_finds_hallucination 完成"
         )
 
+    # 方法作用：验证阶段一无问题时零取数，钉住「合法 SQL 零额外开销」性能契约。
+    # Args: self - pytest 用例实例；monkeypatch - pytest 补丁工具。
+    # Returns: 无返回值，断言失败由 pytest 报告。
+    def test_layer3_valid_sql_skips_stage_two(self, monkeypatch) -> None:
+        """阶段一本来就无 issue 时，节点不得触发任何权威取数。"""
+        logger.debug("test_layer3_valid_sql_skips_stage_two 入口")
+        from src.graph.nodes.layer3_validate import layer3_validate_node
+
+        # Arrange：有数据源，且基准非空并覆盖 SQL 引用的全部列 → 阶段一零 issue
+        contexts = SimpleNamespace(
+            routing=SimpleNamespace(datasource=STAGE_TWO_DATASOURCE),
+            execution=SimpleNamespace(dialect=STAGE_TWO_DIALECT),
+        )
+        monkeypatch.setattr(
+            "src.graph.context.read_contexts", lambda state: contexts, raising=False
+        )
+        manager = _StubSchemaManager(
+            _build_snapshot_stub([("finance_invoices", ["created_at", "year_month"])])
+        )
+        monkeypatch.setattr(
+            "src.knowledge.schema_manager.get_schema_manager",
+            lambda: manager,
+            raising=False,
+        )
+        state = {
+            "generated_sql": STAGE_TWO_SQL,
+            "relevant_tables": [
+                {
+                    "name": "finance_invoices",
+                    "columns": [{"name": "created_at"}, {"name": "year_month"}],
+                }
+            ],
+        }
+
+        # Act
+        result = asyncio.run(layer3_validate_node(state))
+
+        # Assert：第二个断言才是钉住性能契约的关键——合法 SQL 必须零取数
+        assert result["sql_valid"] is True
+        assert manager.calls == []
+        logger.info("test_layer3_valid_sql_skips_stage_two 完成")
+
 
 # 方法作用：构造极简权威快照桩，只保留阶段二复核所需的 tables 属性。
 # Args: tables - (表名, 列名序列) 二元组序列。

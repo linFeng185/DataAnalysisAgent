@@ -51,18 +51,19 @@ async def layer3_validate_node(state: AnalysisState) -> dict:
 
         datasource = contexts.routing.datasource or ""
         dialect_value = contexts.execution.dialect or ""
+        # 阶段一基准：同一变量同时供校验入参与阶段二触发判断，避免两处表达式日后漂移
+        tables_hint = state.get("relevant_tables", []) or []
         issues = validate_sql_schema(
             sql,
             datasources=[datasource] if datasource else [],
             dialect=dialect_value,
-            tables=state.get("relevant_tables", []) or [],
+            tables=tables_hint,
         )
         high_issues = [item for item in issues if item.confidence == "high"]
 
         # 阶段二触发条件：有 high 置信问题，或阶段一根本没有基准可比对。
         # relevant_tables 为空时索引为空，「表不存在」只是无法判定的推断，
         # 必须用权威快照复核一次；这正是设计 §6 修掉「空 tables 静默跳过」空窗的方式。
-        tables_hint = state.get("relevant_tables", []) or []
         need_recheck = bool(high_issues) or not tables_hint
         if need_recheck and datasource:
             confirmed = await _recheck_with_full_snapshot(
