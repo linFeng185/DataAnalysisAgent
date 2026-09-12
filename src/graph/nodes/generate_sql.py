@@ -42,6 +42,12 @@ logger = get_logger(__name__)
 # 目标表的列名进不了 Prompt，模型只能按惯例猜列名（曾导致 i.created_at 不存在）。
 # 现代模型窗口足够大，这里按“能装下整库表结构”来设，不再是瓶颈。
 _PROMPT_SCHEMA_MAX_CHARS = 60000
+# 重试回喂预算：字段错误很多时 issues 量与每表可用列量都会线性放大 Prompt，
+# 这里与 message 的 high_issues[:3] 约定保持一致（issue 上限 3），
+# 并把每表可用列收紧到 20（模块内 MAX_AVAILABLE_COLUMNS=40 是入库上限，
+# 重试 Prompt 不需要那么多）；截断处必须显式提示数量。
+_RETRY_MAX_SCHEMA_ISSUES = 3
+_RETRY_MAX_AVAILABLE_COLUMNS = 20
 _COLUMN_SYNONYMS: dict[str, tuple[str, ...]] = {
     "订单": ("order", "orders", "sale", "sales"),
     "金额": ("amount", "amt", "price", "revenue", "sales", "total"),
@@ -352,9 +358,17 @@ def build_table_whitelist_context(tables: list[dict]) -> str:
 
 # 方法作用：按错误类型构造 SQL 重试上下文，防止幻觉 SQL 被完整回注强化。
 # Args: state - 当前执行状态；retry - 当前重试序号；tables - Schema 合法表列表。
-# Returns: 首次调用返回空文本；幻觉仅返回未知表和白名单，其他错误返回受限 SQL 上下文。
+# Returns: 首次调用返回空文本；表名幻觉仅返回未知表和白名单，字段引用错误
+#          仅返回按表分组的可用列清单，其他错误返回受限 SQL 上下文。
 def build_retry_context(state: AnalysisState, retry: int, tables: list[dict]) -> str:
-    """表名幻觉与普通语义错误使用不同回注策略。"""
+    """表名幻觉、字段引用错误与普通语义错误使用不同回注策略。"""
+    raw_errors = state.get("validation_errors", []) or []
+    logger.debug(
+        "SQL 重试上下文入口",
+        retry=retry,
+        validation_errors=len(raw_errors) if isinstance(raw_errors, (list, tuple)) else 0,
+        table_count=len(tables),
+    )
     if retry <= 0:
         return ""
     validation_errors = state.get("validation_errors", []) or []
@@ -375,6 +389,59 @@ def build_retry_context(state: AnalysisState, retry: int, tables: list[dict]) ->
             f"{build_table_whitelist_context(tables)}\n"
             "禁止复用上一轮 SQL，必须仅基于合法表名和字段 Schema 重新生成。"
         )
+    # schema 幻觉（字段引用错误）：与表名幻觉同策略——不回注失败 SQL，
+    # 只回喂「该表实际可用的列」，避免模型照抄错误 SQL 就地打补丁。
+    # 回喂预算：issue 只渲染前 _RETRY_MAX_SCHEMA_ISSUES 条，每张表最多列出
+    # _RETRY_MAX_AVAILABLE_COLUMNS 个可用列；两处截断都显式提示数量，
+    # 防止模型把「没有列出来」误判成「该列不存在」。
+    schema_issues = [
+        issue
+        for error in validation_errors
+        if isinstance(error, dict) and error.get("type") == "column_reference"
+        for issue in (error.get("issues") or [])
+        if isinstance(issue, dict)
+    ]
+    if schema_issues:
+        rendered_issues = schema_issues[:_RETRY_MAX_SCHEMA_ISSUES]
+        lines = [f"## 第 {retry} 次生成：纠正字段引用错误"]
+        grouped: dict[str, list[str]] = {}
+        for issue in rendered_issues:
+            table = str(issue.get("table", "") or "").strip()
+            datasource = str(issue.get("datasource", "") or "").strip()
+            key = f"{datasource}.{table}" if datasource else table
+            column = str(issue.get("column", "") or "").strip()
+            qualifier = str(issue.get("qualifier", "") or "").strip()
+            reference = f"{qualifier}.{column}" if qualifier else column
+            provided = ", ".join(issue.get("provided_by") or []) or "未知"
+            lines.append(f"上一轮引用了不存在的字段：{key}.{reference}（该列属于: {provided}）")
+            available = [str(item) for item in (issue.get("available_columns") or [])]
+            if available and key not in grouped:
+                grouped[key] = available
+        for key, available in grouped.items():
+            shown = available[:_RETRY_MAX_AVAILABLE_COLUMNS]
+            truncated = (
+                f"（仅列出前 {_RETRY_MAX_AVAILABLE_COLUMNS} 个，共 {len(available)} 个）"
+                if len(available) > _RETRY_MAX_AVAILABLE_COLUMNS
+                else ""
+            )
+            lines.append(f"表 {key} 实际可用列：{', '.join(shown)}{truncated}")
+        if len(schema_issues) > _RETRY_MAX_SCHEMA_ISSUES:
+            lines.append(
+                f"（另有 {len(schema_issues) - _RETRY_MAX_SCHEMA_ISSUES} 个字段引用错误未列出，"
+                "请按可用列清单自行核对）"
+            )
+        lines.append("禁止复用上一轮 SQL，必须仅基于上述列重新生成。")
+        if retry >= 2:
+            lines.append("这是最后一次尝试，必须使用上述明确列出的标识符。")
+        logger.info(
+            "SQL 重试上下文 schema 分支完成",
+            retry=retry,
+            total_issues=len(schema_issues),
+            rendered_issues=len(rendered_issues),
+            tables=len(grouped),
+            context_chars=len("\n".join(lines)),
+        )
+        return "\n".join(lines)
     previous_sql = str(state.get("generated_sql", "") or "")[:3000]
     execution_error = str(state.get("execution_error", "") or "")
     errors: list[object] = list(validation_errors)
