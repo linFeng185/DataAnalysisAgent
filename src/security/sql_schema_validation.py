@@ -206,6 +206,19 @@ def validate_sql_schema(
 
     issues = _collect_unknown_tables(tree, index, default_source)
     issues.extend(_collect_column_issues(tree, index, default_source))
+    for item in issues:
+        try:
+            from src.observability import get_metrics_registry
+
+            get_metrics_registry().record_schema_validation(
+                issue_type=item.type,
+                confidence=item.confidence,
+                dialect=dialect,
+                stage="stage1",
+            )
+        except Exception as exc:
+            # 指标不可用不得影响校验主流程
+            logger.debug("校验指标上报跳过", error=str(exc))
     high_count = sum(1 for item in issues if item.confidence == "high")
     logger.info(
         "Schema 校验完成",

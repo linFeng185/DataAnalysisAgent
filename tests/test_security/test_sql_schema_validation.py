@@ -604,3 +604,30 @@ class TestMultiSourceIsolation:
         assert issues[0].type == "unknown_column"
         assert issues[0].datasource == "pg_main"
         logger.info("test_unauthorized_source_column_not_evidence 完成")
+
+
+class TestValidationMetrics:
+    """覆盖校验指标计数（spec/39 §9）。"""
+
+    # 方法作用：验证指标方法存在且标签为低基数类型。
+    # Args: self - pytest 用例实例。
+    # Returns: 无返回值，断言失败由 pytest 报告。
+    def test_record_schema_validation(self) -> None:
+        """标签仅允许 issue_type / confidence / dialect / stage。"""
+        logger.debug("test_record_schema_validation 入口")
+        from src.observability import MetricsRegistry
+
+        # Arrange
+        registry = MetricsRegistry()
+
+        # Act
+        registry.record_schema_validation(
+            issue_type="unknown_column",
+            confidence="high",
+            dialect="postgres",
+            stage="stage1",
+        )
+
+        # Assert
+        assert b"data_agent_sql_schema_validation_total" in registry.render()
+        logger.info("test_record_schema_validation 完成")

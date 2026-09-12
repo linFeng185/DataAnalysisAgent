@@ -70,6 +70,12 @@ class MetricsRegistry:
             ("dialect", "operation"),
             registry=self.registry,
         )
+        self.sql_schema_validation = Counter(
+            "data_agent_sql_schema_validation_total",
+            "SQL Schema 校验问题总数",
+            ("issue_type", "confidence", "dialect", "stage"),
+            registry=self.registry,
+        )
 
     # 方法作用：记录一次 HTTP 请求的状态和响应耗时。
     # Args: self - 当前注册器；method/route/status - 低基数标签；duration - 秒数。
@@ -108,6 +114,24 @@ class MetricsRegistry:
         self.schema_warnings.labels(
             str(dialect or "unknown")[:32],
             str(operation or "unknown")[:32],
+        ).inc()
+
+    # 方法作用：记录一次 SQL Schema 校验问题，标签严格限制为低基数字段。
+    # Args: self - 当前注册器；issue_type - 问题类型；confidence - 置信度；
+    #       dialect - 数据源方言；stage - 校验阶段。
+    # Returns: 无返回值。
+    def record_schema_validation(
+        self,
+        issue_type: str,
+        confidence: str,
+        dialect: str,
+        stage: str,
+    ) -> None:
+        self.sql_schema_validation.labels(
+            str(issue_type or "unknown")[:32],
+            str(confidence or "unknown")[:16],
+            str(dialect or "unknown")[:32],
+            str(stage or "unknown")[:16],
         ).inc()
 
     # 方法作用：将当前指标编码为 Prometheus 文本格式。
