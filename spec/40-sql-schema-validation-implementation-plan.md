@@ -14,7 +14,7 @@
 
 ## Global Constraints
 
-- **禁止 `git commit` / `git push`**（项目 CLAUDE.md 最高优先级规则，覆盖本技能的所有提交流程）。本计划**不含提交步骤**；每个 Task 完成后仅标记，等待用户明确指示再统一提交。
+- **提交策略（注意：与撰写本计划时的约定已不同）**：撰写时项目规则禁止自动提交，故本计划正文不含提交步骤。**执行时用户于 2026-09-12 显式授权本地 commit**（仍**禁止 push**）；提交信息**不得出现任何 Claude/Anthropic 署名**（用户明确要求）。逐任务执行与提交记录见 `.superpowers/sdd/progress.md`。
 - **每个方法必须有中文注释三要素**（作用 / Args / Returns），紧邻定义上方。
 - **每个方法必须打印日志**：入口 `debug`（方法名 + 关键参数）、出口 `info`（结果摘要）、异常 `error`（含 `exc_info=True`）、分支回退 `info`/`warning`。循环内用 `debug`，禁用 `print()`。
 - **必须使用项目 `.venv` 解释器**：所有命令一律写 `.venv/Scripts/python.exe`（Python **3.14.0**）。**禁止**用系统 `python`——它指向 `D:\python3.10.6`，缺 `StrEnum` 等 3.11+ 特性，会让 `src/failure_policy.py` 直接 `ImportError`，产生**假故障**（实测：同一套测试在 3.10 下 `7 failed`，在 `.venv` 下 `7 passed`）。
