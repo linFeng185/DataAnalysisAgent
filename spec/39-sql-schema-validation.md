@@ -303,7 +303,10 @@ def validate_sql_schema(sql, *, datasources, dialect, tables): ...
 **收益**：合法 SQL 零额外开销；消除两条链路的基准差异与误杀；同时修掉空窗 #1：
 
 - **阶段一为空（无基准）→ 仍然进入阶段二复核**。触发条件是「有 high 置信 issue **或** 阶段一没有基准可比对」（`need_recheck = bool(high_issues) or not tables_hint`），不是只看 high issue——否则空基准会直接放行，空窗依旧。
-- **阶段二也拿不到权威快照 → 按低置信放行 + warning 留痕**。
+- **阶段二也拿不到权威快照 → 降级放行 + warning 留痕**。
+
+> 语义边界（避免误读为硬保证）：「空 `tables` 不再静默放行」只在权威快照**可得**时成立。
+> 若快照也不可得（`get_or_fetch_schema` 返回空或异常），校验结果是**降级放行**——有 warning 留痕可追溯，但该 SQL 会通过。这是刻意的：无基准时把「表不存在」判为幻觉就是误杀，与 §5.4「无法判定不拦截」冲突。执行层（`execute_sql` 的第二道防线）仍会兜底。
 
 > 注：此处**不**采用 fail-closed 报 `unknown_table`。空基准下「表不存在」不是可确认的结论——若按 high 置信上报，会对 SQL 里的**每一张表**都给出误导性诊断（模型据此改表名只会越改越错），且违背 §5.4「无法判定 → 不拦截」的分层原则。`_collect_unknown_tables` 以 `has_baseline = bool(index)` 区分「无基准」与「表确实不在基准里」，前者降 low、后者仍 high。
 
