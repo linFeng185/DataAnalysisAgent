@@ -294,6 +294,9 @@ class Settings(BaseSettings):
     datasource_cache_redis_prefix: str = "data-agent:datasource-cache"
     schema_cache_refresh_enabled: bool = True
     schema_cache_refresh_interval_seconds: int = 60 * 60
+    # 每个 Worker 同时运行的表结构同步任务数上限；超出后自动排队等待，不再直接报错。
+    # 以 max_ 开头，因此支持 /admin/runtime-settings 热改（LIVE_FIELDS 白名单前缀匹配）。
+    max_schema_sync_concurrent: int = Field(default=3, ge=1, le=100)
 
     # ---- Skill Registry ----
     skill_registry_url: str = ""
@@ -532,6 +535,3 @@ def validate_production_settings(settings: Settings) -> None:
         raise ValueError(message)
 
     logger.info("生产配置校验通过")
-    # 每个 Worker 同时运行的表结构同步任务数上限；超出后自动排队等待，不再直接报错。
-    # 以 max_ 开头，因此支持 /admin/runtime-settings 热改（LIVE_FIELDS 白名单前缀匹配）。
-    max_schema_sync_concurrent: int = Field(default=3, ge=1, le=100)
