@@ -23,7 +23,11 @@ class TestTenantPurge:
         result = await purge_tenant_rows(connection, 9)
 
         # Assert
-        assert result["analysis_notifications"] == 1
+        # 通知模块（迁移 033）：收件人行、通知主体与租户渠道配置都要按租户清理；
+        # 旧表 analysis_notifications 已由迁移 034 删除。
+        assert result["notification_recipients"] == 1
+        assert result["notifications"] == 1
+        assert result["notification_channels"] == 1
         assert result["knowledge_sql_observations"] == 1
         assert result["tenant_llm_connections"] == 1
         assert result["users"] == 1

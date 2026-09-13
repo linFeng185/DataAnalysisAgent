@@ -1,4 +1,4 @@
-"""主动洞察、定时报告和站内通知 API。"""
+"""主动洞察与定时报告 API；站内通知已迁至 src/notifications 与 /api/v1/notifications。"""
 
 from __future__ import annotations
 
@@ -240,20 +240,3 @@ async def run_automation_schedule(schedule_id: str) -> dict[str, Any]:
     )
     return await get_scheduled_analysis_runner().run(schedule)
 
-
-@router.get("/automation/notifications")
-# 方法作用：列出当前用户最近的站内自动化通知。
-# Args: limit - 返回数量上限。
-# Returns: 通知数组和总数。
-async def list_automation_notifications(
-    limit: int = Query(default=50, ge=1, le=100),
-) -> dict[str, Any]:
-    identity = get_current_identity()
-    notifications = await get_automation_store().list_notifications(identity, limit)
-    logger.info(
-        "自动化站内通知列表完成",
-        tenant_id=identity.tenant_id,
-        user_id=identity.user_id,
-        total=len(notifications),
-    )
-    return {"notifications": notifications, "total": len(notifications)}
