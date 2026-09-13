@@ -414,6 +414,15 @@ class ReportJobRecord(BaseModel):
     is_paused: bool = False
     created_at: datetime | None = None
     updated_at: datetime | None = None
+    # 报表摘要标题。点「生成计划」时为空，后台规划完成后由 report.title 任务写入；
+    # 模型不可用或解析失败时回退为 prompt 前 20 字。
+    title: str = ""
+    # 发散档位冗余字段，报表信息列表据此出列，无需解析 plan_json。
+    divergence: str = "standard"
+    # 创建时选定的数据源，同样供列表出列。
+    datasources: list[str] = Field(default_factory=list)
+    # 计划失败的可读原因，仅 plan_failed 状态非空。
+    plan_error: str = ""
 
 
 class ReportRunRecord(BaseModel):
@@ -502,3 +511,65 @@ class ReportShareRecord(BaseModel):
     pin_latest: bool = False
     expires_at: datetime | None = None
     revoked_at: datetime | None = None
+
+
+# 模板标识的格式约束与 ReportJobCreateRequest 保持一致：只校格式不校清单，
+# 清单在前端注册表，后端再存一份必然脱钩。空字符串表示使用前端默认模板。
+_TEMPLATE_ID_PATTERN = r"^[a-z0-9_-]{0,32}$"
+
+
+class ReportCreateRequest(BaseModel):
+    """点「生成计划」创建报表记录并启动后台规划；不预占任何额度。"""
+
+    prompt: str = Field(..., min_length=1, max_length=20_000)
+    datasources: list[str] = Field(default_factory=list, max_length=20)
+    timezone: str = Field(default="Asia/Shanghai", max_length=64)
+    # 发散档位由用户在创建页选定；模型无权决定成本上限。
+    divergence: DivergenceLevel = "standard"
+    template_id: str = Field(default="", max_length=32, pattern=_TEMPLATE_ID_PATTERN)
+    model_id: str = Field(default="", max_length=128)
+    llm_connection_id: int | None = Field(default=None, ge=1)
+    idempotency_key: str = Field(default="", max_length=128)
+
+    # 方法作用：校验提示词、数据源名、时区和模型连接成对提交。
+    # Args: self - 创建请求。
+    # Returns: 规范化后的创建请求。
+    @model_validator(mode="after")
+    def validate_create(self) -> "ReportCreateRequest":
+        self.prompt = self.prompt.strip()
+        if not self.prompt:
+            # 空白提示词无法生成计划，必须在入口拦截而不是让后台任务失败。
+            raise ValueError("报表描述不能为空")
+        # 数据源名会进占位计划的 requested_datasources，格式必须与 ReportPlan 一致，
+        # 否则创建成功、后台规划时才在模型校验处失败。
+        self.datasources = list(dict.fromkeys(item.strip() for item in self.datasources if item.strip()))
+        if any(not _IDENTIFIER_RE.fullmatch(item) for item in self.datasources):
+            raise ValueError("数据源名称格式无效")
+        self.timezone = self.timezone.strip()
+        if not _TIMEZONE_RE.fullmatch(self.timezone):
+            raise ValueError("时区格式无效")
+        from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+        try:
+            ZoneInfo(self.timezone)
+        except (ZoneInfoNotFoundError, ValueError) as exc:
+            raise ValueError("未知的 IANA 时区") from exc
+        if (self.llm_connection_id is None) != (not self.model_id.strip()):
+            raise ValueError("llm_connection_id 与 model_id 必须同时提交")
+        return self
+
+
+class ReportSchedulePatchRequest(BaseModel):
+    """报表信息页编辑计划与调度：全部字段可选，分析单元只允许删减。"""
+
+    # None 表示不提交该字段；显式空数组表示全部取消（由 _apply_unit_trimming 拒绝）。
+    accepted_unit_ids: list[str] | None = Field(default=None, max_length=_UNIT_COUNT_STATIC_MAX)
+    execution_mode: Literal["immediate", "scheduled"] | None = None
+    frequency: Literal["hourly", "daily", "weekly", "monthly"] | None = None
+    run_at: datetime | None = None
+    max_runs: int | None = Field(default=None, ge=1, le=1000)
+    schedule_end_at: datetime | None = None
+    page_ttl_days: int | None = Field(default=None, ge=1, le=90)
+    permanent: bool | None = None
+    timezone: str | None = Field(default=None, max_length=64)
+    template_id: str | None = Field(default=None, max_length=32, pattern=_TEMPLATE_ID_PATTERN)

@@ -17,6 +17,7 @@ from src.llm.output_contracts import (
     ReportDivergeOutput,
     ReportPlanUnitsOutput,
     ReportSupplementOutput,
+    ReportTitleOutput,
     ReportUnitRoutesOutput,
     SQLGenerationOutput,
     TaskPlanOutput,
@@ -384,6 +385,18 @@ _INITIAL_PROMPTS: dict[str, PromptDefinition] = {
         ),
         output_model=ReportPlanUnitsOutput,
         context_budget=4000,
+    ),
+    "report.title": PromptDefinition(
+        prompt_id="report.title",
+        version="1.0.0",
+        task="report_title",
+        template=(
+            "你是报表标题助手。根据用户的整段报表需求，起一个不超过 20 个字的中文标题，"
+            "概括报表业务主题即可，不要照抄原文、不要出现引号或标点堆叠、不要输出日期以外的多余说明。"
+            "只输出 JSON：{{\"title\": \"中文标题\"}}。"
+        ),
+        output_model=ReportTitleOutput,
+        context_budget=2000,
     ),
     "report.route": PromptDefinition(
         prompt_id="report.route",

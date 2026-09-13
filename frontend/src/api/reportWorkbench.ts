@@ -1,14 +1,23 @@
-import { del, get, post } from './client';
+import { del, get, patch, post } from './client';
 import type {
   PrivateReportResponse,
+  ReportCreateRequest,
+  ReportCreateResponse,
+  ReportDetailResponse,
   ReportDivergenceLevel,
   ReportDrilldownResponse,
   ReportJob,
   ReportJobDetailResponse,
+  ReportJobStatus,
+  ReportListQuery,
+  ReportListResponse,
+  ReportPageSummary,
   ReportPermissionResponse,
   ReportPlan,
   ReportPlanPreviewResponse,
+  ReportPlanUpdateRequest,
   ReportQuotaResponse,
+  ReportRunResponse,
   ReportQuotaUsageResetRequest,
   ReportQuotaUsageResetResponse,
   ReportRun,
@@ -334,4 +343,79 @@ export function resetReportQuotaUsage(request: ReportQuotaUsageResetRequest): Pr
   if (request.all_users) body.all_users = true;
   else body.user_ids = request.user_ids || [];
   return post<ReportQuotaUsageResetResponse>(`${REPORT_BASE}/admin/quota-usage/reset`, body);
+}
+
+// 方法作用：创建报表记录并触发后台计划生成，不预占额度。
+// Args: request - 提示词、数据源、时区、发散档位、模板与模型选择、幂等键。
+// Returns: 新建报表的标识与初始状态（planning）。
+export function createReport(request: ReportCreateRequest): Promise<ReportCreateResponse> {
+  return post<ReportCreateResponse>(`${REPORT_BASE}/reports`, {
+    prompt: request.prompt,
+    datasources: request.datasources,
+    timezone: request.timezone || 'Asia/Shanghai',
+    // 发散档位与模型选择都必须显式下发：后端据此生成计划，不依赖服务端默认值。
+    divergence: request.divergence || 'standard',
+    template_id: request.template_id || '',
+    model_id: request.model_id || '',
+    llm_connection_id: request.llm_connection_id ?? null,
+    idempotency_key: request.idempotency_key,
+  });
+}
+
+// 方法作用：读取当前身份可见的报表信息列表，支持状态与用户筛选与分页。
+// Args: query - user_id（仅租户管理员）、status、page、page_size。
+// Returns: 报表摘要数组、总数与分页信息。
+export function fetchReportList(query: ReportListQuery = {}): Promise<ReportListResponse> {
+  const params = new URLSearchParams();
+  // 只有租户管理员可以按用户筛选：其他角色传 user_id 会被服务端 403。
+  if (query.user_id) params.set('user_id', String(query.user_id));
+  if (query.status) params.set('status', query.status);
+  params.set('page', String(query.page ?? 1));
+  params.set('page_size', String(query.page_size ?? 20));
+  return get<ReportListResponse>(`${REPORT_BASE}/reports?${params.toString()}`);
+}
+
+// 方法作用：读取单条报表的计划、最近运行、页面版本与历史运行。
+// Args: reportId - 报表标识。
+// Returns: 报表详情。
+export function fetchReportDetail(reportId: string): Promise<ReportDetailResponse> {
+  return get<ReportDetailResponse>(`${REPORT_BASE}/reports/${encodeURIComponent(reportId)}`);
+}
+
+// 方法作用：更新未生成报表的计划与调度（仅 draft 可改，其他状态服务端返回 409）。
+// Args: reportId - 报表标识；request - 要修改的字段，accepted_unit_ids 只允许删减。
+// Returns: 更新后的报表详情。
+export function updateReportPlan(reportId: string, request: ReportPlanUpdateRequest): Promise<ReportDetailResponse> {
+  return patch<ReportDetailResponse>(
+    `${REPORT_BASE}/reports/${encodeURIComponent(reportId)}`,
+    request as unknown as Record<string, unknown>,
+  );
+}
+
+// 方法作用：把未生成的报表投入执行，此时才预占 jobs_created 额度。
+// Args: reportId - 报表标识。
+// Returns: 排队结果与剩余额度；额度不足时服务端返回 429。
+export function runReport(reportId: string): Promise<ReportRunResponse> {
+  return post<ReportRunResponse>(`${REPORT_BASE}/reports/${encodeURIComponent(reportId)}/run`, {});
+}
+
+// 方法作用：对计划生成失败的报表重试后台规划（仅 plan_failed 可重试）。
+// Args: reportId - 报表标识。
+// Returns: 复位后的状态（planning），详情需要重新读取。
+export function retryReportPlan(reportId: string): Promise<{ report_id: string; status: ReportJobStatus }> {
+  return post<{ report_id: string; status: ReportJobStatus }>(`${REPORT_BASE}/reports/${encodeURIComponent(reportId)}/retry-plan`, {});
+}
+
+// 方法作用：删除报表记录；服务端只允许删除未生成或计划失败的报表。
+// Args: reportId - 报表标识。
+// Returns: 删除状态。
+export function deleteReport(reportId: string): Promise<{ status: string }> {
+  return del<{ status: string }>(`${REPORT_BASE}/reports/${encodeURIComponent(reportId)}`);
+}
+
+// 方法作用：读取报表的页面版本摘要，由服务端按版本倒序返回。
+// Args: reportId - 报表标识。
+// Returns: 页面版本摘要数组。
+export function fetchReportPages(reportId: string): Promise<{ pages: ReportPageSummary[] }> {
+  return get<{ pages: ReportPageSummary[] }>(`${REPORT_BASE}/reports/${encodeURIComponent(reportId)}/pages`);
 }

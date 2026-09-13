@@ -209,6 +209,12 @@ class ReportSupplementOutput(StrictOutputModel):
     proposed_units: list[ReportSupplementUnit] = Field(default_factory=list, max_length=6)
 
 
+class ReportTitleOutput(StrictOutputModel):
+    """报表摘要标题输出。上限给到 40 字，服务端仍按 20 字截断后再落库。"""
+
+    title: str = Field(min_length=1, max_length=40)
+
+
 T = TypeVar("T", bound=BaseModel)
 
 

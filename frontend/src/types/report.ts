@@ -11,7 +11,9 @@ export type ReportJobStatus =
   | 'failed'
   | 'cancelled'
   | 'expired'
-  | 'deleted';
+  | 'deleted'
+  /** 计划后台生成失败：可在「报表信息」里重试计划。 */
+  | 'plan_failed';
 
 export interface ReportEstimatedResources {
   query_count: number;
@@ -365,4 +367,104 @@ export interface ReportQuotaUsageResetResponse {
   fields: ReportQuotaResetField[];
   period_start: string;
   period_end: string;
+}
+
+/** 报表信息列表与详情共用的一条报表记录；列表不返回计划正文，详情才带 plan。 */
+export interface ReportListItem {
+  id: string;
+  /** 模型起的报表标题；为空时列表回退展示 prompt。 */
+  title: string;
+  prompt: string;
+  datasources: string[];
+  divergence: ReportDivergenceLevel;
+  status: ReportJobStatus;
+  runs_started: number;
+  next_run_at: string | null;
+  created_at: string | null;
+  execution_mode: ReportExecutionMode;
+  is_paused: boolean;
+  latest_report_id: string | null;
+  /** 计划失败时的可读原因；后端随记录一并返回。 */
+  plan_error?: string | null;
+  /** 创建者；后端只允许创建者点「生成」，界面据此避免给出必然 403 的按钮。 */
+  user_id?: number;
+}
+
+/** 报表信息列表分页响应。 */
+export interface ReportListResponse {
+  reports: ReportListItem[];
+  total: number;
+  page: number;
+  page_size: number;
+}
+
+/** 报表信息页的查询条件；user_id 仅租户管理员可用。 */
+export interface ReportListQuery {
+  user_id?: number;
+  status?: ReportJobStatus;
+  page?: number;
+  page_size?: number;
+}
+
+/** 一次运行产生的页面版本摘要；每次成功运行都会新增一条独立可访问的页面。 */
+export interface ReportPageSummary {
+  id: string;
+  version: number;
+  expires_at: string | null;
+  is_latest: boolean;
+  created_at: string | null;
+}
+
+/** 单条报表详情：计划、最近运行、页面版本与历史运行。 */
+export interface ReportDetailResponse {
+  report: ReportListItem;
+  plan: ReportPlan | null;
+  latest_run: ReportRun | null;
+  latest_report: ReportPageSummary | null;
+  runs: ReportRun[];
+  pages: ReportPageSummary[];
+  /** 计划失败时后端给出的可读原因；成功生成计划后为空。 */
+  plan_error?: string | null;
+}
+
+/** 创建报表请求；创建后进入 planning，计划在后台生成。 */
+export interface ReportCreateRequest {
+  prompt: string;
+  datasources: string[];
+  timezone?: string;
+  divergence?: ReportDivergenceLevel;
+  template_id?: string;
+  model_id?: string;
+  llm_connection_id?: number | null;
+  idempotency_key: string;
+}
+
+/** 创建报表响应：只回传标识与初始状态，计划稍后就绪。 */
+export interface ReportCreateResponse {
+  report_id: string;
+  status: ReportJobStatus;
+  created_at: string | null;
+}
+
+/** 计划与调度更新请求；字段全可选，accepted_unit_ids 只允许删减已有单元。 */
+export interface ReportPlanUpdateRequest {
+  accepted_unit_ids?: string[];
+  execution_mode?: ReportExecutionMode;
+  frequency?: 'hourly' | 'daily' | 'weekly' | 'monthly' | null;
+  run_at?: string | null;
+  max_runs?: number | null;
+  schedule_end_at?: string | null;
+  page_ttl_days?: number;
+  permanent?: boolean;
+  timezone?: string;
+  template_id?: string;
+}
+
+/** 运行报表的响应；此处才预占 jobs_created 额度。 */
+export interface ReportRunResponse {
+  report_id: string;
+  status: ReportJobStatus;
+  execution_mode: ReportExecutionMode;
+  run_id: string | null;
+  quota?: Record<string, unknown> | null;
 }

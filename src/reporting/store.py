@@ -233,11 +233,438 @@ class ReportStore:
             )
         return [self._to_job(row) for row in rows]
 
+    # 方法作用：判断报表记录是否对当前身份可见（本人、租户管理员或具备查看全部能力）。
+    # Args: row - 记录行；identity - 当前身份；view_all - 是否具备 report.view_all。
+    # Returns: 可见返回 True。
+    @staticmethod
+    def _report_visible(row: dict[str, Any], identity: Any, view_all: bool = False) -> bool:
+        tenant_id = int(getattr(identity, "tenant_id", 0) or 0)
+        user_id = int(getattr(identity, "user_id", 0) or 0)
+        role = str(getattr(identity, "role", "") or "")
+        if int(row.get("tenant_id", -1) or -1) != tenant_id:
+            return False
+        # 平台身份不参与租户业务报表的可见范围。
+        return role != "super_admin" and (
+            bool(view_all) or role == "tenant_admin" or int(row.get("user_id", -1) or -1) == user_id
+        )
+
+    # 方法作用：把任务记录行规范化为报表信息列表与详情共用的安全字典。
+    # Args: row - 任务记录行；latest_report_id - 可选的最新页面标识。
+    # Returns: 含列表 7 列字段与计划对象的字典。
+    @classmethod
+    def _report_row_dict(cls, row: Any, latest_report_id: str | None = None) -> dict[str, Any]:
+        plan_data = cls._json_dict(row.get("plan_json", {}) if hasattr(row, "get") else row["plan_json"])
+        plan = None
+        if plan_data.get("analysis_units"):
+            try:
+                plan = ReportPlan.model_validate(plan_data)
+            except ValueError:
+                # 计划损坏不应让详情接口整体失败：列表字段仍可展示，计划按缺失处理。
+                logger.warning("报表记录中的计划无法解析", report_id=str(row.get("id", "")))
+                plan = None
+        datasources = cls._datasource_list(row.get("datasources_json", []))
+        if not datasources and plan is not None:
+            # 旧 create_job 入口创建的记录没有数据源列，用计划里的已选源兜底出列。
+            datasources = list(plan.requested_datasources)
+        return {
+            "id": str(row["id"]),
+            "tenant_id": int(row.get("tenant_id", 0) or 0),
+            "user_id": int(row.get("user_id", 0) or 0),
+            "title": str(row.get("title", "") or ""),
+            "prompt": str(row.get("prompt", "") or ""),
+            "datasources": datasources,
+            "divergence": str(row.get("divergence", "standard") or "standard"),
+            "status": str(row.get("status", "draft") or "draft"),
+            "runs_started": int(row.get("runs_started", 0) or 0),
+            "next_run_at": row.get("next_run_at"),
+            "created_at": row.get("created_at"),
+            "updated_at": row.get("updated_at"),
+            "execution_mode": str(row.get("execution_mode", "immediate") or "immediate"),
+            "frequency": row.get("frequency"),
+            "max_runs": row.get("max_runs"),
+            "schedule_end_at": row.get("schedule_end_at"),
+            "page_ttl_days": int(row.get("page_ttl_days", 7) or 7),
+            "permanent": bool(row.get("permanent", False)),
+            "timezone": str(row.get("timezone", "Asia/Shanghai") or "Asia/Shanghai"),
+            "template_id": (str(row.get("template_id")) if row.get("template_id") else None),
+            "plan_hash": str(row.get("plan_hash", "") or ""),
+            "plan_error": str(row.get("plan_error", "") or ""),
+            "is_paused": bool(row.get("is_paused", False)),
+            "latest_report_id": latest_report_id,
+            "plan": plan,
+        }
+
+    # 方法作用：创建后台规划中的报表记录，不预占任何额度（需求 1.5）。
+    # Args: identity - 当前身份；prompt - 用户描述；datasources - 已选数据源；timezone_name - 租户时区；divergence - 发散档位；template_id - 视觉模板；idempotency_key - 幂等键。
+    # Returns: 任务记录与是否新建；幂等命中时返回已有记录且 created 为 False。
+    async def create_planning_job(self, identity: Any, prompt: str, *, datasources: list[str], timezone_name: str = "Asia/Shanghai", divergence: str = "standard", template_id: str | None = None, idempotency_key: str = "") -> tuple[ReportJobRecord, bool]:
+        """与 create_job_with_quota 的写法一致，但不调用任何配额预占。"""
+        tenant_id = int(getattr(identity, "tenant_id", 0) or 0)
+        user_id = int(getattr(identity, "user_id", 0) or 0)
+        key = str(idempotency_key or "").strip()
+        normalized_datasources = self._datasource_list(datasources)
+        logger.debug("报表后台规划记录创建入口", tenant_id=tenant_id, user_id=user_id, datasource_count=len(normalized_datasources), divergence=divergence)
+        if self._memory:
+            async with self._claim_lock:
+                if key and (tenant_id, user_id, key) in self._idempotency:
+                    existing = self._to_job(self._jobs[self._idempotency[(tenant_id, user_id, key)]])
+                    logger.info("报表后台规划记录幂等命中", report_id=existing.id, created=False)
+                    return existing, False
+                job_id = str(uuid4())
+                now = datetime.now(timezone.utc)
+                row = {
+                    "id": job_id, "tenant_id": tenant_id, "user_id": user_id, "prompt": prompt,
+                    # plan_json 必须非空才能满足列约束；空对象表示计划尚未生成。
+                    "plan_json": {}, "plan_hash": "", "preview_hash": "",
+                    "template_id": template_id, "execution_mode": "immediate", "frequency": None,
+                    "timezone": timezone_name, "max_runs": None, "schedule_end_at": None,
+                    "page_ttl_days": 7, "permanent": False,
+                    "status": "planning", "title": "", "divergence": divergence,
+                    "datasources_json": normalized_datasources, "plan_error": "",
+                    "idempotency_key": key or None,
+                    "next_run_at": None, "is_paused": False, "runs_started": 0,
+                    "created_at": now, "updated_at": now,
+                }
+                self._jobs[job_id] = row
+                if key:
+                    self._idempotency[(tenant_id, user_id, key)] = job_id
+                logger.info("报表后台规划记录创建完成", report_id=job_id, tenant_id=tenant_id, user_id=user_id, created=True)
+                return self._to_job(row), True
+        pool = await self._pool()
+        from src.memory.pg_pool import pg_pool_connection
+
+        job_id = str(uuid4())
+        role = str(getattr(identity, "role", "") or "")
+        async with pg_pool_connection(pool, tenant_id, user_id, role) as connection:
+            if key:
+                # 相同身份与幂等键的并发重试必须在去重查询前串行化。
+                await connection.execute(
+                    "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
+                    f"report-plan:{tenant_id}:{user_id}:{key}",
+                )
+                existing = await connection.fetchrow(
+                    "SELECT * FROM report_jobs WHERE tenant_id=$1 AND user_id=$2 AND idempotency_key=$3",
+                    tenant_id, user_id, key,
+                )
+                if existing is not None:
+                    logger.info("报表后台规划记录幂等命中", report_id=str(existing["id"]), created=False)
+                    return self._to_job(existing), False
+            row = await connection.fetchrow(
+                "INSERT INTO report_jobs (id,tenant_id,user_id,prompt,plan_json,plan_hash,execution_mode,timezone,status,title,divergence,datasources_json,plan_error,idempotency_key,template_id,page_ttl_days,permanent) "
+                "VALUES ($1::uuid,$2,$3,$4,$5::jsonb,$6,$7,$8,'planning',$9,$10,$11::jsonb,$12,$13,$14,$15,$16) RETURNING *",
+                job_id, tenant_id, user_id, prompt, "{}", "", "immediate", timezone_name, "", divergence,
+                json.dumps(normalized_datasources, ensure_ascii=False), "", key or None, template_id, 7, False,
+            )
+        logger.info("报表后台规划记录创建完成", report_id=job_id, tenant_id=tenant_id, user_id=user_id, created=True)
+        return self._to_job(row), True
+
+    # 方法作用：写入后台规划结果并把记录推进到「未生成」（draft）。
+    # Args: report_id - 报表标识；identity - 记录拥有者身份；plan - 生成好的计划；title - 报表标题。
+    # Returns: 写入成功返回 True，记录不存在或越权返回 False。
+    async def save_planned_job(self, report_id: str, identity: Any, *, plan: ReportPlan, title: str) -> bool:
+        """计划与调度列同时落库，使列表出列与点「生成」读到同一份状态。"""
+        plan_hash = plan.canonical_hash()
+        # 立即执行没有下次时间；定时执行由计划里的首次时间兜底。
+        next_run_at = (plan.run_at or datetime.now(timezone.utc)) if plan.execution_mode == "scheduled" else None
+        resolved_title = str(title or "").strip()[:256]
+        tenant_id = int(getattr(identity, "tenant_id", 0) or 0)
+        user_id = int(getattr(identity, "user_id", 0) or 0)
+        logger.debug("报表计划写入入口", report_id=report_id, unit_count=len(plan.analysis_units), divergence=str(plan.divergence))
+        if self._memory:
+            async with self._claim_lock:
+                row = self._jobs.get(str(report_id))
+                if row is None or not self._report_visible(row, identity):
+                    logger.warning("报表计划写入拒绝", report_id=report_id, reason="记录不存在或越权")
+                    return False
+                row.update(
+                    plan_json=plan.model_dump(mode="json"), plan_hash=plan_hash, title=resolved_title,
+                    status="draft", plan_error="", execution_mode=plan.execution_mode, frequency=plan.frequency,
+                    max_runs=plan.max_runs, next_run_at=next_run_at, schedule_end_at=plan.schedule_end_at,
+                    page_ttl_days=plan.page_ttl_days, permanent=plan.permanent, timezone=plan.timezone,
+                    updated_at=datetime.now(timezone.utc),
+                )
+                logger.info("报表计划写入完成", report_id=report_id, status="draft", unit_count=len(plan.analysis_units))
+                return True
+        pool = await self._pool()
+        from src.memory.pg_pool import pg_pool_connection
+
+        role = str(getattr(identity, "role", "") or "")
+        async with pg_pool_connection(pool, tenant_id, user_id, role) as connection:
+            row = await connection.fetchrow(
+                "UPDATE report_jobs SET plan_json=$1::jsonb,plan_hash=$2,title=$3,status='draft',plan_error='',execution_mode=$4,"
+                "frequency=$5,max_runs=$6,next_run_at=$7,schedule_end_at=$8,page_ttl_days=$9,permanent=$10,timezone=$11,updated_at=NOW() "
+                "WHERE id=$12::uuid AND tenant_id=$13 AND ($14<>'super_admin' AND ($14='tenant_admin' OR user_id=$15)) RETURNING id",
+                json.dumps(plan.model_dump(mode="json"), ensure_ascii=False), plan_hash, resolved_title,
+                plan.execution_mode, plan.frequency, plan.max_runs, next_run_at, plan.schedule_end_at,
+                plan.page_ttl_days, plan.permanent, plan.timezone, str(report_id), tenant_id, role, user_id,
+            )
+        if row is None:
+            logger.warning("报表计划写入拒绝", report_id=report_id, reason="记录不存在或越权")
+            return False
+        logger.info("报表计划写入完成", report_id=report_id, status="draft", unit_count=len(plan.analysis_units))
+        return True
+
+    # 方法作用：把规划失败的可读原因写入记录并置为 plan_failed。
+    # Args: report_id - 报表标识；identity - 记录拥有者身份；reason - 用户可读失败原因。
+    # Returns: 写入成功返回 True，记录不存在或越权返回 False。
+    async def mark_plan_failed(self, report_id: str, identity: Any, *, reason: str) -> bool:
+        message = str(reason or "").strip()[:2000] or "计划生成失败，请稍后重试"
+        tenant_id = int(getattr(identity, "tenant_id", 0) or 0)
+        user_id = int(getattr(identity, "user_id", 0) or 0)
+        logger.debug("报表计划失败写入入口", report_id=report_id, reason_chars=len(message))
+        if self._memory:
+            async with self._claim_lock:
+                row = self._jobs.get(str(report_id))
+                if row is None or not self._report_visible(row, identity):
+                    return False
+                row.update(status="plan_failed", plan_error=message, updated_at=datetime.now(timezone.utc))
+                logger.info("报表计划失败写入完成", report_id=report_id, status="plan_failed")
+                return True
+        pool = await self._pool()
+        from src.memory.pg_pool import pg_pool_connection
+
+        role = str(getattr(identity, "role", "") or "")
+        async with pg_pool_connection(pool, tenant_id, user_id, role) as connection:
+            row = await connection.fetchrow(
+                "UPDATE report_jobs SET status='plan_failed',plan_error=$1,updated_at=NOW() WHERE id=$2::uuid AND tenant_id=$3 "
+                "AND ($4<>'super_admin' AND ($4='tenant_admin' OR user_id=$5)) RETURNING id",
+                message, str(report_id), tenant_id, role, user_id,
+            )
+        if row is None:
+            return False
+        logger.info("报表计划失败写入完成", report_id=report_id, status="plan_failed")
+        return True
+
+    # 方法作用：清空计划失败原因并把记录退回「生成中」，用于用户点重试。
+    # Args: report_id - 报表标识；identity - 记录拥有者身份。
+    # Returns: 复位成功返回 True，记录不存在或越权返回 False。
+    async def reset_plan_status(self, report_id: str, identity: Any) -> bool:
+        tenant_id = int(getattr(identity, "tenant_id", 0) or 0)
+        user_id = int(getattr(identity, "user_id", 0) or 0)
+        logger.debug("报表计划重试复位入口", report_id=report_id, user_id=user_id)
+        if self._memory:
+            async with self._claim_lock:
+                row = self._jobs.get(str(report_id))
+                if row is None or not self._report_visible(row, identity):
+                    return False
+                row.update(status="planning", plan_error="", updated_at=datetime.now(timezone.utc))
+                logger.info("报表计划重试复位完成", report_id=report_id)
+                return True
+        pool = await self._pool()
+        from src.memory.pg_pool import pg_pool_connection
+
+        role = str(getattr(identity, "role", "") or "")
+        async with pg_pool_connection(pool, tenant_id, user_id, role) as connection:
+            row = await connection.fetchrow(
+                "UPDATE report_jobs SET status='planning',plan_error='',updated_at=NOW() WHERE id=$1::uuid AND tenant_id=$2 "
+                "AND ($3<>'super_admin' AND ($3='tenant_admin' OR user_id=$4)) RETURNING id",
+                str(report_id), tenant_id, role, user_id,
+            )
+        if row is None:
+            return False
+        logger.info("报表计划重试复位完成", report_id=report_id)
+        return True
+
+    # 方法作用：按可见范围分页读取报表信息列表，默认创建时间倒序。
+    # Args: identity - 当前身份；user_id - 可选目标用户（仅租户管理员按用户筛选）；status - 可选状态；page/page_size - 分页；view_all - 是否具备查看全部能力。
+    # Returns: 列表行与总数。
+    async def list_reports(self, identity: Any, *, user_id: int | None = None, status: str | None = None, page: int = 1, page_size: int = 20, view_all: bool = False) -> tuple[list[dict[str, Any]], int]:
+        """一条 SQL 带出列表、总数和最新页面标识，避免按行查询造成 N+1。"""
+        bounded_page = max(1, int(page or 1))
+        bounded_size = max(1, min(int(page_size or 20), 100))
+        tenant_id = int(getattr(identity, "tenant_id", 0) or 0)
+        logger.debug("报表信息列表查询入口", tenant_id=tenant_id, user_id=int(getattr(identity, "user_id", 0) or 0), page=bounded_page, page_size=bounded_size, status=str(status or ""))
+        if self._memory:
+            rows = [row for row in self._jobs.values() if self._report_visible(row, identity, view_all)]
+            rows = [row for row in rows if str(row.get("status", "")) != "deleted"]
+            if user_id is not None:
+                rows = [row for row in rows if int(row.get("user_id", 0) or 0) == int(user_id)]
+            if status:
+                rows = [row for row in rows if str(row.get("status", "")) == str(status)]
+            rows.sort(key=lambda row: row.get("created_at") or datetime.min.replace(tzinfo=timezone.utc), reverse=True)
+            total = len(rows)
+            start = (bounded_page - 1) * bounded_size
+            items = [self._report_row_dict(row, self._latest_report_id(str(row["id"]))) for row in rows[start:start + bounded_size]]
+            logger.info("报表信息列表查询完成", tenant_id=tenant_id, total=total, returned=len(items))
+            return items, total
+        pool = await self._pool()
+        from src.memory.pg_pool import pg_pool_connection
+
+        role = str(getattr(identity, "role", "") or "")
+        offset = (bounded_page - 1) * bounded_size
+        async with pg_pool_connection(pool, tenant_id, int(getattr(identity, "user_id", 0) or 0), role) as connection:
+            rows = await connection.fetch(
+                "SELECT j.id::text AS id, j.tenant_id, j.user_id, j.prompt, j.title, j.divergence, j.datasources_json, j.status, "
+                "j.runs_started, j.next_run_at, j.created_at, j.updated_at, j.execution_mode, j.frequency, j.max_runs, "
+                "j.schedule_end_at, j.page_ttl_days, j.permanent, j.timezone, j.template_id, j.plan_hash, j.plan_error, j.is_paused, "
+                "lv.id::text AS latest_report_id, COUNT(*) OVER () AS total_count "
+                "FROM report_jobs j "
+                "LEFT JOIN LATERAL (SELECT v.id FROM report_versions v WHERE v.job_id=j.id AND v.tenant_id=j.tenant_id AND v.deleted_at IS NULL ORDER BY v.is_latest DESC,v.version DESC LIMIT 1) lv ON TRUE "
+                "WHERE j.tenant_id=$1 AND j.status<>'deleted' "
+                "AND ($2<>'super_admin' AND ($3::boolean OR $2='tenant_admin' OR j.user_id=$4)) "
+                "AND ($5::bigint IS NULL OR j.user_id=$5::bigint) AND ($6='' OR j.status=$6) "
+                "ORDER BY j.created_at DESC LIMIT $7 OFFSET $8",
+                tenant_id, role, bool(view_all), int(getattr(identity, "user_id", 0) or 0),
+                (int(user_id) if user_id is not None else None), str(status or ""), bounded_size, offset,
+            )
+        total = int(rows[0]["total_count"]) if rows else 0
+        items = [self._report_row_dict(row, str(row["latest_report_id"]) if row.get("latest_report_id") else None) for row in rows]
+        logger.info("报表信息列表查询完成", tenant_id=tenant_id, total=total, returned=len(items))
+        return items, total
+
+    # 方法作用：读取单条报表记录的原始字段与计划对象，供详情、编辑、运行和删除共用。
+    # Args: report_id - 报表标识；identity - 当前身份；view_all - 是否具备查看全部能力。
+    # Returns: 报表字典，不存在或越权返回 None。
+    async def get_report_row(self, report_id: str, identity: Any, *, view_all: bool = False) -> dict[str, Any] | None:
+        if self._memory:
+            row = self._jobs.get(str(report_id))
+            # 已软删除的记录与数据库分支保持一致：一律按不存在处理。
+            if row is None or str(row.get("status", "")) == "deleted" or not self._report_visible(row, identity, view_all):
+                return None
+            return self._report_row_dict(row, self._latest_report_id(str(report_id)))
+        pool = await self._pool()
+        from src.memory.pg_pool import pg_pool_connection
+
+        tenant_id = int(getattr(identity, "tenant_id", 0) or 0)
+        role = str(getattr(identity, "role", "") or "")
+        async with pg_pool_connection(pool, tenant_id, int(getattr(identity, "user_id", 0) or 0), role) as connection:
+            row = await connection.fetchrow(
+                "SELECT j.id::text AS id, j.tenant_id, j.user_id, j.prompt, j.title, j.divergence, j.datasources_json, j.status, "
+                "j.runs_started, j.next_run_at, j.created_at, j.updated_at, j.execution_mode, j.frequency, j.max_runs, "
+                "j.schedule_end_at, j.page_ttl_days, j.permanent, j.timezone, j.template_id, j.plan_hash, j.plan_error, j.is_paused, "
+                "j.plan_json, lv.id::text AS latest_report_id "
+                "FROM report_jobs j "
+                "LEFT JOIN LATERAL (SELECT v.id FROM report_versions v WHERE v.job_id=j.id AND v.tenant_id=j.tenant_id AND v.deleted_at IS NULL ORDER BY v.is_latest DESC,v.version DESC LIMIT 1) lv ON TRUE "
+                "WHERE j.id=$1::uuid AND j.tenant_id=$2 AND j.status<>'deleted' "
+                "AND ($3<>'super_admin' AND ($4::boolean OR $3='tenant_admin' OR j.user_id=$5))",
+                str(report_id), tenant_id, role, bool(view_all), int(getattr(identity, "user_id", 0) or 0),
+            )
+        return self._report_row_dict(row, str(row["latest_report_id"]) if row and row.get("latest_report_id") else None) if row else None
+
+    # 方法作用：把编辑后的计划与调度写回 draft 记录，并重算计划哈希。
+    # Args: report_id - 报表标识；identity - 记录拥有者身份；plan - 重新校验过的计划；columns - 待更新的调度列。
+    # Returns: 写回成功返回 True，记录不存在或越权返回 False。
+    async def update_report_plan(self, report_id: str, identity: Any, *, plan: ReportPlan, columns: dict[str, Any]) -> bool:
+        plan_hash = plan.canonical_hash()
+        tenant_id = int(getattr(identity, "tenant_id", 0) or 0)
+        user_id = int(getattr(identity, "user_id", 0) or 0)
+        logger.debug("报表计划编辑写入入口", report_id=report_id, execution_mode=plan.execution_mode, unit_count=len(plan.analysis_units))
+        if self._memory:
+            async with self._claim_lock:
+                row = self._jobs.get(str(report_id))
+                if row is None or not self._report_visible(row, identity):
+                    return False
+                # 与数据库分支保持同一组列：列表出列读的是列而不是 plan_json。
+                row.update(
+                    plan_json=plan.model_dump(mode="json"), plan_hash=plan_hash, execution_mode=plan.execution_mode,
+                    frequency=plan.frequency, max_runs=plan.max_runs, schedule_end_at=plan.schedule_end_at,
+                    page_ttl_days=plan.page_ttl_days, permanent=plan.permanent, timezone=plan.timezone,
+                    **columns, updated_at=datetime.now(timezone.utc),
+                )
+                logger.info("报表计划编辑写入完成", report_id=report_id, plan_hash=plan_hash)
+                return True
+        pool = await self._pool()
+        from src.memory.pg_pool import pg_pool_connection
+
+        role = str(getattr(identity, "role", "") or "")
+        async with pg_pool_connection(pool, tenant_id, user_id, role) as connection:
+            row = await connection.fetchrow(
+                "UPDATE report_jobs SET plan_json=$1::jsonb,plan_hash=$2,execution_mode=$3,frequency=$4,max_runs=$5,next_run_at=$6,"
+                "schedule_end_at=$7,page_ttl_days=$8,permanent=$9,timezone=$10,template_id=$11,updated_at=NOW() "
+                "WHERE id=$12::uuid AND tenant_id=$13 AND ($14<>'super_admin' AND ($14='tenant_admin' OR user_id=$15)) RETURNING id",
+                json.dumps(plan.model_dump(mode="json"), ensure_ascii=False), plan_hash,
+                plan.execution_mode, plan.frequency, plan.max_runs, columns.get("next_run_at"),
+                plan.schedule_end_at, plan.page_ttl_days, plan.permanent, plan.timezone, columns.get("template_id"),
+                str(report_id), tenant_id, role, user_id,
+            )
+        if row is None:
+            return False
+        logger.info("报表计划编辑写入完成", report_id=report_id, plan_hash=plan_hash)
+        return True
+
+    # 方法作用：软删除报表记录，保留运行与页面数据供审计追溯。
+    # Args: report_id - 报表标识；identity - 当前身份；view_all - 是否具备查看全部能力。
+    # Returns: 删除成功返回 True，记录不存在或越权返回 False。
+    async def delete_report(self, report_id: str, identity: Any, *, view_all: bool = False) -> bool:
+        tenant_id = int(getattr(identity, "tenant_id", 0) or 0)
+        logger.debug("报表记录删除入口", report_id=report_id, user_id=int(getattr(identity, "user_id", 0) or 0))
+        if self._memory:
+            async with self._claim_lock:
+                row = self._jobs.get(str(report_id))
+                if row is None or not self._report_visible(row, identity, view_all):
+                    return False
+                row.update(status="deleted", updated_at=datetime.now(timezone.utc))
+                logger.info("报表记录删除完成", report_id=report_id)
+                return True
+        pool = await self._pool()
+        from src.memory.pg_pool import pg_pool_connection
+
+        role = str(getattr(identity, "role", "") or "")
+        async with pg_pool_connection(pool, tenant_id, int(getattr(identity, "user_id", 0) or 0), role) as connection:
+            row = await connection.fetchrow(
+                "UPDATE report_jobs SET status='deleted',updated_at=NOW() WHERE id=$1::uuid AND tenant_id=$2 "
+                "AND ($3<>'super_admin' AND ($4::boolean OR $3='tenant_admin' OR user_id=$5)) RETURNING id",
+                str(report_id), tenant_id, role, bool(view_all), int(getattr(identity, "user_id", 0) or 0),
+            )
+        if row is None:
+            return False
+        logger.info("报表记录删除完成", report_id=report_id)
+        return True
+
+    # 方法作用：列出报表的全部页面版本摘要，按版本倒序。
+    # Args: report_id - 报表标识；identity - 当前身份；view_all - 是否具备查看全部能力。
+    # Returns: 页面摘要字典列表（id/version/expires_at/is_latest/created_at）。
+    async def list_report_pages(self, report_id: str, identity: Any, *, view_all: bool = False) -> list[dict[str, Any]]:
+        logger.debug("报表页面列表查询入口", report_id=report_id, user_id=int(getattr(identity, "user_id", 0) or 0))
+        if self._memory:
+            report = await self.get_report_row(report_id, identity, view_all=view_all)
+            if report is None:
+                return []
+            rows = [row for row in self._versions.values() if str(row.get("job_id")) == str(report_id) and row.get("deleted_at") is None]
+            rows.sort(key=lambda row: int(row.get("version", 0) or 0), reverse=True)
+            return [self._page_summary(row) for row in rows]
+        pool = await self._pool()
+        from src.memory.pg_pool import pg_pool_connection
+
+        tenant_id = int(getattr(identity, "tenant_id", 0) or 0)
+        role = str(getattr(identity, "role", "") or "")
+        async with pg_pool_connection(pool, tenant_id, int(getattr(identity, "user_id", 0) or 0), role) as connection:
+            rows = await connection.fetch(
+                "SELECT v.id::text AS id, v.version, v.expires_at, v.is_latest, v.created_at FROM report_versions v "
+                "JOIN report_jobs j ON j.id=v.job_id "
+                "WHERE v.job_id=$1::uuid AND v.tenant_id=$2 AND v.deleted_at IS NULL "
+                "AND ($3<>'super_admin' AND ($4::boolean OR $3='tenant_admin' OR j.user_id=$5)) ORDER BY v.version DESC LIMIT 200",
+                str(report_id), tenant_id, role, bool(view_all), int(getattr(identity, "user_id", 0) or 0),
+            )
+        return [self._page_summary(row) for row in rows]
+
+    # 方法作用：把页面版本行规范化为只读摘要。
+    # Args: row - 版本行。
+    # Returns: 页面摘要字典。
+    @staticmethod
+    def _page_summary(row: Any) -> dict[str, Any]:
+        return {
+            "id": str(row.get("id", "")),
+            "version": int(row.get("version", 0) or 0),
+            "expires_at": row.get("expires_at"),
+            "is_latest": bool(row.get("is_latest", False)),
+            "created_at": row.get("created_at"),
+        }
+
+    # 方法作用：读取某报表最新页面的标识，内存分支列表出列使用。
+    # Args: job_id - 报表任务标识。
+    # Returns: 最新页面标识；没有页面时返回 None。
+    def _latest_report_id(self, job_id: str) -> str | None:
+        rows = [row for row in self._versions.values() if str(row.get("job_id")) == str(job_id) and row.get("deleted_at") is None]
+        row = max(rows, key=lambda item: (item.get("created_at") or datetime.min.replace(tzinfo=timezone.utc), int(item.get("version", 0) or 0)), default=None)
+        return str(row["id"]) if row else None
+
     # 方法作用：更新任务状态并记录最近更新时间。
-    # Args: job_id - 任务 ID；identity - 当前身份；status - draft/queued/running/succeeded/partial/failed/cancelled。
+    # Args: job_id - 任务 ID；identity - 当前身份；status - draft/planning/plan_failed/queued/running/succeeded/partial/failed/cancelled。
     # Returns: 更新后的任务或 None。
     async def update_job_status(self, job_id: str, identity: Any, status: str) -> ReportJobRecord | None:
-        allowed = {"draft", "planning", "queued", "running", "succeeded", "partial", "failed", "cancelled", "expired", "deleted"}
+        # plan_failed 与迁移 032 的 CHECK 约束保持一致：计划失败是显式终态，可重试。
+        allowed = {"draft", "planning", "plan_failed", "queued", "running", "succeeded", "partial", "failed", "cancelled", "expired", "deleted"}
         if status not in allowed:
             raise ValueError("报表任务状态无效")
         now = datetime.now(timezone.utc)
@@ -1549,7 +1976,40 @@ class ReportStore:
     @classmethod
     def _to_job(cls, row: Any) -> ReportJobRecord:
         plan_data = cls._json_dict(row.get("plan_json", {}) if hasattr(row, "get") else row["plan_json"])
-        return ReportJobRecord(id=str(row["id"]), tenant_id=int(row["tenant_id"]), user_id=int(row["user_id"]), prompt=str(row["prompt"]), plan=ReportPlan.model_validate(plan_data), plan_hash=str(row.get("plan_hash", "") or ""), preview_hash=str(row.get("preview_hash", "") or ""), template_id=(str(row.get("template_id")) if row.get("template_id") else None), status=str(row.get("status", "draft")), runs_started=int(row.get("runs_started", 0) or 0), next_run_at=row.get("next_run_at"), is_paused=bool(row.get("is_paused", False)), created_at=row.get("created_at"), updated_at=row.get("updated_at"))
+        if not plan_data.get("analysis_units"):
+            # 后台规划中的记录还没有真实计划（plan_json 仍是空对象）：用占位计划满足
+            # ReportPlan 的单元数下限，真实计划由 plan_worker 写回后被替换。
+            plan_data = cls._placeholder_plan_data(row)
+        return ReportJobRecord(id=str(row["id"]), tenant_id=int(row["tenant_id"]), user_id=int(row["user_id"]), prompt=str(row["prompt"]), plan=ReportPlan.model_validate(plan_data), plan_hash=str(row.get("plan_hash", "") or ""), preview_hash=str(row.get("preview_hash", "") or ""), template_id=(str(row.get("template_id")) if row.get("template_id") else None), status=str(row.get("status", "draft")), runs_started=int(row.get("runs_started", 0) or 0), next_run_at=row.get("next_run_at"), is_paused=bool(row.get("is_paused", False)), created_at=row.get("created_at"), updated_at=row.get("updated_at"), title=str(row.get("title", "") or ""), divergence=str(row.get("divergence", "standard") or "standard"), datasources=cls._datasource_list(row.get("datasources_json", [])), plan_error=str(row.get("plan_error", "") or ""))
+
+    # 方法作用：为「计划尚未生成」的记录构造可校验的占位计划。
+    # Args: row - 任务记录行（含 prompt / datasources_json / divergence / timezone）。
+    # Returns: 满足 ReportPlan 契约的占位计划字典。
+    @classmethod
+    def _placeholder_plan_data(cls, row: Any) -> dict[str, Any]:
+        prompt = str(row.get("prompt", "") or "").strip() or "报表计划生成中"
+        return {
+            # unit_id 带 pending 前缀：任何误把占位计划当真实计划的行为都能一眼看出。
+            "analysis_units": [{"unit_id": "pending_plan", "question": prompt[:4000]}],
+            "requested_datasources": cls._datasource_list(row.get("datasources_json", [])),
+            "divergence": str(row.get("divergence", "standard") or "standard"),
+            "timezone": str(row.get("timezone", "Asia/Shanghai") or "Asia/Shanghai"),
+        }
+
+    # 方法作用：把数据库或内存里的数据源列表列规范化为字符串列表。
+    # Args: value - JSONB 列、JSON 字符串或列表。
+    # Returns: 去重后的非空数据源名列表。
+    @staticmethod
+    def _datasource_list(value: Any) -> list[str]:
+        items = value
+        if isinstance(items, str):
+            try:
+                items = json.loads(items)
+            except (TypeError, ValueError):
+                items = []
+        if not isinstance(items, list):
+            return []
+        return list(dict.fromkeys(str(item).strip() for item in items if str(item).strip()))
 
     # 方法作用：把数据库行转换为安全的运行模型。
     # Args: row - asyncpg Record 或内存字典。

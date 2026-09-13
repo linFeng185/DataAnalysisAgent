@@ -21,11 +21,14 @@ from src.reporting.models import (
     DrilldownRequest,
     PageLifecycleRequest,
     QuotaPolicyRequest,
+    ReportCreateRequest,
     ReportJobCreateRequest,
     ReportPlan,
     ReportPlanRequest,
+    ReportSchedulePatchRequest,
     ReportShareCreateRequest,
 )
+from src.reporting.plan_worker import get_report_plan_worker
 from src.reporting.planner import ReportPlanner
 from src.reporting.quota import (
     QuotaExceededError,
@@ -152,6 +155,53 @@ async def _require_capability(identity: Any, capability: str) -> None:
         raise HTTPException(403, f"缺少报表能力: {capability}")
 
 
+# 方法作用：判断当前身份是否具备任一报表能力，用于共用入口的兼容鉴权。
+# Args: identity - 当前请求身份；capabilities - 候选能力键。
+# Returns: 任一能力命中返回 True。
+async def _has_any_capability(identity: Any, capabilities: tuple[str, ...]) -> bool:
+    service = get_report_permission_service()
+    for capability in capabilities:
+        if await service.has(identity, capability):
+            return True
+    return False
+
+
+# 方法作用：判断当前身份是否具备查看全租户报表的能力。
+# Args: identity - 当前请求身份。
+# Returns: 具备 report.view_all 返回 True。
+async def _has_view_all(identity: Any) -> bool:
+    return await get_report_permission_service().has(identity, "report.view_all")
+
+
+# 方法作用：读取单条报表记录，不存在或越权时统一返回 404。
+# Args: identity - 当前请求身份；report_id - 报表标识。
+# Returns: 报表字典（含 plan 对象）。
+async def _load_report(identity: Any, report_id: str) -> dict[str, Any]:
+    report = await get_report_store().get_report_row(report_id, identity, view_all=await _has_view_all(identity))
+    if report is None:
+        logger.warning("报表记录读取失败", report_id=report_id, tenant_id=getattr(identity, "tenant_id", 0), user_id=getattr(identity, "user_id", 0))
+        raise HTTPException(404, "报表不存在或无权访问")
+    return report
+
+
+# 方法作用：把报表记录转换为对外响应，计划对象单独由调用方返回。
+# Args: report - 报表记录字典。
+# Returns: 不含内部计划对象的报表摘要。
+def _public_report(report: dict[str, Any]) -> dict[str, Any]:
+    return {key: value for key, value in report.items() if key not in {"plan", "tenant_id"}}
+
+
+# 方法作用：校验报表写操作必须由创建者本人发起。
+# Args: identity - 当前请求身份；report - 报表记录字典。
+# Returns: 无返回值；非创建者时抛出 HTTP 403。
+def _require_report_owner(identity: Any, report: dict[str, Any]) -> None:
+    # 数据库 RLS 的 WITH CHECK 只允许本人写自己的行，租户管理员也不能替代业务用户改计划；
+    # 内存分支与它保持一致，避免两种部署方式出现不同权限。
+    if int(report.get("user_id", 0) or 0) != int(getattr(identity, "user_id", 0) or 0):
+        logger.warning("报表写操作归属拒绝", report_id=report.get("id", ""), tenant_id=getattr(identity, "tenant_id", 0), user_id=getattr(identity, "user_id", 0))
+        raise HTTPException(403, "只能以报表创建者身份操作，不能用管理员权限替代业务用户")
+
+
 # 方法作用：在计划阶段重新解析当前身份可用的数据源和行列授权。
 # Args: identity - 当前请求身份；plan - 待执行报表计划。
 # Returns: 数据源名称到授权摘要的映射。
@@ -253,6 +303,7 @@ async def _resolve_plan_llm_selection(tenant_id: int, connection_id: int | None 
 # Args: request - 计划预览请求。
 # Returns: 可供确认的结构化计划。
 async def preview_plan(request: ReportPlanRequest) -> dict[str, Any]:
+    """兼容入口：前端已改用 POST /reports 的后台计划生成，这里只保留旧链路。"""
     identity = get_current_identity()
     await _require_capability(identity, "report.menu")
     planner = ReportPlanner()
@@ -290,6 +341,7 @@ async def preview_plan(request: ReportPlanRequest) -> dict[str, Any]:
 # Args: request - 计划创建请求。
 # Returns: Job、Run 排队摘要和剩余配额。
 async def create_job(request: ReportJobCreateRequest) -> dict[str, Any]:
+    """兼容入口：前端已改用 POST /reports/{id}/run，这里保留「先预览后确认」的旧链路。"""
     identity = get_current_identity()
     await _require_capability(identity, "report.create")
     cache_key = (int(identity.tenant_id), int(identity.user_id), request.plan_hash)
@@ -476,21 +528,277 @@ async def get_run(run_id: str) -> dict[str, Any]:
 
 
 @router.get("/reports/{report_id}")
-# 方法作用：读取当前用户可访问且未到期的最新私有报表页面。
+# 方法作用：读取报表详情（计划、最近运行、页面列表），并兼容旧查看页的页面正文读取。
 # Args: report_id - 报表 ID。
-# Returns: 页面文档、版本和数据摘要。
+# Returns: 报表摘要、计划、运行、页面与（页面未过期时的）页面文档。
 async def get_report(report_id: str) -> dict[str, Any]:
+    """同一个入口服务两类消费者：报表信息详情按记录读取，旧查看页按页面读取。"""
     identity = get_current_identity()
-    await _require_capability(identity, "report.menu")
-    version = await get_report_store().get_report_version(report_id, identity)
-    if version is None:
-        raise HTTPException(404, "报表不存在或无权访问")
-    if _is_expired(version.expires_at):
+    # 旧查看页只持有 report.menu，报表信息页使用 report.list，两者都能通过。
+    if not await _has_any_capability(identity, ("report.list", "report.menu")):
+        raise HTTPException(403, "缺少报表能力: report.list")
+    store = get_report_store()
+    view_all = await _has_view_all(identity)
+    report = await store.get_report_row(report_id, identity, view_all=view_all)
+    if report is None:
+        # 兼容路径：按页面 report_id 读取旧查看页正文。
+        version = await store.get_report_version(report_id, identity)
+        if version is None:
+            raise HTTPException(404, "报表不存在或无权访问")
+        if _is_expired(version.expires_at):
+            raise HTTPException(410, "报表页面已过期")
+        document = _filtered_document(version.document, await get_report_permission_service().has(identity, "report.live_drilldown"))
+        return {"report": None, "plan": None, "latest_run": None, "latest_report": None, "runs": [], "pages": [], "report_id": version.report_id, "version": version.version, "document": document, "data_manifest": version.data_manifest}
+    # 页面正文只在最新页面未过期时下发；过期页面保留 410 语义，避免查看页拿到空正文。
+    version = await store.get_latest_version_for_job(report_id, identity)
+    if version is not None and _is_expired(version.expires_at):
         raise HTTPException(410, "报表页面已过期")
-    document = dict(version.document)
-    if not await get_report_permission_service().has(identity, "report.live_drilldown"):
-        document["drilldowns"] = [item for item in document.get("drilldowns", []) if item.get("mode", "snapshot") == "snapshot"]
-    return {"report_id": version.report_id, "version": version.version, "document": document, "data_manifest": version.data_manifest}
+    runs = await store.list_runs(report_id, identity, 20)
+    pages = await store.list_report_pages(report_id, identity, view_all=view_all)
+    payload: dict[str, Any] = {
+        "report": _public_report(report),
+        "plan": report["plan"].model_dump(mode="json") if report.get("plan") is not None else None,
+        "latest_run": runs[0].model_dump(mode="json") if runs else None,
+        "latest_report": next((item for item in pages if item["is_latest"]), pages[0] if pages else None),
+        "runs": [item.model_dump(mode="json") for item in runs],
+        "pages": pages,
+        # 顶层再暴露一次失败原因：前端详情类型把它声明在响应根上，避免读到 undefined。
+        "plan_error": report["plan_error"],
+    }
+    if version is not None:
+        payload["report_id"] = version.report_id
+        payload["version"] = version.version
+        payload["document"] = _filtered_document(version.document, await get_report_permission_service().has(identity, "report.live_drilldown"))
+        payload["data_manifest"] = version.data_manifest
+    logger.info("报表详情读取完成", report_id=report_id, user_id=identity.user_id, status=report["status"], page_count=len(pages), run_count=len(runs))
+    return payload
+
+
+# 方法作用：按实时钻取能力裁剪页面正文中的钻取定义。
+# Args: document - 页面文档；live_allowed - 是否具备 report.live_drilldown。
+# Returns: 裁剪后的页面文档副本。
+def _filtered_document(document: dict[str, Any], live_allowed: bool) -> dict[str, Any]:
+    result = dict(document)
+    if not live_allowed:
+        result["drilldowns"] = [item for item in result.get("drilldowns", []) if item.get("mode", "snapshot") == "snapshot"]
+    return result
+
+
+@router.post("/reports", status_code=202)
+# 方法作用：点「生成计划」立即创建报表记录并启动后台规划，不预占任何额度。
+# Args: request - 创建请求（描述、数据源、时区、档位、模板、模型、幂等键）。
+# Returns: 报表标识、状态与创建时间。
+async def create_report(request: ReportCreateRequest) -> dict[str, Any]:
+    """需求 1.5：额度在点「生成」时才预占，这里只建记录。"""
+    identity = get_current_identity()
+    await _require_capability(identity, "report.create_page")
+    store = get_report_store()
+    logger.debug("报表创建入口", tenant_id=identity.tenant_id, user_id=identity.user_id, datasource_count=len(request.datasources), divergence=request.divergence)
+    try:
+        job, created = await store.create_planning_job(
+            identity,
+            request.prompt,
+            datasources=list(request.datasources),
+            timezone_name=request.timezone,
+            divergence=request.divergence,
+            template_id=request.template_id.strip() or None,
+            idempotency_key=request.idempotency_key,
+        )
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    if created:
+        # 后台规划复用 runner 的 asyncio.Task 模式，异常在工作器内转成 plan_failed。
+        get_report_plan_worker().enqueue(job.id, identity, model_id=request.model_id, connection_id=request.llm_connection_id)
+    logger.info("报表记录创建完成", report_id=job.id, tenant_id=identity.tenant_id, user_id=identity.user_id, created=created)
+    return {"report_id": job.id, "status": job.status, "created_at": job.created_at}
+
+
+@router.get("/reports")
+# 方法作用：按可见范围分页列出报表信息，默认创建时间倒序。
+# Args: user_id - 可选目标用户（仅租户管理员）；status - 可选状态；page/page_size - 分页。
+# Returns: 报表列表、总数与分页参数。
+async def list_reports(
+    user_id: int | None = Query(default=None, ge=1),
+    status: Literal["planning", "plan_failed", "draft", "queued", "running", "succeeded", "partial", "failed", "cancelled", "expired", "deleted"] | None = Query(default=None),
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=20, ge=1),
+) -> dict[str, Any]:
+    """租户管理员可按用户筛选，其他角色只返回自己的记录。"""
+    identity = get_current_identity()
+    await _require_capability(identity, "report.list")
+    if user_id is not None and str(identity.role) != "tenant_admin" and int(user_id) != int(identity.user_id):
+        raise HTTPException(403, "仅租户管理员可按用户筛选报表")
+    bounded_size = max(1, min(int(page_size), 100))
+    items, total = await get_report_store().list_reports(
+        identity,
+        user_id=user_id,
+        status=status,
+        page=page,
+        page_size=bounded_size,
+        view_all=await _has_view_all(identity),
+    )
+    logger.info("报表信息列表完成", tenant_id=identity.tenant_id, user_id=identity.user_id, total=total, returned=len(items))
+    return {"reports": [_public_report(item) for item in items], "total": total, "page": page, "page_size": bounded_size}
+
+
+@router.patch("/reports/{report_id}")
+# 方法作用：编辑「未生成」报表的计划与调度，分析单元只允许删减。
+# Args: report_id - 报表标识；request - 可选的分析单元、执行方式、频率与页面策略。
+# Returns: 更新后的报表详情。
+async def update_report(report_id: str, request: ReportSchedulePatchRequest) -> dict[str, Any]:
+    """需求 1.6：改计划后必须重算 plan_hash 并重新校验全部既有约束。"""
+    identity = get_current_identity()
+    await _require_capability(identity, "report.create_page")
+    store = get_report_store()
+    report = await _load_report(identity, report_id)
+    _require_report_owner(identity, report)
+    if report["status"] != "draft":
+        raise HTTPException(409, "仅「未生成」状态的报表可以修改计划")
+    plan = report.get("plan")
+    if plan is None:
+        raise HTTPException(409, "该报表计划不可用，请重试生成计划")
+    if request.accepted_unit_ids is not None:
+        # 复用确认入口的裁剪逻辑：只允许删减，越界或空数组直接 422。
+        plan = _apply_unit_trimming(plan, request.accepted_unit_ids)
+    candidate = plan.model_dump(mode="json")
+    if request.execution_mode is not None:
+        candidate["execution_mode"] = request.execution_mode
+    if request.frequency is not None:
+        candidate["frequency"] = request.frequency
+    if request.run_at is not None:
+        candidate["run_at"] = request.run_at.isoformat()
+    if request.max_runs is not None:
+        candidate["max_runs"] = request.max_runs
+    if request.schedule_end_at is not None:
+        candidate["schedule_end_at"] = request.schedule_end_at.isoformat()
+    if request.page_ttl_days is not None:
+        candidate["page_ttl_days"] = request.page_ttl_days
+    if request.permanent is not None:
+        candidate["permanent"] = request.permanent
+    if request.timezone is not None:
+        candidate["timezone"] = request.timezone
+    try:
+        updated = ReportPlan.model_validate(candidate)
+    except ValueError as exc:
+        logger.warning("报表计划编辑校验失败", report_id=report_id, reason=str(exc))
+        raise HTTPException(422, str(exc)) from exc
+    # 改动后重新校验全部既有约束，避免用编辑接口绕过创建时的权限检查。
+    if updated.execution_mode == "scheduled" and not updated.frequency:
+        raise HTTPException(422, "定时报表必须明确每小时、每天、每周或每月频率")
+    if updated.execution_mode == "scheduled":
+        await _require_capability(identity, "report.schedule")
+    if updated.permanent:
+        await _require_capability(identity, "report.permanent")
+    if updated.share.enabled:
+        await _require_capability(identity, "report.share")
+    columns = {
+        # 立即执行没有下次运行时间；定时执行沿用计划里的首次时间。
+        "next_run_at": (updated.run_at if updated.execution_mode == "scheduled" else None),
+        "template_id": (request.template_id if request.template_id is not None else report["template_id"]),
+    }
+    if not await store.update_report_plan(report_id, identity, plan=updated, columns=columns):
+        raise HTTPException(404, "报表不存在或无权访问")
+    logger.info("报表计划编辑完成", report_id=report_id, user_id=identity.user_id, plan_hash=updated.canonical_hash(), unit_count=len(updated.analysis_units))
+    return await get_report(report_id)
+
+
+@router.post("/reports/{report_id}/run", status_code=202)
+# 方法作用：点「生成」预占任务额度并排队运行未生成报表。
+# Args: report_id - 报表标识。
+# Returns: 排队状态、执行方式与配额快照。
+async def run_report(report_id: str) -> dict[str, Any]:
+    """需求 1.5：jobs_created 只在这里预占，预占失败时状态保持不变。"""
+    identity = get_current_identity()
+    await _require_capability(identity, "report.create_page")
+    store = get_report_store()
+    report = await _load_report(identity, report_id)
+    _require_report_owner(identity, report)
+    if report["status"] != "draft":
+        raise HTTPException(409, "仅「未生成」状态的报表可以运行")
+    plan = report.get("plan")
+    if plan is None:
+        raise HTTPException(409, "该报表计划不可用，请重试生成计划")
+    if plan.execution_mode == "scheduled":
+        await _require_capability(identity, "report.schedule")
+        if not plan.frequency:
+            raise HTTPException(422, "定时任务必须明确每小时、每天、每周或每月频率")
+        from src.app_context import get_app_context
+
+        scheduler = get_app_context().get_resource("report_scheduler")
+        if scheduler is None or not scheduler.running:
+            raise HTTPException(503, "持久化报表调度服务尚未启动，请联系平台管理员")
+        if plan.schedule_end_at is not None and _is_expired(plan.schedule_end_at):
+            raise HTTPException(422, "调度结束时间必须在未来")
+    # 授权先解析：越权请求不能先消耗用户的任务额度。
+    access = await _resolve_plan_access(identity, plan)
+    try:
+        quota = await get_report_quota_manager().reserve(identity, jobs=1, timezone_name=plan.timezone)
+    except QuotaExceededError as exc:
+        logger.warning("报表运行配额拒绝", report_id=report_id, user_id=identity.user_id, error=str(exc))
+        raise HTTPException(429, describe_quota_error(exc)) from exc
+    if plan.execution_mode == "scheduled":
+        # 定时任务交给调度器认领：写回下次运行时间并置为排队。
+        await store.update_dispatch(report_id, identity, status="queued", next_run_at=plan.run_at or datetime.now(timezone.utc))
+    else:
+        await store.update_dispatch(report_id, identity, status="queued", next_run_at=None)
+        from src.reporting.runner import get_report_runner
+
+        get_report_runner().enqueue(report_id, identity, authorized_datasources=access)
+    logger.info("报表运行已排队", report_id=report_id, tenant_id=identity.tenant_id, user_id=identity.user_id, execution_mode=plan.execution_mode)
+    return {"report_id": report_id, "status": "queued", "execution_mode": plan.execution_mode, "run_id": None, "quota": asdict(quota)}
+
+
+@router.post("/reports/{report_id}/retry-plan", status_code=202)
+# 方法作用：重试失败的计划生成，清空失败原因后重新入队后台规划。
+# Args: report_id - 报表标识。
+# Returns: 复位后的状态。
+async def retry_report_plan(report_id: str) -> dict[str, Any]:
+    """仅 plan_failed 可重试，其他状态返回 409。"""
+    identity = get_current_identity()
+    await _require_capability(identity, "report.create_page")
+    store = get_report_store()
+    report = await _load_report(identity, report_id)
+    _require_report_owner(identity, report)
+    if report["status"] != "plan_failed":
+        raise HTTPException(409, "仅计划失败的报表可以重试生成计划")
+    if not await store.reset_plan_status(report_id, identity):
+        raise HTTPException(404, "报表不存在或无权访问")
+    get_report_plan_worker().enqueue(report_id, identity)
+    logger.info("报表计划重试已排队", report_id=report_id, user_id=identity.user_id)
+    return {"report_id": report_id, "status": "planning"}
+
+
+@router.delete("/reports/{report_id}")
+# 方法作用：删除未生成、计划失败或已结束的报表记录。
+# Args: report_id - 报表标识。
+# Returns: 删除状态。
+async def delete_report(report_id: str) -> dict[str, Any]:
+    """生成中与运行中的报表禁止删除，避免与后台任务竞争同一记录。"""
+    identity = get_current_identity()
+    await _require_capability(identity, "report.create_page")
+    report = await _load_report(identity, report_id)
+    _require_report_owner(identity, report)
+    if report["status"] in {"planning", "queued", "running"}:
+        raise HTTPException(409, "报表正在生成或运行中，请等待结束后再删除")
+    if not await get_report_store().delete_report(report_id, identity, view_all=await _has_view_all(identity)):
+        raise HTTPException(404, "报表不存在或无权访问")
+    logger.info("报表记录删除完成", report_id=report_id, user_id=identity.user_id, previous_status=report["status"])
+    return {"report_id": report_id, "status": "deleted"}
+
+
+@router.get("/reports/{report_id}/pages")
+# 方法作用：列出该报表的全部页面版本摘要，按版本倒序。
+# Args: report_id - 报表标识。
+# Returns: 页面摘要列表与总数。
+async def list_report_pages(report_id: str) -> dict[str, Any]:
+    """为多页面独立可访问做准备，本次只做只读列表。"""
+    identity = get_current_identity()
+    await _require_capability(identity, "report.list")
+    view_all = await _has_view_all(identity)
+    await _load_report(identity, report_id)
+    pages = await get_report_store().list_report_pages(report_id, identity, view_all=view_all)
+    logger.info("报表页面列表完成", report_id=report_id, user_id=identity.user_id, total=len(pages))
+    return {"pages": pages, "total": len(pages)}
 
 
 @router.get("/reports/{report_id}/lifecycle")

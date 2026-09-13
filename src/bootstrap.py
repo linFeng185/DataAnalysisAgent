@@ -33,6 +33,7 @@ _BOOTSTRAP_STEPS: tuple[tuple[str, str], ...] = (
     ("_start_schema_cache_refresh", "Schema 缓存刷新服务"),
     ("_start_automation", "主动洞察与定时报告服务"),
     ("_start_report_scheduler", "报表持久化调度与恢复"),
+    ("_start_report_plan_worker", "报表后台计划生成工作器"),
 )
 
 _REQUIRED_BOOTSTRAP_STEPS = {
@@ -477,6 +478,19 @@ async def _start_report_scheduler(settings: Settings) -> None:
     service = ReportScheduler(store, get_report_runner())
     get_app_context().set_resource("report_scheduler", service, closer=ReportScheduler.close)
     await service.start()
+
+
+# 方法作用：注册报表后台规划工作器，使其随应用生命周期启停。
+# Args: settings - 当前应用配置。
+# Returns: 无返回值。
+async def _start_report_plan_worker(settings: Settings) -> None:
+    """规划任务由后台 Task 承载，Store 在无数据库时退化为内存实现，因此不额外设门禁。"""
+    logger.debug("_start_report_plan_worker 入口", report_scheduler_enabled=settings.report_scheduler_enabled)
+    from src.reporting.plan_worker import get_report_plan_worker
+
+    # get_or_create 会把 ReportPlanWorker.close 注册为关闭器，退出时取消在途规划任务。
+    get_report_plan_worker()
+    logger.info("报表后台规划工作器已启动")
 
 
 # 方法作用：执行启动阶段并应用生产阻断、非生产降级策略。

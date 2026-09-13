@@ -9,6 +9,7 @@ import {
   ThunderboltOutlined, ReadOutlined, ApiOutlined,
   SafetyCertificateOutlined, LogoutOutlined, UserOutlined,
   MenuOutlined, ScheduleOutlined, BulbOutlined, LinkOutlined,
+  FileTextOutlined, UnorderedListOutlined,
 } from '@ant-design/icons';
 import { AuthProvider } from './hooks/AuthContext';
 import { useAuth } from './hooks/AuthContext';
@@ -37,8 +38,9 @@ const MemoryPage = lazy(() => import('./pages/MemoryPage'));
 const MetricsPage = lazy(() => import('./pages/MetricsPage'));
 const McpPage = lazy(() => import('./pages/McpPage'));
 const AdminPage = lazy(() => import('./pages/AdminPage'));
-const AutomationPage = lazy(() => import('./pages/AutomationPage'));
 const ReportWorkbenchPage = lazy(() => import('./pages/ReportWorkbenchPage'));
+const ReportCreatePage = lazy(() => import('./pages/ReportCreatePage'));
+const ReportListPage = lazy(() => import('./pages/ReportListPage'));
 const LinkManagementPage = lazy(() => import('./pages/LinkManagementPage'));
 const ReportViewerPage = lazy(() => import('./pages/ReportViewerPage'));
 const SharedReportPage = lazy(() => import('./pages/SharedReportPage'));
@@ -77,7 +79,7 @@ function AdminRoute() {
 }
 
 // 方法作用：在进入报表工作台及其子页面前再次校验服务端菜单能力，防止仅靠前端隐藏绕过权限。
-// Args: children - 通过校验后渲染的子页面；缺省时渲染报表工作台主页。
+// Args: children - 通过校验后渲染的子页面（创建报表/报表信息/链接管理）；缺省时回退到旧工作台主页。
 // Returns: 目标子页面、加载占位或首页重定向。
 function ReportRoute({ children }: { children?: ReactNode }) {
   useLanguage();
@@ -111,6 +113,8 @@ function AppContent() {
   const isCompact = screens.md === false;
   const { user, logout } = useAuth();
   const [reportMenuAllowed, setReportMenuAllowed] = useState<boolean | null>(null);
+  // 三个报表子页各配一个能力键：父菜单控制整体可见性，子项按能力键分别显示。
+  const [reportCapabilities, setReportCapabilities] = useState<string[]>([]);
 
   useEffect(() => {
     get<HealthResponse>('/health')
@@ -122,8 +126,12 @@ function AppContent() {
   useEffect(() => {
     let active = true;
     fetchReportPermissions()
-      .then(result => { if (active) setReportMenuAllowed(result.menu_allowed); })
-      .catch(() => { if (active) setReportMenuAllowed(false); });
+      .then(result => {
+        if (!active) return;
+        setReportMenuAllowed(result.menu_allowed);
+        setReportCapabilities(result.capabilities || []);
+      })
+      .catch(() => { if (active) { setReportMenuAllowed(false); setReportCapabilities([]); } });
     return () => { active = false; };
   }, [user?.role]);
 
@@ -147,16 +155,25 @@ function AppContent() {
       ? { key: 'knowledge', icon: <ReadOutlined />, label: <NavLink to="/knowledge">{t("知识库")}</NavLink> }
       : null,
     { key: 'memory', icon: <BulbOutlined />, label: <NavLink to="/memory">{t("我的记忆")}</NavLink> },
+    // 报表工作台拆成三个子页：父项沿用 report.menu，子项各按自己的能力键控制可见性。
+    // key 与路径一致，menuKey 由 pathname 推导，子页路径变更后仍能高亮。
     reportMenuAllowed === true && user?.role !== 'super_admin'
-      ? { key: 'report-workbench', icon: <ScheduleOutlined />, label: <NavLink to="/report-workbench">{t("报表工作台")}</NavLink> }
-      : null,
-    // 链接管理作为独立菜单项紧跟报表工作台；后续批次合并成子菜单时只需替换这两项。
-    // key 与路径一致，menuKey 由 pathname 推导，路径变更后仍能高亮。
-    reportMenuAllowed === true && user?.role !== 'super_admin'
-      ? { key: 'report-workbench/links', icon: <LinkOutlined />, label: <NavLink to="/report-workbench/links">{t("链接管理")}</NavLink> }
-      : null,
-    user?.role !== 'viewer'
-      ? { key: 'automation', icon: <ScheduleOutlined />, label: <NavLink to="/automation">{t("自动化")}</NavLink> }
+      ? {
+        key: 'report-workbench',
+        icon: <ScheduleOutlined />,
+        label: <span>{t("报表工作台")}</span>,
+        children: [
+          reportCapabilities.includes('report.create_page')
+            ? { key: 'report-workbench/create', icon: <FileTextOutlined />, label: <NavLink to="/report-workbench/create">{t("创建报表")}</NavLink> }
+            : null,
+          reportCapabilities.includes('report.list')
+            ? { key: 'report-workbench/jobs', icon: <UnorderedListOutlined />, label: <NavLink to="/report-workbench/jobs">{t("报表信息")}</NavLink> }
+            : null,
+          reportCapabilities.includes('report.link_manage')
+            ? { key: 'report-workbench/links', icon: <LinkOutlined />, label: <NavLink to="/report-workbench/links">{t("链接管理")}</NavLink> }
+            : null,
+        ].filter((item): item is NonNullable<typeof item> => item !== null),
+      }
       : null,
     ['super_admin', 'tenant_admin'].includes(user?.role || '')
       ? { key: 'mcp', icon: <ApiOutlined />, label: <NavLink to="/mcp">MCP</NavLink> }
@@ -171,6 +188,8 @@ function AppContent() {
       mode="inline"
       selectedKeys={[menuKey]}
       items={navigationItems}
+      // 深层链接直接落在报表子页时展开父菜单：openKeys 非受控，只在首次挂载生效。
+      defaultOpenKeys={location.pathname.startsWith('/report-workbench') ? ['report-workbench'] : []}
       style={{ marginTop: 4 }}
       onClick={() => setMobileNavOpen(false)}
     />
@@ -243,10 +262,12 @@ function AppContent() {
                 <Route path="/knowledge" element={<KnowledgePage />} />
                 <Route path="/memory" element={<MemoryPage />} />
                 <Route path="/metric-catalog" element={<MetricsPage />} />
-                <Route path="/report-workbench" element={<ReportRoute />} />
+                {/* 旧路径重定向到创建报表页；旧「自动化」菜单与路由已按需求 1.8 摘除 */}
+                <Route path="/report-workbench" element={<Navigate to="/report-workbench/create" replace />} />
+                <Route path="/report-workbench/create" element={<ReportRoute><ReportCreatePage /></ReportRoute>} />
+                <Route path="/report-workbench/jobs" element={<ReportRoute><ReportListPage /></ReportRoute>} />
                 <Route path="/report-workbench/links" element={<ReportRoute><LinkManagementPage /></ReportRoute>} />
                 <Route path="/reports/:reportId" element={<ReportViewerPage />} />
-                <Route path="/automation" element={<AutomationPage />} />
                 <Route path="/mcp" element={<McpPage />} />
                 <Route path="/admin" element={<AdminRoute />} />
               </Routes>

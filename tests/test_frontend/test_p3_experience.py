@@ -77,22 +77,19 @@ class TestP3Experience:
         assert "/install" in source
         assert "Skill Registry" in source
 
-    # 方法作用：验证自动化工作台提供任务管理、立即执行和站内通知视图。
+    # 方法作用：验证需求 1.8 的落点：自动化菜单项与路由已从应用外壳移除。
     # Args: self - pytest 测试类实例。
     # Returns: 无返回值，断言失败时由 pytest 报告。
-    def test_automation_page_exposes_schedules_and_notifications(self) -> None:
-        """P3 主动洞察和定时报告必须有可操作的产品入口。"""
+    def test_automation_menu_and_route_removed(self) -> None:
+        """「自动化」菜单与 /automation 路由删除；页面文件暂留，等通知模块完成后统一清理。"""
         # Arrange
         app = Path("frontend/src/App.tsx").read_text(encoding="utf-8")
-        page = Path("frontend/src/pages/AutomationPage.tsx").read_text(encoding="utf-8")
 
         # Act / Assert
-        assert 'to="/automation"' in app
-        assert 'path="/automation"' in app
-        assert "创建自动化任务" in page
-        assert "/automation/schedules" in page
-        assert "/automation/notifications" in page
-        assert "/run" in page
+        assert 'to="/automation"' not in app, "自动化菜单项必须已移除"
+        assert 'path="/automation"' not in app, "自动化路由必须已移除"
+        assert "AutomationPage" not in app, "自动化页面不应再被路由引用"
+        assert Path("frontend/src/pages/AutomationPage.tsx").exists(), "页面文件暂留，避免与并行任务冲突"
 
     # 方法作用：验证结果卡区分成功、补参、待确认和失败并展示报告正文。
     # Args: self - pytest 测试类实例。

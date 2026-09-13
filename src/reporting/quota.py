@@ -113,9 +113,11 @@ class QuotaSnapshot:
 
 _ROLE_CAPABILITIES: dict[str, frozenset[str]] = {
     "super_admin": frozenset(),
-    "tenant_admin": frozenset({"report.menu", "report.create", "report.schedule", "report.share", "report.extend", "report.permanent", "report.live_drilldown", "report.view_all", "report.download"}),
-    "analyst": frozenset({"report.menu", "report.create"}),
-    "viewer": frozenset(),
+    "tenant_admin": frozenset({"report.menu", "report.create", "report.create_page", "report.list", "report.link_manage", "report.schedule", "report.share", "report.extend", "report.permanent", "report.live_drilldown", "report.view_all", "report.download"}),
+    # report.menu 保留作父菜单可见性开关；三个子页各配独立能力键（设计 48 第 7.1 节）。
+    "analyst": frozenset({"report.menu", "report.create", "report.create_page", "report.list", "report.link_manage"}),
+    # viewer 只看报表信息：拿到 report.list 与父菜单可见性，但没有创建页与链接管理键。
+    "viewer": frozenset({"report.menu", "report.list"}),
 }
 
 
