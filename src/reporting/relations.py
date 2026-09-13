@@ -13,6 +13,7 @@ from typing import Any
 from pydantic import BaseModel, Field, model_validator
 
 from src.logging_config import get_logger
+from src.reporting.models import max_plan_units
 
 logger = get_logger(__name__)
 
@@ -556,7 +557,7 @@ def build_relations(
         result_id = result.get("unit_id", "") if isinstance(result, dict) else getattr(result, "unit_id", "")
         result_map[str(result_id)] = result
     datasets: list[dict[str, Any]] = []
-    for unit in units[:12]:
+    for unit in units[:max_plan_units()]:
         item = unit.model_dump(mode="python") if hasattr(unit, "model_dump") else dict(unit)
         result = result_map.get(str(item.get("unit_id", "")))
         if result is not None:

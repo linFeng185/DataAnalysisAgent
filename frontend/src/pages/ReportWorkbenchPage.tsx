@@ -152,8 +152,10 @@ export default function ReportWorkbenchPage() {
       setDatasources(datasourceResult.datasources || []);
       setJobs(jobResult.jobs || []);
       setQuota(quotaResult);
-      if (selectedDatasources.length === 0 && datasourceResult.datasources?.[0]?.name) {
-        setSelectedDatasources([datasourceResult.datasources[0].name]);
+      // 经营全景这类报表横跨多个业务域，默认只勾第一个数据源会让所有单元都在
+      // 单源上取数并因缺表失败。默认全选，由用户在预览前自行收窄。
+      if (selectedDatasources.length === 0) {
+        setSelectedDatasources((datasourceResult.datasources || []).map(item => item.name));
       }
       // 模型列表单独加载：失败只提示，不影响工作台其余内容；成功时预选租户默认命名连接。
       get<{ models: ModelOption[]; default: string | { connection_id?: number; model_id?: string } }>('/models')

@@ -13,7 +13,12 @@ from uuid import uuid4
 from pydantic import BaseModel, Field, model_validator
 
 from src.logging_config import get_logger
-from src.reporting.models import ReportPlan, UnitResult
+from src.reporting.models import (
+    ReportPlan,
+    UnitResult,
+    max_document_blocks,
+    max_plan_units,
+)
 from src.reporting.relations import RelationEvidence
 
 logger = get_logger(__name__)
@@ -25,6 +30,10 @@ _FORBIDDEN_OPTION_KEYS = {
 }
 _DANGEROUS_TEXT_RE = re.compile(r"(?:function\s*\(|=>|<\s*script|javascript:|data:text/html)", re.I)
 _BLOCK_TYPES = {"kpi", "narrative", "chart", "table", "insight_list", "relationship", "quality", "source_citation", "callout", "findings"}
+# 集合类字段的静态宽松上界只用于挡住畸形输入；真实的块数预算由
+# max_document_blocks() 在 validate_document 里按配置校验，两者必须分开：
+# 写进 Field 的值在类定义时就固定，改配置后不会跟着变。
+_STATIC_LIST_MAX = 4000
 
 
 # 方法作用：递归校验 ECharts option 只能包含普通 JSON 值和白名单节点。
@@ -116,7 +125,7 @@ class ReportSection(BaseModel):
     id: str = Field(..., min_length=1, max_length=64)
     title: str = Field(default="", max_length=500)
     subtitle: str = Field(default="", max_length=2000)
-    blocks: list[ReportBlock] = Field(default_factory=list, max_length=80)
+    blocks: list[ReportBlock] = Field(default_factory=list, max_length=_STATIC_LIST_MAX)
 
 
 class ReportDocument(BaseModel):
@@ -130,12 +139,12 @@ class ReportDocument(BaseModel):
     generated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     expires_at: datetime | None = None
     theme: dict[str, str] = Field(default_factory=lambda: {"accent": "#1677ff", "density": "comfortable"})
-    navigation: list[str] = Field(default_factory=list, max_length=30)
-    sections: list[ReportSection] = Field(default_factory=list, max_length=80)
+    navigation: list[str] = Field(default_factory=list, max_length=_STATIC_LIST_MAX)
+    sections: list[ReportSection] = Field(default_factory=list, max_length=_STATIC_LIST_MAX)
     sources: list[dict[str, str]] = Field(default_factory=list, max_length=50)
     limitations: list[str] = Field(default_factory=list, max_length=50)
     permissions: dict[str, bool] = Field(default_factory=lambda: {"download": False, "drilldown": False})
-    drilldowns: list[dict[str, Any]] = Field(default_factory=list, max_length=80)
+    drilldowns: list[dict[str, Any]] = Field(default_factory=list, max_length=_STATIC_LIST_MAX)
 
     # 方法作用：限制页面总块数和序列化大小，避免把大结果写入公开页面。
     # Args: self - 待校验报表文档。
@@ -143,7 +152,7 @@ class ReportDocument(BaseModel):
     @model_validator(mode="after")
     def validate_document(self) -> "ReportDocument":
         block_count = sum(len(section.blocks) for section in self.sections)
-        if block_count > 80:
+        if block_count > max_document_blocks():
             raise ValueError("报表页面块数量超过限制")
         for section in self.sections:
             if len(section.blocks) != len({block.id for block in section.blocks}):
@@ -152,6 +161,39 @@ class ReportDocument(BaseModel):
         if len(encoded.encode("utf-8")) > 2_097_152:
             raise ValueError("报表页面超过 2 MB 限制")
         return self
+
+
+# 方法作用：按页面块预算裁剪超限文档，优先保留先出现的块。
+# Args: document - 待裁剪的报表文档。
+# Returns: 被裁掉的块数；未超预算时返回 0。
+def truncate_document_to_block_budget(document: ReportDocument) -> int:
+    """块是按区段顺序追加的，深挖发现与口径来源在末尾，裁剪天然从增量内容开始。"""
+    budget = max_document_blocks()
+    total = sum(len(section.blocks) for section in document.sections)
+    if total <= budget:
+        return 0
+    removed = 0
+    kept = 0
+    for section in document.sections:
+        # 按区段顺序填预算：前面区段优先占满，剩下的才轮到后面的增量区段。
+        allowed = min(len(section.blocks), max(0, budget - kept))
+        kept += allowed
+        if allowed >= len(section.blocks):
+            continue
+        removed += len(section.blocks) - allowed
+        del section.blocks[allowed:]
+        if not section.blocks:
+            # 裁空的区段留在页面里只会渲染成空壳，直接从导航与区段列表摘掉。
+            logger.warning("报表区段因块预算被整体裁剪", section_id=section.id)
+    document.sections = [section for section in document.sections if section.blocks]
+    if removed:
+        kept_ids = {section.id for section in document.sections}
+        # overview 是页面固定首屏锚点，不挂在任何区段上，必须原样保留。
+        document.navigation = [
+            item for item in document.navigation if item in kept_ids or item == "overview"
+        ]
+        logger.warning("报表页面块数超出预算，已裁剪增量区段", removed=removed, budget=budget, total=total)
+    return removed
 
 
 class ReportArtifact(BaseModel):
@@ -260,7 +302,7 @@ def build_report_document(
     drilldowns: list[dict[str, Any]] = []
     sections: list[ReportSection] = []
     navigation: list[str] = ["overview"]
-    for result in results[:12]:
+    for result in results[:max_plan_units()]:
         section_id = result.unit_id
         navigation.append(section_id)
         safe_rows = [sanitize_value(row) for row in result.rows[:100]]
@@ -333,12 +375,18 @@ def build_report_document(
                 layout=layout_for_block("table"),
             ))
         else:
+            # 直答类单元（元数据说明等）的结论在摘要文字里，没有数据表是正常形态；
+            # 用「暂无数据」会让整份报表看起来每个单元都缺数据。
+            if result.answer_kind == "text":
+                label, fallback_message = "该单元为说明类分析", "结论见上方分析摘要"
+            else:
+                label, fallback_message = "该分析单元暂无数据", "查询未返回可展示数据"
             blocks.append(ReportBlock(
                 section_id=section_id,
                 type="callout",
                 priority=100,
-                title="该分析单元暂无数据",
-                content={"status": result.status, "message": result.user_error_message or "查询未返回可展示数据"},
+                title=label,
+                content={"status": result.status, "message": result.user_error_message or fallback_message},
                 layout=layout_for_block("callout", False),
             ))
         summary = result.summary or f"已完成“{section_id}”分析，当前样本 {len(safe_rows)} 行。"

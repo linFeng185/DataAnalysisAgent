@@ -20,6 +20,8 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field
 
 from src.logging_config import get_logger
+from src.reporting.models import AnalysisUnit, UnitResult
+from src.reporting.relations import RelationEvidence
 
 logger = get_logger(__name__)
 
@@ -43,6 +45,77 @@ _MAX_OUTLIER_RATIO = 0.2
 _MIN_YOY_MONTHS = 13
 
 _DATE_FORMATS = ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d", "%Y/%m/%d", "%Y-%m", "%Y/%m", "%Y")
+
+
+# 方法作用：识别同时要求多项运行证据的说明单元，不改变普通 Schema 或数据查询路由。
+# Args: unit - 报表分析单元。
+# Returns: 是否应在查询与关系分析结束后汇总本轮证据。
+def is_runtime_quality_unit(unit: AnalysisUnit) -> bool:
+    """识别报表级覆盖、截断、权限和关系说明。"""
+    question = unit.question.strip()
+    explaining = question.startswith(("说明", "披露")) or "本次报表" in question or "本报表" in question
+    evidence_groups = (("时间覆盖", "覆盖范围"), ("截断",), ("权限过滤", "权限限制"), ("未能建立", "未建立"))
+    return explaining and sum(any(term in question for term in group) for group in evidence_groups) >= 2
+
+
+# 方法作用：从本轮有界样本、执行状态和关系证据生成质量说明，不调用模型或再次查询。
+# Args: unit - 说明单元；results - 其他单元结果；relations - 实际关系证据；resolved_units - 授权解析摘要。
+# Returns: 可写回页面与运行状态的文字结果。
+def summarize_runtime_quality(
+    unit: AnalysisUnit,
+    results: list[UnitResult],
+    relations: list[RelationEvidence],
+    resolved_units: list[dict[str, Any]],
+) -> UnitResult:
+    """只报告已观测证据，严格区分样本范围、全库范围和未知权限影响。"""
+    data_results = [result for result in results if result.answer_kind == "data"]
+    populated = [result for result in data_results if result.rows]
+    failed = sum(result.status == "failed" for result in data_results)
+    partial = sum(result.status == "partial" for result in data_results)
+    lines = [
+        f"本轮收到 {len(data_results)} 个数据分析单元的执行结果，其中 {len(populated)} 个返回样本，失败 {failed} 个，部分完成 {partial} 个。",
+        "时间覆盖仅按返回样本计算，不代表数据库完整范围；年月粒度不能证明最近 90 天逐日完整覆盖。",
+    ]
+    if not populated:
+        lines.append("本轮没有可用的查询结果样本，无法确认实际时间覆盖；这不等于没有尝试执行查询。")
+    for result in data_results:
+        if not result.rows:
+            lines.append(f"{result.unit_id}：状态 {result.status}，没有可用样本。")
+            continue
+        # 多源数据按来源分别披露，不能把不同来源的最早/最晚值拼成完整覆盖。
+        source_rows: dict[str, list[dict[str, Any]]] = {}
+        for row in result.rows:
+            source = str(row.get("_datasource") or result.datasource or "来源未标注")
+            source_rows.setdefault(source, []).append(row)
+        for source, rows in source_rows.items():
+            time_column = detect_time_column(rows, result.columns)
+            dated = [(parsed, str(row[time_column])) for row in rows if time_column and (parsed := _parse_date(row.get(time_column))) is not None]
+            coverage = f"{time_column} 样本值 {min(dated)[1]} 至 {max(dated)[1]}" if dated else "没有可解析的时间列，无法确认覆盖"
+            lines.append(f"{result.unit_id} / {source}：{len(rows)} 行样本；{coverage}。")
+    truncated_units = [result.unit_id for result in data_results if result.truncated]
+    lines.append(
+        "结果样本截断：" + "、".join(truncated_units) + "；被裁掉行的具体内容不能从保留样本恢复。"
+        if truncated_units else "结果样本未收到截断标记；这不等于已确认全量返回。"
+    )
+    lines.append("Schema 或 Prompt 文本截断与查询结果行截断是不同证据，不能混用。")
+    denied_units = {str(item.get("unit_id")) for item in resolved_units if item.get("authorization_status") == "denied"}
+    denied_units.update(result.unit_id for result in data_results if result.error_code == "DATASOURCE_FORBIDDEN")
+    if denied_units:
+        lines.append(f"权限阻断 {len(denied_units)} 个分析单元，未执行其受限查询。")
+    lines.append("权限：仅使用当前身份可见结果；没有被过滤表、列或行的完整清单与数量，不能据此认定没有过滤。")
+    verified = [relation for relation in relations if relation.evidence_level == "verified_relation"]
+    statistical = [relation for relation in relations if relation.evidence_level in {"statistical_association", "cross_source_statistical"}]
+    unresolved = [relation for relation in relations if relation.evidence_level not in {"verified_relation", "statistical_association", "cross_source_statistical"}]
+    lines.append(f"关系证据：样本关系校验通过 {len(verified)} 条，仅统计关联 {len(statistical)} 条，未建立或被阻断 {len(unresolved)} 条；不代表 Schema 外键或因果关系。")
+    for relation in unresolved[:20]:
+        reason = "；".join(relation.limitations[:3]) or "未取得可验证关系证据"
+        lines.append(f"{relation.left_unit_id} ↔ {relation.right_unit_id}：{reason}。")
+    if len(unresolved) > 20:
+        lines.append(f"其余 {len(unresolved) - 20} 条未建立关系未逐项展开。")
+    warnings = list(dict.fromkeys(warning for result in results for warning in result.warnings))[:20]
+    if warnings:
+        lines.append("单元已披露的限制：" + "；".join(warnings))
+    return UnitResult(unit_id=unit.unit_id, answer_kind="text", summary="\n\n".join(lines), warnings=warnings)
 
 
 class FindingItem(BaseModel):

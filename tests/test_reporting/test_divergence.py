@@ -251,11 +251,14 @@ class TestPlanPhaseDiverge:
         # Arrange
         import src.llm.client as llm_client
         import src.llm.invocation as llm_invocation
+        from src.config import get_settings
         from src.llm.output_contracts import ReportDivergeOutput
         from src.reporting.models import AnalysisUnit
         from src.reporting.planner import ReportPlanner
 
         monkeypatch.setattr(llm_client, "is_task_llm_available", lambda task: True)
+        # 上限来自配置（app.yaml），测试显式钉住它，避免随部署配置漂移而失去约束语义。
+        monkeypatch.setattr(get_settings(), "report_max_units_per_run", 12)
 
         async def fake_invoke(prompt_id, sections, **kwargs):
             return ReportDivergeOutput(proposed_units=[

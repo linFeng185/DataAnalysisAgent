@@ -145,10 +145,18 @@ async def report_retrieve_schema(state: ReportWorkbenchState) -> dict[str, Any]:
 # Args: state - 含已解析单元的状态。
 # Returns: query_plans 列表，不包含可直接执行的任意 SQL。
 async def report_plan_queries(state: ReportWorkbenchState) -> dict[str, Any]:
+    from src.reporting.models import max_plan_units
+    from src.reporting.profiling import is_runtime_quality_unit
+
     await _log_step(state, "report_plan_queries", "running")
     plans: list[dict[str, Any]] = []
+    units_by_id = _units_by_id(state)
     grouped: dict[tuple[str, tuple[str, ...], tuple[str, ...], tuple[str, str]], dict[str, Any]] = {}
-    for unit in state.get("resolved_units", [])[:16]:
+    for unit in state.get("resolved_units", [])[:max_plan_units()]:
+        # 运行说明不与空维度/指标的数据单元合并，否则顺序变化会吞掉真正的查询。
+        if is_runtime_quality_unit(units_by_id[unit["unit_id"]]):
+            plans.append({"unit_id": unit["unit_id"], "unit_ids": [unit["unit_id"]], "datasource": unit.get("datasource", ""), "query_kind": "runtime_quality"})
+            continue
         time_range = unit.get("time_range", {}) or {}
         if hasattr(time_range, "model_dump"):
             time_range = time_range.model_dump(mode="json")
@@ -187,6 +195,10 @@ async def report_plan_queries(state: ReportWorkbenchState) -> dict[str, Any]:
 async def _execute_single_unit(state: ReportWorkbenchState, unit: Any, datasource: str, resolved: dict[str, Any], executor: Any) -> UnitResult:
     if resolved.get("authorization_status") == "denied":
         return UnitResult(unit_id=unit.unit_id, datasource=datasource, status="failed", error_code="DATASOURCE_FORBIDDEN", user_error_message="该分析单元使用的数据源未授权，已阻止执行")
+    from src.reporting.profiling import is_runtime_quality_unit
+
+    if is_runtime_quality_unit(unit):
+        return UnitResult(unit_id=unit.unit_id, answer_kind="text", summary="等待本轮查询与关系证据汇总。")
     if executor is None:
         return UnitResult(unit_id=unit.unit_id, datasource=datasource, status="partial", warnings=["首期执行器未绑定，等待现有 SQL 工作流注入"], user_error_message="当前报表暂时没有可用的查询执行器")
     for attempt in range(1, 4):
@@ -212,6 +224,9 @@ async def _execute_single_unit(state: ReportWorkbenchState, unit: Any, datasourc
     return UnitResult(unit_id=unit.unit_id, datasource=datasource, status="failed", error_code="UNIT_EXECUTION_FAILED", user_error_message="该分析单元执行失败，请查看运行日志后重试")
 
 
+# 方法作用：执行数据单元并汇总状态，运行质量说明不掩盖数据查询失败。
+# Args: state - 报表执行状态。
+# Returns: 单元结果和本轮状态。
 async def report_execute_units(state: ReportWorkbenchState) -> dict[str, Any]:
     await _log_step(state, "report_execute_units", "running")
     plan = state["plan"]
@@ -219,6 +234,9 @@ async def report_execute_units(state: ReportWorkbenchState) -> dict[str, Any]:
     resolved_by_id = {str(item.get("unit_id", "")): item for item in state.get("resolved_units", [])}
     executor = state.get("execute_unit")
 
+    # 方法作用：执行去重后的查询计划并回填共享该查询的单元。
+    # Args: query_plan - 有界查询计划。
+    # Returns: 对应各单元的结果。
     async def execute_one(query_plan: dict[str, Any]) -> list[UnitResult]:
         unit = units_by_id[query_plan["unit_id"]]
         unit_ids = [str(item) for item in query_plan.get("unit_ids", [unit.unit_id]) if str(item) in units_by_id]
@@ -231,10 +249,20 @@ async def report_execute_units(state: ReportWorkbenchState) -> dict[str, Any]:
 
     grouped_results = await asyncio.gather(*(execute_one(item) for item in state.get("query_plans", [])))
     results = [result for group in grouped_results for result in group]
-    success_count = sum(item.status == "success" and bool(item.rows) for item in results)
-    failed_count = sum(item.status == "failed" for item in results)
+    from src.reporting.profiling import is_runtime_quality_unit
+
+    execution_units = {unit_id for unit_id, unit in units_by_id.items() if not is_runtime_quality_unit(unit)}
+    execution_units.update(item.unit_id for item in results if item.status == "failed")
+    outcome_results = [item for item in results if item.unit_id in execution_units] if execution_units else results
+    # 数据类单元要求有数据行；直答类单元（元数据说明等）产出是文字结论，
+    # 无数据行是正常形态，据「有无数据行」判定会把它们误算成部分完成。
+    success_count = sum(
+        item.status == "success" and (bool(item.rows) or item.answer_kind == "text")
+        for item in outcome_results
+    )
+    failed_count = sum(item.status == "failed" for item in outcome_results)
     # 运行期补查追加的单元同样计入期望数，否则部分成功会被误判为成功。
-    expected_count = len(plan.analysis_units) + len(state.get("runtime_units", []) or [])
+    expected_count = len(execution_units) if execution_units else len(plan.analysis_units) + len(state.get("runtime_units", []) or [])
     run_status = "succeeded" if expected_count > 0 and failed_count == 0 and success_count == expected_count else ("partial" if success_count > 0 or failed_count < max(1, expected_count) else "failed")
     await _log_step(state, "report_execute_units", "partial" if run_status == "partial" else ("succeeded" if run_status == "succeeded" else "failed"))
     return {"unit_results": results, "run_status": run_status}
@@ -250,24 +278,35 @@ async def report_profile_results(state: ReportWorkbenchState) -> dict[str, Any]:
         rows = result.rows
         summary = result.summary or f"分析单元返回 {len(rows)} 行样本。"
         warnings = list(result.warnings)
-        if not rows and "暂无数据" not in warnings:
+        if not rows and result.answer_kind != "text" and "暂无数据" not in warnings:
             warnings.append("当前查询没有返回数据，无法进行完整趋势分析")
         profiled.append(result.model_copy(update={"summary": summary, "warnings": warnings}))
     await _log_step(state, "report_profile_results", "succeeded")
     return {"unit_results": profiled}
 
 
-# 方法作用：基于单元授权列集合构建同源关系证据，跨源仅返回降级说明。
+# 方法作用：构建实际关系证据，并在所有查询完成后回填运行质量说明。
 # Args: state - 含 resolved_units 的状态。
-# Returns: RelationEvidence 列表。
+# Returns: RelationEvidence 列表和已回填质量说明的单元结果。
 async def report_build_relations(state: ReportWorkbenchState) -> dict[str, Any]:
     await _log_step(state, "report_build_relations", "running")
+    from src.reporting.profiling import is_runtime_quality_unit, summarize_runtime_quality
+
+    quality_units = {unit_id: unit for unit_id, unit in _units_by_id(state).items() if is_runtime_quality_unit(unit)}
+    results = list(state.get("unit_results", []))
+    evidence_results = [item for item in results if item.unit_id not in quality_units]
+    resolved_units = list(state.get("resolved_units", []))
     relations = build_relations(
-        list(state.get("resolved_units", [])),
-        list(state.get("unit_results", [])),
+        [item for item in resolved_units if item.get("unit_id") not in quality_units],
+        evidence_results,
     )
+    results = [
+        summarize_runtime_quality(quality_units[item.unit_id], evidence_results, relations, resolved_units)
+        if item.unit_id in quality_units and item.status != "failed" else item
+        for item in results
+    ]
     await _log_step(state, "report_build_relations", "succeeded")
-    return {"relations": relations}
+    return {"relations": relations, "unit_results": results}
 
 
 # 方法作用：汇总事实、关系证据和限制，不把统计关系升级为因果结论。
@@ -353,14 +392,14 @@ def _remaining_budget(state: ReportWorkbenchState) -> tuple[str, int]:
 # Args: state - 含结果、发现与档位的状态。
 # Returns: "supplement" 表示进入回路，"continue" 表示继续后续节点。
 def report_decide_supplement(state: ReportWorkbenchState) -> str:
-    from src.reporting.models import _MAX_PLAN_UNITS, divergence_max_rounds
+    from src.reporting.models import divergence_max_rounds, max_plan_units
 
     level, remaining = _remaining_budget(state)
     if remaining <= 0:
         return "continue"
     if int(state.get("divergence_round", 0) or 0) >= divergence_max_rounds(level):
         return "continue"
-    if len(state["plan"].analysis_units) + len(state.get("runtime_units", []) or []) >= _MAX_PLAN_UNITS:
+    if len(state["plan"].analysis_units) + len(state.get("runtime_units", []) or []) >= max_plan_units():
         return "continue"
     # 深挖没有显著发现说明数据正常，无需补查，且这条筛选不消耗 LLM 调用。
     significant = any(
@@ -377,7 +416,7 @@ def report_decide_supplement(state: ReportWorkbenchState) -> str:
 # Args: state - 含 unit_findings、resolved_units 与授权数据源的状态。
 # Returns: 追加的单元、解析摘要、执行结果与轮数。
 async def report_plan_supplement(state: ReportWorkbenchState) -> dict[str, Any]:
-    from src.reporting.models import _MAX_PLAN_UNITS, divergence_units_per_round
+    from src.reporting.models import divergence_units_per_round, max_plan_units
 
     await _log_step(state, "report_plan_supplement", "running")
     level, remaining = _remaining_budget(state)
@@ -386,7 +425,7 @@ async def report_plan_supplement(state: ReportWorkbenchState) -> dict[str, Any]:
     limit = min(
         divergence_units_per_round(level),
         remaining,
-        _MAX_PLAN_UNITS - len(plan.analysis_units) - len(state.get("runtime_units", []) or []),
+        max_plan_units() - len(plan.analysis_units) - len(state.get("runtime_units", []) or []),
     )
     if limit <= 0:
         await _log_step(state, "report_plan_supplement", "succeeded")
@@ -614,7 +653,16 @@ async def report_validate_document(state: ReportWorkbenchState) -> dict[str, Any
     artifact = state.get("artifact")
     if not isinstance(artifact, ReportArtifact):
         raise ValueError("报表页面产物缺失")
-    artifact.document = artifact.document.model_validate(artifact.document.model_dump(mode="json"))
+    # 块预算超限时按追加顺序裁剪增量区段（深挖发现、口径来源排在末尾）。
+    # 这里绝不能直接抛错：单元已经成功取数，多出几块就丢弃整份报表的代价远大于少渲染几段。
+    from src.reporting.document import truncate_document_to_block_budget
+
+    truncated = truncate_document_to_block_budget(artifact.document)
+    try:
+        artifact.document = artifact.document.model_validate(artifact.document.model_dump(mode="json"))
+    except ValueError:
+        logger.error("报表页面校验失败", truncated_blocks=truncated, exc_info=True)
+        raise
     await _log_step(state, "report_validate_document", "succeeded")
     return {"artifact": artifact}
 

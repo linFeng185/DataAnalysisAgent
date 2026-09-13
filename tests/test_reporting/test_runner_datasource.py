@@ -229,6 +229,43 @@ class TestReportRunnerDatasourceFanout:
         # Assert
         assert routes == {unit.unit_id: ["oracle"]}
 
+    # 方法作用：候选源只有一个时路由仍必须执行，缺表单元才能被判定为无命中。
+    # Args: self - pytest 测试类实例；monkeypatch - pytest 补丁工具。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    async def test_route_units_still_runs_for_single_source(self, monkeypatch) -> None:
+        """单源短路会绕过「没有源能支撑该问题」的检测，让缺表单元照样发查询。"""
+        # Arrange
+        import src.llm.client as llm_client
+        import src.llm.invocation as llm_invocation
+        from src.llm.output_contracts import ReportUnitRoutesOutput
+        from src.reporting.models import AnalysisUnit, ReportPlan
+        from src.reporting.runner import ReportRunner
+        from src.reporting.store import ReportStore
+
+        unsupported = AnalysisUnit(unit_id="unit_none", question="广告归因收入")
+        supported = AnalysisUnit(unit_id="unit_ok", question="订单净销售额")
+        plan = ReportPlan(requested_datasources=["oracle"], analysis_units=[unsupported, supported])
+        runner = ReportRunner(store=ReportStore(memory=True))
+        monkeypatch.setattr(llm_client, "is_task_llm_available", lambda task: True)
+        monkeypatch.setattr(ReportRunner, "_datasource_table_catalog", AsyncMock(return_value="### oracle\norders"))
+
+        # 方法作用：返回「一个单元无命中、一个单元命中」的路由结果。
+        # Args: prompt_id - 注册的 Prompt 标识；sections - 提示段落；kwargs - 透传参数。
+        # Returns: 含空数据源列表的路由契约实例。
+        async def fake_invoke_structured(prompt_id, sections, **kwargs):
+            return ReportUnitRoutesOutput(routes=[
+                {"unit_id": "unit_none", "datasources": []},
+                {"unit_id": "unit_ok", "datasources": ["oracle"]},
+            ])
+
+        monkeypatch.setattr(llm_invocation, "invoke_structured", fake_invoke_structured)
+
+        # Act
+        routes = await runner._route_units(plan, ["oracle"], 3)
+
+        # Assert
+        assert routes == {"unit_none": [], "unit_ok": ["oracle"]}
+
     # 方法作用：验证单元执行显式声明报表能力，关闭旧的自主补查回环。
     # Args: self - pytest 测试类实例；monkeypatch - pytest 补丁工具。
     # Returns: 无返回值，断言失败时由 pytest 报告。

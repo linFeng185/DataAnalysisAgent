@@ -176,7 +176,7 @@ class ReportUnitRoute(StrictOutputModel):
 class ReportUnitRoutesOutput(StrictOutputModel):
     """分析单元到数据源的命中映射；空列表表示没有数据源能支撑该问题。"""
 
-    routes: list[ReportUnitRoute] = Field(default_factory=list, max_length=12)
+    routes: list[ReportUnitRoute] = Field(default_factory=list, max_length=200)
 
 
 class ReportDivergeUnit(StrictOutputModel):

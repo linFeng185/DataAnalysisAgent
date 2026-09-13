@@ -108,10 +108,14 @@ class TestReportPlannerLlmUnits:
     # 方法作用：验证模型给出超过上限的单元数量时被截断到 12 个。
     # Args: self - pytest 测试类实例。
     # Returns: 无返回值，断言失败时由 pytest 报告。
-    async def test_excess_llm_units_are_truncated(self) -> None:
-        """模型返回超过 12 个单元时应截断，保证配额不被突破。"""
+    async def test_excess_llm_units_are_truncated(self, monkeypatch) -> None:
+        """模型返回超过配置上限的单元时应截断，保证配额不被突破。"""
         # Arrange
+        from src.config import get_settings
         from src.reporting.planner import ReportPlanner
+
+        # 上限来自配置（app.yaml），测试显式钉住它，避免随部署配置漂移而失去约束语义。
+        monkeypatch.setattr(get_settings(), "report_max_units_per_run", 12)
 
         class FakePlanner:
             # 方法作用：返回 15 个编号唯一的分析单元。

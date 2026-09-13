@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -21,6 +22,54 @@ _ROUTE_LLM_TASK = "report_route"
 _CATALOG_TABLES_PER_SOURCE = 200
 # 指标口径来源的标识前缀，由 resolve_metric_references 生成。
 _METRIC_SOURCE_PREFIX = "metric:"
+# 相对时间范围的单位中文名；无法识别时按天处理，与 TimeRange 默认值 90d 一致。
+_TIME_RANGE_UNIT_NAMES = {"d": "天", "w": "周", "m": "个月", "y": "年"}
+
+
+# 方法作用：把单元的时间范围契约渲染成中文时间说明。
+# Args: time_range - AnalysisUnit.time_range 的契约值。
+# Returns: 可直接拼进查询文本的时间说明；无法识别时回退到原值。
+def _describe_time_range(time_range: Any) -> str:
+    logger.debug("时间范围渲染入口", kind=getattr(time_range, "kind", ""), value=getattr(time_range, "value", ""))
+    kind = str(getattr(time_range, "kind", "") or "")
+    value = str(getattr(time_range, "value", "") or "").strip()
+    if kind == "all":
+        logger.debug("时间范围渲染完成", text="全部数据", kind=kind)
+        return "全部数据"
+    if kind == "absolute":
+        # 绝对范围保留原始日期串，并补一个中文单位词，使主图「问题里是否已含
+        # 时间范围」的规则能识别到，不会被再问一次时间范围。
+        text = f"{value}（绝对日期范围）" if value else ""
+        logger.debug("时间范围渲染完成", text=text, kind=kind)
+        return text
+    match = re.fullmatch(r"(\d+)\s*([A-Za-z]?)", value)
+    if not match:
+        logger.debug("时间范围渲染回退到原值", value=value, kind=kind)
+        return value
+    amount = int(match.group(1))
+    unit = _TIME_RANGE_UNIT_NAMES.get(match.group(2).lower(), "天")
+    text = f"最近 {amount} {unit}"
+    logger.debug("时间范围渲染完成", text=text, kind=kind)
+    return text
+
+
+# 方法作用：把计划确定的时间范围并入单元查询文本。
+# Args: unit - 待执行的 AnalysisUnit。
+# Returns: 供主图执行的查询文本；无可用时间范围时返回原问题。
+def _compose_unit_query(unit: Any) -> str:
+    unit_id = str(getattr(unit, "unit_id", "") or "")
+    question = str(getattr(unit, "question", "") or "")
+    logger.debug("报表单元查询拼装入口", unit_id=unit_id, question_chars=len(question))
+    hint = _describe_time_range(getattr(unit, "time_range", None))
+    if not hint:
+        logger.info("报表单元无可用时间范围，按原问题执行", unit_id=unit_id)
+        return question
+    # 时间范围在预览阶段就已绑定，执行期必须显式带上：主图 classify_intent 会按
+    # 问题文本重判 needs_time_range，不带就会被拦成「请指定查询的时间范围」，
+    # 白白丢掉一个参数早就确定的单元。
+    query = f"{question}（时间范围：{hint}）"
+    logger.info("报表单元查询拼装完成", unit_id=unit_id, time_hint=hint, query_chars=len(query))
+    return query
 
 
 # 方法作用：从旧工作流返回的知识来源里筛出指标口径引用，供页面做口径溯源。
@@ -298,7 +347,7 @@ class ReportRunner:
         session_id = f"report-{run_id}-{unit.unit_id}"
         thread_id = f"tenant:{int(identity.get('tenant_id', 0))}:user:{int(identity.get('user_id', 0))}:session:{session_id}"
         result = await app.ainvoke({
-            "user_query": unit.question,
+            "user_query": _compose_unit_query(unit),
             "datasource": datasource,
             "selected_datasources": selected_sources,
             "datasource_access": authorized,
@@ -336,16 +385,26 @@ class ReportRunner:
             or result.get("query_result_truncated")
         )
         analysis = final.get("analysis") or {}
+        # 直答类单元（元数据说明、知识直答等）产出的是文字结论，没有数据行是正常形态；
+        # 标成 text 后，成功单元判据才不会把它们误算成部分完成。
+        from src.graph.contracts import DIRECT_ANSWER_SOURCES
+
+        answer_kind = "text" if str(final.get("source", "") or "") in DIRECT_ANSWER_SOURCES else "data"
         return UnitResult(
             unit_id=unit.unit_id,
             datasource=datasource,
             live_query_id=live_query_id,
+            answer_kind=answer_kind,
             rows=[dict(row) for row in rows if isinstance(row, dict)],
             truncated=truncated,
             metric_citations=_extract_metric_citations(result.get("activated_knowledge")),
             column_comments=_extract_column_comments(result.get("relevant_tables")),
             field_descriptions=_extract_field_descriptions(analysis),
             summary=str(analysis.get("summary", "") or ""),
+            warnings=list(dict.fromkeys(
+                item for item in (analysis.get("limitations", []) or [])
+                if isinstance(item, str) and item.strip()
+            ))[:20],
         )
 
     # 方法作用：读取各数据源的表名清单，供路由模型与计划期发散判断命中关系。
@@ -373,8 +432,10 @@ class ReportRunner:
     # Returns: unit_id 到命中数据源列表的映射；无法判定时返回空字典表示沿用全源检索。
     async def _route_units(self, plan: Any, requested: list[str], tenant_id: int) -> dict[str, list[str]]:
         units = [unit for unit in plan.analysis_units if not unit.datasource]
-        # 只有一个候选源时不存在选择问题；单元已点名数据源时不需要路由。
-        if not units or len(requested) <= 1:
+        # 单元已点名数据源时不需要路由。候选源只有一个时仍必须路由：
+        # 路由不只是“选哪个源”，还负责判定“这个单元在候选源里有没有支撑表”。
+        # 单源短路会让缺表单元照样发查询，最后只在 SQL 生成阶段变成一句“查询失败”。
+        if not units or not requested:
             return {}
         try:
             from src.llm.client import is_task_llm_available

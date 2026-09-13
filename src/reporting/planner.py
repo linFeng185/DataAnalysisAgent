@@ -12,12 +12,12 @@ from zoneinfo import ZoneInfo
 from src.logging_config import get_logger
 from src.reporting.models import (
     _CAUSAL_PHRASE_RE,
-    _MAX_PLAN_UNITS,
     AnalysisUnit,
     EstimatedResources,
     ReportPlan,
     SharePlan,
     divergence_unit_budget,
+    max_plan_units,
 )
 
 logger = get_logger(__name__)
@@ -121,7 +121,7 @@ class ReportPlanner:
         # 未绑定数据源的单元按“每个已选源各一次”计上界；已绑定源按 1 次计。
         source_upper_bound = max(1, len(requested))
         # 发散单元尚未生成，但成本必须按最坏情况预估：额度用满即为上界。
-        divergent_upper_bound = min(divergence_unit_budget(divergence), _MAX_PLAN_UNITS - len(units))
+        divergent_upper_bound = min(divergence_unit_budget(divergence), max_plan_units() - len(units))
         fanout = sum(1 if unit.datasource else source_upper_bound for unit in units)
         fanout += max(0, divergent_upper_bound) * source_upper_bound
         plan = ReportPlan(
@@ -244,7 +244,7 @@ class ReportPlanner:
             pieces = [text[:4000]]
         units: list[AnalysisUnit] = []
         seen: set[str] = set()
-        for index, piece in enumerate(pieces[:12], start=1):
+        for index, piece in enumerate(pieces[:max_plan_units()], start=1):
             topic = piece[:4000]
             key = ReportPlanner._topic_key(topic, index)
             if key in seen:
@@ -452,7 +452,7 @@ class ReportPlanner:
     ) -> ReportPlan:
         divergence = str(plan.divergence)
         user_units = [unit for unit in plan.analysis_units if unit.origin == "user"]
-        limit = min(divergence_unit_budget(divergence), _MAX_PLAN_UNITS - len(user_units))
+        limit = min(divergence_unit_budget(divergence), max_plan_units() - len(user_units))
         if limit <= 0:
             # 额度为 0 或全局单元上限已满是正常路径，不是降级。
             logger.info("报表计划期发散跳过", divergence=divergence, user_units=len(user_units), limit=limit)
@@ -577,7 +577,7 @@ class ReportPlanner:
     ) -> list[AnalysisUnit]:
         units: list[AnalysisUnit] = []
         seen: set[str] = set()
-        for index, raw in enumerate(raw_units[:12], start=1):
+        for index, raw in enumerate(raw_units[:max_plan_units()], start=1):
             question = str(raw.get("question") or "").strip()
             if not question:
                 continue

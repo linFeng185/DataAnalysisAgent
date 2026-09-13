@@ -168,3 +168,95 @@ class TestReportRunner:
         assert result["report_id"]
         assert result["version"] == 1
         assert (await store.list_jobs(identity))[0].status == "succeeded"
+
+
+class TestDirectAnswerUnitOutcome:
+    """覆盖直答类单元的状态判定。
+
+    回归 2026-09-13：data_quality 这类元数据说明单元走 llm_direct，产出是文字结论、
+    没有数据行。而成功单元的判据是「status 为 success 且有数据行」，于是它被算成
+    未完成，整份报表被判为 partial（expected 12 / success 11）。
+    """
+
+    # 方法作用：直答单元无数据行时，运行状态仍应为 succeeded。
+    # Args: self - pytest 测试类实例。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    @pytest.mark.asyncio
+    async def test_direct_answer_unit_keeps_run_succeeded(self) -> None:
+        """说明类单元的结论在摘要文字里，无数据行不等于失败。"""
+        # Arrange
+        from src.graph.subgraphs.report_workbench import build_report_workbench_subgraph
+        from src.reporting.models import AnalysisUnit, ReportPlan, UnitResult
+
+        plan = ReportPlan(
+            requested_datasources=["sales"],
+            analysis_units=[
+                AnalysisUnit(unit_id="data", question="销售趋势", metrics=["销售额"]),
+                AnalysisUnit(unit_id="meta", question="说明时间覆盖范围"),
+            ],
+        )
+
+        # 方法作用：数据单元返回数据行，说明类单元只返回文字结论。
+        # Args: unit - 待执行单元；_state - 子图状态。
+        # Returns: 对应的单元结果。
+        async def execute(unit, _state):
+            if unit.unit_id == "meta":
+                return UnitResult(
+                    unit_id=unit.unit_id,
+                    datasource="sales",
+                    answer_kind="text",
+                    summary="当前 Schema 的时间覆盖范围如下…",
+                )
+            return UnitResult(unit_id=unit.unit_id, datasource="sales", rows=[{"month": "1", "value": 3}])
+
+        graph = build_report_workbench_subgraph()
+
+        # Act
+        result = await graph.ainvoke(
+            {"plan": plan, "identity": {"tenant_id": 3, "user_id": 7, "role": "analyst"}, "execute_unit": execute}
+        )
+
+        # Assert
+        assert result["run_status"] == "succeeded"
+
+    # 方法作用：说明类单元的 callout 文案不得写成「暂无数据」。
+    # Args: self - pytest 测试类实例。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    @pytest.mark.asyncio
+    async def test_direct_answer_callout_labels_as_explanation(self) -> None:
+        """说明类单元要在页面上标明结论在摘要里，而不是像缺数据。"""
+        # Arrange
+        from src.graph.subgraphs.report_workbench import build_report_workbench_subgraph
+        from src.reporting.models import AnalysisUnit, ReportPlan, UnitResult
+
+        plan = ReportPlan(
+            requested_datasources=["sales"],
+            analysis_units=[AnalysisUnit(unit_id="meta", question="说明时间覆盖范围")],
+        )
+
+        # 方法作用：返回说明类单元结果。
+        # Args: unit - 待执行单元；_state - 子图状态。
+        # Returns: 仅含文字结论的单元结果。
+        async def execute(unit, _state):
+            return UnitResult(
+                unit_id=unit.unit_id,
+                datasource="sales",
+                answer_kind="text",
+                summary="时间覆盖范围说明…",
+            )
+
+        graph = build_report_workbench_subgraph()
+
+        # Act
+        result = await graph.ainvoke(
+            {"plan": plan, "identity": {"tenant_id": 3, "user_id": 7, "role": "analyst"}, "execute_unit": execute}
+        )
+
+        # Assert
+        callouts = [
+            block
+            for section in result["artifact"].document.sections
+            for block in section.blocks
+            if block.type == "callout"
+        ]
+        assert callouts and callouts[0].title == "该单元为说明类分析"

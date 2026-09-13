@@ -21,8 +21,39 @@ _DIVERGENCE_UNIT_BUDGET: dict[str, int] = {"conservative": 0, "standard": 3, "de
 # 运行期回路最大轮数与单轮追加上限。
 _DIVERGENCE_MAX_ROUNDS: dict[str, int] = {"conservative": 0, "standard": 1, "deep": 2}
 _DIVERGENCE_UNITS_PER_ROUND: dict[str, int] = {"conservative": 0, "standard": 2, "deep": 3}
-# 计划中分析单元总数的全局上限，发散不得突破。
-_MAX_PLAN_UNITS = 12
+# 单元数的静态上界，仅用于 Pydantic 字段约束。真实上限由超级管理员在配置里
+# 设定（report_max_units_per_run），运行时一律通过 max_plan_units() 读取——
+# 散落的硬编码会导致"配置改了但某处仍卡在 12"。
+_UNIT_COUNT_STATIC_MAX = 200
+
+
+# 方法作用：读取超级管理员配置的计划单元数上限。
+# Args: 无。
+# Returns: 当前允许的分析单元总数（含发散单元），至少为 1。
+def max_plan_units() -> int:
+    from src.config import get_settings
+
+    return max(1, int(get_settings().report_max_units_per_run))
+
+
+# 单个分析单元在页面上的块预算：kpi / chart / table / narrative / quality 五块，
+# 再为确定性深挖发现与关系证据留出同量级余量。findings 是按发现条数生成的，
+# 单元数上调后块数会同步放大，所以块上限必须由单元数推导而不是写死。
+_UNIT_BLOCK_BUDGET = 10
+# 与单元数无关的固定区段（总览/关系证据/指标口径/跨源聚合）预留的块数。
+_FIXED_BLOCK_BUDGET = 40
+# 页面块数下限，保证单单元的小报表仍有原 80 块的空间。
+_MIN_DOCUMENT_BLOCKS = 80
+
+
+# 方法作用：按可配置的分析单元上限推导报表页面的块数上限。
+# Args: 无。
+# Returns: 页面级块数上限；随 report_max_units_per_run 缩放，避免单元数上调后
+#          页面校验把已成功取数的整份报表判为失败。
+def max_document_blocks() -> int:
+    return max(_MIN_DOCUMENT_BLOCKS, max_plan_units() * _UNIT_BLOCK_BUDGET + _FIXED_BLOCK_BUDGET)
+
+
 # 因果措辞黑名单：提示词约束是软约束，服务端必须硬校验。
 _CAUSAL_PHRASE_RE = re.compile(r"导致|造成|因为|引起|致使|归因于")
 
@@ -164,11 +195,11 @@ class ReportPlan(BaseModel):
     page_ttl_days: int = Field(default=7, ge=1, le=90)
     permanent: bool = False
     requested_datasources: list[str] = Field(default_factory=list, max_length=20)
-    analysis_units: list[AnalysisUnit] = Field(..., min_length=1, max_length=12)
+    analysis_units: list[AnalysisUnit] = Field(..., min_length=1, max_length=_UNIT_COUNT_STATIC_MAX)
     # 发散档位。同一需求不同档位对应不同执行范围与成本上限，因此进 canonical_hash。
     divergence: DivergenceLevel = "standard"
     # 相对预览计划被用户删减掉的单元标识，保留审计线索。同样进 canonical_hash。
-    excluded_unit_ids: list[str] = Field(default_factory=list, max_length=12)
+    excluded_unit_ids: list[str] = Field(default_factory=list, max_length=_UNIT_COUNT_STATIC_MAX)
     share: SharePlan = Field(default_factory=SharePlan)
     warnings: list[str] = Field(default_factory=list, max_length=20)
     needs_confirmation: bool = False
@@ -209,6 +240,10 @@ class ReportPlan(BaseModel):
         if self.permanent:
             self.page_ttl_days = max(self.page_ttl_days, 7)
         self.warnings = list(dict.fromkeys(item.strip() for item in self.warnings if item.strip()))
+        # 字段上的静态上界只是 Pydantic 边界，真实上限由配置决定。
+        limit = max_plan_units()
+        if len(self.analysis_units) > limit:
+            raise ValueError(f"分析单元数超过系统上限 {limit}")
         return self
 
     # 方法作用：生成不含可变估算字段的规范计划哈希。
@@ -251,7 +286,7 @@ class ReportJobCreateRequest(BaseModel):
     plan_override: ReportPlan | None = None
     # 用户在预览页勾选保留的单元。None 表示全部接受（与既有行为一致）；
     # 显式空数组表示全部取消，属非法请求。只允许删减，不允许新增。
-    accepted_unit_ids: list[str] | None = Field(default=None, max_length=12)
+    accepted_unit_ids: list[str] | None = Field(default=None, max_length=_UNIT_COUNT_STATIC_MAX)
     # 视觉模板标识。**不进 ReportPlan、不进 canonical_hash**：模板只影响呈现，
     # 不改变执行范围与成本，因此不该让改配色触发重新预览与重新确认。
     # 只校格式不校清单：清单在前端注册表，后端再存一份必然脱钩。
@@ -314,7 +349,7 @@ class QuotaPolicyRequest(BaseModel):
     max_jobs_created: int = Field(default=20, ge=0, le=100_000)
     max_runs_started: int = Field(default=50, ge=0, le=100_000)
     max_concurrent_runs: int = Field(default=2, ge=0, le=100)
-    max_analysis_units_per_run: int = Field(default=12, ge=1, le=12)
+    max_analysis_units_per_run: int = Field(default=12, ge=1, le=_UNIT_COUNT_STATIC_MAX)
     # 与管理端上限保持一致：多源扇出的真实查询数是 单元数 × 命中源数。
     max_queries_per_run: int = Field(default=16, ge=1, le=1000)
     max_rows_per_query: int = Field(default=100_000, ge=1, le=10_000_000)
@@ -330,6 +365,10 @@ class UnitResult(BaseModel):
     datasource: str = ""
     live_query_id: str = ""
     status: Literal["success", "partial", "failed"] = "success"
+    # 单元产出形态：data 表示应返回数据行，text 表示直答（元数据说明 / 知识类），
+    # 无数据行是它的正常形态。成功单元的判据据此区分，否则直答单元会被判成
+    # 部分完成，整份报表被拖成 partial。
+    answer_kind: Literal["data", "text"] = "data"
     rows: list[dict[str, Any]] = Field(default_factory=list, max_length=1000)
     # 旧工作流已给出截断信号，执行器必须透传：统计结论需要据此披露样本局限。
     truncated: bool = False
