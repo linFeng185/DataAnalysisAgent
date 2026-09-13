@@ -432,10 +432,15 @@ class ReportRunner:
             # 未出现在路由结果里的单元会退回全源检索，按 fallback 计入才不会低报。
             actual += len(matched) if matched is not None else fallback
         # 运行期发散回路是数据驱动的，预占时无法知道会不会发生、会加几个单元，
-        # 因此按档位总额度上限预留。禁止"先跑再按实际补扣"，那会绕过配额。
+        # 因此按额度上限预留。禁止"先跑再按实际补扣"，那会绕过配额。
         from src.reporting.models import divergence_unit_budget
 
-        actual += divergence_unit_budget(str(getattr(plan, "divergence", "standard") or "standard")) * fallback
+        level = str(getattr(plan, "divergence", "standard") or "standard")
+        # 档位是计划期与运行期**共享**的总授权：计划期已经追加的发散单元必须扣减，
+        # 否则会把已经花掉的额度再预留一遍（与子图 _remaining_budget 同口径）。
+        plan_diverged = sum(1 for unit in plan.analysis_units if getattr(unit, "origin", "user") == "diverged")
+        runtime_budget = max(0, divergence_unit_budget(level) - plan_diverged)
+        actual += runtime_budget * fallback
         actual = max(1, actual)
         estimated = plan.estimated.model_copy(update={
             "query_count": min(1000, actual),

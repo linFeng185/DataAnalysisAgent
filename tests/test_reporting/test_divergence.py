@@ -489,6 +489,33 @@ class TestReservation:
         assert reserved_standard.estimated.query_count > reserved_conservative.estimated.query_count
         assert reserved_conservative.estimated.query_count == 1
 
+    # 方法作用：验证预占扣减计划期已用的额度，不把共享额度算两遍。
+    # Args: self - 测试实例。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    def test_reserve_subtracts_plan_phase_divergence(self) -> None:
+        """深度档额度 6 全部用在计划期时，运行期应预留 0。
+
+        这是真实运行暴露的缺陷：预占按全额 6 × 数据源数预留，把计划期已经
+        花掉的额度再算一遍，导致 5 个数据源时凭空多出 30 次查询而误报配额不足。
+        """
+        # Arrange
+        from src.reporting.models import AnalysisUnit, ReportPlan
+        from src.reporting.runner import ReportRunner
+
+        user_unit = AnalysisUnit(question="用户需求", unit_id="u1")
+        diverged = [
+            AnalysisUnit(question=f"计划期发散{index}", unit_id=f"d{index}", origin="diverged", rationale="相关", decided_by="plan")
+            for index in range(6)
+        ]
+        plan = ReportPlan(divergence="deep", requested_datasources=["a"], analysis_units=[user_unit, *diverged])
+        routed = {unit.unit_id: ["a"] for unit in plan.analysis_units}
+
+        # Act
+        reserved = ReportRunner._reserve_plan(plan, routed)
+
+        # Assert：7 个单元各命中 1 个源，运行期额度为 0，因此恰好等于单元数
+        assert reserved.estimated.query_count == len(plan.analysis_units) == 7
+
 
 class TestPromptVariableContract:
     """验证 23.17：调用方必须提供模板所需的全部变量。
