@@ -34,6 +34,10 @@ from src.reporting.quota import (
     ReportPermissionService,
     describe_quota_error,
 )
+from src.reporting.quota_reset import (
+    QuotaUsageResetRequest,
+    QuotaUsageResetResponse,
+)
 from src.reporting.share_analytics import (
     BatchRevokeSharesRequest,
     ShareVisitCreateRequest,
@@ -800,6 +804,41 @@ async def get_user_policy(user_id: int) -> dict[str, Any]:
         "quota": asdict(snapshot),
         "period": "calendar_month",
     }
+
+
+@router.post("/admin/quota-usage/reset")
+# 方法作用：由租户管理员把单个、多个或全租户用户的本月已用量清零，不改动额度上限。
+# Args: request - 目标范围（user_ids 与 all_users 互斥）与要清零的字段。
+# Returns: 实际清零用户数、实际字段与当前周期起止。
+async def reset_quota_usage(request: QuotaUsageResetRequest) -> dict[str, Any]:
+    """字段仅限四个按月累计项；个别目标不存在或跨租户时跳过，不让整次请求失败。"""
+    identity = get_current_identity()
+    tenant_id = int(getattr(identity, "tenant_id", 0) or 0)
+    operator_id = int(getattr(identity, "user_id", 0) or 0)
+    logger.debug("报表额度重置路由入口", tenant_id=tenant_id, user_id=operator_id, all_users=bool(request.all_users), target_count=len(request.user_ids), fields=list(request.fields))
+    if str(identity.role) != "tenant_admin":
+        raise HTTPException(403, "报表使用额度由当前租户管理员配置")
+    if tenant_id <= 0:
+        raise HTTPException(403, "当前身份没有租户")
+    store = get_report_store()
+    try:
+        period_start, period_end, cleared = await get_report_quota_manager().reset_usage(
+            identity,
+            list(request.user_ids),
+            list(request.fields),
+            all_users=bool(request.all_users),
+        )
+    except ValueError as exc:
+        logger.warning("报表额度重置字段非法", tenant_id=tenant_id, error=str(exc))
+        raise HTTPException(422, str(exc)) from exc
+    except Exception as exc:
+        logger.error("报表额度重置失败", tenant_id=tenant_id, user_id=operator_id, exc_info=True)
+        raise HTTPException(503, "额度重置暂不可用") from exc
+    # 每个被实际清零的用户各写一条审计；跨租户与本期无用量行的目标不产生记录。
+    for target_user_id in cleared:
+        await store.record_audit({"tenant_id": identity.tenant_id, "user_id": identity.user_id, "action": "quota_usage_reset", "result": "success", "metadata": {"target_user_id": int(target_user_id), "fields": list(request.fields)}})
+    logger.info("报表额度重置路由完成", tenant_id=tenant_id, user_id=operator_id, reset_users=len(cleared), all_users=bool(request.all_users), fields=list(request.fields))
+    return QuotaUsageResetResponse(reset_users=len(cleared), fields=list(request.fields), period_start=period_start, period_end=period_end).model_dump()
 
 
 @router.get("/shared/reports/{token}")

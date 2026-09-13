@@ -181,8 +181,9 @@ class TestReportBrowser:
         page.route("**/api/v1/**", handle)
         page.goto(f"{frontend_origin}/admin")
         page.get_by_role("button", name="报表额度").click()
-        expect(page.get_by_label("每月可创建任务数")).to_have_value("20")
-        page.get_by_label("每月可创建任务数").fill("30")
+        # 弹窗底部的重置区也有同名复选框，严格模式下必须限定到表单里的第一个输入框。
+        expect(page.get_by_label("每月可创建任务数").first).to_have_value("20")
+        page.get_by_label("每月可创建任务数").first.fill("30")
         page.get_by_role("button", name="保存额度").click()
         expect(page.get_by_text("报表额度已保存", exact=True)).to_be_visible()
         assert len(saved) == 1

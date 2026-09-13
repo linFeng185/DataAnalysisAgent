@@ -1,7 +1,10 @@
 import { t, useLanguage } from '../../i18n';
 import { useEffect, useState } from 'react';
-import { Alert, Checkbox, Form, InputNumber, Modal, Spin, message } from 'antd';
+import { Alert, Button, Checkbox, Divider, Form, InputNumber, Modal, Popconfirm, Space, Spin, Typography, message } from 'antd';
 import { get, put } from '../../api/client';
+import { resetReportQuotaUsage } from '../../api/reportWorkbench';
+import type { ReportQuotaResetField } from '../../types/report';
+import { REPORT_QUOTA_RESET_FIELDS, quotaResetResultMessage } from './quotaResetFields';
 
 const fields = [
   ['max_jobs_created', t("每月可创建任务数"), 0, 100000],
@@ -33,6 +36,9 @@ export default function ReportPolicyEditor({ user, onClose }: Props) {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
+  // 重置区独立于额度表单：它不清零上限，也不参与「保存额度」的提交。
+  const [resetFields, setResetFields] = useState<ReportQuotaResetField[]>([]);
+  const [resetting, setResetting] = useState(false);
   // 系统上限由后端下发（超级管理员在配置里设定），表单不得自己写死一个更小的值。
   const [limits, setLimits] = useState<Record<string, number>>({});
   useEffect(() => {
@@ -67,9 +73,25 @@ export default function ReportPolicyEditor({ user, onClose }: Props) {
     }
   };
 
+  // 方法作用：把选中字段在当前自然月的已用量清零，不改动额度上限。
+  // Args: 无，读取 resetFields 与当前用户。
+  // Returns: 提交结束后无返回值；成功后保留弹窗以便继续调整上限。
+  const resetUsage = async (): Promise<void> => {
+    if (resetting || resetFields.length === 0) return;
+    setResetting(true);
+    try {
+      const result = await resetReportQuotaUsage({ user_ids: [user.id], fields: resetFields });
+      message.success(quotaResetResultMessage(result, 1));
+    } catch (failure) {
+      message.error(failure instanceof Error ? failure.message : t("已用量重置失败"));
+    } finally {
+      setResetting(false);
+    }
+  };
+
   return <Modal open title={t("报表额度 · {value0}", { value0: user.username })} onCancel={onClose}
     onOk={() => void save()} confirmLoading={saving} okText={t("保存额度")} okButtonProps={{ disabled: loading || Boolean(error) }}>
-    <Alert type="info" showIcon message={t("当前按自然月统计（Asia/Shanghai），修改上限不清空已用量。业务额度由租户管理员管理。")} style={{ marginBottom: 16 }} />
+    <Alert type="info" showIcon message={t("当前按自然月统计（Asia/Shanghai）：保存额度只修改上限、不清空已用量；重置已用量只清零本周期用量、不修改上限。业务额度由租户管理员管理。")} style={{ marginBottom: 16 }} />
     {error ? <Alert type="error" message={error} /> : <Spin spinning={loading}>
       <Form form={form} layout="vertical">
         <Form.Item name="capabilities" label={t("报表能力")}><Checkbox.Group options={capabilities} /></Form.Item>
@@ -88,6 +110,20 @@ export default function ReportPolicyEditor({ user, onClose }: Props) {
           </Form.Item>;
         })}
       </Form>
+      <Divider plain style={{ margin: '8px 0 12px' }}>{t("重置本周期已用量")}</Divider>
+      <Typography.Paragraph type="secondary" style={{ marginBottom: 12 }}>
+        {t("清零选中字段在当前自然月的已用量，不修改上面的额度上限；重置结果不可撤销。")}
+      </Typography.Paragraph>
+      <Space direction="vertical" size={12} style={{ width: '100%' }}>
+        <Checkbox.Group options={REPORT_QUOTA_RESET_FIELDS} value={resetFields}
+          onChange={values => setResetFields(values as ReportQuotaResetField[])} />
+        <Popconfirm title={t("确认重置本周期已用量？")}
+          description={t("将清零选中字段的本月已用量，且不可撤销。")}
+          okText={t("确认重置")} cancelText={t("取消")}
+          onConfirm={() => void resetUsage()} disabled={resetFields.length === 0}>
+          <Button danger loading={resetting} disabled={resetFields.length === 0}>{t("重置已用量")}</Button>
+        </Popconfirm>
+      </Space>
     </Spin>}
   </Modal>;
 }

@@ -9,6 +9,7 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 from src.logging_config import get_logger
+from src.reporting.quota_reset import normalize_reset_fields
 
 logger = get_logger(__name__)
 
@@ -330,6 +331,45 @@ class QuotaManager:
         usage = self._usage.get(key)
         if usage is not None:
             usage.concurrent_runs = max(0, usage.concurrent_runs - max(0, int(amount)))
+
+    # 方法作用：把目标用户当前周期的已用量清零，不改动配额上限。
+    # Args: identity - 操作管理员身份；user_ids - 目标用户 ID 列表（all_users 为真时忽略）；fields - 要清零的字段名（仅四个按月累计字段）；timezone_name - 周期时区；all_users - 是否覆盖本租户全部用户。
+    # Returns: (周期起点, 周期终点, 实际被清零的用户 ID 列表)；下一自然月边界用同一函数计算。
+    async def reset_usage(self, identity: Any, user_ids: list[int], fields: list[str], timezone_name: str = "Asia/Shanghai", all_users: bool = False) -> tuple[datetime, datetime, list[int]]:
+        """持久化模式改库、内存模式改缓存，两条路径都必须让下一次 snapshot 立刻反映清零结果。"""
+        tenant_id = int(getattr(identity, "tenant_id", 0) or 0)
+        columns = normalize_reset_fields(fields)
+        period_start, period_end = self.period_bounds(timezone_name)
+        logger.debug("报表配额重置入口", tenant_id=tenant_id, user_id=int(getattr(identity, "user_id", 0) or 0), all_users=bool(all_users), target_count=len(user_ids), fields=columns)
+        if self._store is not None and not bool(getattr(self._store, "_memory", True)) and hasattr(self._store, "reset_quota_usage"):
+            # 持久化模式的「全租户」以 Store 里的用户清单为准；显式目标直接下发，跨租户目标自然匹配不到用量行。
+            targets = await self._store.list_tenant_user_ids(identity) if all_users else sorted({int(item) for item in user_ids if int(item) > 0})
+            rows = await self._store.reset_quota_usage(identity, targets, columns, period_start)
+            cleared = sorted({int(item) for item in rows})
+        else:
+            cleared = self._reset_memory_usage(tenant_id, user_ids, columns, period_start, bool(all_users))
+        logger.info("报表配额重置完成", tenant_id=tenant_id, reset_users=len(cleared), all_users=bool(all_users), fields=columns)
+        return period_start, period_end, cleared
+
+    # 方法作用：把内存用量缓存中目标用户当前周期的选中字段清零。
+    # Args: tenant_id - 租户 ID；user_ids - 目标用户 ID 列表；fields - 字段名列表；period_start - 周期起点；all_users - 是否覆盖本租户全部用户。
+    # Returns: 实际被清零的用户 ID 升序列表；没有用量缓存的用户不计入。
+    def _reset_memory_usage(self, tenant_id: int, user_ids: list[int], fields: list[str], period_start: datetime, all_users: bool) -> list[int]:
+        """内存分支没有数据库的 RETURNING，只有存在用量缓存的用户才算「实际被清零」。"""
+        period_key = period_start.isoformat()
+        selected = {int(item) for item in user_ids if int(item) > 0}
+        cleared: list[int] = []
+        # 只改用量对象的值、不改字典结构，遍历过程安全；租户外与周期外的缓存一律跳过。
+        for (key_tenant, key_user, key_period), usage in self._usage.items():
+            if key_tenant != tenant_id or key_period != period_key:
+                continue
+            if not all_users and key_user not in selected:
+                continue
+            for name in fields:
+                setattr(usage, name, 0)
+            cleared.append(key_user)
+        logger.debug("报表配额内存缓存重置完成", tenant_id=tenant_id, all_users=bool(all_users), reset_users=len(cleared))
+        return sorted(cleared)
 
     # 方法作用：读取当前周期的剩余配额，不产生预占副作用。
     # Args: identity - 当前身份；timezone_name - 周期时区。

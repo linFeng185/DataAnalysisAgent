@@ -349,3 +349,20 @@ export interface ReportShareLinkQuery {
   page_size?: number;
 }
 
+/** 可按自然月清零已用量的四个额度字段键，取值与后端冻结契约一一对应。 */
+export type ReportQuotaResetField = 'jobs_created' | 'runs_started' | 'llm_tokens' | 'share_links';
+
+/** 报表额度已用量重置请求；user_ids 与 all_users 互斥且必居其一，fields 不能为空数组。 */
+export interface ReportQuotaUsageResetRequest {
+  user_ids?: number[];
+  all_users?: boolean;
+  fields: ReportQuotaResetField[];
+}
+
+/** 报表额度已用量重置结果；reset_users 是实际被清零的用户数，可能小于请求人数。 */
+export interface ReportQuotaUsageResetResponse {
+  reset_users: number;
+  fields: ReportQuotaResetField[];
+  period_start: string;
+  period_end: string;
+}

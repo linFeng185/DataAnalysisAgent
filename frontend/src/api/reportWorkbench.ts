@@ -9,12 +9,20 @@ import type {
   ReportPlan,
   ReportPlanPreviewResponse,
   ReportQuotaResponse,
+  ReportQuotaUsageResetRequest,
+  ReportQuotaUsageResetResponse,
   ReportRun,
   ReportRunStep,
   ReportShareRequest,
   ReportShareResponse,
   ReportShareSummary,
   ReportSharedResponse,
+  ReportShareBatchRevokeResponse,
+  ReportShareLinkListResponse,
+  ReportShareLinkQuery,
+  ReportShareLinkStatus,
+  ReportShareVisitListResponse,
+  SharedReportVisitResponse,
 } from '../types/report';
 
 const REPORT_BASE = '/report-workbench';
@@ -250,12 +258,6 @@ export async function fetchSharedDrilldown(
   if (!response.ok) throw await publicError(response);
   return response.json() as Promise<ReportDrilldownResponse>;
 }
-  ReportShareBatchRevokeResponse,
-  ReportShareLinkListResponse,
-  ReportShareLinkQuery,
-  ReportShareLinkStatus,
-  ReportShareVisitListResponse,
-  SharedReportVisitResponse,
 
 // 方法作用：读取链接管理页的分享链接平铺列表及各链接的访问量与停留时长聚合。
 // Args: query - 报表、创建人、状态筛选与分页条件。
@@ -323,3 +325,13 @@ export async function reportSharedReportVisitDuration(
   return response.json() as Promise<{ visit_id: string; duration_seconds: number }>;
 }
 
+// 方法作用：由租户管理员把指定用户或全租户的本月额度已用量清零，不修改额度上限。
+// Args: request - 目标范围（user_ids 与 all_users 互斥二选一）与要清零的字段，fields 不能为空。
+// Returns: 实际清零的用户数、实际字段与当前周期起止。
+export function resetReportQuotaUsage(request: ReportQuotaUsageResetRequest): Promise<ReportQuotaUsageResetResponse> {
+  // user_ids 与 all_users 互斥：两个都发会被后端判为冲突，因此按范围只发其中一个。
+  const body: Record<string, unknown> = { fields: request.fields };
+  if (request.all_users) body.all_users = true;
+  else body.user_ids = request.user_ids || [];
+  return post<ReportQuotaUsageResetResponse>(`${REPORT_BASE}/admin/quota-usage/reset`, body);
+}

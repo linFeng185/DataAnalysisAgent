@@ -21,6 +21,7 @@ from src.reporting.models import (
     ReportShareRecord,
     ReportVersionRecord,
 )
+from src.reporting.quota_reset import normalize_reset_fields
 from src.reporting.share_analytics import to_share_list_item
 
 logger = get_logger(__name__)
@@ -1121,6 +1122,41 @@ class ReportStore:
             raise LookupError("目标用户不存在或不属于当前租户")
         return dict(row)
 
+    # 方法作用：列出本租户的全部用户 ID，供租户管理员按「全租户」范围重置额度。
+    # Args: identity - 操作管理员身份。
+    # Returns: 去重升序的用户 ID 列表，只含当前租户用户；租户缺失时返回空列表。
+    async def list_tenant_user_ids(self, identity: Any) -> list[int]:
+        """平台与跨租户身份都拿不到用户清单：查询始终以当前身份的租户为条件。"""
+        tenant_id = int(getattr(identity, "tenant_id", 0) or 0)
+        logger.debug("租户用户清单读取入口", tenant_id=tenant_id, user_id=int(getattr(identity, "user_id", 0) or 0))
+        if tenant_id <= 0:
+            logger.info("租户用户清单读取跳过", tenant_id=tenant_id, reason="缺少租户")
+            return []
+        if self._memory:
+            # 内存分支没有 users 表，只能汇总 Store 内已登记的本租户用户（任务、分享与策略覆盖），
+            # 统一按 tenant_id 过滤，不把其他租户的用户算进来。
+            known: set[int] = set()
+            for row in self._jobs.values():
+                if int(row.get("tenant_id", 0) or 0) == tenant_id:
+                    known.add(int(row.get("user_id", 0) or 0))
+            for row in self._shares.values():
+                if int(row.get("tenant_id", 0) or 0) == tenant_id:
+                    known.add(int(row.get("created_by", 0) or 0))
+            for tenant_key, user_key in list(self._quota_policies) + list(self._capabilities):
+                if int(tenant_key) == tenant_id:
+                    known.add(int(user_key))
+            known.discard(0)
+            users = sorted(known)
+            logger.info("租户用户清单读取完成", tenant_id=tenant_id, user_count=len(users), memory=True)
+            return users
+        from src.memory.pg_pool import pg_pool_connection
+
+        async with pg_pool_connection(await self._pool(), tenant_id, int(getattr(identity, "user_id", 0) or 0), str(getattr(identity, "role", "") or "")) as connection:
+            rows = await connection.fetch("SELECT id FROM users WHERE tenant_id=$1", tenant_id)
+        users = sorted({int(row["id"]) for row in rows})
+        logger.info("租户用户清单读取完成", tenant_id=tenant_id, user_count=len(users))
+        return users
+
     # 方法作用：验证目标租户归属并在同一事务保存能力与额度。
     # Args: identity - 租户管理员；user_id - 目标用户；policy - 额度策略；capabilities - 能力列表。
     # Returns: 无返回值。
@@ -1239,6 +1275,35 @@ class ReportStore:
                 bounded,
                 period_start,
             )
+
+    # 方法作用：把目标用户当前周期的指定已用量列清零，返回实际被清零的用户 ID。
+    # Args: identity - 操作管理员身份；user_ids - 目标用户 ID 列表；fields - 要清零的字段名（仅四个按月累计字段）；period_start - 当前周期起点。
+    # Returns: 实际被清零的用户 ID 升序列表；没有匹配的用量行时为空列表。
+    async def reset_quota_usage(self, identity: Any, user_ids: list[int], fields: list[str], period_start: datetime) -> list[int]:
+        """只清用量不动上限：SET 列名只能取自白名单，请求里的字段名绝不直接拼进 SQL。"""
+        columns = normalize_reset_fields(fields)
+        targets = sorted({int(item) for item in user_ids if int(item) > 0})
+        tenant_id = int(getattr(identity, "tenant_id", 0) or 0)
+        logger.debug("报表额度用量重置入口", tenant_id=tenant_id, target_count=len(targets), fields=columns, period_start=period_start.isoformat())
+        if not targets:
+            logger.info("报表额度用量重置跳过", tenant_id=tenant_id, reason="没有有效目标用户")
+            return []
+        if self._memory:
+            # 内存模式的周期用量由 QuotaManager 的内存缓存持有（与 reserve_quota/get_quota_usage 的既有约定一致），
+            # Store 侧没有用量行，清零由 QuotaManager.reset_usage 的内存分支完成。
+            logger.info("报表额度用量重置跳过", tenant_id=tenant_id, reason="内存分支无用量行")
+            return []
+        from src.memory.pg_pool import pg_pool_connection
+
+        # 列名来自 normalize_reset_fields 的白名单，值全部走占位符，注入面只剩这四个固定列名。
+        assignments = ", ".join(f"{column}=0" for column in columns)
+        sql = f"UPDATE report_quota_usage SET {assignments} WHERE tenant_id=$1 AND user_id = ANY($2) AND period_start=$3 RETURNING user_id"
+        pool = await self._pool()
+        async with pg_pool_connection(pool, tenant_id, int(getattr(identity, "user_id", 0) or 0), str(getattr(identity, "role", "") or "")) as connection:
+            rows = await connection.fetch(sql, tenant_id, targets, period_start)
+        cleared = sorted({int(row["user_id"]) for row in rows})
+        logger.info("报表额度用量重置完成", tenant_id=tenant_id, reset_users=len(cleared), fields=columns)
+        return cleared
 
     # 方法作用：按租户时区计算当前自然月周期起止时间，供持久化配额读写复用。
     # Args: timezone_name - IANA 时区名称。

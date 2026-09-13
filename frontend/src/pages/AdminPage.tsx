@@ -2,8 +2,8 @@ import { t, useLanguage } from '../i18n';
 import { useEffect, useMemo, useState } from 'react';
 import type { ReactNode } from 'react';
 import {
-  Alert, Button, Descriptions, Divider, Empty, Form, Input, InputNumber, Modal, Select,
-  Space, Spin, Switch, Table, Tabs, Tag, Tooltip, Typography, message,
+  Alert, Button, Checkbox, Descriptions, Divider, Empty, Form, Input, InputNumber, Modal, Popconfirm,
+  Radio, Select, Space, Spin, Switch, Table, Tabs, Tag, Tooltip, Typography, message,
 } from 'antd';
 import {
   DeleteOutlined, EditOutlined, KeyOutlined, MinusCircleOutlined, PlusOutlined, ReloadOutlined,
@@ -11,8 +11,11 @@ import {
 } from '@ant-design/icons';
 import { useNavigate } from 'react-router-dom';
 import { del, get, patch, post, put } from '../api/client';
+import { resetReportQuotaUsage } from '../api/reportWorkbench';
+import type { ReportQuotaResetField } from '../types/report';
 import { useAuth } from '../hooks/AuthContext';
 import ReportPolicyEditor from '../components/report/ReportPolicyEditor';
+import { REPORT_QUOTA_RESET_FIELDS, quotaResetResultMessage } from '../components/report/quotaResetFields';
 import QueryQuotaEditor from '../components/QueryQuotaEditor';
 import MCPSecurityPanel from '../components/MCPSecurityPanel';
 import RuntimeControlsPanel from '../components/RuntimeControlsPanel';
@@ -273,6 +276,12 @@ export default function AdminPage() {
   const [userModal, setUserModal] = useState(false);
   const [passwordUser, setPasswordUser] = useState<ManagedUser | null>(null);
   const [reportPolicyUser, setReportPolicyUser] = useState<ManagedUser | null>(null);
+  // 批量重置只作用于本租户用户表格：行多选、重置范围与待清零字段都是临时状态。
+  const [selectedUserIds, setSelectedUserIds] = useState<number[]>([]);
+  const [batchResetOpen, setBatchResetOpen] = useState(false);
+  const [batchResetScope, setBatchResetScope] = useState<'selected' | 'all'>('selected');
+  const [batchResetFields, setBatchResetFields] = useState<ReportQuotaResetField[]>([]);
+  const [batchResetSubmitting, setBatchResetSubmitting] = useState(false);
   const [passwordTenantId, setPasswordTenantId] = useState<number | null>(null);
   const [tenantAdminStates, setTenantAdminStates] = useState<Record<number, TenantAdminLoadState>>({});
   const [policyModal, setPolicyModal] = useState(false);
@@ -644,6 +653,40 @@ export default function AdminPage() {
     }
   };
 
+  // 方法作用：打开批量重置弹窗并重置临时选择，未勾选用户时默认按全租户范围。
+  // Args: 无。
+  // Returns: 无返回值。
+  const openBatchReset = () => {
+    setBatchResetScope(selectedUserIds.length > 0 ? 'selected' : 'all');
+    setBatchResetFields([]);
+    setBatchResetOpen(true);
+  };
+
+  // 方法作用：提交批量或全租户的报表额度已用量重置，并按实际清零人数提示结果。
+  // Args: 无，读取重置范围、选中用户与字段选择。
+  // Returns: 提交结束后无返回值。
+  const submitBatchReset = async (): Promise<void> => {
+    const scopeAllUsers = batchResetScope === 'all';
+    const targetUserIds = selectedUserIds;
+    if (batchResetSubmitting || batchResetFields.length === 0) return;
+    if (!scopeAllUsers && targetUserIds.length === 0) return;
+    // 全租户路径用当前已加载的用户总数作为请求人数，用于说明「实际清零人数少于请求人数」的差异。
+    const requestedCount = scopeAllUsers ? users.length : targetUserIds.length;
+    setBatchResetSubmitting(true);
+    try {
+      // 两条范围路径互斥：全租户只发 all_users，指定用户只发 user_ids。
+      const result = scopeAllUsers
+        ? await resetReportQuotaUsage({ all_users: true, fields: batchResetFields })
+        : await resetReportQuotaUsage({ user_ids: targetUserIds, fields: batchResetFields });
+      message.success(quotaResetResultMessage(result, requestedCount));
+      setBatchResetFields([]);
+      setBatchResetOpen(false);
+    } catch (failure) {
+      console.error('AdminPage.submitBatchReset 异常', failure);
+      message.error(failure instanceof Error ? failure.message : t("报表额度重置失败"));
+    } finally { setBatchResetSubmitting(false); }
+  };
+
   // 方法作用：打开动态访问策略创建或编辑表单。
   // Args: policy - 可选数据库策略，缺失时进入创建模式。
   // Returns: 无返回值。
@@ -818,6 +861,9 @@ export default function AdminPage() {
     () => providers.find(provider => provider.id === selectedProviderId),
     [providers, selectedProviderId],
   );
+  // 没有目标用户或没勾字段时禁用提交，避免发一个必然被后端 422 拒绝的请求。
+  const batchResetDisabled = batchResetFields.length === 0
+    || (batchResetScope === 'selected' && selectedUserIds.length === 0);
 
   const tenantWorkspace = (
     <Table<Tenant> rowKey="id" dataSource={tenants} loading={loading} pagination={{ pageSize: 20 }}
@@ -875,7 +921,12 @@ export default function AdminPage() {
 
   const userWorkspace = (
     <Table<ManagedUser> rowKey="id" dataSource={users} loading={loading} pagination={{ pageSize: 20 }}
+      rowSelection={isTenantAdmin ? {
+        selectedRowKeys: selectedUserIds,
+        onChange: keys => setSelectedUserIds(keys.map(Number)),
+      } : undefined}
       title={() => <Space wrap><Button type="primary" icon={<PlusOutlined />} onClick={() => setUserModal(true)}>{t("创建用户")}</Button>
+        {isTenantAdmin && <Button onClick={openBatchReset}>{t("批量重置报表额度")}</Button>}
         {!isTenantAdmin && <Select allowClear placeholder={t("全部租户")} style={{ width: 180 }} value={tenantFilter} onChange={setTenantFilter}
           options={tenants.map(tenant => ({ value: tenant.id, label: tenant.name }))} />}
         <Button icon={<ReloadOutlined />} onClick={() => void load()} aria-label={t("刷新用户")} /></Space>}
@@ -1152,6 +1203,31 @@ export default function AdminPage() {
       <Form form={passwordForm} layout="vertical">
         <Form.Item name="password" label={t("新密码")} rules={[{ required: true, min: 8, max: 72 }]}><Input.Password /></Form.Item>
       </Form>
+    </Modal>
+
+    <Modal title={t("批量重置报表额度")} open={batchResetOpen}
+      onCancel={() => { setBatchResetOpen(false); setBatchResetFields([]); }} footer={null} destroyOnHidden>
+      <Alert type="info" showIcon
+        message={t("重置只清零当前自然月的已用量，不修改额度上限；已用量清零后不可撤销。")} style={{ marginBottom: 16 }} />
+      <Form layout="vertical">
+        <Form.Item label={t("重置范围")}>
+          <Radio.Group value={batchResetScope} onChange={event => setBatchResetScope(event.target.value)}>
+            <Radio value="selected">{t("已选中的 {value0} 个用户", { value0: selectedUserIds.length })}</Radio>
+            <Radio value="all">{t("当前租户全部用户")}</Radio>
+          </Radio.Group>
+        </Form.Item>
+        <Form.Item label={t("重置字段")}>
+          <Checkbox.Group options={REPORT_QUOTA_RESET_FIELDS} value={batchResetFields}
+            onChange={values => setBatchResetFields(values as ReportQuotaResetField[])} />
+        </Form.Item>
+      </Form>
+      <Space style={{ width: '100%', justifyContent: 'flex-end' }}>
+        <Button onClick={() => { setBatchResetOpen(false); setBatchResetFields([]); }}>{t("取消")}</Button>
+        <Popconfirm title={t("确认重置本周期已用量？")} description={t("将清零选中字段的本月已用量，且不可撤销。")}
+          okText={t("确认重置")} cancelText={t("取消")} onConfirm={() => void submitBatchReset()} disabled={batchResetDisabled}>
+          <Button type="primary" danger loading={batchResetSubmitting} disabled={batchResetDisabled}>{t("重置已用量")}</Button>
+        </Popconfirm>
+      </Space>
     </Modal>
 
     <Modal title={editingPolicy ? t("编辑访问策略") : t("创建访问策略")} open={policyModal}

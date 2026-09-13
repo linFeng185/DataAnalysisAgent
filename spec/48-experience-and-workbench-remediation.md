@@ -139,11 +139,12 @@
 
 ## 5. D 批：额度重置
 
-- `POST /report-workbench/admin/users/{user_id}/quota-usage/reset`：请求体为**要清零的字段多选**，取值限于 `jobs_created`、`runs_started`、`llm_tokens`、`share_links` 四个按月累计字段；空列表返回 422。
-- 批量与全租户：复用同一处理逻辑，接受 `user_ids` 列表或 `all_users: true`，两者互斥。
+- `POST /report-workbench/admin/quota-usage/reset`：单用户、批量与全租户共用同一入口，请求体 `{"user_ids":[...], "all_users":false, "fields":[...]}`；`user_ids` 与 `all_users: true` 互斥且必居其一（同时出现、都不提供或空 `user_ids` 均 422），`fields` 为**要清零的字段多选**，取值限于 `jobs_created`、`runs_started`、`llm_tokens`、`share_links` 四个按月累计字段，空数组或未知字段名返回 422。
 - 只把当前周期的 `report_quota_usage` 对应列清零，**不改动 `report_quota_policies` 的上限**。
-- 每次重置写入 `report_access_audit`，记录操作者、目标用户与被清零字段。
-- 仅租户管理员可调用。
+- 响应 `{"reset_users":N,"fields":[...],"period_start":"...","period_end":"..."}`；`reset_users` 是**实际被清零的用户数**，跨租户目标与本期无用量行的目标不计入，且不让整次请求失败。
+- 每个被实际清零的用户各写一条 `report_access_audit`（`action="quota_usage_reset"`，`metadata` 含目标用户与字段）。
+- 仅租户管理员可调用，其余身份 403。
+- 字段白名单必须来自唯一来源（`src/reporting/quota_reset.py`），**禁止把请求里的字段名拼进 SQL**；持久化分支用 `RETURNING user_id` 确认实际被清零的用户。
 
 ## 6. E 批：数据源同步排队
 
