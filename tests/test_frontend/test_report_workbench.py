@@ -201,3 +201,20 @@ class TestReportWorkbenchFrontend:
         assert "unit.rationale" in page
         assert "ReportDivergenceLevel" in types
         assert "divergence" in api
+
+    # 方法作用：验证预览页可逐项取消建议单元并提交裁剪结果。
+    # Args: self - pytest 测试类实例。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    def test_workbench_sends_accepted_unit_ids(self) -> None:
+        """取消勾选后创建任务必须提交 accepted_unit_ids；未取消时传 null 走全部接受。"""
+        # Arrange
+        page = Path("frontend/src/pages/ReportWorkbenchPage.tsx").read_text(encoding="utf-8")
+        api = Path("frontend/src/api/reportWorkbench.ts").read_text(encoding="utf-8")
+
+        # Act / Assert
+        assert "Checkbox" in page
+        assert "excludedUnitIds" in page
+        assert "acceptedUnitIds" in page
+        assert "纳入本次报表" in page
+        # 接口层字段名必须与后端契约一致
+        assert "accepted_unit_ids" in api

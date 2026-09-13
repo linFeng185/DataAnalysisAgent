@@ -53,11 +53,11 @@ class ReportStore:
     # 方法作用：在同一事务中去重、扣任务配额并创建任务，返回是否需要首次入队。
     # Args: identity - 当前身份；prompt - 描述；plan - 已确认计划；idempotency_key - 幂等键；quota_manager - 配额服务。
     # Returns: 任务、是否新建及配额快照。
-    async def create_job_with_quota(self, identity: Any, prompt: str, plan: ReportPlan, idempotency_key: str, quota_manager: Any) -> tuple[ReportJobRecord, bool, Any]:
+    async def create_job_with_quota(self, identity: Any, prompt: str, plan: ReportPlan, idempotency_key: str, quota_manager: Any, preview_hash: str = "") -> tuple[ReportJobRecord, bool, Any]:
         """内存使用应用锁，PostgreSQL 使用事务锁保证多实例幂等。"""
         if self._memory:
             async with self._claim_lock:
-                return await self._create_reserved_job(identity, prompt, plan, idempotency_key, quota_manager)
+                return await self._create_reserved_job(identity, prompt, plan, idempotency_key, quota_manager, preview_hash)
         from src.memory.pg_pool import pg_pool_connection
         from src.reporting.quota import QuotaManager
 
@@ -71,12 +71,12 @@ class ReportStore:
                 )
             scoped_store = ReportStore(pg_pool=connection, memory=False)
             scoped_quota = QuotaManager(store=scoped_store, default_policy=quota_manager.default_policy)
-            return await scoped_store._create_reserved_job(identity, prompt, plan, idempotency_key, scoped_quota)
+            return await scoped_store._create_reserved_job(identity, prompt, plan, idempotency_key, scoped_quota, preview_hash)
 
     # 方法作用：在调用方已经取得的创建事务或应用锁内完成去重和预占。
     # Args: identity - 当前身份；prompt - 描述；plan - 计划；idempotency_key - 幂等键；quota_manager - 同事务配额服务。
     # Returns: 任务、是否新建及配额快照。
-    async def _create_reserved_job(self, identity: Any, prompt: str, plan: ReportPlan, idempotency_key: str, quota_manager: Any) -> tuple[ReportJobRecord, bool, Any]:
+    async def _create_reserved_job(self, identity: Any, prompt: str, plan: ReportPlan, idempotency_key: str, quota_manager: Any, preview_hash: str = "") -> tuple[ReportJobRecord, bool, Any]:
         existing = await self.get_job_by_idempotency(identity, idempotency_key)
         if existing is not None:
             if existing.plan.canonical_hash() != plan.canonical_hash():
@@ -84,7 +84,7 @@ class ReportStore:
             return existing, False, await quota_manager.snapshot(identity, timezone_name=plan.timezone)
         snapshot = await quota_manager.reserve(identity, jobs=1, timezone_name=plan.timezone)
         try:
-            job = await self.create_job(identity, prompt, plan, idempotency_key)
+            job = await self.create_job(identity, prompt, plan, idempotency_key, preview_hash=preview_hash)
         except BaseException:
             if self._memory:
                 await quota_manager.refund_uncreated_job(identity, plan.timezone, period_start=snapshot.period_start)
@@ -114,7 +114,7 @@ class ReportStore:
     # 方法作用：创建当前身份的报表任务并执行幂等键去重。
     # Args: identity - 当前租户身份；prompt - 用户描述；plan - 已确认计划；idempotency_key - 客户端幂等键。
     # Returns: 新建或已存在的 ReportJobRecord。
-    async def create_job(self, identity: Any, prompt: str, plan: ReportPlan, idempotency_key: str = "") -> ReportJobRecord:
+    async def create_job(self, identity: Any, prompt: str, plan: ReportPlan, idempotency_key: str = "", preview_hash: str = "") -> ReportJobRecord:
         tenant_id = int(getattr(identity, "tenant_id", 0) or 0)
         user_id = int(getattr(identity, "user_id", 0) or 0)
         if self._memory:
@@ -126,6 +126,7 @@ class ReportStore:
             row = {
                 "id": job_id, "tenant_id": tenant_id, "user_id": user_id, "prompt": prompt,
                 "plan_json": plan.model_dump(mode="json"), "plan_hash": plan.canonical_hash(),
+                "preview_hash": preview_hash or plan.canonical_hash(),
                 "status": "queued", "next_run_at": plan.run_at or now, "is_paused": False,
                 "runs_started": 0, "created_at": now, "updated_at": now,
             }
@@ -148,10 +149,10 @@ class ReportStore:
                 if existing:
                     return self._to_job(existing)
             row = await connection.fetchrow(
-                "INSERT INTO report_jobs (id,tenant_id,user_id,prompt,plan_json,plan_hash,execution_mode,frequency,timezone,max_runs,status,idempotency_key,next_run_at,schedule_end_at,page_ttl_days,permanent) "
-                "VALUES ($1::uuid,$2,$3,$4,$5::jsonb,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16) RETURNING *",
+                "INSERT INTO report_jobs (id,tenant_id,user_id,prompt,plan_json,plan_hash,preview_hash,execution_mode,frequency,timezone,max_runs,status,idempotency_key,next_run_at,schedule_end_at,page_ttl_days,permanent) "
+                "VALUES ($1::uuid,$2,$3,$4,$5::jsonb,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17) RETURNING *",
                 job_id, tenant_id, user_id, prompt, json.dumps(plan.model_dump(mode="json"), ensure_ascii=False),
-                plan.canonical_hash(), plan.execution_mode, plan.frequency, plan.timezone, plan.max_runs,
+                plan.canonical_hash(), preview_hash or plan.canonical_hash(), plan.execution_mode, plan.frequency, plan.timezone, plan.max_runs,
                 "queued", idempotency_key.strip() or None, plan.run_at or datetime.now(timezone.utc), plan.schedule_end_at, plan.page_ttl_days, plan.permanent,
             )
         logger.info("报表任务创建完成", job_id=job_id, tenant_id=tenant_id, user_id=user_id)
@@ -1068,7 +1069,7 @@ class ReportStore:
     @classmethod
     def _to_job(cls, row: Any) -> ReportJobRecord:
         plan_data = cls._json_dict(row.get("plan_json", {}) if hasattr(row, "get") else row["plan_json"])
-        return ReportJobRecord(id=str(row["id"]), tenant_id=int(row["tenant_id"]), user_id=int(row["user_id"]), prompt=str(row["prompt"]), plan=ReportPlan.model_validate(plan_data), status=str(row.get("status", "draft")), runs_started=int(row.get("runs_started", 0) or 0), next_run_at=row.get("next_run_at"), is_paused=bool(row.get("is_paused", False)), created_at=row.get("created_at"), updated_at=row.get("updated_at"))
+        return ReportJobRecord(id=str(row["id"]), tenant_id=int(row["tenant_id"]), user_id=int(row["user_id"]), prompt=str(row["prompt"]), plan=ReportPlan.model_validate(plan_data), plan_hash=str(row.get("plan_hash", "") or ""), preview_hash=str(row.get("preview_hash", "") or ""), status=str(row.get("status", "draft")), runs_started=int(row.get("runs_started", 0) or 0), next_run_at=row.get("next_run_at"), is_paused=bool(row.get("is_paused", False)), created_at=row.get("created_at"), updated_at=row.get("updated_at"))
 
     # 方法作用：把数据库行转换为安全的运行模型。
     # Args: row - asyncpg Record 或内存字典。

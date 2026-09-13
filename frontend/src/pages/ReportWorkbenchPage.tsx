@@ -1,6 +1,6 @@
 import { t, useLanguage } from '../i18n';
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { Alert, Button, Card, Drawer, Empty, Input, List, message, Segmented, Select, Space, Statistic, Table, Tag, Typography } from 'antd';
+import { Alert, Button, Card, Checkbox, Drawer, Empty, Input, List, message, Segmented, Select, Space, Statistic, Table, Tag, Typography } from 'antd';
 import {
   ClockCircleOutlined,
   BarsOutlined,
@@ -113,6 +113,8 @@ export default function ReportWorkbenchPage() {
   const navigate = useNavigate();
   const [prompt, setPrompt] = useState('');
   const [divergence, setDivergence] = useState<ReportDivergenceLevel>('standard');
+  // 被用户取消勾选的单元。只允许删减，服务端会拒绝任何不属于预览计划的标识。
+  const [excludedUnitIds, setExcludedUnitIds] = useState<string[]>([]);
   const [datasources, setDatasources] = useState<DatasourceConfig[]>([]);
   const [selectedDatasources, setSelectedDatasources] = useState<string[]>([]);
   const [models, setModels] = useState<ModelOption[]>([]);
@@ -198,6 +200,8 @@ export default function ReportWorkbenchPage() {
     try {
       const result = await previewReportPlan(prompt.trim(), selectedDatasources, undefined, modelId, llmConnectionId, divergence);
       setPreview(result);
+      // 新预览意味着单元集合可能变化，旧的取消勾选不再适用。
+      setExcludedUnitIds([]);
       creationKey.current = crypto.randomUUID();
     } catch (error) {
       message.error(error instanceof Error ? error.message : t("计划解析失败"));
@@ -228,12 +232,17 @@ export default function ReportWorkbenchPage() {
     creationInFlight.current = true;
     setCreating(true);
     try {
+      // 有取消勾选时只保留被接受的单元；没有取消则传 null 走"全部接受"，与既有行为一致。
+      const acceptedUnitIds = excludedUnitIds.length > 0
+        ? preview.plan.analysis_units.map(unit => unit.unit_id).filter(id => !excludedUnitIds.includes(id))
+        : null;
       const result = await createReportJob(
         prompt.trim(),
         preview.plan_hash,
         null,
         true,
         creationKey.current || (creationKey.current = crypto.randomUUID()),
+        acceptedUnitIds,
       );
       const jobId = typeof result.job_id === 'string' ? result.job_id : '';
       setPreview(null);
@@ -416,6 +425,14 @@ export default function ReportWorkbenchPage() {
               header={t("建议补充的分析")}
               dataSource={preview.plan.analysis_units.filter(unit => unit.origin === 'diverged')}
               renderItem={unit => <List.Item className="report-plan-unit">
+                <Checkbox
+                  checked={!excludedUnitIds.includes(unit.unit_id)}
+                  onChange={event => setExcludedUnitIds(current => event.target.checked
+                    ? current.filter(id => id !== unit.unit_id)
+                    : [...current, unit.unit_id])}
+                >
+                  {t("纳入本次报表")}
+                </Checkbox>
                 <Typography.Text strong>{unit.unit_id}</Typography.Text>
                 <Typography.Text>{unit.question}</Typography.Text>
                 <Typography.Text type="secondary">{t("建议理由：")}{unit.rationale || t("未说明")}</Typography.Text>

@@ -80,6 +80,7 @@ export function createReportJob(
   plan: ReportPlan | null,
   confirm: boolean,
   idempotencyKey: string,
+  acceptedUnitIds?: string[] | null,
 ): Promise<Record<string, unknown>> {
   return post<Record<string, unknown>>(`${REPORT_BASE}/jobs`, {
     prompt,
@@ -87,6 +88,8 @@ export function createReportJob(
     plan_override: plan,
     confirm,
     idempotency_key: idempotencyKey,
+    // 不传表示全部接受；传数组表示只保留列表中的单元。空数组由服务端拒绝。
+    accepted_unit_ids: acceptedUnitIds ?? null,
   });
 }
 

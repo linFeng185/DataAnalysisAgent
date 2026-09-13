@@ -180,6 +180,35 @@ async def _resolve_plan_access(identity: Any, plan: ReportPlan) -> dict[str, dic
 # 方法作用：把计划模型转换为不含内部权限快照的预览响应。
 # Args: plan - 报表计划。
 # Returns: 计划 JSON、哈希和估算摘要。
+# 方法作用：按用户勾选结果删减计划单元，只允许删减不允许新增。
+# Args: plan - 预览确认过的计划；accepted_unit_ids - 用户保留的单元标识列表。
+# Returns: 裁剪后的有效计划；入参非法时抛出 HTTPException。
+def _apply_unit_trimming(plan: ReportPlan, accepted_unit_ids: list[str]) -> ReportPlan:
+    from src.reporting.models import ReportPlan as _ReportPlan
+
+    accepted = list(dict.fromkeys(str(item) for item in accepted_unit_ids))
+    if not accepted:
+        # 空数组是"全部取消"，等价于空计划，属非法请求；不传该字段才表示全部接受。
+        raise HTTPException(422, "accepted_unit_ids 不能是空数组；如需全部接受请不提交该字段")
+    known = {unit.unit_id for unit in plan.analysis_units}
+    unknown = [item for item in accepted if item not in known]
+    if unknown:
+        # 没有这条校验，客户端就能凭空构造执行范围。
+        raise HTTPException(422, f"包含不属于预览计划的分析单元：{'、'.join(unknown[:5])}")
+    kept = set(accepted)
+    excluded = [unit.unit_id for unit in plan.analysis_units if unit.unit_id not in kept]
+    if not excluded:
+        return plan
+    candidate = plan.model_dump(mode="json")
+    candidate["analysis_units"] = [unit.model_dump(mode="json") for unit in plan.analysis_units if unit.unit_id in kept]
+    # 记录被删减的标识，保留审计线索；该字段进 canonical_hash。
+    candidate["excluded_unit_ids"] = list(dict.fromkeys([*plan.excluded_unit_ids, *excluded]))
+    # 重新走完整校验：单元被删后 requested_datasources 会重算，unit_id 唯一性也会再验一次。
+    trimmed = _ReportPlan.model_validate(candidate)
+    logger.info("报表计划按用户裁剪", kept_count=len(trimmed.analysis_units), excluded_count=len(excluded))
+    return trimmed
+
+
 def _plan_response(plan: ReportPlan) -> dict[str, Any]:
     return {"plan": plan.model_dump(mode="json"), "plan_hash": plan.canonical_hash(), "estimated": plan.estimated.model_dump(mode="json"), "job_id": None}
 
@@ -270,6 +299,12 @@ async def create_job(request: ReportJobCreateRequest) -> dict[str, Any]:
         raise HTTPException(409, "计划已过期，请重新生成预览")
     if plan.canonical_hash() != request.plan_hash:
         raise HTTPException(409, "计划哈希不匹配，请重新确认计划")
+    if request.accepted_unit_ids is not None:
+        # 裁剪只能删减预览计划，不能新增：执行范围只可能更小，因此不构成越权。
+        # 凭证校验必须发生在裁剪之前，客户端仍须持有完整预览计划的哈希。
+        if request.plan_override is not None:
+            raise HTTPException(422, "accepted_unit_ids 与 plan_override 不能同时提交")
+        plan = _apply_unit_trimming(plan, request.accepted_unit_ids)
     if plan.needs_confirmation and not request.confirm:
         raise HTTPException(409, "该计划需要用户确认后才能执行")
     if plan.execution_mode == "scheduled":
@@ -291,7 +326,11 @@ async def create_job(request: ReportJobCreateRequest) -> dict[str, Any]:
     quota_manager = get_report_quota_manager()
     store = get_report_store()
     try:
-        job, created, quota = await store.create_job_with_quota(identity, request.prompt, plan, request.idempotency_key, quota_manager)
+        # plan_json 存裁剪后的有效计划，plan_hash 仍是它的校验和；
+        # preview_hash 单独记录客户端提交的预览凭证，用于审计「这份计划来自哪次预览」。
+        job, created, quota = await store.create_job_with_quota(
+            identity, request.prompt, plan, request.idempotency_key, quota_manager, request.plan_hash
+        )
     except QuotaExceededError as exc:
         raise HTTPException(429, "本周期报表任务配额已用尽") from exc
     except ValueError as exc:
