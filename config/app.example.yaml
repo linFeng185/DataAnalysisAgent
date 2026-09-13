@@ -1,111 +1,213 @@
 # 应用统一配置示例。复制为 app.yaml 后按环境修改；LLM 凭证由管理后台维护。
+# 注释格式：用途 | 默认值（不填时实际生效，以 src/config.py 为准）| 生效范围
+#   热生效 = 可用 PUT /admin/runtime-settings 立即修改（改本文件后需重启才成为新基线）
+#   需重启 = 不在热改白名单内，修改后必须重启进程
+# 配置优先级：环境变量 / .env > 本文件；APP_CONFIG_PATH 可指定本文件路径。
+
+# 用途：运行环境 dev/prod/test，prod 会在启动时强制校验密钥强度与 DATABASE_URL | 默认值：prod | 生效范围：需重启
 env: dev
+# 用途：日志级别 DEBUG/INFO/WARNING/ERROR | 默认值：INFO | 生效范围：需重启
 log_level: INFO
+# 用途：日志输出格式，console 便于排查 / json 便于采集 | 默认值：console | 生效范围：需重启
 log_format: console
+# 用途：日志文件路径（按天轮转保留 7 份）| 默认值：logs/app.log | 生效范围：需重启
 log_file: logs/app.log
+# 用途：开发态代码热重载开关 | 默认值：true | 生效范围：需重启
 server_reload_enabled: true
 
 # 仅保留模型路由元数据；远程服务地址和凭证由管理后台维护。
+# 用途：LLM 供应商 openai/anthropic | 默认值：openai | 生效范围：热生效
 llm_provider: openai
+# 用途：主模型名（Agent 主链路）| 默认值：gpt-4o | 生效范围：热生效
 llm_model: gpt-4o
+# 用途：采样温度，越低越稳定 | 默认值：0.0 | 生效范围：热生效
 llm_temperature: 0.0
+# 用途：单次响应最大输出 Token 数 | 默认值：4096 | 生效范围：热生效
 llm_max_tokens: 4096
+# 用途：远程模型单次请求超时秒数 | 默认值：60 | 生效范围：热生效
 llm_timeout: 60
+# 用途：结果分析类子任务的模型超时秒数（允许 0.1-3600）| 默认值：30.0 | 生效范围：热生效
 analysis_llm_timeout: 30
+# 用途：流式响应相邻分片最大间隔秒数，超时判定断流 | 默认值：30 | 生效范围：热生效
 llm_stream_chunk_timeout: 30
+# 用途：轻量节点（摘要、命名等）使用的低成本模型 | 默认值：gpt-4o-mini | 生效范围：热生效
 cheap_llm_model: gpt-4o-mini
+# 用途：本地模型名，留空表示不启用本地模型 | 默认值：空 | 生效范围：需重启
 local_llm_model: ""
+# 用途：本地模型 OpenAI-compatible 基础地址 | 默认值：空 | 生效范围：需重启
 local_llm_base_url: ""
+# 用途：本地模型 API Key，本地服务通常任意填 | 默认值：local | 生效范围：需重启
 local_llm_api_key: local
+# 用途：本地模型请求超时秒数 | 默认值：15 | 生效范围：热生效
 local_llm_timeout: 15
+# 用途：允许发送到远程模型的任务清单，逗号分隔 | 默认值：generate_sql | 生效范围：热生效
 llm_remote_tasks: generate_sql
+# 用途：本地模型失败时是否允许回退到远程模型 | 默认值：false | 生效范围：热生效
 llm_allow_remote_fallback: false
 
+# 用途：智能体自身状态库连接串（用户、会话、记忆、报表等）| 默认值：空（必须配置）| 生效范围：需重启
 database_url: ""
+# 用途：启动时自动执行 migrations 迁移 | 默认值：true（prod 校验强制 true）| 生效范围：需重启
 run_migrations_on_startup: true
+# 用途：长期记忆自动维护任务总开关 | 默认值：true | 生效范围：需重启
 memory_maintenance_enabled: true
+# 用途：记忆维护任务执行间隔秒数 | 默认值：86400（24 小时）| 生效范围：需重启
 memory_maintenance_interval_seconds: 86400
+# 用途：记忆晋升为长期知识所需的最小复用次数（允许 2-100）| 默认值：3 | 生效范围：热生效
 knowledge_evolution_promotion_threshold: 3
 
+# 用途：向量库类型 chroma / milvus | 默认值：chroma | 生效范围：需重启
 vector_store_type: chroma
+# 用途：是否启用向量库抽象层（统一多后端接口）| 默认值：true | 生效范围：需重启
 vector_store_abstract_enabled: true
+# 用途：Milvus 服务地址，切换到 milvus 时必须填写 | 默认值：空 | 生效范围：需重启
 milvus_uri: ""
+# 用途：ChromaDB 持久化目录 | 默认值：./chroma_data | 生效范围：需重启
 chroma_persist_dir: ./chroma_data
+# 用途：ChromaDB 集合名 | 默认值：data_agent_knowledge | 生效范围：需重启
 chroma_collection_name: data_agent_knowledge
+# 用途：本地嵌入模型目录（不带 onnx 子目录）| 默认值：空（必须配置，否则向量检索不可用）| 生效范围：需重启
 embedding_model_path: ""
 
+# 用途：Redis 连接串，用于限流、缓存与跨 Worker 协调 | 默认值：redis://localhost:6379/0 | 生效范围：需重启
 redis_url: redis://localhost:6379/0
+# 用途：数据源内容缓存后端 local 单机 / redis 多实例共享 | 默认值：local | 生效范围：需重启
 datasource_cache_backend: local
+# 用途：local 后端缓存目录 | 默认值：./data/cache/datasource | 生效范围：需重启
 datasource_cache_dir: ./data/cache/datasource
+# 用途：缓存条目存活秒数 | 默认值：604800（7 天）| 生效范围：需重启
 datasource_cache_ttl_seconds: 604800
+# 用途：redis 后端 key 前缀，用于多环境共用实例时隔离 | 默认值：data-agent:datasource-cache | 生效范围：需重启
 datasource_cache_redis_prefix: data-agent:datasource-cache
+# 用途：是否定时刷新数据源 Schema 缓存 | 默认值：true | 生效范围：需重启
 schema_cache_refresh_enabled: true
+# 用途：Schema 缓存刷新间隔秒数 | 默认值：3600 | 生效范围：需重启
 schema_cache_refresh_interval_seconds: 3600
 
+# 用途：远程 Skill 仓库地址，空表示只用本地目录 | 默认值：空 | 生效范围：需重启
 skill_registry_url: ""
+# 用途：允许拉取 Skill 的可信主机，逗号分隔 | 默认值：空 | 生效范围：需重启
 skill_registry_trusted_hosts: ""
+# 用途：单个 Skill 包体积上限（字节）| 默认值：10485760（10 MiB）| 生效范围：需重启
 skill_registry_max_package_bytes: 10485760
+# 用途：受管/额外目录 Skill 是否强制校验 Ed25519 签名 | 默认值：true | 生效范围：需重启
 skill_require_signatures: true
+# 用途：可信签发者公钥映射（key_id → PEM/Base64 公钥）| 默认值：空（无可用公钥，受管/额外目录 Skill 签名校验必然失败）| 生效范围：需重启
 skill_trusted_public_keys: '{}'
 
+# 用途：主动洞察与自动化总开关 | 默认值：true | 生效范围：需重启
 automation_enabled: true
+# 用途：定时报告调度器开关 | 默认值：true | 生效范围：需重启
 report_scheduler_enabled: true
+# 用途：调度轮询间隔秒数（允许 10-3600）| 默认值：60 | 生效范围：需重启
 automation_poll_interval_seconds: 60
+# 用途：报告外发 SMTP 服务器地址 | 默认值：空（不启用邮件外发）| 生效范围：需重启
 automation_smtp_host: ""
+# 用途：SMTP 端口 | 默认值：587 | 生效范围：需重启
 automation_smtp_port: 587
+# 用途：SMTP 是否启用 STARTTLS | 默认值：true | 生效范围：需重启
 automation_smtp_starttls: true
+# 用途：SMTP 登录用户名 | 默认值：空 | 生效范围：需重启
 automation_smtp_username: ""
+# 用途：SMTP 登录密码（仅服务端读取，任务请求不能提交）| 默认值：空 | 生效范围：需重启
 automation_smtp_password: ""
+# 用途：邮件发件人地址 | 默认值：空 | 生效范围：需重启
 automation_email_from: ""
+# 用途：飞书群机器人 Webhook 地址 | 默认值：空（不推送）| 生效范围：需重启
 automation_feishu_webhook_url: ""
+# 用途：Slack Incoming Webhook 地址 | 默认值：空（不推送）| 生效范围：需重启
 automation_slack_webhook_url: ""
 
+# 用途：报表工作台总开关 | 默认值：true | 生效范围：需重启
 report_workbench_enabled: true
+# 用途：新建报表默认有效期天数（允许 1-90）| 默认值：7 | 生效范围：需重启
 report_default_ttl_days: 7
+# 用途：报表有效期上限天数（允许 1-3650）| 默认值：90 | 生效范围：需重启
 report_max_ttl_days: 90
+# 用途：报表默认时区，影响时间口径与展示 | 默认值：Asia/Shanghai | 生效范围：需重启
 report_default_timezone: Asia/Shanghai
+# 用途：单个报表运行的最大分析单元数（允许 1-200，租户按成本承受力设定）| 默认值：12（本模板示例值为 36）| 生效范围：需重启
 report_max_units_per_run: 36
 # 多源扇出下单次运行的查询数 = 单元数 × 命中源数，需要能容纳整库扇出
+# 用途：单个报表运行的最大查询数（允许 1-1000）| 默认值：16（本模板示例值为 100）| 生效范围：需重启
 report_max_queries_per_run: 100
+# 用途：报表单元并发执行数（允许 1-100）| 默认值：4 | 生效范围：需重启
 report_max_concurrency: 4
+# 用途：单页结果字节上限（允许 1024-50000000）| 默认值：2097152（2 MiB）| 生效范围：需重启
 report_max_page_bytes: 2097152
+# 用途：公开分享链接的最长有效期天数 | 默认值：30 | 生效范围：需重启
 report_max_public_share_days: 30
+# 用途：是否允许生成公开分享链接 | 默认值：true | 生效范围：需重启
 report_public_share_enabled: true
+# 用途：报表单元失败重试次数（允许 1-10）| 默认值：3 | 生效范围：需重启
 report_retry_max_attempts: 3
+# 用途：单次报表运行超时秒数（允许 1-86400）| 默认值：900（15 分钟）| 生效范围：需重启
 report_run_timeout_seconds: 900
 
+# 用途：多租户隔离开关，关闭时仍强制登录 | 默认值：false | 生效范围：需重启
 multi_tenant: false
+# 用途：是否开放公开注册接口 | 默认值：false | 生效范围：需重启
 registration_enabled: false
+# 用途：内置超级管理员用户名 | 默认值：admin | 生效范围：需重启
 super_admin_username: admin
+# 用途：内置超级管理员初始密码，users.id=1 不存在时用它创建 | 默认值：空（首次启动必须注入）| 生效范围：需重启
 super_admin_password: ""
+# 用途：JWT 签名密钥，prod 要求至少 32 字符 | 默认值：空（必须配置）| 生效范围：需重启
 jwt_secret: ""
+# 用途：访问令牌有效期小时数 | 默认值：24 | 生效范围：热生效
 jwt_access_token_expire_hours: 24
+# 用途：刷新令牌有效期天数 | 默认值：7 | 生效范围：热生效
 jwt_refresh_token_expire_days: 7
+# 用途：管理端点 API Key；留空表示管理端点不启用 Key 认证 | 默认值：空（不启用）| 生效范围：需重启
 admin_api_key: ""
+# 用途：数据源凭证等敏感字段的 Fernet 主密钥，prod 要求至少 32 字符 | 默认值：空（必须配置）| 生效范围：需重启
 credential_encryption_key: ""
+# 用途：当前使用的加密密钥标识，用于版本化轮换 | 默认值：空 | 生效范围：需重启
 credential_key_id: ""
+# 用途：历史密钥映射（key_id → 主密钥），用于轮换期解密旧密文 | 默认值：{} | 生效范围：需重启
 credential_previous_keys: {}
+# 用途：密钥来源渠道 environment 明文 / file 挂载文件 / vault 服务 | 默认值：environment | 生效范围：需重启
 secret_provider: environment
+# 用途：secret_provider=file 时的密钥 JSON 文件路径 | 默认值：空 | 生效范围：需重启
 secret_file: ""
+# 用途：Vault 服务地址 | 默认值：空 | 生效范围：需重启
 vault_addr: ""
+# 用途：Vault KV 挂载点 | 默认值：secret | 生效范围：需重启
 vault_mount: secret
+# 用途：Vault 中存放密钥的路径 | 默认值：空 | 生效范围：需重启
 vault_secret_path: ""
+# 用途：Vault Token 文件路径（避免 token 明文进环境变量）| 默认值：空 | 生效范围：需重启
 vault_token_file: ""
+# 用途：Vault Enterprise 命名空间 | 默认值：空 | 生效范围：需重启
 vault_namespace: ""
+# 用途：Vault 服务端 CA 证书路径，用于自签证书校验 | 默认值：空 | 生效范围：需重启
 vault_ca_file: ""
+# 用途：读取的密钥版本号，0 表示取最新版本 | 默认值：0 | 生效范围：需重启
 vault_secret_version: 0
+# 用途：Vault 请求超时秒数（允许 0-60）| 默认值：10 | 生效范围：需重启
 vault_timeout_seconds: 10
 
+# 用途：允许跨域的前端 origin，逗号分隔；空表示拒绝所有跨域，prod 禁止 * | 默认值：空 | 生效范围：需重启
 cors_allowed_origins: ""
+# 用途：HSTS 头的 max-age 秒数，仅生产 HTTPS 响应生效 | 默认值：31536000（1 年）| 生效范围：需重启
 security_hsts_seconds: 31536000
+# 用途：API 认证基线与审计日志策略（default_auth / default_access_log / 可信代理 / 紧急封禁 / 启动策略）| 默认值：见各项注释 | 生效范围：需重启
 api_access:
+  # 用途：未在 bootstrap_policies 中声明且非公开路由的默认认证方式 | 默认值：jwt | 生效范围：需重启
   default_auth: jwt
   # 只保留主要节点日志：常规读请求（前端轮询状态接口）不再逐条记录。
   # 异常仍由 "API 访问异常" 以 error 级记录；安全路由另配 security/audit 保留审计。
+  # 用途：未单列策略的路由默认访问日志级别 standard/security/audit/none | 默认值：standard（本模板为 none）| 生效范围：需重启
   default_access_log: none
+  # 用途：可信反向代理 CIDR 列表，用于还原真实客户端 IP | 默认值：[]（不信任任何代理）| 生效范围：需重启
   trusted_proxy_cidrs:
     - 172.30.0.0/24
+  # 用途：紧急 IP 封禁名单（IP 或 CIDR），命中即拒绝 | 默认值：[] | 生效范围：需重启
   emergency_ip_deny: []
+  # 用途：启动基线路由策略列表，每项含 id/path/path_type/methods/auth/access_log/description 七个字段；
+  #       未列出的路由回落到上面的 default_auth 与 default_access_log。子项为结构数据，逐条注释见 src/config.py 默认策略
+  # 默认值：src/config.py 的 _default_api_access_policies()（健康检查、指标、登录等公开路由 + 管理写操作审计）
+  # 生效范围：需重启
   bootstrap_policies:
     - id: health
       path: /api/v1/health
@@ -234,64 +336,120 @@ api_access:
       access_log: audit
       description: 模型连通性测试
 
+# 用途：主模型不可用时的降级链，逗号分隔（例：gpt-4o,claude-sonnet-4-6）| 默认值：空（不降级）| 生效范围：需重启
 llm_fallback_chain: ""
+# 用途：上下文绝对上限 Token 数，0 表示按模型 context_window 动态计算 | 默认值：0 | 生效范围：热生效
 context_max_tokens: 0
+# 用途：模型 context_window 未知时的兜底窗口（允许 1024-10000000）| 默认值：128000 | 生效范围：热生效
 context_default_window: 128000
+# 用途：触发上下文压缩的窗口占比（0.5-0.95）| 默认值：0.80 | 生效范围：热生效
 context_compression_trigger_ratio: 0.80
+# 用途：压缩后的目标窗口占比（0.1-0.8），必须小于触发比例 | 默认值：0.55 | 生效范围：热生效
 context_compression_target_ratio: 0.55
+# 用途：硬上限占比（0.8-0.99），超过即强制截断，必须大于触发比例 | 默认值：0.92 | 生效范围：热生效
 context_hard_limit_ratio: 0.92
+# 用途：预留给系统提示词的 Token 数 | 默认值：12000 | 生效范围：热生效
 context_prompt_reserve_tokens: 12000
+# 用途：预留给模型输出的 Token 数 | 默认值：8192 | 生效范围：热生效
 context_output_reserve_tokens: 8192
+# 用途：预留给压缩摘要的 Token 数（128-100000）| 默认值：1024 | 生效范围：热生效
 context_summary_reserve_tokens: 1024
+# 用途：保持完整原文的最近轮次数量 | 默认值：5 | 生效范围：热生效
 context_hot_turns: 5
+# 用途：保留摘要而非原文的较远轮次数量 | 默认值：20 | 生效范围：热生效
 context_warm_turns: 20
+# 用途：压缩摘要专用模型，空则复用 cheap_llm_model | 默认值：空 | 生效范围：热生效
 context_summary_model: ""
+# 用途：单次分析投喂 LLM 的样本字符上限，超限按比例均匀抽取 | 默认值：50000 | 生效范围：热生效
 analysis_data_max_chars: 50000
+# 用途：归因分析最少转化路径数（1-10000）| 默认值：2 | 生效范围：热生效
 attribution_min_converted_paths: 2
+# 用途：归因时间衰减半衰期天数 | 默认值：7.0 | 生效范围：热生效
 attribution_time_decay_half_life_days: 7.0
+# 用途：归因分析最多加载的触点行数（200-100000）| 默认值：10000 | 生效范围：热生效
 attribution_max_touchpoint_rows: 10000
+# 用途：SQL 生成等可重试节点的最大重试次数 | 默认值：3 | 生效范围：热生效
 max_retry_count: 3
+# 用途：结果不完整时允许的补充查询轮数（0-3）| 默认值：2 | 生效范围：热生效
 max_supplemental_query_rounds: 2
 
+# 用途：全局每小时查询次数上限 | 默认值：100 | 生效范围：热生效
 max_queries_per_hour: 100
+# 用途：单用户每小时登录次数上限 | 默认值：20 | 生效范围：热生效
 login_max_per_hour: 20
+# 用途：每小时注册次数上限 | 默认值：10 | 生效范围：需重启
 registration_max_per_hour: 10
+# 用途：连续登录失败多少次后锁定账号 | 默认值：5 | 生效范围：热生效
 login_lockout_threshold: 5
+# 用途：账号锁定时长（分钟）| 默认值：15 | 生效范围：热生效
 login_lockout_minutes: 15
+# 用途：单个自然语言问题的字符上限 | 默认值：8000 | 生效范围：热生效
 max_query_chars: 8000
+# 用途：单条 SQL 的字符上限 | 默认值：20000 | 生效范围：热生效
 max_sql_chars: 20000
+# 用途：单次查询可命中的数据源数量上限 | 默认值：5 | 生效范围：热生效
 max_datasources_per_query: 5
+# 用途：单次查询最大扫描行数 | 默认值：10000000 | 生效范围：热生效
 max_scan_rows: 10000000
+# 用途：单条 SQL 最大执行秒数 | 默认值：30 | 生效范围：热生效
 max_execution_time: 30
+# 用途：返回给分析器的结果行数上限 | 默认值：100000 | 生效范围：热生效
 max_result_rows: 100000
+# 用途：统计类查询的结果行数上限 | 默认值：500000 | 生效范围：热生效
 max_stats_rows: 500000
+# 用途：单个上传文件字节上限 | 默认值：20971520（20 MiB）| 生效范围：热生效
 max_upload_bytes: 20971520
+# 用途：单次上传文件个数上限 | 默认值：20 | 生效范围：热生效
 max_upload_files: 20
+# 用途：单次上传总字节上限 | 默认值：104857600（100 MiB）| 生效范围：热生效
 max_upload_total_bytes: 104857600
 
+# 用途：生产环境 EXPLAIN 校验跳过的方言列表 | 默认值：[snowflake] | 生效范围：热生效
 explain_skip_dialects:
   - snowflake
+# 用途：放开私网数据库访问的白名单（主机/IP/CIDR），逗号分隔 | 默认值：空（仅允许公网可路由地址）| 生效范围：热生效
 datasource_host_allowlist: ""
+# 用途：是否上报 LangSmith 链路追踪 | 默认值：false | 生效范围：需重启
 langsmith_tracing: false
+# 用途：LangSmith API Key | 默认值：空 | 生效范围：需重启
 langsmith_api_key: ""
+# 用途：LangSmith 项目名 | 默认值：data-analysis-agent | 生效范围：需重启
 langsmith_project: data-analysis-agent
+# 用途：LangSmith 服务端点，支持自建 | 默认值：https://api.smith.langchain.com | 生效范围：需重启
 langsmith_endpoint: https://api.smith.langchain.com
+# 用途：是否隐藏上报的输入内容（防业务数据外泄）| 默认值：true | 生效范围：需重启
 langsmith_hide_inputs: true
+# 用途：是否隐藏上报的输出内容 | 默认值：true | 生效范围：需重启
 langsmith_hide_outputs: true
+# 用途：上报采样率 0.0-1.0 | 默认值：1.0 | 生效范围：需重启
 langsmith_sampling_rate: 1.0
 
+# 用途：MCP 服务配置来源文件，通常与统一 YAML 同一份 | 默认值：config/app.yaml | 生效范围：需重启
 mcp_config_path: config/app.yaml
+# 用途：允许连接的受管 SSE MCP 主机白名单，逗号分隔 | 默认值：空（全部拒绝）| 生效范围：热生效
 mcp_remote_host_allowlist: ""
+# 用途：内置 MCP 服务定义表，键为服务名，值为 enabled/transport/command/args/description 等字段 | 默认值：{} | 生效范围：需重启
 mcp_servers:
+  # 服务名，可自定义；enabled=false 时不加载
   filesystem:
+    # 用途：是否启用该服务 | 默认值：false（示例为禁用）| 生效范围：需重启
     enabled: false
+    # 用途：传输方式 stdio 本地进程 / sse 远程服务 | 默认值：stdio | 生效范围：需重启
     transport: stdio
+    # 用途：stdio 方式下启动的可执行命令 | 默认值：空 | 生效范围：需重启
     command: ""
+    # 用途：启动命令的参数列表 | 默认值：[] | 生效范围：需重启
     args: []
+    # 用途：服务说明，仅用于展示 | 默认值：空 | 生效范围：需重启
     description: 文件系统访问（默认禁用）
 
+# 用途：内置 Skills 目录，始终加载且不受环境变量覆盖 | 默认值：skills | 生效范围：需重启
 skills_dir: skills
+# 用途：额外的 Skills 搜索目录，分号分隔，上传时优先写入第一个目录 | 默认值：空 | 生效范围：需重启
 extra_skills_dirs: ""
+# 用途：租户级/个人级 Skill 的受管根目录 | 默认值：data/skills | 生效范围：需重启
 managed_skills_dir: data/skills
+# 用途：指标口径等业务文档目录 | 默认值：docs/metrics | 生效范围：需重启
 metrics_docs_dir: docs/metrics
+# 用途：系统知识只读目录，分号分隔，启动时按 checksum 增量扫描 | 默认值：空 | 生效范围：需重启
 system_knowledge_dirs: ""
