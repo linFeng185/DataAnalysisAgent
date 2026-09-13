@@ -29,6 +29,7 @@ class ReportWorkbenchState(TypedDict, total=False):
     unit_results: list[UnitResult]
     relations: list[RelationEvidence]
     cross_business_analysis: dict[str, Any]
+    metric_citations: list[dict[str, Any]]
     artifact: ReportArtifact
     run_status: str
     execute_unit: Any
@@ -277,6 +278,7 @@ async def report_plan_layout(state: ReportWorkbenchState) -> dict[str, Any]:
     artifact = build_report_document(state["plan"], list(state.get("unit_results", [])), report_id=state.get("report_id"), relations=list(state.get("relations", [])))
     if state.get("cross_business_analysis", {}).get("limitations"):
         artifact.document.limitations.extend(state["cross_business_analysis"]["limitations"])
+    _append_metric_citations(artifact, list(state.get("metric_citations", []) or []))
     aggregation = state.get("cross_business_analysis", {}).get("aggregation", {})
     if aggregation.get("status") == "success":
         from src.reporting.document import (
@@ -293,6 +295,62 @@ async def report_plan_layout(state: ReportWorkbenchState) -> dict[str, Any]:
         artifact.document.sections.append(ReportSection(id=data_ref, title="跨源样本聚合", subtitle="同一明确粒度，按来源分别统计；不代表全量业务总额", blocks=[ReportBlock(section_id=data_ref, type="table", title="授权样本的分组统计", data_ref=data_ref, content={"columns": list(rows[0]) if rows else [], "rows": rows}, layout=layout_for_block("table"))]))
     await _log_step(state, "report_plan_layout", "succeeded")
     return {"artifact": artifact}
+
+
+# 方法作用：把已批准指标口径追加为页面来源区段。
+# Args: artifact - 已构建的页面产物；citations - 指标口径快照列表。
+# Returns: 无返回值；无可引用口径或区段校验失败时保持页面不变。
+def _append_metric_citations(artifact: ReportArtifact, citations: list[dict[str, Any]]) -> None:
+    if not citations:
+        return
+    from src.reporting.document import ReportBlock, ReportSection, layout_for_block
+
+    summary = "本报表按租户指标目录的已批准口径计算：" + "；".join(
+        f"{item.get('name') or item.get('code')} v{item.get('version')}" for item in citations
+    )
+    try:
+        # 页面块校验会拒绝含脚本特征的文本；口径表达式来自指标目录，
+        # 但装饰性来源块无权让整份报表构建失败，失败时降级为不展示。
+        section = ReportSection(
+            id="metric_refs",
+            title="指标口径来源",
+            subtitle="口径取自租户指标目录的已批准版本，可追溯",
+            blocks=[ReportBlock(
+                section_id="metric_refs",
+                type="source_citation",
+                title="已批准口径",
+                content={"citation_kind": "metric_catalog", "items": citations, "summary": summary},
+                layout=layout_for_block("source_citation"),
+            )],
+        )
+    except ValueError:
+        logger.warning(
+            "指标口径来源区段被页面校验拒绝，已降级为不展示",
+            citation_codes=[str(item.get("code", "")) for item in citations],
+            exc_info=True,
+        )
+        return
+    artifact.document.sections.append(section)
+
+
+# 方法作用：汇总各单元解析出的指标口径引用，供页面做口径溯源。
+# Args: state - 含 unit_results 的状态。
+# Returns: 按指标编码去重后的口径引用列表。
+async def report_attach_metric_refs(state: ReportWorkbenchState) -> dict[str, Any]:
+    await _log_step(state, "report_attach_metric_refs", "running")
+    # 保守档保持"完全不加料"的语义。divergence 字段由 23.17 引入，
+    # 此处按 getattr 读取，使该字段落地后闸门自动生效，无需二次改动。
+    if str(getattr(state.get("plan"), "divergence", "standard") or "standard") == "conservative":
+        await _log_step(state, "report_attach_metric_refs", "succeeded")
+        return {"metric_citations": []}
+    collected: dict[str, dict[str, Any]] = {}
+    for result in state.get("unit_results", []):
+        for citation in list(getattr(result, "metric_citations", []) or []):
+            code = str(citation.get("code", "") or "")
+            if code:
+                collected[code] = dict(citation)
+    await _log_step(state, "report_attach_metric_refs", "succeeded")
+    return {"metric_citations": list(collected.values())}
 
 
 # 方法作用：再次执行 DSL 和大小约束校验，防止自定义执行器写入非法页面。
@@ -321,6 +379,7 @@ def build_report_workbench_subgraph():
     graph.add_node("report_profile_results", report_profile_results)
     graph.add_node("report_build_relations", report_build_relations)
     graph.add_node("report_synthesize_insights", report_synthesize_insights)
+    graph.add_node("report_attach_metric_refs", report_attach_metric_refs)
     graph.add_node("report_plan_layout", report_plan_layout)
     graph.add_node("report_validate_document", report_validate_document)
     graph.set_entry_point("report_load_policy")
@@ -331,7 +390,8 @@ def build_report_workbench_subgraph():
     graph.add_edge("report_execute_units", "report_profile_results")
     graph.add_edge("report_profile_results", "report_build_relations")
     graph.add_edge("report_build_relations", "report_synthesize_insights")
-    graph.add_edge("report_synthesize_insights", "report_plan_layout")
+    graph.add_edge("report_synthesize_insights", "report_attach_metric_refs")
+    graph.add_edge("report_attach_metric_refs", "report_plan_layout")
     graph.add_edge("report_plan_layout", "report_validate_document")
     graph.add_edge("report_validate_document", END)
     return graph.compile()

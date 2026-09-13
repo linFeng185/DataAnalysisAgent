@@ -121,3 +121,18 @@ class TestReportWorkbenchFrontend:
         assert "sql_success_count" in page
         assert "query_count" in page
         assert ".report-run-stats" in styles
+
+    # 方法作用：验证指标口径来源块渲染结构化条目而不是只显示一段文本。
+    # Args: self - pytest 测试类实例。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    def test_renderer_shows_metric_citations(self) -> None:
+        """口径溯源需要展示指标名、版本与表达式，供用户核对计算口径。"""
+        # Arrange
+        renderer = Path("frontend/src/components/report/ReportDocumentRenderer.tsx").read_text(encoding="utf-8")
+
+        # Act / Assert
+        assert "case 'source_citation'" in renderer
+        assert "content.items" in renderer
+        assert "item.expression" in renderer
+        # 复用既有的安全文本转换，不引入 HTML 注入面
+        assert "dangerouslySetInnerHTML" not in renderer

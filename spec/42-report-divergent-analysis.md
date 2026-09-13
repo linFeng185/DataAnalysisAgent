@@ -452,14 +452,21 @@ def analyze_cross_source(
 
 ### 8.2 改为口径溯源
 
-`resolve_metric_reference()`（`metric_catalog.py:250-276`）**已经存在**，职责是"将显式指标引用解析为已批准版本的口径文本与可追溯来源"。直接复用，不做新实现。
+> **实现修正（2026-09-12 落地时）**：本节原写"调用 `resolve_metric_reference()` 按 `AnalysisUnit.metrics` 名称与别名精确匹配"，**这是错的**。真实的既有机制是 `resolve_metric_references()`（复数，`metric_catalog.py:253`），它解析的是**问题文本里的 `@metric(code)` 显式引用**，不存在按名称匹配的路径。且该解析**已经由既有工作流完成**：`retrieve_schema.py:147-157` 在单元执行时调用它，结果写入 state 的 `activated_knowledge`。因此报表侧无需任何新查询与 LLM 调用，只要把结果筛出来呈现。下文按修正后的机制描述。
 
-新增节点 `report_attach_metric_refs`：
+**数据来源**：旧工作流 state 的 `activated_knowledge` 列表。其中 `source_id` 以 `metric:` 开头的条目即指标口径来源（形如 `metric:{tenant}:{code}:v{version}`），`locator` 内含 `metric_code` / `version` / `name` / `expression` / `unit`。
 
-- 输入：各单元的 `AnalysisUnit.metrics`。
-- 调用 `resolve_metric_reference()` 取已批准版本的 `name` / `expression` / `version` / 生效时间。
-- 输出 **`source_citation` block** —— 该 block 类型已在 `_BLOCK_TYPES`（`document.py:27`）定义但**从未有产出路径**，本设计正好填上这个落差（1.3 相关条目）。
-- **不解析 `description` 里的非结构化文字**（可能含目标值也可能含别的），不做任何数值推断。
+**落地路径（三段，各司其职）**：
+
+| 环节 | 位置 | 职责 |
+|---|---|---|
+| 提取 | `runner._extract_metric_citations()` | 按 `metric:` 前缀筛选、按 `metric_code` 去重、丢弃结构不完整的条目 |
+| 汇总 | 新节点 `report_attach_metric_refs` | 汇总各单元的 `UnitResult.metric_citations` 并全局去重；保守档返回空（见 8.3） |
+| 成块 | `_append_metric_citations()`（由 `report_plan_layout` 调用） | 追加 `source_citation` 区段，携带可读 `summary` 与结构化 `items` |
+
+- `source_citation` 已在 `_BLOCK_TYPES`（`document.py:27`）与 `layout_for_block`（`document.py:198`）中定义但**从未有产出路径**，本设计正好填上这个落差。
+- **不解析 `description` 里的非结构化文字**，不做任何数值推断。
+- 页面块的脚本特征校验（`document.py:105-107`）只检查 `content` 的**顶层字符串值**，因此嵌套在 `items` 里的口径表达式不会被拦；进入顶层 `summary` 的文本会被拦。区段构建失败时**降级为不展示并记 warning**，不让装饰性来源块导致整份报表失败。
 
 `content` 结构：
 

@@ -270,6 +270,8 @@ class UnitResult(BaseModel):
     # 旧工作流已给出截断信号，执行器必须透传：统计结论需要据此披露样本局限。
     truncated: bool = False
     columns: list[str] = Field(default_factory=list, max_length=100)
+    # 单元问题里 @metric(...) 引用解析出的已批准口径快照，供页面做口径溯源。
+    metric_citations: list[dict[str, Any]] = Field(default_factory=list, max_length=20)
     summary: str = ""
     warnings: list[str] = Field(default_factory=list, max_length=20)
     error_code: str = ""

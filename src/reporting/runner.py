@@ -19,6 +19,36 @@ _ROUTE_LLM_TASK = "report_route"
 # 取 200 以覆盖上百张表的库（实测财务库 125 张）；一旦超预算被截断，
 # 排在后面的数据源会整段丢失，路由就必然漏判。
 _CATALOG_TABLES_PER_SOURCE = 200
+# 指标口径来源的标识前缀，由 resolve_metric_references 生成。
+_METRIC_SOURCE_PREFIX = "metric:"
+
+
+# 方法作用：从旧工作流返回的知识来源里筛出指标口径引用，供页面做口径溯源。
+# Args: activated - 工作流状态中的 activated_knowledge 列表。
+# Returns: 去重后的口径快照列表，每项含 code、name、expression、version。
+def _extract_metric_citations(activated: Any) -> list[dict[str, Any]]:
+    citations: dict[str, dict[str, Any]] = {}
+    for item in list(activated or []):
+        if not isinstance(item, dict):
+            continue
+        if not str(item.get("source_id", "") or "").startswith(_METRIC_SOURCE_PREFIX):
+            continue
+        locator = item.get("locator")
+        if not isinstance(locator, dict):
+            continue
+        code = str(locator.get("metric_code", "") or "")
+        if not code:
+            continue
+        citations[code] = {
+            "code": code,
+            "name": str(locator.get("name", "") or ""),
+            "expression": str(locator.get("expression", "") or ""),
+            "unit": str(locator.get("unit", "") or ""),
+            "version": int(locator.get("version", 0) or 0),
+        }
+    if citations:
+        logger.info("报表单元指标口径引用已解析", count=len(citations), codes=sorted(citations))
+    return list(citations.values())
 
 
 class ReportRunner:
@@ -263,7 +293,15 @@ class ReportRunner:
             (statistics.get("truncated") if isinstance(statistics, dict) else False)
             or result.get("query_result_truncated")
         )
-        return UnitResult(unit_id=unit.unit_id, datasource=datasource, live_query_id=live_query_id, rows=[dict(row) for row in rows if isinstance(row, dict)], truncated=truncated, summary=str((final.get("analysis") or {}).get("summary", "") or ""))
+        return UnitResult(
+            unit_id=unit.unit_id,
+            datasource=datasource,
+            live_query_id=live_query_id,
+            rows=[dict(row) for row in rows if isinstance(row, dict)],
+            truncated=truncated,
+            metric_citations=_extract_metric_citations(result.get("activated_knowledge")),
+            summary=str((final.get("analysis") or {}).get("summary", "") or ""),
+        )
 
     # 方法作用：读取各数据源的表名清单，供路由模型判断命中关系。
     # Args: requested - 已授权数据源名称；tenant_id - 当前租户。

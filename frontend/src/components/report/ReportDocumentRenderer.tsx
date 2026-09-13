@@ -1,6 +1,6 @@
 import { t, useLanguage } from '../../i18n';
 import { lazy, Suspense, type CSSProperties, type ReactNode } from 'react';
-import { Alert, Button, Card, Empty, List, Statistic, Table, Tag, Typography } from 'antd';
+import { Alert, Button, Card, Empty, List, Space, Statistic, Table, Tag, Typography } from 'antd';
 import type { EChartsOption } from 'echarts';
 import type { ReportBlock, ReportDocument, ReportDrilldownDefinition } from '../../types/report';
 
@@ -138,9 +138,27 @@ function renderBlock(
     case 'callout':
       body = <Alert type={content.status === 'failed' ? 'error' : 'info'} showIcon message={displayText(content.message || content.status)} />;
       break;
-    case 'source_citation':
-      body = <Typography.Paragraph type="secondary">{displayText(content.source || content.sources || content.summary)}</Typography.Paragraph>;
+    case 'source_citation': {
+      const citations = Array.isArray(content.items)
+        ? content.items.filter((item): item is Record<string, unknown> => Boolean(item && typeof item === 'object'))
+        : [];
+      body = citations.length > 0 ? <div className="report-citation-content">
+        <Typography.Paragraph type="secondary">{displayText(content.summary)}</Typography.Paragraph>
+        <List
+          size="small"
+          dataSource={citations}
+          renderItem={item => <List.Item>
+            <Space direction="vertical" size={2}>
+              <Typography.Text strong>
+                {displayText(item.name || item.code)}{typeof item.version === 'number' ? ` v${item.version}` : ''}
+              </Typography.Text>
+              {item.expression ? <Typography.Text code>{displayText(item.expression)}</Typography.Text> : null}
+            </Space>
+          </List.Item>}
+        />
+      </div> : <Typography.Paragraph type="secondary">{displayText(content.source || content.sources || content.summary)}</Typography.Paragraph>;
       break;
+    }
     case 'narrative':
     default:
       body = <Typography.Paragraph style={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>{displayText(content.summary || content.text || content.message)}</Typography.Paragraph>;
