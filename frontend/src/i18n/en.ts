@@ -809,6 +809,8 @@ const en: Record<string, string> = {
   "耗时：": "Duration: ",
   "加载表结构失败": "Failed to load table structure",
   "同步状态读取失败": "Failed to load sync status",
+  "同步状态刷新失败，显示的可能不是最新状态": "Failed to refresh sync status; the displayed state may be outdated",
+  "发布阶段不可终止，避免留下半发布快照": "Cannot stop while publishing; avoid leaving a half-published snapshot",
   "表结构同步已启动": "Table structure sync started",
   "同步失败": "Sync failed",
   "终止失败": "Failed to stop sync",

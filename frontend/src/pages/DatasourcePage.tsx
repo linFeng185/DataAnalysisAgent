@@ -62,6 +62,10 @@ function normalizePayload(
   return payload;
 }
 
+// 数据源行在接口摘要之上附加只属于界面的读取失败提示，
+// 读取失败只记为行级提示，绝不覆盖 schema_sync.status 里的真实状态。
+type DatasourceRow = DatasourceConfig & { sync_read_error?: string };
+
 // 方法作用：展示并维护当前租户可见的数据源。
 // Args: 无。
 // Returns: 数据源管理页面。
@@ -69,7 +73,7 @@ export default function DatasourcePage() {
   useLanguage();
   const { user } = useAuth();
   const canManage = ['super_admin', 'tenant_admin'].includes(user?.role || '');
-  const [datasources, setDatasources] = useState<DatasourceConfig[]>([]);
+  const [datasources, setDatasources] = useState<DatasourceRow[]>([]);
   const [open, setOpen] = useState(false);
   const [editing, setEditing] = useState<DatasourceConfig | null>(null);
   const [form] = Form.useForm();
@@ -117,12 +121,16 @@ export default function DatasourcePage() {
 
   useEffect(() => { void load(); }, []);
 
-  // 方法作用：仅在存在进行中的同步时轮询列表，空闲即停。
+  // 方法作用：仅在存在进行中的同步或未读到的状态时轮询列表，全部终态即停。
   // Args: 无，读取当前列表状态。
   // Returns: 卸载或进入空闲时停止轮询。
   useEffect(() => {
+    // unknown 表示本轮没读到状态，读取失败提示表示本轮刷新失败，两者都不是终态：
+    // 必须继续轮询才能自愈；只有全部行落到 idle/succeeded/cancelled/failed 时才停表，避免空闲空转。
     const active = datasources.some(item =>
-      ['running', 'cancelling'].includes(item.schema_sync?.status || ''));
+      ['running', 'cancelling'].includes(item.schema_sync?.status || '')
+      || item.schema_sync?.status === 'unknown'
+      || Boolean(item.sync_read_error));
     if (!active) return undefined;
     let alive = true;
     let timer: number;
@@ -135,7 +143,10 @@ export default function DatasourcePage() {
         const items = await fetchDatasourceCatalog();
         if (alive && currentRevision === revision.current) setDatasources(items);
       } catch {
-        if (alive && currentRevision === revision.current) setDatasources(items => items.map(item => ({ ...item, schema_sync: { status: 'unknown' } })));
+        // 读取失败只标记行级提示，保留上一轮已知状态，绝不把真实状态覆盖成 unknown。
+        if (alive && currentRevision === revision.current) {
+          setDatasources(items => items.map(item => ({ ...item, sync_read_error: t("同步状态刷新失败，显示的可能不是最新状态") })));
+        }
       } finally {
         if (alive) timer = window.setTimeout(() => void poll(), 1500);
       }
@@ -350,16 +361,24 @@ export default function DatasourcePage() {
             { title: t("更新时间"), dataIndex: 'updated_at', key: 'updated_at', width: 170, render: (value: string) => value
               ? new Date(value).toLocaleString()
               : <Typography.Text type="secondary">-</Typography.Text> },
-            { title: t("同步状态"), key: 'sync', width: 150, render: (_: unknown, source: DatasourceConfig) => {
-              const state = source.schema_sync || { status: 'idle' };
-              return <Tooltip title={state.error || state.finished_at}><Tag color={['running', 'cancelling'].includes(state.status) ? 'processing' : state.status === 'succeeded' ? 'success' : ['failed', 'unknown'].includes(state.status) ? 'error' : 'default'}>{syncLabels[state.status] || state.status}</Tag></Tooltip>;
+            { title: t("同步状态"), key: 'sync', width: 150, render: (_: unknown, source: DatasourceRow) => {
+              const state: SchemaSyncStatus = source.schema_sync || { status: 'idle' };
+              // 状态列只展示读到的事实，本轮读取失败的原因与状态共存于同一行的悬浮提示。
+              const hint = [source.sync_read_error, state.error || state.finished_at].filter(Boolean).join('；');
+              return <Tooltip title={hint}><Tag color={['running', 'cancelling'].includes(state.status) ? 'processing' : state.status === 'succeeded' ? 'success' : ['failed', 'unknown'].includes(state.status) ? 'error' : 'default'}>{syncLabels[state.status] || state.status}</Tag></Tooltip>;
             } },
             ...(canManage ? [{
               title: t("操作"), key: 'action', width: 300, fixed: 'right' as const,
               render: (_: unknown, datasource: DatasourceConfig) => (
                 <Space size={4}>
-                  <Button size="small" disabled={pendingSync.includes(datasource.name) || ['running', 'cancelling', 'unknown'].includes(datasource.schema_sync?.status || '')} onClick={() => void changeSync(datasource)}>{t("同步表结构")}</Button>
-                  {['running', 'cancelling'].includes(datasource.schema_sync?.status || '') && <Button danger size="small" disabled={pendingSync.includes(datasource.name) || datasource.schema_sync?.status === 'cancelling' || datasource.schema_sync?.phase === 'publishing'} onClick={() => void changeSync(datasource, true)}>{t("终止同步")}</Button>}
+                  {/* unknown 只代表没读到状态，不等于正在同步：只有确认进行中才禁止重复启动。 */}
+                  <Button size="small" disabled={pendingSync.includes(datasource.name) || ['running', 'cancelling'].includes(datasource.schema_sync?.status || '')} onClick={() => void changeSync(datasource)}>{t("同步表结构")}</Button>
+                  {['running', 'cancelling'].includes(datasource.schema_sync?.status || '') && (
+                    // 发布阶段仍禁止终止（后端会返回 409），但必须把原因显式告诉用户。
+                    <Tooltip title={datasource.schema_sync?.phase === 'publishing' ? t("发布阶段不可终止，避免留下半发布快照") : ''}>
+                      <Button danger size="small" disabled={pendingSync.includes(datasource.name) || datasource.schema_sync?.status === 'cancelling' || datasource.schema_sync?.phase === 'publishing'} onClick={() => void changeSync(datasource, true)}>{t("终止同步")}</Button>
+                    </Tooltip>
+                  )}
                   <Tooltip title={t("编辑")}>
                     <Button
                       aria-label={t("编辑 {value0}", { value0: datasource.name })}
