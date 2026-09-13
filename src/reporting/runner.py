@@ -8,7 +8,7 @@ from typing import Any
 
 from src.logging_config import get_logger
 from src.reporting.models import UnitResult
-from src.reporting.quota import QuotaExceededError, QuotaManager
+from src.reporting.quota import QuotaExceededError, QuotaManager, describe_quota_error
 from src.reporting.store import ReportStore, get_report_store
 
 logger = get_logger(__name__)
@@ -215,7 +215,8 @@ class ReportRunner:
                 await self.store.update_job_status(job_id, identity, "cancelled")
             raise
         except QuotaExceededError as exc:
-            message = "本周期报表配额不足，请联系租户管理员"
+            # 带上维度、上限与本次需求：只写"配额不足"无法定位要调哪一项。
+            message = describe_quota_error(exc)
             await self.store.update_run(run.id, identity, status="failed", error_code="QUOTA_EXCEEDED", internal_error_message=str(exc), user_error_message=message, finished_at=datetime.now(timezone.utc))
             if version_store is None:
                 await self.store.update_job_status(job_id, identity, "failed")

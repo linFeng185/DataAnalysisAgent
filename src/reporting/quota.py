@@ -16,6 +16,39 @@ logger = get_logger(__name__)
 class QuotaExceededError(RuntimeError):
     """报表资源配额不足。"""
 
+    # 方法作用：记录被拒的配额维度与具体数值，供上层生成可定位的提示。
+    # Args: message - 兜底文本；field - 配额字段名；limit - 当前上限；requested - 本次请求量。
+    # Returns: 无返回值。
+    def __init__(self, message: str = "QUOTA_EXCEEDED", *, field: str = "", limit: int = 0, requested: int = 0) -> None:
+        self.field = str(field or "")
+        self.limit = int(limit or 0)
+        self.requested = int(requested or 0)
+        super().__init__(message)
+
+
+# 配额维度的中文标签，与前端额度表单的字段文案保持一致，
+# 让用户能直接对上「去后台调哪一项」，而不是只看到一句"配额不足"。
+QUOTA_FIELD_LABELS: dict[str, str] = {
+    "jobs_created": "每月可创建任务数",
+    "runs_started": "每月可运行次数",
+    "concurrent_runs": "同时运行上限",
+    "analysis_units": "单次分析单元上限",
+    "queries": "单次查询上限",
+    "rows": "单次查询行数上限",
+    "llm_tokens": "每月 Token 预算",
+    "share_links": "每月分享链接上限",
+}
+
+
+# 方法作用：把配额拒绝转成带具体数值的可读提示。
+# Args: error - 配额异常。
+# Returns: 带维度、上限与本次需求的提示；缺失数值信息时回退到通用文案。
+def describe_quota_error(error: QuotaExceededError) -> str:
+    label = QUOTA_FIELD_LABELS.get(error.field)
+    if not label or error.limit <= 0:
+        return "本周期报表配额不足，请联系租户管理员"
+    return f"{label}为 {error.limit}，本次任务需要 {error.requested}，请联系租户管理员调整额度"
+
 
 @dataclass(frozen=True, slots=True)
 class QuotaPolicy:
@@ -218,8 +251,20 @@ class QuotaManager:
             )
             for next_value, limit, field_name in checks:
                 if next_value > limit:
-                    logger.warning("报表配额预占拒绝", tenant_id=tenant_id, user_id=user_id, field=field_name)
-                    raise QuotaExceededError(f"QUOTA_EXCEEDED: {field_name}")
+                    logger.warning(
+                        "报表配额预占拒绝",
+                        tenant_id=tenant_id,
+                        user_id=user_id,
+                        field=field_name,
+                        limit=limit,
+                        requested=next_value,
+                    )
+                    raise QuotaExceededError(
+                        f"QUOTA_EXCEEDED: {field_name} limit={limit} requested={next_value}",
+                        field=field_name,
+                        limit=limit,
+                        requested=next_value,
+                    )
             usage.jobs_created += jobs
             usage.runs_started += runs
             usage.concurrent_runs += concurrent

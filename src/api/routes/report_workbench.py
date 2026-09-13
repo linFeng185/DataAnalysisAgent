@@ -32,6 +32,7 @@ from src.reporting.quota import (
     QuotaManager,
     QuotaPolicy,
     ReportPermissionService,
+    describe_quota_error,
 )
 from src.reporting.sharing import (
     can_access_user_scope,
@@ -332,7 +333,7 @@ async def create_job(request: ReportJobCreateRequest) -> dict[str, Any]:
             identity, request.prompt, plan, request.idempotency_key, quota_manager, request.plan_hash, request.template_id
         )
     except QuotaExceededError as exc:
-        raise HTTPException(429, "本周期报表任务配额已用尽") from exc
+        raise HTTPException(429, describe_quota_error(exc)) from exc
     except ValueError as exc:
         raise HTTPException(409, str(exc)) from exc
     from src.reporting.runner import get_report_runner
@@ -561,7 +562,7 @@ async def create_share(report_id: str, request: ReportShareCreateRequest) -> dic
     try:
         quota = await get_report_quota_manager().reserve(identity, shares=1)
     except QuotaExceededError as exc:
-        raise HTTPException(429, "本周期分享链接配额已用尽") from exc
+        raise HTTPException(429, describe_quota_error(exc)) from exc
     token, token_hash = generate_share_token()
     code_hash = await hash_authorization_code(request.authorization_code) if request.require_code else ""
     expires_at = datetime.now(timezone.utc) + timedelta(days=request.expires_in_days)
@@ -667,7 +668,7 @@ async def _execute_private_live(version: Any, definition: dict[str, Any], reques
         reservation = await quota.reserve(identity, concurrent=1, queries=1, rows=request.page_size + 1)
         return await execute_live_drilldown(query, access[query["datasource"]], definition, request.filters, request.page, request.page_size, tenant_id=identity.tenant_id)
     except QuotaExceededError as exc:
-        raise HTTPException(429, "实时钻取资源预算不足") from exc
+        raise HTTPException(429, describe_quota_error(exc)) from exc
     except PermissionError as exc:
         raise HTTPException(403, str(exc)) from exc
     except RuntimeError as exc:
@@ -699,6 +700,39 @@ async def get_my_permissions() -> dict[str, Any]:
     return {"capabilities": capabilities, "menu_allowed": "report.menu" in capabilities}
 
 
+# 超级管理员在配置里设定的系统上限：租户管理员只能在它之下配置用户额度。
+# 一张表同时驱动校验文案与下发字段，避免两处各写一份而脱钩。
+# 格式：策略字段名 -> (配置项名, 中文标签)
+_SYSTEM_LIMIT_FIELDS: dict[str, tuple[str, str]] = {
+    "max_analysis_units_per_run": ("report_max_units_per_run", "单次分析单元上限"),
+    "max_queries_per_run": ("report_max_queries_per_run", "单次查询上限"),
+    "max_concurrent_runs": ("report_max_concurrency", "同时运行上限"),
+    "max_page_bytes": ("report_max_page_bytes", "单页大小上限"),
+}
+
+
+# 方法作用：读取超级管理员配置的报表系统上限。
+# Args: 无。
+# Returns: 策略字段名到系统上限的映射。
+def _system_quota_limits() -> dict[str, int]:
+    from src.config import get_settings
+
+    settings = get_settings()
+    return {field: int(getattr(settings, setting_name)) for field, (setting_name, _) in _SYSTEM_LIMIT_FIELDS.items()}
+
+
+# 方法作用：校验租户管理员提交的用户额度没有越过超级管理员配置的系统上限。
+# Args: payload - 待保存的策略字段字典（不含 capabilities）。
+# Returns: 无返回值；越界时抛出 422 并指明是哪一项与上限值。
+def _validate_within_system_limits(payload: dict[str, Any]) -> None:
+    # 「不能超过超级管理员配置的上限」此前从未被任何代码读取与拦截，
+    # 租户管理员实际只被前端表单卡在更小的值上。这里把规则真正落到服务端。
+    for field_name, ceiling in _system_quota_limits().items():
+        if int(payload.get(field_name, 0) or 0) > ceiling:
+            label = _SYSTEM_LIMIT_FIELDS[field_name][1]
+            raise HTTPException(422, f"{label}不能超过系统上限 {ceiling}")
+
+
 @router.put("/admin/users/{user_id}/policy")
 # 方法作用：由租户管理员设置目标用户报表能力和周期配额。
 # Args: user_id - 目标用户；request - 能力与配额配置。
@@ -712,7 +746,9 @@ async def set_user_policy(user_id: int, request: QuotaPolicyRequest) -> dict[str
         raise HTTPException(422, "用户 ID 无效")
     if int(identity.tenant_id) <= 0:
         raise HTTPException(403, "当前身份没有租户")
-    policy = QuotaPolicy(**request.model_dump(exclude={"capabilities"}))
+    payload = request.model_dump(exclude={"capabilities"})
+    _validate_within_system_limits(payload)
+    policy = QuotaPolicy(**payload)
     store = get_report_store()
     try:
         await store.save_user_policy(identity, user_id, policy, request.capabilities)
@@ -747,7 +783,16 @@ async def get_user_policy(user_id: int) -> dict[str, Any]:
     policy = QuotaPolicyRequest.model_validate(persisted or {})
     capabilities = await get_report_permission_service().capabilities(subject)
     snapshot = await get_report_quota_manager().snapshot(subject)
-    return {"user_id": user_id, "capabilities": capabilities, "policy": policy.model_dump(exclude={"capabilities"}), "quota": asdict(snapshot), "period": "calendar_month"}
+    return {
+        "user_id": user_id,
+        "capabilities": capabilities,
+        "policy": policy.model_dump(exclude={"capabilities"}),
+        # 下发系统上限，供前端把输入框上限对齐到超级管理员的配置，
+        # 而不是在表单里写死一个更小的值。
+        "limits": _system_quota_limits(),
+        "quota": asdict(snapshot),
+        "period": "calendar_month",
+    }
 
 
 @router.get("/shared/reports/{token}")

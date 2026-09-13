@@ -202,6 +202,22 @@ class TestReportWorkbenchFrontend:
         assert "ReportDivergenceLevel" in types
         assert "divergence" in api
 
+    # 方法作用：验证额度表单的输入上限来自后端下发的系统上限。
+    # Args: self - pytest 测试类实例。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    def test_policy_editor_uses_backend_system_limits(self) -> None:
+        """表单曾把单次查询上限写死在 16，导致租户管理员无法配到系统上限。"""
+        # Arrange
+        editor = Path("frontend/src/components/report/ReportPolicyEditor.tsx").read_text(encoding="utf-8")
+        route = Path("src/api/routes/report_workbench.py").read_text(encoding="utf-8")
+
+        # Act / Assert
+        assert "limits" in editor
+        assert "limits[key] ?? maximum" in editor
+        # 后端必须下发校验依据的系统上限
+        assert "_system_quota_limits" in route
+        assert '"limits"' in route
+
     # 方法作用：验证预览页可逐项取消建议单元并提交裁剪结果。
     # Args: self - pytest 测试类实例。
     # Returns: 无返回值，断言失败时由 pytest 报告。

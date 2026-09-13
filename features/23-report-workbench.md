@@ -58,6 +58,13 @@
 | （阶段 A 前置修复）**已完成** | 未单列功能点，属 23.16/23.17 的实施前置，四项均已落地：① `runner._default_execute_unit` 注入 `suppress_supplemental_query=True`，并在 `after_analyze_result` 条件上追加同名否定项关闭旧补查回环；② 修 `processors.yoy` 既有 bug（原先与 `mom` 逐字相同、算的是环比却输出同比，现改为按年平移对齐去年同期）；③ `UnitResult.truncated` 透传旧工作流已有信号（**未新增 `total_rows`**：原始行数在现有链路不可得，为拿不到的分母下钻 `sql_execution.py` 与 `execute_sql.py` 不划算，且这两个文件正被另一条并行开发线修改）；④ `EstimatedResources.query_count` 上限 16→64（18 个单元 × 平均 4 源） | — | Phase 3，已完成 |
 | （其余项） | 本轮编号范围内均已实现 | 生产验收见下文，不另伪造开发完成状态 | — |
 
+### 2026-09-13 配额层级与预占修复批次
+
+- **预占重复计算共享额度**：`_reserve_plan` 按 `divergence_unit_budget(level) × 数据源数` 全量预留运行期发散额度，**没有扣减计划期已经用掉的部分**（深度档 6 × 5 个源 = 凭空多 30 次）。子图的 `_remaining_budget` 早就做了扣减，两处口径不一致。已改为同样扣减，与 `spec/42` 第 4 节"档位是两阶段共享总授权"的不变量对齐。
+- **系统上限从未生效**：`report_max_queries_per_run` 等配置项（`config.py`）此前**除定义处外零引用**，`set_user_policy` 不做任何越界校验，因此"租户管理员的用户上限不得超过超级管理员配置的系统上限"这条规则**根本没有实现**。已新增 `_system_quota_limits()` / `_validate_within_system_limits()`：按配置校验并返回 422，同时通过 `GET .../policy` 的 `limits` 字段下发，供前端表单与配置对齐。**一张 `_SYSTEM_LIMIT_FIELDS` 表同时驱动校验文案与下发字段**，避免两处脱钩。
+- **额度表单硬编码**：`ReportPolicyEditor.tsx` 把 `max_queries_per_run` 的输入上限**写死为 16**，而系统配置是 100、后端契约允许 1000。结果租户管理员**在界面上根本无法配到系统上限**，实测用户账号的有效值正是被卡住的 16，真实扇出 17 因此被拒。已改为 `limits[key] ?? maximum`，以配置为准。
+- **超额提示无数字**：`QuotaExceededError` 只带字段名，四处捕获点都返回固定文案（"本周期报表配额不足"），无法定位要调哪一项。已让异常携带 `field`/`limit`/`requested`（新参数为关键字可选，既有的位置参数构造与 `match="QUOTA_EXCEEDED"` 断言保持可用），并新增 `QUOTA_FIELD_LABELS` + `describe_quota_error()` 由 runner 与三个 API 捕获点共用，提示形如「单次查询上限为 16，本次任务需要 47，请联系租户管理员调整额度」。
+
 ### 2026-09-13 首次真实运行修复批次
 
 首次在真实环境跑通报表后暴露两个缺陷，均已修复并补上能真正抓住它们的回归：

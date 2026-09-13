@@ -21,7 +21,7 @@ const capabilities = [
   ['report.live_drilldown', t("实时钻取")], ['report.view_all', t("查看租户报表")], ['report.download', t("下载")],
 ].map(([value, label]) => ({ value, label }));
 
-interface PolicyResponse { policy: Record<string, number>; capabilities: string[]; }
+interface PolicyResponse { policy: Record<string, number>; capabilities: string[]; limits?: Record<string, number>; }
 interface Props { user: { id: number; username: string }; onClose: () => void; }
 
 // 方法作用：供租户管理员维护本租户用户的报表能力与自然月额度。
@@ -33,11 +33,17 @@ export default function ReportPolicyEditor({ user, onClose }: Props) {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
+  // 系统上限由后端下发（超级管理员在配置里设定），表单不得自己写死一个更小的值。
+  const [limits, setLimits] = useState<Record<string, number>>({});
   useEffect(() => {
     let active = true;
     setLoading(true);
     get<PolicyResponse>(`/report-workbench/admin/users/${user.id}/policy`)
-      .then(result => { if (active) form.setFieldsValue({ ...result.policy, capabilities: result.capabilities }); })
+      .then(result => {
+        if (!active) return;
+        form.setFieldsValue({ ...result.policy, capabilities: result.capabilities });
+        setLimits(result.limits || {});
+      })
       .catch(failure => { if (active) setError(failure instanceof Error ? failure.message : t("策略读取失败")); })
       .finally(() => { if (active) setLoading(false); });
     return () => { active = false; };
@@ -68,7 +74,8 @@ export default function ReportPolicyEditor({ user, onClose }: Props) {
       <Form form={form} layout="vertical">
         <Form.Item name="capabilities" label={t("报表能力")}><Checkbox.Group options={capabilities} /></Form.Item>
         {fields.map(([key, label, minimum, maximum]) => <Form.Item key={key} name={key} label={label} rules={[{ required: true }]}>
-          <InputNumber min={minimum} max={maximum} precision={0} style={{ width: '100%' }} />
+          {/* 有系统上限时以它为准；没有对应配置项的字段沿用本地上界 */}
+          <InputNumber min={minimum} max={limits[key] ?? maximum} precision={0} style={{ width: '100%' }} />
         </Form.Item>)}
       </Form>
     </Spin>}
