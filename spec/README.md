@@ -45,3 +45,4 @@
 | [45-knowledge-governance-and-memory-ui-implementation-plan.md](45-knowledge-governance-and-memory-ui-implementation-plan.md) | 知识库治理与长期记忆管理实施计划（8 个 Task） | 动态 |
 | [46-embedding-backend-onnx.md](46-embedding-backend-onnx.md) | 嵌入后端切换 ONNX Runtime（消除 transformers 启动延迟） | 动态 |
 | [47-configurable-embedding-model.md](47-configurable-embedding-model.md) | 可替换嵌入模型与自动重编码（模型指纹 collection · 后台异步重建） | 动态 |
+| [48-experience-and-workbench-remediation.md](48-experience-and-workbench-remediation.md) | 体验整改与报表工作台重构设计（A～E 五批 · 9 项需求） | 动态 |
