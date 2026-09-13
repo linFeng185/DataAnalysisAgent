@@ -213,7 +213,9 @@ class TestReportWorkbenchFrontend:
 
         # Act / Assert
         assert "limits" in editor
-        assert "limits[key] ?? maximum" in editor
+        assert "ceiling ?? maximum" in editor
+        # 系统上限必须显示出来：否则输入被静默钳住，看起来像"改了没生效"
+        assert "受系统上限约束，最大 {value0}" in editor
         # 后端必须下发校验依据的系统上限
         assert "_system_quota_limits" in route
         assert '"limits"' in route

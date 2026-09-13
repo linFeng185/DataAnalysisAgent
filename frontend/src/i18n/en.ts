@@ -1,6 +1,7 @@
 // 静态界面词典；业务数据、SQL 和模型原文不进入翻译通道。
 const en: Record<string, string> = {
   "报表模板": "Report template",
+  "受系统上限约束，最大 {value0}": "Capped by the system limit, max {value0}",
   "模板只影响呈现样式，不改变取数范围与成本，因此随时切换都不会要求重新预览。": "Templates only affect presentation, not data scope or cost, so switching never requires re-previewing.",
   "专业分析风，紧凑清晰，适合日常经营分析": "Professional analytics style, compact and clear",
   "墨玉": "Ink",
@@ -951,5 +952,25 @@ const en: Record<string, string> = {
   "其他": "Other",
   " · 个人": " · Private",
   "失败: ": "Failed: ",
+  "我的记忆": "My memory",
+  "暂无长期记忆。成功执行的 SQL 和你的偏好会自动沉淀到这里。": "No long-term memory yet. Successfully executed SQL and your preferences are stored here automatically.",
+  "全部类型": "All types",
+  "用户偏好": "User preference",
+  "学习模式": "Learned pattern",
+  "纠正记录": "Correction",
+  "项目规则": "Project rule",
+  "访问次数": "Access count",
+  "置信度": "Confidence",
+  "最后访问时间": "Last accessed",
+  "记忆详情": "Memory details",
+  "过期时间": "Expires at",
+  "问题": "Question",
+  "加载记忆失败": "Failed to load memories",
+  "创建人": "Created by",
+  "文档知识": "Document knowledge",
+  "Schema 内省": "Schema introspection",
+  "显示系统知识": "Show platform knowledge",
+  "随表结构自动维护": "Maintained with the table schema",
+  "可选：绑定数据源": "Optional: bind a data source",
 };
 export default en;

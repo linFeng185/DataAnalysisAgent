@@ -73,10 +73,20 @@ export default function ReportPolicyEditor({ user, onClose }: Props) {
     {error ? <Alert type="error" message={error} /> : <Spin spinning={loading}>
       <Form form={form} layout="vertical">
         <Form.Item name="capabilities" label={t("报表能力")}><Checkbox.Group options={capabilities} /></Form.Item>
-        {fields.map(([key, label, minimum, maximum]) => <Form.Item key={key} name={key} label={label} rules={[{ required: true }]}>
-          {/* 有系统上限时以它为准；没有对应配置项的字段沿用本地上界 */}
-          <InputNumber min={minimum} max={limits[key] ?? maximum} precision={0} style={{ width: '100%' }} />
-        </Form.Item>)}
+        {fields.map(([key, label, minimum, maximum]) => {
+          const ceiling = limits[key];
+          return <Form.Item
+            key={key}
+            name={key}
+            label={label}
+            rules={[{ required: true }]}
+            // 有系统上限时把上限写出来：否则输入被静默钳住，看起来像"改了没生效"。
+            extra={ceiling === undefined ? undefined : t("受系统上限约束，最大 {value0}", { value0: ceiling })}
+          >
+            {/* 有系统上限时以它为准；没有对应配置项的字段沿用本地上界 */}
+            <InputNumber min={minimum} max={ceiling ?? maximum} precision={0} style={{ width: '100%' }} />
+          </Form.Item>;
+        })}
       </Form>
     </Spin>}
   </Modal>;
