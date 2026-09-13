@@ -276,3 +276,76 @@ export interface ReportQuotaResponse {
   tokens_remaining: number;
   shares_remaining: number;
 }
+
+/** 链接管理页的分享状态筛选值；active 含未到期的有效链接。 */
+export type ReportShareLinkStatus = 'active' | 'revoked' | 'expired';
+
+/** 链接管理页的一行分享链接摘要，含访问时长埋点聚合。 */
+export interface ReportShareLinkSummary {
+  id: string;
+  report_id: string;
+  report_title: string;
+  version: number;
+  scope: 'public' | 'user';
+  user_scope: 'none' | 'specified' | 'tenant';
+  require_code: boolean;
+  created_by: number;
+  created_at: string | null;
+  expires_at: string | null;
+  revoked_at: string | null;
+  /** 总访问量，等于系统用户访问量与非系统用户访问量之和。 */
+  visitor_count: number;
+  /** 带登录身份访问的次数（租户未开启身份记录时恒为 0）。 */
+  system_visitor_count: number;
+  /** 未识别身份（匿名）访问的次数。 */
+  anonymous_visitor_count: number;
+  total_duration_seconds: number;
+  average_duration_seconds: number;
+}
+
+/** 链接管理页分页响应。 */
+export interface ReportShareLinkListResponse {
+  shares: ReportShareLinkSummary[];
+  total: number;
+  page: number;
+  page_size: number;
+}
+
+/** 一次分享访问的明细行，用于「最近访问」抽屉。 */
+export interface ReportShareVisit {
+  /** 匿名访问为 null，界面按非系统用户展示。 */
+  user_id: number | null;
+  username: string;
+  started_at: string | null;
+  last_seen_at: string | null;
+  duration_seconds: number;
+  ip_hash: string;
+}
+
+/** 最近访问明细响应。 */
+export interface ReportShareVisitListResponse {
+  visits: ReportShareVisit[];
+  total: number;
+}
+
+/** 批量取消分享的结果；skipped 为不可撤销（已撤销或非本人）的条数。 */
+export interface ReportShareBatchRevokeResponse {
+  revoked: number;
+  skipped: number;
+}
+
+/** 公开分享页登记一次访问后的埋点标识与访客类型。 */
+export interface SharedReportVisitResponse {
+  visit_id: string;
+  visitor_kind: 'user' | 'anonymous';
+}
+
+/** 链接管理页的查询条件；status 与 created_by 省略时由服务端按可见范围返回全部。 */
+export interface ReportShareLinkQuery {
+  report_id?: string;
+  created_by?: number;
+  status?: ReportShareLinkStatus;
+  page?: number;
+  page_size?: number;
+}
+

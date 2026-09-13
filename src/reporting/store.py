@@ -9,7 +9,7 @@ from contextlib import asynccontextmanager
 from dataclasses import asdict, is_dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from src.config import get_settings
 from src.logging_config import get_logger
@@ -21,8 +21,33 @@ from src.reporting.models import (
     ReportShareRecord,
     ReportVersionRecord,
 )
+from src.reporting.share_analytics import to_share_list_item
 
 logger = get_logger(__name__)
+
+
+# 方法作用：判断字符串是否是 PostgreSQL 可接受的 UUID，避免非法标识触发数据库转型错误。
+# Args: value - 待校验的标识。
+# Returns: 合法 UUID 返回 True。
+def _is_uuid(value: Any) -> bool:
+    try:
+        UUID(str(value))
+        return True
+    except (TypeError, ValueError, AttributeError):
+        return False
+
+
+# 链接管理列表与总数查询共用同一份可见范围与筛选谓词，避免两处规则脱钩。
+# 参数顺序：$1 tenant_id、$2 role、$3 user_id、$4 report_id、$5 created_by、$6 status。
+_SHARE_LIST_FILTER_SQL = (
+    "s.tenant_id=$1 AND ($2<>'super_admin' AND ($2='tenant_admin' OR s.created_by=$3)) "
+    "AND ($4::uuid IS NULL OR s.report_id=$4::uuid) "
+    "AND ($5::bigint IS NULL OR s.created_by=$5::bigint) "
+    "AND ($6 = '' "
+    "OR ($6='revoked' AND s.revoked_at IS NOT NULL) "
+    "OR ($6='expired' AND s.revoked_at IS NULL AND s.expires_at IS NOT NULL AND s.expires_at <= NOW()) "
+    "OR ($6='active' AND s.revoked_at IS NULL AND (s.expires_at IS NULL OR s.expires_at > NOW())))"
+)
 
 
 class ReportStore:
@@ -45,6 +70,10 @@ class ReportStore:
         self._live_queries: dict[str, dict[str, Any]] = {}
         self._shares: dict[str, dict[str, Any]] = {}
         self._share_by_token: dict[str, str] = {}
+        self._share_visits: dict[str, dict[str, Any]] = {}
+        self._tenant_settings: dict[int, dict[str, Any]] = {}
+        # 内存分支没有 users 表，访问者用户名由测试或调用方登记后回填。
+        self._usernames: dict[int, str] = {}
         self._audits: list[dict[str, Any]] = []
         self._capabilities: dict[tuple[int, int], list[str]] = {}
         self._quota_policies: dict[tuple[int, int], dict[str, Any]] = {}
@@ -578,7 +607,8 @@ class ReportStore:
     # Returns: ReportShareRecord。
     async def create_share(self, record: dict[str, Any], token_hash: str, code_hash: str = "") -> ReportShareRecord:
         share_id = str(record.get("id") or uuid4())
-        row = {**record, "id": share_id, "token_hash": token_hash, "code_hash": code_hash, "revoked_at": None, "view_count": 0}
+        # created_at 与数据库 DEFAULT NOW() 对齐，内存分支的链接管理列表才能给出真实创建时间。
+        row = {**record, "id": share_id, "token_hash": token_hash, "code_hash": code_hash, "revoked_at": None, "view_count": 0, "created_at": record.get("created_at") or datetime.now(timezone.utc)}
         if self._memory:
             self._shares[share_id] = row
             self._share_by_token[token_hash] = share_id
@@ -592,20 +622,24 @@ class ReportStore:
         return self._to_share(db_row)
 
     # 方法作用：按 token 摘要读取未撤销的分享并增加访问计数。
-    # Args: token_hash - HMAC token 摘要。
+    # Args: token_hash - HMAC token 摘要；count_view - 是否累加 view_count（埋点心跳不计数）。
     # Returns: 分享记录或 None。
-    async def get_share_by_token(self, token_hash: str) -> dict[str, Any] | None:
+    async def get_share_by_token(self, token_hash: str, *, count_view: bool = True) -> dict[str, Any] | None:
         if self._memory:
             share_id = self._share_by_token.get(token_hash)
             row = self._shares.get(share_id) if share_id else None
-            if row:
+            if row and count_view:
                 row["view_count"] = int(row.get("view_count", 0)) + 1
             return dict(row) if row else None
         pool = await self._pool()
         async with pool.acquire() as connection:
             async with connection.transaction():
                 await connection.execute("SELECT set_config('app.report_share_access','true',true)")
-                row = await connection.fetchrow("UPDATE report_shares SET view_count=view_count+1,last_viewed_at=NOW() WHERE token_hash=$1 AND revoked_at IS NULL RETURNING *", token_hash)
+                if count_view:
+                    row = await connection.fetchrow("UPDATE report_shares SET view_count=view_count+1,last_viewed_at=NOW() WHERE token_hash=$1 AND revoked_at IS NULL RETURNING *", token_hash)
+                else:
+                    # 访问明细上报会高频调用本方法，绝不能把心跳累加进 view_count。
+                    row = await connection.fetchrow("SELECT * FROM report_shares WHERE token_hash=$1 AND revoked_at IS NULL", token_hash)
         return dict(row) if row else None
 
     # 方法作用：撤销当前身份可管理的分享链接。
@@ -631,6 +665,386 @@ class ReportStore:
     @staticmethod
     def _share_public_dict(row: dict[str, Any]) -> dict[str, Any]:
         return {key: value for key, value in row.items() if key not in {"token_hash", "code_hash"}}
+
+    # 方法作用：记录一次分享访问明细，匿名访问只留 0 占位不写真实身份。
+    # Args: share - 分享记录（字典或 ReportShareRecord）；tenant_id - 分享所属租户；visitor_kind - user/anonymous；user_id - 访客用户 ID；ip_hash - 客户端 IP 摘要；unlocked - 是否已用授权码解锁。
+    # Returns: 新建的访问记录字典。
+    async def create_share_visit(self, share: Any, tenant_id: int, visitor_kind: str, user_id: int, ip_hash: str, unlocked: bool) -> dict[str, Any]:
+        visit_id = str(uuid4())
+        share_id = str(share.get("id") if isinstance(share, dict) else getattr(share, "id", ""))
+        report_id = str(share.get("report_id") if isinstance(share, dict) else getattr(share, "report_id", ""))
+        # 关闭身份记录开关时调用方已降级为 anonymous，这里再兜一次底：没有用户 ID 一律匿名。
+        kind = "user" if str(visitor_kind) == "user" and int(user_id or 0) > 0 else "anonymous"
+        now = datetime.now(timezone.utc)
+        logger.debug("分享访问记录创建入口", share_id=share_id, tenant_id=int(tenant_id or 0), visitor_kind=kind)
+        row = {
+            "id": visit_id,
+            "share_id": share_id,
+            "report_id": report_id,
+            "tenant_id": int(tenant_id or 0),
+            "visitor_kind": kind,
+            "user_id": int(user_id or 0) if kind == "user" else 0,
+            "ip_hash": str(ip_hash or "")[:128],
+            "unlocked": bool(unlocked),
+            "started_at": now,
+            "last_seen_at": now,
+            "duration_seconds": 0,
+        }
+        if self._memory:
+            self._share_visits[visit_id] = row
+            logger.info("分享访问记录创建完成", visit_id=visit_id, visitor_kind=kind)
+            return dict(row)
+        # 公开侧没有登录身份，只凭分享访问标记放行 INSERT；token 归属校验由调用方先行完成。
+        pool = await self._pool()
+        async with pool.acquire() as connection:
+            async with connection.transaction():
+                await connection.execute("SELECT set_config('app.report_share_access','true',true)")
+                db_row = await connection.fetchrow(
+                    "INSERT INTO report_share_visits (id,tenant_id,share_id,report_id,visitor_kind,user_id,ip_hash,unlocked,started_at,last_seen_at,duration_seconds) "
+                    "VALUES ($1::uuid,$2,$3::uuid,$4::uuid,$5,$6,$7,$8,NOW(),NOW(),0) RETURNING *",
+                    visit_id, row["tenant_id"], share_id, report_id, kind, row["user_id"], row["ip_hash"], row["unlocked"],
+                )
+        logger.info("分享访问记录创建完成", visit_id=visit_id, visitor_kind=kind)
+        return dict(db_row)
+
+    # 方法作用：按 token 归属幂等覆盖访问停留时长，并刷新最近可见时间。
+    # Args: token_hash - 分享 token 摘要；visit_id - 访问记录标识；duration_seconds - 累积停留秒数。
+    # Returns: 更新后的访问记录；不属于该 token 或不存在时返回 None。
+    async def update_share_visit(self, token_hash: str, visit_id: str, duration_seconds: int) -> dict[str, Any] | None:
+        bounded = max(0, int(duration_seconds))
+        logger.debug("分享访问时长更新入口", visit_id=visit_id, duration_seconds=bounded)
+        if self._memory:
+            row = self._share_visits.get(str(visit_id))
+            share_id = self._share_by_token.get(str(token_hash))
+            share_row = self._shares.get(str(share_id)) if share_id else None
+            # 与数据库分支保持同一判据：token 归属不符或分享已撤销都不允许再写时长。
+            if row is None or share_row is None or share_row.get("revoked_at") is not None or str(row.get("share_id")) != str(share_id):
+                logger.info("分享访问时长更新跳过", visit_id=visit_id, reason="归属校验未通过")
+                return None
+            row["duration_seconds"] = bounded
+            row["last_seen_at"] = datetime.now(timezone.utc)
+            logger.info("分享访问时长更新完成", visit_id=visit_id, duration_seconds=bounded)
+            return dict(row)
+        if not _is_uuid(visit_id):
+            # 非法标识在数据库里不可能存在，直接按未命中处理，避免 UUID 转型异常。
+            logger.info("分享访问时长更新跳过", visit_id=visit_id, reason="标识非 UUID")
+            return None
+        pool = await self._pool()
+        async with pool.acquire() as connection:
+            async with connection.transaction():
+                await connection.execute("SELECT set_config('app.report_share_access','true',true)")
+                # 归属校验与写入放在同一条语句里，token 与 visit 不一致时不会命中任何行。
+                db_row = await connection.fetchrow(
+                    "UPDATE report_share_visits v SET duration_seconds=$3,last_seen_at=NOW() FROM report_shares s "
+                    "WHERE v.id=$1::uuid AND v.share_id=s.id AND s.token_hash=$2 AND s.revoked_at IS NULL RETURNING v.*",
+                    str(visit_id), str(token_hash), bounded,
+                )
+        if db_row is None:
+            logger.info("分享访问时长更新跳过", visit_id=visit_id, reason="访问记录不存在或不属于该分享")
+            return None
+        logger.info("分享访问时长更新完成", visit_id=visit_id, duration_seconds=bounded)
+        return dict(db_row)
+
+    # 方法作用：按可见范围平铺租户内分享，并带出按访问明细聚合的计数与时长。
+    # Args: identity - 当前身份；report_id - 可选报表筛选；created_by - 可选创建人筛选（仅租户管理员）；status - active/revoked/expired；page - 页码；page_size - 每页条数。
+    # Returns: (当前页列表行, 命中总数)。
+    async def list_tenant_shares(self, identity: Any, *, report_id: str | None = None, created_by: int | None = None, status: str | None = None, page: int = 1, page_size: int = 20) -> tuple[list[dict[str, Any]], int]:
+        bounded_page = max(1, int(page or 1))
+        bounded_size = max(1, min(int(page_size or 20), 100))
+        logger.debug("链接管理列表查询入口", tenant_id=int(getattr(identity, "tenant_id", 0) or 0), page=bounded_page, page_size=bounded_size)
+        if self._memory:
+            rows = [row for row in self._shares.values() if self._visible(row, identity)]
+            if report_id:
+                rows = [row for row in rows if str(row.get("report_id", "")) == str(report_id)]
+            if created_by is not None:
+                rows = [row for row in rows if int(row.get("created_by", 0) or 0) == int(created_by)]
+            if status:
+                rows = [row for row in rows if self._share_status(row) == str(status)]
+            rows.sort(key=lambda row: row.get("created_at") or datetime.min.replace(tzinfo=timezone.utc), reverse=True)
+            total = len(rows)
+            start = (bounded_page - 1) * bounded_size
+            items = [self._memory_share_item(row) for row in rows[start:start + bounded_size]]
+            logger.info("链接管理列表查询完成", tenant_id=int(getattr(identity, "tenant_id", 0) or 0), total=total, returned=len(items))
+            return items, total
+        pool = await self._pool()
+        from src.memory.pg_pool import pg_pool_connection
+
+        tenant_id = int(getattr(identity, "tenant_id", 0) or 0)
+        user_id = int(getattr(identity, "user_id", 0) or 0)
+        role = str(getattr(identity, "role", "") or "")
+        # report_id 在数据库中是 UUID 列；非 UUID 的筛选值不可能命中任何分享。
+        report_filter = str(report_id) if report_id else None
+        if report_filter is not None and not _is_uuid(report_filter):
+            logger.info("链接管理列表查询完成", tenant_id=tenant_id, total=0, reason="报表标识非 UUID")
+            return [], 0
+        parameters = (tenant_id, role, user_id, report_filter, created_by, str(status or ""))
+        async with pg_pool_connection(pool, tenant_id, user_id, role) as connection:
+            # 一条聚合 SQL 带出列表与访问统计，避免按分享逐条查询造成 N+1。
+            rows = await connection.fetch(
+                "SELECT s.id::text AS id, s.report_id::text AS report_id, s.scope, s.user_scope, s.created_by, s.created_at, s.expires_at, s.revoked_at, "
+                "COALESCE(v.version,0) AS version, COALESCE(j.prompt,'') AS report_prompt, "
+                "CASE WHEN COALESCE(s.code_hash,'') = '' THEN FALSE ELSE TRUE END AS require_code, "
+                "COUNT(vs.id) AS visitor_count, "
+                "COUNT(vs.id) FILTER (WHERE vs.visitor_kind='user') AS system_visitor_count, "
+                "COUNT(vs.id) FILTER (WHERE vs.visitor_kind='anonymous') AS anonymous_visitor_count, "
+                "COALESCE(SUM(vs.duration_seconds),0) AS total_duration_seconds, "
+                "COUNT(*) OVER () AS total_count "
+                "FROM report_shares s "
+                "LEFT JOIN report_versions v ON v.id=s.report_version_id "
+                "LEFT JOIN report_jobs j ON j.id=v.job_id "
+                "LEFT JOIN report_share_visits vs ON vs.share_id=s.id "
+                f"WHERE {_SHARE_LIST_FILTER_SQL} "
+                "GROUP BY s.id, s.report_id, s.scope, s.user_scope, s.created_by, s.created_at, s.expires_at, s.revoked_at, v.version, j.prompt "
+                "ORDER BY s.created_at DESC LIMIT $7 OFFSET $8",
+                *parameters, bounded_size, (bounded_page - 1) * bounded_size,
+            )
+            if rows:
+                total = int(rows[0]["total_count"])
+            elif bounded_page > 1:
+                # 窗口计数随行返回，翻过尾页拿不到行时才补一次总数查询。
+                total = int(await connection.fetchval(f"SELECT COUNT(*) FROM report_shares s WHERE {_SHARE_LIST_FILTER_SQL}", *parameters) or 0)
+            else:
+                total = 0
+        items = [self._pg_share_item(row) for row in rows]
+        logger.info("链接管理列表查询完成", tenant_id=tenant_id, total=total, returned=len(items))
+        return items, total
+
+    # 方法作用：读取分享最近访问的系统用户及其停留时长，权限与该分享的可见范围一致。
+    # Args: share_id - 分享标识；identity - 当前身份。
+    # Returns: 访问者列表；分享不存在或越权返回 None。
+    async def list_share_visitors(self, share_id: str, identity: Any) -> list[dict[str, Any]] | None:
+        # 上限 50：链接管理只展示最近访问，不提供全量导出。
+        limit = 50
+        logger.debug("分享访问者列表入口", share_id=share_id, user_id=int(getattr(identity, "user_id", 0) or 0))
+        if self._memory:
+            row = self._shares.get(str(share_id))
+            if row is None or not self._visible(row, identity):
+                logger.info("分享访问者列表跳过", share_id=share_id, reason="分享不存在或越权")
+                return None
+            visits = [
+                item
+                for item in self._share_visits.values()
+                if str(item.get("share_id", "")) == str(share_id) and str(item.get("visitor_kind", "")) == "user"
+            ]
+            visits.sort(key=lambda item: item.get("started_at") or datetime.min.replace(tzinfo=timezone.utc), reverse=True)
+            result = [self._memory_visitor_item(item) for item in visits[:limit]]
+            logger.info("分享访问者列表完成", share_id=share_id, visit_count=len(result))
+            return result
+        if not _is_uuid(share_id):
+            return None
+        pool = await self._pool()
+        from src.memory.pg_pool import pg_pool_connection
+
+        tenant_id = int(getattr(identity, "tenant_id", 0) or 0)
+        user_id = int(getattr(identity, "user_id", 0) or 0)
+        role = str(getattr(identity, "role", "") or "")
+        async with pg_pool_connection(pool, tenant_id, user_id, role) as connection:
+            # 先判分享可见性，再取访问明细；两步分别复用分享可见范围规则。
+            visible = await connection.fetchval(
+                "SELECT 1 FROM report_shares WHERE id=$1::uuid AND tenant_id=$2 AND ($3<>'super_admin' AND ($3='tenant_admin' OR created_by=$4))",
+                str(share_id), tenant_id, role, user_id,
+            )
+            if not visible:
+                logger.info("分享访问者列表跳过", share_id=share_id, reason="分享不存在或越权")
+                return None
+            rows = await connection.fetch(
+                "SELECT v.user_id, COALESCE(u.username,'') AS username, v.started_at, v.last_seen_at, v.duration_seconds, v.ip_hash "
+                "FROM report_share_visits v JOIN report_shares s ON s.id=v.share_id "
+                "LEFT JOIN users u ON u.id=v.user_id "
+                "WHERE v.share_id=$1::uuid AND v.tenant_id=$2 AND v.visitor_kind='user' "
+                "ORDER BY v.started_at DESC LIMIT $3",
+                str(share_id), tenant_id, limit,
+            )
+        result = [
+            {
+                "user_id": int(row["user_id"]),
+                "username": str(row["username"] or ""),
+                "started_at": row["started_at"],
+                "last_seen_at": row["last_seen_at"],
+                "duration_seconds": int(row["duration_seconds"] or 0),
+                "ip_hash": str(row["ip_hash"] or ""),
+            }
+            for row in rows
+        ]
+        logger.info("分享访问者列表完成", share_id=share_id, visit_count=len(result))
+        return result
+
+    # 方法作用：批量撤销可见范围内的分享，个别标识越权或已撤销不影响其余撤销。
+    # Args: share_ids - 待撤销的分享标识列表；identity - 当前身份。
+    # Returns: (成功撤销数, 跳过数)。
+    async def revoke_shares(self, share_ids: list[str], identity: Any) -> tuple[int, int]:
+        normalized = list(dict.fromkeys(str(item) for item in share_ids if str(item).strip()))
+        logger.debug("批量撤销分享入口", tenant_id=int(getattr(identity, "tenant_id", 0) or 0), request_count=len(normalized))
+        if self._memory:
+            now = datetime.now(timezone.utc)
+            revoked = 0
+            for share_id in normalized:
+                row = self._shares.get(share_id)
+                if row is None or not self._visible(row, identity) or row.get("revoked_at") is not None:
+                    continue
+                row["revoked_at"] = now
+                revoked += 1
+            skipped = len(normalized) - revoked
+            logger.info("批量撤销分享完成", revoked=revoked, skipped=skipped)
+            return revoked, skipped
+        pool = await self._pool()
+        from src.memory.pg_pool import pg_pool_connection
+
+        tenant_id = int(getattr(identity, "tenant_id", 0) or 0)
+        user_id = int(getattr(identity, "user_id", 0) or 0)
+        role = str(getattr(identity, "role", "") or "")
+        valid_ids = [item for item in normalized if _is_uuid(item)]
+        revoked = 0
+        if valid_ids:
+            async with pg_pool_connection(pool, tenant_id, user_id, role) as connection:
+                rows = await connection.fetch(
+                    "UPDATE report_shares SET revoked_at=NOW() WHERE id=ANY($1::uuid[]) AND tenant_id=$2 "
+                    "AND ($3<>'super_admin' AND ($3='tenant_admin' OR created_by=$4)) AND revoked_at IS NULL RETURNING id",
+                    valid_ids, tenant_id, role, user_id,
+                )
+            revoked = len(rows)
+        skipped = len(normalized) - revoked
+        logger.info("批量撤销分享完成", revoked=revoked, skipped=skipped)
+        return revoked, skipped
+
+    # 方法作用：读取租户级报表设置，未配置时返回默认值。
+    # Args: tenant_id - 租户标识。
+    # Returns: 设置字典（含开关与永久报表上限）。
+    async def get_tenant_settings(self, tenant_id: int) -> dict[str, Any]:
+        defaults = {
+            "tenant_id": int(tenant_id or 0),
+            "record_share_visitor_identity": True,
+            "max_permanent_reports_per_user": 0,
+            "updated_by": 0,
+            "updated_at": None,
+        }
+        if self._memory:
+            stored = self._tenant_settings.get(int(tenant_id or 0))
+            return {**defaults, **dict(stored)} if stored else defaults
+        pool = await self._pool()
+        from src.memory.pg_pool import pg_pool_connection
+
+        record_tenant = int(tenant_id or 0)
+        async with pg_pool_connection(pool, record_tenant, 0, "analyst") as connection:
+            row = await connection.fetchrow("SELECT tenant_id, record_share_visitor_identity, max_permanent_reports_per_user, updated_by, updated_at FROM report_tenant_settings WHERE tenant_id=$1", record_tenant)
+        return {**defaults, **dict(row)} if row else defaults
+
+    # 方法作用：保存租户级报表设置。
+    # Args: tenant_id - 租户标识；settings - 开关与永久报表上限；updated_by - 操作管理员用户 ID。
+    # Returns: 保存后的设置字典。
+    async def save_tenant_settings(self, tenant_id: int, settings: dict[str, Any], updated_by: int) -> dict[str, Any]:
+        record_tenant = int(tenant_id or 0)
+        values = {
+            "tenant_id": record_tenant,
+            "record_share_visitor_identity": bool(settings.get("record_share_visitor_identity", True)),
+            "max_permanent_reports_per_user": max(0, int(settings.get("max_permanent_reports_per_user", 0) or 0)),
+            "updated_by": int(updated_by or 0),
+        }
+        logger.debug("租户报表设置保存入口", tenant_id=record_tenant, updated_by=values["updated_by"])
+        if self._memory:
+            stored = {**values, "updated_at": datetime.now(timezone.utc)}
+            self._tenant_settings[record_tenant] = stored
+            logger.info("租户报表设置保存完成", tenant_id=record_tenant)
+            return dict(stored)
+        pool = await self._pool()
+        from src.memory.pg_pool import pg_pool_connection
+
+        # 设置表的管理策略要求 tenant_admin 角色；调用方在 API 层已校验租户管理员身份。
+        async with pg_pool_connection(pool, record_tenant, values["updated_by"], "tenant_admin") as connection:
+            row = await connection.fetchrow(
+                "INSERT INTO report_tenant_settings (tenant_id,record_share_visitor_identity,max_permanent_reports_per_user,updated_by,updated_at) "
+                "VALUES ($1,$2,$3,$4,NOW()) "
+                "ON CONFLICT (tenant_id) DO UPDATE SET record_share_visitor_identity=EXCLUDED.record_share_visitor_identity, "
+                "max_permanent_reports_per_user=EXCLUDED.max_permanent_reports_per_user, updated_by=EXCLUDED.updated_by, updated_at=NOW() RETURNING *",
+                record_tenant, values["record_share_visitor_identity"], values["max_permanent_reports_per_user"], values["updated_by"],
+            )
+        logger.info("租户报表设置保存完成", tenant_id=record_tenant)
+        return dict(row)
+
+    # 方法作用：按分享 ID 聚合访问计数与停留时长。
+    # Args: share_id - 分享标识。
+    # Returns: 计数、系统/匿名访客数与平均时长。
+    def _visit_aggregate(self, share_id: str) -> dict[str, int]:
+        visits = [row for row in self._share_visits.values() if str(row.get("share_id", "")) == str(share_id)]
+        total_duration = sum(int(row.get("duration_seconds", 0) or 0) for row in visits)
+        count = len(visits)
+        return {
+            "visitor_count": count,
+            "system_visitor_count": sum(1 for row in visits if str(row.get("visitor_kind", "")) == "user"),
+            "anonymous_visitor_count": sum(1 for row in visits if str(row.get("visitor_kind", "")) != "user"),
+            "total_duration_seconds": total_duration,
+            "average_duration_seconds": total_duration // count if count else 0,
+        }
+
+    # 方法作用：判定分享当前状态，供有效/已撤销/已过期筛选复用。
+    # Args: row - 内存分享记录。
+    # Returns: active/revoked/expired 之一。
+    @staticmethod
+    def _share_status(row: dict[str, Any]) -> str:
+        if row.get("revoked_at") is not None:
+            return "revoked"
+        expires_at = row.get("expires_at")
+        if isinstance(expires_at, str):
+            try:
+                expires_at = datetime.fromisoformat(expires_at.replace("Z", "+00:00"))
+            except ValueError:
+                return "active"
+        if isinstance(expires_at, datetime):
+            value = expires_at if expires_at.tzinfo is not None else expires_at.replace(tzinfo=timezone.utc)
+            if value <= datetime.now(timezone.utc):
+                return "expired"
+        return "active"
+
+    # 方法作用：把内存分享记录组装成链接管理列表行。
+    # Args: row - 内存分享记录。
+    # Returns: 含访问聚合的列表行字典。
+    def _memory_share_item(self, row: dict[str, Any]) -> dict[str, Any]:
+        share_id = str(row.get("id", ""))
+        version = self._versions.get(str(row.get("report_version_id", ""))) or {}
+        job = self._jobs.get(str(version.get("job_id", ""))) or {}
+        # report_jobs 暂无 title 列，先用任务描述充当标题来源。
+        prompt = str(row.get("report_prompt") or job.get("prompt", "") or "")
+        data = {
+            "id": share_id,
+            "report_id": row.get("report_id", ""),
+            "report_prompt": prompt,
+            "version": row.get("version", version.get("version", 0)),
+            "scope": row.get("scope", "public"),
+            "user_scope": row.get("user_scope", "none"),
+            "require_code": bool(str(row.get("code_hash", "") or "")),
+            "created_by": row.get("created_by", 0),
+            "created_at": row.get("created_at"),
+            "expires_at": row.get("expires_at"),
+            "revoked_at": row.get("revoked_at"),
+            **self._visit_aggregate(share_id),
+        }
+        return to_share_list_item(data)
+
+    # 方法作用：把数据库聚合行组装成链接管理列表行。
+    # Args: row - asyncpg 聚合查询结果行。
+    # Returns: 含访问聚合的列表行字典。
+    @staticmethod
+    def _pg_share_item(row: Any) -> dict[str, Any]:
+        data = dict(row)
+        total_duration = int(data.get("total_duration_seconds", 0) or 0)
+        count = int(data.get("visitor_count", 0) or 0)
+        data["total_duration_seconds"] = total_duration
+        data["average_duration_seconds"] = total_duration // count if count else 0
+        return to_share_list_item(data)
+
+    # 方法作用：把内存访问记录转换为系统用户访问条目。
+    # Args: row - 内存访问记录。
+    # Returns: 访问者条目字典。
+    def _memory_visitor_item(self, row: dict[str, Any]) -> dict[str, Any]:
+        visitor_id = int(row.get("user_id", 0) or 0)
+        return {
+            "user_id": visitor_id,
+            "username": str(self._usernames.get(visitor_id, "") or ""),
+            "started_at": row.get("started_at"),
+            "last_seen_at": row.get("last_seen_at"),
+            "duration_seconds": int(row.get("duration_seconds", 0) or 0),
+            "ip_hash": str(row.get("ip_hash", "") or ""),
+        }
 
     # 方法作用：记录分享访问和 Drilldown 访问的持久化审计事件。
     # Args: event - 不包含完整 token、SQL 或敏感数据的审计字段。

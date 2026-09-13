@@ -1,4 +1,5 @@
 import { lazy, Suspense, useState, useEffect } from 'react';
+import type { ReactNode } from 'react';
 import { BrowserRouter, Routes, Route, NavLink, Navigate, useLocation } from 'react-router-dom';
 import { Layout, Menu, ConfigProvider, Tag, Typography, theme, Grid, Button, Drawer, Result } from 'antd';
 import type { MenuProps } from 'antd';
@@ -7,7 +8,7 @@ import {
   CheckCircleOutlined, LoadingOutlined,
   ThunderboltOutlined, ReadOutlined, ApiOutlined,
   SafetyCertificateOutlined, LogoutOutlined, UserOutlined,
-  MenuOutlined, ScheduleOutlined, BulbOutlined,
+  MenuOutlined, ScheduleOutlined, BulbOutlined, LinkOutlined,
 } from '@ant-design/icons';
 import { AuthProvider } from './hooks/AuthContext';
 import { useAuth } from './hooks/AuthContext';
@@ -38,6 +39,7 @@ const McpPage = lazy(() => import('./pages/McpPage'));
 const AdminPage = lazy(() => import('./pages/AdminPage'));
 const AutomationPage = lazy(() => import('./pages/AutomationPage'));
 const ReportWorkbenchPage = lazy(() => import('./pages/ReportWorkbenchPage'));
+const LinkManagementPage = lazy(() => import('./pages/LinkManagementPage'));
 const ReportViewerPage = lazy(() => import('./pages/ReportViewerPage'));
 const SharedReportPage = lazy(() => import('./pages/SharedReportPage'));
 const LoginPage = lazy(() => import('./pages/LoginPage'));
@@ -74,10 +76,10 @@ function AdminRoute() {
   return result;
 }
 
-// 方法作用：在进入报表工作台前再次校验服务端菜单能力，防止仅靠前端隐藏绕过权限。
-// Args: 无，读取当前认证身份和报表能力接口。
-// Returns: 报表工作台、加载占位或首页重定向。
-function ReportRoute() {
+// 方法作用：在进入报表工作台及其子页面前再次校验服务端菜单能力，防止仅靠前端隐藏绕过权限。
+// Args: children - 通过校验后渲染的子页面；缺省时渲染报表工作台主页。
+// Returns: 目标子页面、加载占位或首页重定向。
+function ReportRoute({ children }: { children?: ReactNode }) {
   useLanguage();
   const { user } = useAuth();
   const [allowed, setAllowed] = useState<boolean | null>(null);
@@ -92,7 +94,7 @@ function ReportRoute() {
 
   if (user?.role === 'super_admin') return <Navigate to="/admin" replace />;
   if (allowed === null) return pageFallback;
-  return allowed ? <ReportWorkbenchPage /> : <Navigate to="/" replace />;
+  return allowed ? <>{children ?? <ReportWorkbenchPage />}</> : <Navigate to="/" replace />;
 }
 
 // 方法作用：渲染桌面侧栏或移动抽屉导航及当前业务路由。
@@ -147,6 +149,11 @@ function AppContent() {
     { key: 'memory', icon: <BulbOutlined />, label: <NavLink to="/memory">{t("我的记忆")}</NavLink> },
     reportMenuAllowed === true && user?.role !== 'super_admin'
       ? { key: 'report-workbench', icon: <ScheduleOutlined />, label: <NavLink to="/report-workbench">{t("报表工作台")}</NavLink> }
+      : null,
+    // 链接管理作为独立菜单项紧跟报表工作台；后续批次合并成子菜单时只需替换这两项。
+    // key 与路径一致，menuKey 由 pathname 推导，路径变更后仍能高亮。
+    reportMenuAllowed === true && user?.role !== 'super_admin'
+      ? { key: 'report-workbench/links', icon: <LinkOutlined />, label: <NavLink to="/report-workbench/links">{t("链接管理")}</NavLink> }
       : null,
     user?.role !== 'viewer'
       ? { key: 'automation', icon: <ScheduleOutlined />, label: <NavLink to="/automation">{t("自动化")}</NavLink> }
@@ -237,6 +244,7 @@ function AppContent() {
                 <Route path="/memory" element={<MemoryPage />} />
                 <Route path="/metric-catalog" element={<MetricsPage />} />
                 <Route path="/report-workbench" element={<ReportRoute />} />
+                <Route path="/report-workbench/links" element={<ReportRoute><LinkManagementPage /></ReportRoute>} />
                 <Route path="/reports/:reportId" element={<ReportViewerPage />} />
                 <Route path="/automation" element={<AutomationPage />} />
                 <Route path="/mcp" element={<McpPage />} />

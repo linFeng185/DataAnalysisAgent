@@ -1,5 +1,5 @@
 import { t, useLanguage } from '../i18n';
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { Alert, Button, Form, Input, Modal, Space, Spin, Tag, Typography, message } from 'antd';
 import { LockOutlined, ReloadOutlined } from '@ant-design/icons';
 import { useParams } from 'react-router-dom';
@@ -11,9 +11,95 @@ import { useReportTemplate } from '../hooks/useReportTemplate';
 import {
   fetchSharedDrilldown,
   fetchSharedReport,
+  reportSharedReportVisitDuration,
+  startSharedReportVisit,
   unlockSharedReport,
 } from '../api/reportWorkbench';
 import type { ReportDrilldownDefinition, ReportDrilldownResponse, ReportSharedResponse } from '../types/report';
+
+/** 停留时长心跳间隔：每 30 秒上报一次累积值。 */
+const VISIT_HEARTBEAT_MS = 30000;
+
+// 方法作用：公开分享页停留时长埋点：快照加载成功后登记一次访问，只累计页面可见时间并按累积值上报。
+// Args: token - URL 分享 token；loaded - 公开快照是否已成功加载；unlocked - 是否已通过授权码解锁。
+// Returns: 无返回值，副作用为访问登记、可见时长累计与心跳上报。
+function useShareVisitBeacon(token: string | undefined, loaded: boolean, unlocked: boolean): void {
+  // 访问 ID：登记成功前不上报时长，避免把停留时长挂到不存在的访问记录上。
+  const visitIdRef = useRef('');
+  // StrictMode 会重复执行一次挂载副作用，用 ref 记住已登记的 token，保证只产生一条访问记录。
+  const registeredTokenRef = useRef('');
+  const unlockedRef = useRef(unlocked);
+  // 累积停留秒数与当前可见区段起点；隐藏期间起点为 null，因此后台时间不计入。
+  const visibleSecondsRef = useRef(0);
+  const visibleSinceRef = useRef<number | null>(null);
+
+  // 解锁状态只影响后续心跳里的 unlocked 标记，不重新登记访问，也不单独补发请求。
+  useEffect(() => { unlockedRef.current = unlocked; }, [unlocked]);
+
+  // 方法作用：结算当前可见区段的停留时长，隐藏期间不计时。
+  // Args: 无。
+  // Returns: 无返回值，结果累加到 visibleSecondsRef。
+  const settleVisible = useCallback((): void => {
+    if (visibleSinceRef.current === null) return;
+    const now = Date.now();
+    visibleSecondsRef.current += Math.max(0, now - visibleSinceRef.current) / 1000;
+    // 仍然可见时从当前时刻继续累计，保证心跳拿到的始终是累积值。
+    visibleSinceRef.current = document.visibilityState === 'visible' ? now : null;
+  }, []);
+
+  // 登记一次访问：同一 token 只登记一次，StrictMode 双挂载第二次直接跳过。
+  useEffect(() => {
+    if (!token || !loaded) return;
+    if (registeredTokenRef.current === token) return;
+    registeredTokenRef.current = token;
+    void startSharedReportVisit(token, unlockedRef.current)
+      .then(result => { visitIdRef.current = result.visit_id; })
+      .catch(error => console.debug('分享页访问登记失败', error));
+  }, [token, loaded]);
+
+  // 计时与上报：组件挂载时开始，卸载时清理定时器和监听，不给用户留后台请求。
+  useEffect(() => {
+    if (!token) return undefined;
+    // 页面在后台打开时先不计时，等变为可见再开始累计。
+    visibleSinceRef.current = document.visibilityState === 'visible' ? Date.now() : null;
+
+    // 方法作用：把当前累积停留时长上报给服务端，卸载路径用 keepalive 让请求活到页面销毁之后。
+    // Args: keepalive - 页面卸载时为 true，普通心跳为 false。
+    // Returns: 无返回值，失败只写调试日志，不打扰访客。
+    const flush = (keepalive: boolean): void => {
+      settleVisible();
+      const visitId = visitIdRef.current;
+      if (!visitId) return;
+      void reportSharedReportVisitDuration(token, visitId, Math.round(visibleSecondsRef.current), unlockedRef.current, keepalive)
+        .catch(error => console.debug('分享页停留时长上报失败', error));
+    };
+
+    // 方法作用：可见性变化时开始或结算计时，隐藏期间的时间不计入停留时长。
+    // Args: 无。
+    // Returns: 无返回值。
+    const onVisibilityChange = (): void => {
+      if (document.visibilityState === 'visible') {
+        if (visibleSinceRef.current === null) visibleSinceRef.current = Date.now();
+        return;
+      }
+      settleVisible();
+      visibleSinceRef.current = null;
+    };
+    // 方法作用：页面卸载（关闭标签、刷新、前进后退）时补发最后一次累积值。
+    // Args: 无。
+    // Returns: 无返回值。
+    const onPageHide = (): void => flush(true);
+
+    const heartbeat = window.setInterval(() => flush(false), VISIT_HEARTBEAT_MS);
+    document.addEventListener('visibilitychange', onVisibilityChange);
+    window.addEventListener('pagehide', onPageHide);
+    return () => {
+      window.clearInterval(heartbeat);
+      document.removeEventListener('visibilitychange', onVisibilityChange);
+      window.removeEventListener('pagehide', onPageHide);
+    };
+  }, [token, settleVisible]);
+}
 
 // 方法作用：展示不依赖登录的公开报表快照和授权码解锁状态。
 // Args: 无，分享 token 从路由参数读取。
@@ -34,6 +120,9 @@ export default function SharedReportPage() {
   const [drilldownResult, setDrilldownResult] = useState<ReportDrilldownResponse | null>(null);
   const [drilldownLoading, setDrilldownLoading] = useState(false);
   const [drilldownError, setDrilldownError] = useState('');
+
+  // 停留时长埋点：快照加载成功后才登记访问，授权码解锁状态随心跳一起上报。
+  useShareVisitBeacon(token, Boolean(report), Boolean(sessionToken));
 
   // 方法作用：读取公开快照，并将授权码锁定响应转换为解锁界面状态。
   // Args: 无。

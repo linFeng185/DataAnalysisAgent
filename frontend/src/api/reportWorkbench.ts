@@ -250,3 +250,76 @@ export async function fetchSharedDrilldown(
   if (!response.ok) throw await publicError(response);
   return response.json() as Promise<ReportDrilldownResponse>;
 }
+  ReportShareBatchRevokeResponse,
+  ReportShareLinkListResponse,
+  ReportShareLinkQuery,
+  ReportShareLinkStatus,
+  ReportShareVisitListResponse,
+  SharedReportVisitResponse,
+
+// 方法作用：读取链接管理页的分享链接平铺列表及各链接的访问量与停留时长聚合。
+// Args: query - 报表、创建人、状态筛选与分页条件。
+// Returns: 分享链接摘要、总数和分页信息。
+export function fetchReportShareLinks(query: ReportShareLinkQuery = {}): Promise<ReportShareLinkListResponse> {
+  const params = new URLSearchParams();
+  if (query.report_id) params.set('report_id', query.report_id);
+  if (query.created_by) params.set('created_by', String(query.created_by));
+  if (query.status) params.set('status', query.status);
+  params.set('page', String(query.page ?? 1));
+  params.set('page_size', String(query.page_size ?? 20));
+  return get<ReportShareLinkListResponse>(`${REPORT_BASE}/shares?${params.toString()}`);
+}
+
+// 方法作用：读取单条分享链接的最近访问明细，只返回系统用户及其停留时长。
+// Args: shareId - 分享链接 ID。
+// Returns: 访问明细数组和总数。
+export function fetchReportShareVisits(shareId: string): Promise<ReportShareVisitListResponse> {
+  return get<ReportShareVisitListResponse>(`${REPORT_BASE}/shares/${encodeURIComponent(shareId)}/visits`);
+}
+
+// 方法作用：批量取消分享链接，服务端逐条判定可撤销性并回传跳过数量。
+// Args: shareIds - 要取消的分享链接 ID 列表。
+// Returns: 已取消与已跳过的条数。
+export function batchRevokeReportShares(shareIds: string[]): Promise<ReportShareBatchRevokeResponse> {
+  return post<ReportShareBatchRevokeResponse>(`${REPORT_BASE}/shares/batch-revoke`, { share_ids: shareIds });
+}
+
+// 方法作用：公开分享页成功加载快照后登记一次访问，取得后续上报停留时长用的访问 ID。
+// Args: token - URL 分享 token；unlocked - 本次加载是否已通过授权码解锁。
+// Returns: 访问 ID 与访客类型（系统用户或匿名）。
+export async function startSharedReportVisit(token: string, unlocked: boolean): Promise<SharedReportVisitResponse> {
+  const response = await fetch(`/api/v1${REPORT_BASE}/shared/reports/${encodeURIComponent(token)}/visits`, {
+    method: 'POST',
+    credentials: 'include',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ unlocked }),
+  });
+  if (!response.ok) throw await publicError(response);
+  return response.json() as Promise<SharedReportVisitResponse>;
+}
+
+// 方法作用：以累积值幂等覆盖的方式上报公开分享页停留时长，重试或重复上报不会重复计数。
+// Args: token - URL 分享 token；visitId - 访问登记返回的 ID；durationSeconds - 累积停留秒数；unlocked - 是否已通过授权码解锁；keepalive - 页面卸载时为 true。
+// Returns: 服务端确认保留的累积秒数。
+export async function reportSharedReportVisitDuration(
+  token: string,
+  visitId: string,
+  durationSeconds: number,
+  unlocked = false,
+  keepalive = false,
+): Promise<{ visit_id: string; duration_seconds: number }> {
+  // 卸载路径必须用 fetch keepalive：navigator.sendBeacon 只能发 POST，无法表达 PATCH 的幂等覆盖语义。
+  const response = await fetch(
+    `/api/v1${REPORT_BASE}/shared/reports/${encodeURIComponent(token)}/visits/${encodeURIComponent(visitId)}`,
+    {
+      method: 'PATCH',
+      credentials: 'include',
+      keepalive,
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ duration_seconds: Math.round(durationSeconds), unlocked }),
+    },
+  );
+  if (!response.ok) throw await publicError(response);
+  return response.json() as Promise<{ visit_id: string; duration_seconds: number }>;
+}
+

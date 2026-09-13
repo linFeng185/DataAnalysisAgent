@@ -109,6 +109,16 @@ def _default_api_access_policies() -> list[ApiAccessRouteConfig]:
             description="公开报表快照明细钻取",
         ),
         ApiAccessRouteConfig(
+            id="report_shared_visit_create", path="/api/v1/report-workbench/shared/reports/{token}/visits",
+            path_type="template", methods=["POST"], auth="optional", access_log="audit",
+            description="分享访问上报",
+        ),
+        ApiAccessRouteConfig(
+            id="report_shared_visit_update", path="/api/v1/report-workbench/shared/reports/{token}/visits/{visit_id}",
+            path_type="template", methods=["PATCH"], auth="optional", access_log="audit",
+            description="分享停留时长上报",
+        ),
+        ApiAccessRouteConfig(
             id="report_permissions_me", path="/api/v1/report-workbench/permissions/me",
             methods=["GET"], auth="jwt", access_log="standard", description="当前用户报表能力",
         ),

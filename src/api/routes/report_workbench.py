@@ -6,9 +6,9 @@ import secrets
 from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, Literal
 
-from fastapi import APIRouter, Header, HTTPException, Query
+from fastapi import APIRouter, Header, HTTPException, Query, Request
 
 from src.api.auth import get_current_identity
 from src.api.routes._helpers import _call_with_optional_tenant
@@ -33,6 +33,13 @@ from src.reporting.quota import (
     QuotaPolicy,
     ReportPermissionService,
     describe_quota_error,
+)
+from src.reporting.share_analytics import (
+    BatchRevokeSharesRequest,
+    ShareVisitCreateRequest,
+    ShareVisitUpdateRequest,
+    TenantReportSettings,
+    hash_client_ip,
 )
 from src.reporting.sharing import (
     can_access_user_scope,
@@ -906,3 +913,172 @@ async def unlock_shared_report(token: str, request: AuthorizationCodeRequest) ->
     _unlock_sessions[session] = (str(share["id"]), datetime.now(timezone.utc) + timedelta(minutes=15))
     await store.record_audit({"tenant_id": share.get("tenant_id"), "share_id": share.get("id"), "action": "share_unlock", "result": "success"})
     return {"session_token": session, "expires_in_seconds": 900}
+
+
+# 方法作用：解析客户端 IP 并做不可逆摘要，供访问明细与审计使用。
+# Args: request - 当前 HTTP 请求。
+# Returns: IP 摘要；无法解析时返回空字符串。
+def _client_ip_hash(request: Request) -> str:
+    # 访问策略中间件已解析可信代理链，缺失时回退到直连地址。
+    client_ip = str(getattr(request.state, "client_ip", "") or "")
+    if not client_ip:
+        client = getattr(request, "client", None)
+        client_ip = str(getattr(client, "host", "") or "")
+    return hash_client_ip(client_ip)
+
+
+# 方法作用：按分享 token 读取未撤销且未过期的分享，供访问上报复用同一套 404/410 语义。
+# Args: store - 报表 Store；token - URL 中的分享 token。
+# Returns: 分享记录字典。
+async def _require_share_for_visit(store: Any, token: str) -> dict[str, Any]:
+    share = await store.get_share_by_token(hash_share_token(token), count_view=False)
+    if not share or share.get("revoked_at") is not None:
+        await store.record_audit({"action": "share_visit", "result": "not_found"})
+        raise HTTPException(404, "分享链接不存在或已撤销")
+    if _is_expired(share.get("expires_at")):
+        await store.record_audit({"tenant_id": share.get("tenant_id"), "share_id": share.get("id"), "action": "share_visit", "result": "expired"})
+        raise HTTPException(410, "分享链接已过期")
+    return share
+
+
+@router.post("/shared/reports/{token}/visits")
+# 方法作用：公开侧上报一次分享访问，按租户开关决定是否记录登录身份。
+# Args: token - 分享 token；request - 当前请求（客户端 IP）；payload - 可选授权码解锁标记。
+# Returns: 访问标识与实际记录的访客类型。
+async def create_share_visit_report(token: str, request: Request, payload: ShareVisitCreateRequest = ShareVisitCreateRequest()) -> dict[str, Any]:
+    """匿名访问同样计入访问量与时长，只是不记录用户身份。"""
+    store = get_report_store()
+    logger.debug("分享访问上报入口", token_prefix=token[:6], unlocked=bool(payload.unlocked))
+    share = await _require_share_for_visit(store, token)
+    identity = get_current_identity()
+    tenant_id = int(share.get("tenant_id", 0) or 0)
+    visitor_kind = "anonymous"
+    visitor_user_id = 0
+    if int(getattr(identity, "user_id", 0) or 0) > 0 and str(getattr(identity, "role", "") or "") != "anonymous":
+        # 需求 3.2：租户关闭身份记录时，携带登录身份也按匿名记录，不写 user_id。
+        settings = await store.get_tenant_settings(tenant_id)
+        if bool(settings.get("record_share_visitor_identity", True)):
+            visitor_kind = "user"
+            visitor_user_id = int(identity.user_id)
+        else:
+            logger.info("分享访问按匿名记录", share_id=share.get("id"), tenant_id=tenant_id, reason="租户关闭分享身份记录")
+    record = await store.create_share_visit(share, tenant_id, visitor_kind, visitor_user_id, _client_ip_hash(request), bool(payload.unlocked))
+    await store.record_audit({"tenant_id": tenant_id, "share_id": share.get("id"), "report_id": share.get("report_id"), "action": "share_visit", "result": "success", "ip_hash": str(record.get("ip_hash", "")), "metadata": {"visitor_kind": visitor_kind, "unlocked": bool(payload.unlocked)}})
+    logger.info("分享访问上报完成", share_id=share.get("id"), visit_id=record.get("id"), visitor_kind=visitor_kind)
+    return {"visit_id": str(record.get("id", "")), "visitor_kind": visitor_kind}
+
+
+@router.patch("/shared/reports/{token}/visits/{visit_id}")
+# 方法作用：上报累积停留时长，幂等覆盖并刷新最近可见时间。
+# Args: token - 分享 token；visit_id - 访问标识；payload - 累积秒数。
+# Returns: 访问标识与写入后的累积秒数。
+async def update_share_visit_duration(token: str, visit_id: str, payload: ShareVisitUpdateRequest) -> dict[str, Any]:
+    """只校验 token 归属与撤销状态：页面卸载时的最后一笔时长仍允许落库。"""
+    store = get_report_store()
+    logger.debug("分享停留时长上报入口", visit_id=visit_id, duration_seconds=int(payload.duration_seconds))
+    record = await store.update_share_visit(hash_share_token(token), visit_id, int(payload.duration_seconds))
+    if record is None:
+        raise HTTPException(404, "访问记录不存在或不属于该分享链接")
+    logger.info("分享停留时长上报完成", visit_id=visit_id, duration_seconds=int(record.get("duration_seconds", 0) or 0))
+    return {"visit_id": str(record.get("id", "")), "duration_seconds": int(record.get("duration_seconds", 0) or 0)}
+
+
+@router.get("/shares")
+# 方法作用：按可见范围返回租户内分享平铺列表，含访问计数与停留时长。
+# Args: report_id - 可选报表筛选；created_by - 可选创建人筛选（仅租户管理员）；status - 有效状态筛选；page/page_size - 分页。
+# Returns: 列表行、总数与分页参数。
+async def list_shares(
+    report_id: str | None = Query(default=None),
+    created_by: int | None = Query(default=None, ge=1),
+    status: Literal["active", "revoked", "expired"] | None = Query(default=None),
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=20, ge=1),
+) -> dict[str, Any]:
+    """需求 3.3：租户管理员看全租户并可按创建人筛选，其他角色只看自己创建的。"""
+    identity = get_current_identity()
+    role = str(getattr(identity, "role", "") or "")
+    if created_by is not None and role != "tenant_admin":
+        raise HTTPException(403, "仅租户管理员可按创建人筛选分享链接")
+    # page_size 超上限按 100 夹紧而不是报错，避免前端分页参数越界直接失败。
+    bounded_size = max(1, min(int(page_size), 100))
+    items, total = await get_report_store().list_tenant_shares(identity, report_id=report_id, created_by=created_by, status=status, page=page, page_size=bounded_size)
+    logger.info("链接管理列表完成", tenant_id=identity.tenant_id, user_id=identity.user_id, total=total, returned=len(items))
+    return {"shares": items, "total": total, "page": page, "page_size": bounded_size}
+
+
+@router.get("/shares/{share_id}/visits")
+# 方法作用：返回该分享最近访问的系统用户及其停留时长。
+# Args: share_id - 分享标识。
+# Returns: 访问者列表与条数。
+async def list_share_visitors(share_id: str) -> dict[str, Any]:
+    """权限与该分享的可见范围一致：租户管理员可看任意，其他人只看自己创建的。"""
+    identity = get_current_identity()
+    visits = await get_report_store().list_share_visitors(share_id, identity)
+    if visits is None:
+        raise HTTPException(404, "分享不存在或无权访问")
+    logger.info("分享访问者列表完成", share_id=share_id, user_id=identity.user_id, visit_count=len(visits))
+    return {"visits": visits, "total": len(visits)}
+
+
+@router.post("/shares/batch-revoke")
+# 方法作用：批量撤销可见范围内的分享，个别标识无权限不影响整体结果。
+# Args: payload - 待撤销的分享标识列表（1..100）。
+# Returns: 成功撤销数与跳过数。
+async def batch_revoke_shares(payload: BatchRevokeSharesRequest) -> dict[str, int]:
+    """skipped 计入不在可见范围、已撤销或不存在的标识。"""
+    identity = get_current_identity()
+    store = get_report_store()
+    logger.debug("批量撤销分享入口", tenant_id=identity.tenant_id, user_id=identity.user_id, request_count=len(payload.share_ids))
+    revoked, skipped = await store.revoke_shares(payload.share_ids, identity)
+    await store.record_audit({"tenant_id": identity.tenant_id, "user_id": identity.user_id, "action": "share_revoke_batch", "result": "success", "metadata": {"requested": len(payload.share_ids), "revoked": revoked, "skipped": skipped}})
+    logger.info("批量撤销分享完成", tenant_id=identity.tenant_id, revoked=revoked, skipped=skipped)
+    return {"revoked": revoked, "skipped": skipped}
+
+
+# 方法作用：校验当前身份是租户管理员且归属明确租户。
+# Args: identity - 当前请求身份。
+# Returns: 租户标识；不满足时抛出 HTTP 403。
+def _require_tenant_admin_identity(identity: Any) -> int:
+    if str(getattr(identity, "role", "") or "") != "tenant_admin":
+        logger.warning("租户报表设置授权拒绝", tenant_id=getattr(identity, "tenant_id", 0), user_id=getattr(identity, "user_id", 0))
+        raise HTTPException(403, "租户级报表设置由当前租户管理员维护")
+    tenant_id = int(getattr(identity, "tenant_id", 0) or 0)
+    if tenant_id <= 0:
+        raise HTTPException(403, "当前身份没有租户")
+    return tenant_id
+
+
+@router.get("/admin/tenant-settings")
+# 方法作用：读取当前租户的报表设置。
+# Args: 无。
+# Returns: 身份记录开关与永久报表上限。
+async def get_tenant_report_settings() -> dict[str, Any]:
+    """GET 与 PUT 同样只开放给租户管理员。"""
+    identity = get_current_identity()
+    tenant_id = _require_tenant_admin_identity(identity)
+    stored = await get_report_store().get_tenant_settings(tenant_id)
+    settings = TenantReportSettings(
+        record_share_visitor_identity=bool(stored.get("record_share_visitor_identity", True)),
+        max_permanent_reports_per_user=int(stored.get("max_permanent_reports_per_user", 0) or 0),
+    )
+    logger.info("租户报表设置读取完成", tenant_id=tenant_id, user_id=identity.user_id)
+    return settings.model_dump(mode="json")
+
+
+@router.put("/admin/tenant-settings")
+# 方法作用：保存当前租户的报表设置并写入审计。
+# Args: payload - 身份记录开关与永久报表上限。
+# Returns: 保存后的设置。
+async def update_tenant_report_settings(payload: TenantReportSettings) -> dict[str, Any]:
+    """max_permanent_reports_per_user 为 0 表示不限制，负数在契约层即被拒绝。"""
+    identity = get_current_identity()
+    tenant_id = _require_tenant_admin_identity(identity)
+    store = get_report_store()
+    stored = await store.save_tenant_settings(tenant_id, payload.model_dump(), int(identity.user_id))
+    await store.record_audit({"tenant_id": tenant_id, "user_id": identity.user_id, "action": "tenant_settings_update", "result": "success", "metadata": payload.model_dump()})
+    settings = TenantReportSettings(
+        record_share_visitor_identity=bool(stored.get("record_share_visitor_identity", True)),
+        max_permanent_reports_per_user=int(stored.get("max_permanent_reports_per_user", 0) or 0),
+    )
+    logger.info("租户报表设置保存完成", tenant_id=tenant_id, user_id=identity.user_id)
+    return settings.model_dump(mode="json")
