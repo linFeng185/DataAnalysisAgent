@@ -4,6 +4,7 @@ import { Alert, Button, Form, Input, Modal, Space, Spin, Tag, Typography, messag
 import { LockOutlined, ReloadOutlined } from '@ant-design/icons';
 import { useParams } from 'react-router-dom';
 import ReportDocumentRenderer from '../components/report/ReportDocumentRenderer';
+import ReportPageShell from '../components/report/ReportPageShell';
 import ReportDrilldownModal from '../components/report/ReportDrilldownModal';
 import TemplateSwitcher from '../components/report/TemplateSwitcher';
 import { useReportTemplate } from '../hooks/useReportTemplate';
@@ -115,15 +116,22 @@ export default function SharedReportPage() {
     }
   };
 
-  if (loading) return <div className="report-document"><Spin tip={t("分享报表加载中")} /></div>;
-  if (error) return <div className="report-document"><Alert type="error" showIcon message={error} action={<Button icon={<ReloadOutlined />} onClick={() => void loadReport}>{t("重试")}</Button>} /></div>;
-  if (!report && !locked) return <div className="report-document"><Alert type="warning" showIcon message={t("分享报表暂时不可用")} /></div>;
-  return <div>
-    {locked && <div className="report-document"><Alert type="info" showIcon icon={<LockOutlined />} message={t("该分享需要授权码")} action={<Button type="primary" onClick={() => setUnlockOpen(true)}>{t("输入授权码")}</Button>} /></div>}
-    {report && <>
-      <div className="report-document report-viewer-toolbar"><Tag color="blue">{t("公开快照 · 版本")} {report.version}</Tag><Typography.Text type="secondary">{t("页面内容来自固定脱敏版本")}</Typography.Text><TemplateSwitcher value={templateId} onChange={setTemplateId} /></div>
-      <ReportDocumentRenderer document={report.document} dataManifest={report.data_manifest} templateId={templateId} onDrilldown={(definition, filters) => void loadDrilldown(definition, filters)} />
-    </>}
+  // 加载态、错误态与授权码提示同样落在统一外壳内，避免加载完成前后是两套观感。
+  if (loading) return <ReportPageShell templateId={templateId}><div className="report-document"><Spin tip={t("分享报表加载中")} /></div></ReportPageShell>;
+  if (error) return <ReportPageShell templateId={templateId}><div className="report-document"><Alert type="error" showIcon message={error} action={<Button icon={<ReloadOutlined />} onClick={() => void loadReport}>{t("重试")}</Button>} /></div></ReportPageShell>;
+  if (!report && !locked) return <ReportPageShell templateId={templateId}><div className="report-document"><Alert type="warning" showIcon message={t("分享报表暂时不可用")} /></div></ReportPageShell>;
+  // 分享页保留顶栏（公开快照标识、版本与模板切换），并作为外壳槽位进入 TemplateScope。
+  const toolbar = report ? <>
+    <Tag color="blue">{t("公开快照 · 版本")} {report.version}</Tag>
+    <Typography.Text type="secondary">{t("页面内容来自固定脱敏版本")}</Typography.Text>
+    <TemplateSwitcher value={templateId} onChange={setTemplateId} />
+  </> : null;
+  return <>
+    <ReportPageShell templateId={templateId} toolbar={toolbar}>
+      {locked && <div className="report-document"><Alert type="info" showIcon icon={<LockOutlined />} message={t("该分享需要授权码")} action={<Button type="primary" onClick={() => setUnlockOpen(true)}>{t("输入授权码")}</Button>} /></div>}
+      {report && <ReportDocumentRenderer document={report.document} dataManifest={report.data_manifest} templateId={templateId} onDrilldown={(definition, filters) => void loadDrilldown(definition, filters)} />}
+    </ReportPageShell>
+    {/* 弹窗不进模板作用域：模板不为 Modal 的样式负责 */}
     <Modal title={t("解锁分享报表")} open={unlockOpen} onCancel={() => setUnlockOpen(false)} footer={null} destroyOnHidden>
       <Form layout="vertical" onFinish={values => void unlock(values as { authorization_code: string })}>
         <Form.Item name="authorization_code" label={t("授权码")} rules={[{ required: true, min: 1, message: t("请输入授权码") }]}>
@@ -141,5 +149,5 @@ export default function SharedReportPage() {
       onClose={() => { setDrilldown(null); setDrilldownResult(null); setDrilldownError(''); }}
       onPageChange={(page, pageSize) => void changeDrilldownPage(page, pageSize)}
     />
-  </div>;
+  </>;
 }

@@ -126,16 +126,21 @@ class TestPageWiring:
             assert "useReportTemplate" in page
             assert "templateId={templateId}" in page
 
-    # 方法作用：验证渲染器消费文档记录的模板并包裹作用域。
+    # 方法作用：验证渲染器消费文档记录的模板，模板作用域统一由页面外壳持有。
     # Args: self - 测试实例。
     # Returns: 无返回值，断言失败时由 pytest 报告。
     def test_renderer_consumes_document_theme(self) -> None:
         """渲染器必须读 document.theme，而不是写死一套外观。"""
         # Arrange
         renderer = Path("frontend/src/components/report/ReportDocumentRenderer.tsx").read_text(encoding="utf-8")
+        shell = Path("frontend/src/components/report/ReportPageShell.tsx").read_text(encoding="utf-8")
 
         # Act / Assert
-        assert "TemplateScope" in renderer
+        assert "useReportTemplate" in renderer
+        assert "resolveTemplate" in renderer
+        # 渲染器不再自带作用域，避免与页面外壳嵌套成两层主题
+        assert "<TemplateScope" not in renderer
+        assert "<TemplateScope" in shell
         assert "withChartBaseline" in renderer
         # 图表高度由模板密度决定，不再硬编码 320
         assert "densityMetrics" in renderer

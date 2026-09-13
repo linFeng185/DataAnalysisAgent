@@ -4,6 +4,7 @@ import { Alert, Button, Form, Input, InputNumber, List, Modal, Popconfirm, Selec
 import { ArrowLeftOutlined, DeleteOutlined, ReloadOutlined, ShareAltOutlined, TeamOutlined } from '@ant-design/icons';
 import { useNavigate, useParams } from 'react-router-dom';
 import ReportDocumentRenderer from '../components/report/ReportDocumentRenderer';
+import ReportPageShell from '../components/report/ReportPageShell';
 import ReportDrilldownModal from '../components/report/ReportDrilldownModal';
 import TemplateSwitcher from '../components/report/TemplateSwitcher';
 import { useReportTemplate } from '../hooks/useReportTemplate';
@@ -191,25 +192,30 @@ export default function ReportViewerPage() {
     }
   };
 
-  if (loading) return <div className="report-document"><Spin tip={t("报表加载中")} /></div>;
-  if (error || !report) return <div className="report-document"><Alert type="error" showIcon message={error || t("报表不存在")} action={<Button icon={<ReloadOutlined />} onClick={() => void loadReport()}>{t("重试")}</Button>} />{lifecycle?.expired && lifecycleActions}</div>;
+  // 加载态与错误态同样落在统一外壳内，避免加载完成前后是两套观感。
+  if (loading) return <ReportPageShell templateId={templateId}><div className="report-document"><Spin tip={t("报表加载中")} /></div></ReportPageShell>;
+  if (error || !report) return <ReportPageShell templateId={templateId}><div className="report-document"><Alert type="error" showIcon message={error || t("报表不存在")} action={<Button icon={<ReloadOutlined />} onClick={() => void loadReport()}>{t("重试")}</Button>} />{lifecycle?.expired && lifecycleActions}</div></ReportPageShell>;
   const expiry = expiryInfo(report.document.expires_at);
-  return <div>
-    <div className="report-document report-viewer-toolbar">
-      <Space wrap>
-        <Button icon={<ArrowLeftOutlined />} onClick={() => navigate('/report-workbench')}>{t("返回工作台")}</Button>
-        <Tag color={expiry.color}>{expiry.text}</Tag>
-        <Tag>{t("版本")} {report.version}</Tag>
-      </Space>
-      <Space>
-        {/* 模板切换只影响本机这次浏览，不写回服务端、不改报表版本 */}
-        <TemplateSwitcher value={templateId} onChange={setTemplateId} />
-        {lifecycleActions}
-        <Button icon={<TeamOutlined />} onClick={() => { setSharesOpen(true); void loadShares(); }}>{t("管理分享")}</Button>
-        <Button icon={<ShareAltOutlined />} onClick={() => { setShareResult(null); shareForm.resetFields(); setShareOpen(true); }}>{t("分享")}</Button>
-      </Space>
-    </div>
-    <ReportDocumentRenderer document={report.document} dataManifest={report.data_manifest} templateId={templateId} onDrilldown={(definition, filters) => void loadDrilldown(definition, filters)} />
+  // 顶栏作为外壳的 toolbar 槽位传入，从而在 TemplateScope 内消费同一套 --report-* 变量。
+  const toolbar = <>
+    <Space wrap>
+      <Button icon={<ArrowLeftOutlined />} onClick={() => navigate('/report-workbench')}>{t("返回工作台")}</Button>
+      <Tag color={expiry.color}>{expiry.text}</Tag>
+      <Tag>{t("版本")} {report.version}</Tag>
+    </Space>
+    <Space>
+      {/* 模板切换只影响本机这次浏览，不写回服务端、不改报表版本 */}
+      <TemplateSwitcher value={templateId} onChange={setTemplateId} />
+      {lifecycleActions}
+      <Button icon={<TeamOutlined />} onClick={() => { setSharesOpen(true); void loadShares(); }}>{t("管理分享")}</Button>
+      <Button icon={<ShareAltOutlined />} onClick={() => { setShareResult(null); shareForm.resetFields(); setShareOpen(true); }}>{t("分享")}</Button>
+    </Space>
+  </>;
+  return <>
+    <ReportPageShell templateId={templateId} toolbar={toolbar}>
+      <ReportDocumentRenderer document={report.document} dataManifest={report.data_manifest} templateId={templateId} onDrilldown={(definition, filters) => void loadDrilldown(definition, filters)} />
+    </ReportPageShell>
+    {/* 弹窗不进模板作用域：模板不为 Modal 的样式负责 */}
     <ReportDrilldownModal
       open={Boolean(drilldown)}
       loading={drilldownLoading}
@@ -275,5 +281,5 @@ export default function ReportViewerPage() {
         </List.Item>}
       />
     </Modal>
-  </div>;
+  </>;
 }

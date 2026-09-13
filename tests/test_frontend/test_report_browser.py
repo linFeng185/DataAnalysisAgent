@@ -2,6 +2,7 @@
 
 import json
 import os
+import re
 import shutil
 import socket
 import subprocess
@@ -17,7 +18,8 @@ import pytest
 
 from src.logging_config import get_logger
 
-pytestmark = [pytest.mark.browser, pytest.mark.skipif(os.getenv("RUN_BROWSER_TESTS") != "1", reason="浏览器测试需要显式开启")]
+# 浏览器标记只挂在需要真实浏览器的用例类上：同文件的静态契约用例默认参与执行。
+BROWSER_MARKERS = [pytest.mark.browser, pytest.mark.skipif(os.getenv("RUN_BROWSER_TESTS") != "1", reason="浏览器测试需要显式开启")]
 logger = get_logger(__name__)
 
 
@@ -72,6 +74,8 @@ def browser_page() -> Iterator[Any]:
 
 class TestReportBrowser:
     """覆盖功能 23.9：真实点击、失败重试和请求幂等性。"""
+
+    pytestmark = BROWSER_MARKERS
 
     # 方法作用：验证用户点击生成计划、确认和刷新均触发请求。
     # Args: self - 测试实例；browser_page - 浏览器页面；frontend_origin - 隔离服务地址。
@@ -185,3 +189,67 @@ class TestReportBrowser:
         assert saved[0]["max_jobs_created"] == 30
         assert saved[0]["capabilities"] == ["report.menu", "report.create"]
         assert "tenant_id" not in saved[0]
+
+
+class TestReportPageShell:
+    """覆盖 23.15：私有查看页与公开分享页共用的整页外壳（整页底色、限宽居中、顶栏作用域）。"""
+
+    # 方法作用：验证两个报表页都由统一外壳承载整页背景。
+    # Args: self - 测试实例。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    def test_viewer_and_shared_pages_use_shared_shell(self) -> None:
+        """页面根节点曾是裸 div，主题底色只覆盖中间内容，四周露出浏览器默认白底。"""
+        # Arrange
+        viewer = Path("frontend/src/pages/ReportViewerPage.tsx").read_text(encoding="utf-8")
+        shared = Path("frontend/src/pages/SharedReportPage.tsx").read_text(encoding="utf-8")
+
+        # Act / Assert
+        for page in (viewer, shared):
+            assert "import ReportPageShell from '../components/report/ReportPageShell'" in page
+            # 不得再把 .report-document 直接当作返回根节点，否则外层底色又露出来
+            assert not re.search(r"return <div className=\"report-document\"", page)
+        # 加载态、错误态与正文态都在同一外壳内：查看页 3 处，分享页 4 处（含授权码锁定态）
+        assert viewer.count("<ReportPageShell") == 3
+        assert shared.count("<ReportPageShell") == 4
+
+    # 方法作用：验证顶栏渲染在 TemplateScope 作用域内部。
+    # Args: self - 测试实例。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    def test_toolbar_renders_inside_template_scope(self) -> None:
+        """顶栏曾在作用域外，--report-* 变量取不到，只能落到 CSS 回退值，与正文割裂。"""
+        # Arrange
+        shell = Path("frontend/src/components/report/ReportPageShell.tsx").read_text(encoding="utf-8")
+        viewer = Path("frontend/src/pages/ReportViewerPage.tsx").read_text(encoding="utf-8")
+        shared = Path("frontend/src/pages/SharedReportPage.tsx").read_text(encoding="utf-8")
+
+        # Act / Assert
+        assert shell.index("<TemplateScope") < shell.index("{toolbar") < shell.index("</TemplateScope>")
+        for page in (viewer, shared):
+            # 顶栏经外壳槽位传入，页面不再自建作用域外的顶栏
+            assert "toolbar=" in page
+            assert "report-viewer-toolbar" not in page
+
+    # 方法作用：验证整页底色取模板变量、内容限宽居中，且窄屏断点同步收窄内边距。
+    # Args: self - 测试实例。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    def test_page_shell_takes_template_background_and_centered_column(self) -> None:
+        """页面级背景必须消费 --report-bg，不能写死白色；嵌在应用 Layout 内要扣掉顶栏高度。"""
+        # Arrange
+        styles = Path("frontend/src/index.css").read_text(encoding="utf-8")
+        shell = Path("frontend/src/components/report/ReportPageShell.tsx").read_text(encoding="utf-8")
+
+        # Act
+        page_rule = re.search(r"\.report-page \{[^}]*\}", styles)
+        body_rule = re.search(r"\.report-page-body \{[^}]*\}", styles)
+        mobile_rule = re.search(r"@media \(max-width: 767px\) \{.*\n\}", styles, re.DOTALL)
+
+        # Assert
+        # 外壳组件必须真的挂上这两个类名，否则样式规则无处生效
+        assert 'className="report-page"' in shell
+        assert 'className="report-page-body"' in shell
+        assert page_rule and "var(--report-bg" in page_rule.group(0)
+        # 私有查看页高度扣掉 64px 应用顶栏，避免多出一条滚动条
+        assert ".app-content .report-page" in styles
+        assert body_rule and "min(1440px, 100%)" in body_rule.group(0)
+        # 移动端断点必须覆盖新外壳的容器类，否则窄屏沿用桌面内边距
+        assert mobile_rule and ".report-page-body" in mobile_rule.group(0)

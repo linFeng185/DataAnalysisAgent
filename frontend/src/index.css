@@ -22,12 +22,38 @@ body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sa
 
 /* 报表视觉一律消费 --report-* 变量：这些变量由 TemplateScope 按模板注入，
    作用域限定在 .report-theme 内，不污染应用其余部分。 */
-.report-document {
+/* 报表页面外壳：整页铺模板底色，内容限宽居中，顶栏与正文同处一个作用域。
+   私有查看页嵌在应用 Layout 内，高度要扣掉 64px 应用顶栏，避免多出一条滚动条。 */
+.report-page {
+  min-height: 100vh;
+  min-height: 100dvh;
+  background: var(--report-bg, #f7f8fa);
+  color: var(--report-text-primary, #1f2329);
+  font-family: var(--report-font, inherit);
+}
+.app-content .report-page { min-height: calc(100vh - 64px); min-height: calc(100dvh - 64px); }
+.report-page-body {
   width: min(1440px, 100%);
   margin: 0 auto;
   padding: calc(var(--report-space-unit, 16px) * 1.5);
   box-sizing: border-box;
-  background: var(--report-bg, #f7f8fa);
+}
+/* 查看页顶栏：与正文同一作用域，按钮、标签、边框、圆角全部走模板变量 */
+.report-page-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+  margin-bottom: 20px;
+  padding: calc(var(--report-space-unit, 16px) * 0.75) var(--report-space-unit, 16px);
+  background: var(--report-surface, #ffffff);
+  border: 1px solid var(--report-border, #f0f0f0);
+  border-radius: var(--report-radius, 8px);
+  box-shadow: var(--report-shadow, none);
+}
+.report-document {
+  box-sizing: border-box;
   color: var(--report-text-primary, #1f2329);
   font-family: var(--report-font, inherit);
 }
@@ -103,8 +129,9 @@ body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sa
   .automation-page .ant-card-head { padding: 0 12px; }
   .automation-page .ant-card-body { padding: 12px; }
   .automation-form-row { grid-template-columns: minmax(0, 1fr); gap: 0; }
-  .report-workbench-page, .report-document { padding: 14px 10px; }
-  .report-workbench-toolbar { align-items: flex-start; }
+  .report-workbench-page, .report-page-body { padding: 14px 10px; }
+  .report-workbench-toolbar, .report-page-toolbar { align-items: flex-start; }
+  .report-page-toolbar { padding: 10px 12px; }
   .report-plan-summary { grid-template-columns: minmax(0, 1fr); }
   .report-section-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; }
   .report-block { grid-column: span var(--report-mobile-span, 4); }

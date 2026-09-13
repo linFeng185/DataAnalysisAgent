@@ -5,7 +5,6 @@ import type { EChartsOption } from 'echarts';
 import type { ReportBlock, ReportDocument, ReportDrilldownDefinition } from '../../types/report';
 import { densityMetrics, resolveTemplate, type ReportTemplateTokens } from '../../report/templates';
 import { withChartBaseline } from './chartBase';
-import TemplateScope from './TemplateScope';
 import { useReportTemplate } from '../../hooks/useReportTemplate';
 
 const ReactECharts = lazy(() => import('../EChartsView'));
@@ -218,13 +217,14 @@ function renderBlock(
 
 // 方法作用：渲染后端签发的动态报表文档和响应式区段。
 // Args: document - 已通过后端 DSL 校验的报表文档；dataManifest - 脱敏数据清单；onDrilldown - 可选 Drilldown 回调。
-// Returns: 报表页面 React 节点。
+// Returns: 报表页面 React 节点，需由 ReportPageShell 包裹以获得整页底色与模板主题。
 export default function ReportDocumentRenderer({ document, dataManifest, onDrilldown, templateId }: ReportDocumentRendererProps) {
   useLanguage();
   const [recordedTemplateId] = useReportTemplate(document);
   const activeTemplateId = templateId || recordedTemplateId;
   const tokens = resolveTemplate(activeTemplateId).tokens;
-  return <TemplateScope templateId={activeTemplateId}><div className="report-document">
+  // 页面级背景、限宽与模板作用域统一由 ReportPageShell 承担，这里只负责文档本身的内容与样式。
+  return <div className="report-document">
     <header className="report-document-header">
       <Typography.Title level={2}>{document.title}</Typography.Title>
       {document.subtitle && <Typography.Paragraph type="secondary">{document.subtitle}</Typography.Paragraph>}
@@ -242,5 +242,5 @@ export default function ReportDocumentRenderer({ document, dataManifest, onDrill
         {[...section.blocks].sort((left, right) => right.priority - left.priority).map(block => renderBlock(block, document, dataManifest, onDrilldown, tokens))}
       </div>
     </section>)}
-  </div></TemplateScope>;
+  </div>;
 }
