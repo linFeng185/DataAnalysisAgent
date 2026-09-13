@@ -16,6 +16,7 @@ from src.reporting.models import (
     EstimatedResources,
     ReportPlan,
     SharePlan,
+    TimeRange,
     divergence_unit_budget,
     max_plan_units,
 )
@@ -57,6 +58,12 @@ _SPAN_UNIT_DAYS: dict[str, int] = {"d": 1, "w": 7, "m": 30, "q": 90, "y": 365}
 # Args: time_range - 单元的 TimeRange。
 # Returns: 估算天数；无法解析时返回 0。
 def _span_days(time_range: Any) -> int:
+    if getattr(time_range, "kind", "") == "absolute":
+        try:
+            start, end = str(time_range.value).split("/")
+            return (datetime.fromisoformat(end) - datetime.fromisoformat(start)).days + 1
+        except (ValueError, TypeError):
+            return 0
     match = re.match(r"^(\d+)\s*([a-zA-Z]?)", str(getattr(time_range, "value", "") or "").strip())
     if not match:
         return 0
@@ -153,6 +160,15 @@ class ReportPlanner:
             plan = await self._merge_structured_llm(plan, normalized)
         else:
             plan = await self._plan_units_with_llm(plan, normalized)
+        # 年度标题属于全局分析范围，模型拆分后的问题不再含标题，必须显式保留。
+        heading = _SECTION_MARK_RE.split(normalized, maxsplit=1)[0]
+        year_match = re.search(r"(?<!\d)((?:19|20)\d{2})\s*年(?:度)?[^，。；:：]{0,40}(?:报表|报告|分析)", heading)
+        if year_match:
+            year = int(year_match.group(1))
+            time_range = TimeRange(kind="absolute", value=f"{year}-01-01/{year}-12-31")
+            for unit in plan.analysis_units:
+                if unit.time_range == TimeRange():
+                    unit.time_range = time_range.model_copy()
         logger.info(
             "报表计划解析完成",
             execution_mode=plan.execution_mode,

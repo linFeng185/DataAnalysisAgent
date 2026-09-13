@@ -816,18 +816,20 @@ def _collect_column_issues(
         type_index and str(dialect or "").strip().lower() in _TYPE_CHECK_DIALECTS
     )
     for scope in traverse_scope(tree):
+        selected_keys = set(scope.selected_sources)
+        selected_sources = {alias: node for alias, node in scope.sources.items() if alias in selected_keys}
         # 证据 1：CTE 与派生表在 sources 中是 Scope 类型，天然被排除，不会误判为物理表。
         local_tables = {
             str(alias).lower(): str(node.name or "").lower()
-            for alias, node in scope.sources.items()
+            for alias, node in selected_sources.items()
             if isinstance(node, exp.Table)
         }
-        has_cte_or_derived = len(local_tables) < len(scope.sources)
+        has_cte_or_derived = len(local_tables) < len(selected_sources)
         # 本 scope 各表节点携带的 schema 限定名。列限定符若等于它，属「用 schema 名限定列」
         # 的无效形态（无别名时表别名就是表名），必须拦截而非当作 CTE 限定符静默放行。
         scope_schemas = {
             str(node.db).strip().lower()
-            for node in scope.sources.values()
+            for node in selected_sources.values()
             if isinstance(node, exp.Table) and str(node.db or "").strip()
         }
         owners = {
@@ -909,13 +911,18 @@ def _collect_column_issues(
                     )
                 )
             else:
+                # 输出别名可在后续子句引用，但不能为定义它自身的表达式凭空提供输入列。
+                projection = column.find_ancestor(exp.Alias)
+                visible_aliases = projection_aliases
+                if projection is not None and projection.parent is select:
+                    visible_aliases = projection_aliases - {str(projection.alias or "").strip().lower()}
                 issues.extend(
                     _check_unqualified_column(
                         column_name,
                         resolved,
                         len(local_tables),
                         has_cte_or_derived,
-                        projection_aliases,
+                        visible_aliases,
                         index,
                         cte_outputs,
                         default_source,

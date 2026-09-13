@@ -88,7 +88,7 @@ class TestReportWorkbenchSubgraph:
             requested_datasources=["sales"],
             analysis_units=[
                 AnalysisUnit(unit_id="sales", question="销售额", dimensions=["month"], metrics=["amount"]),
-                AnalysisUnit(unit_id="orders", question="订单数", dimensions=["month"], metrics=["amount"]),
+                AnalysisUnit(unit_id="orders", question="销售额", dimensions=["month"], metrics=["amount"]),
             ],
         )
         calls: list[str] = []

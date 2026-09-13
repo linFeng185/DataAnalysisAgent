@@ -151,7 +151,7 @@ async def report_plan_queries(state: ReportWorkbenchState) -> dict[str, Any]:
     await _log_step(state, "report_plan_queries", "running")
     plans: list[dict[str, Any]] = []
     units_by_id = _units_by_id(state)
-    grouped: dict[tuple[str, tuple[str, ...], tuple[str, ...], tuple[str, str]], dict[str, Any]] = {}
+    grouped: dict[tuple, dict[str, Any]] = {}
     for unit in state.get("resolved_units", [])[:max_plan_units()]:
         # 运行说明不与空维度/指标的数据单元合并，否则顺序变化会吞掉真正的查询。
         if is_runtime_quality_unit(units_by_id[unit["unit_id"]]):
@@ -163,6 +163,8 @@ async def report_plan_queries(state: ReportWorkbenchState) -> dict[str, Any]:
         time_signature = (str(time_range.get("kind", "relative")), str(time_range.get("value", "90d"))) if isinstance(time_range, dict) else ("relative", "90d")
         signature = (
             str(unit.get("datasource", "")),
+            " ".join(str(unit.get("question", "")).split()),
+            tuple((state.get("unit_datasources") or {}).get(str(unit["unit_id"]), [])),
             tuple(unit.get("dimensions", []) or []),
             tuple(unit.get("metrics", []) or []),
             time_signature,

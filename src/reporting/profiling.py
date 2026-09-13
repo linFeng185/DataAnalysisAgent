@@ -74,7 +74,7 @@ def summarize_runtime_quality(
     partial = sum(result.status == "partial" for result in data_results)
     lines = [
         f"本轮收到 {len(data_results)} 个数据分析单元的执行结果，其中 {len(populated)} 个返回样本，失败 {failed} 个，部分完成 {partial} 个。",
-        "时间覆盖仅按返回样本计算，不代表数据库完整范围；年月粒度不能证明最近 90 天逐日完整覆盖。",
+        "时间覆盖仅按返回样本计算，不代表数据库完整范围；年月粒度不能证明请求时间窗口逐日完整覆盖。",
     ]
     if not populated:
         lines.append("本轮没有可用的查询结果样本，无法确认实际时间覆盖；这不等于没有尝试执行查询。")

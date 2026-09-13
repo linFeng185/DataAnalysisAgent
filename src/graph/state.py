@@ -221,6 +221,9 @@ class AnalysisState(TypedDict, total=False):
     supplemental_query_round: Annotated[int, UntrackedValue]
     """当前请求已经执行的自主补查轮数。"""
 
+    suppress_supplemental_query: Annotated[bool, UntrackedValue]
+    """报表执行器关闭旧补查回环的请求标记，必须在图入口保留。"""
+
     supplemental_evidence: Annotated[list[dict[str, Any]], UntrackedValue]
     """补查问题、最终 SQL、脱敏结果和失败信息，仅在当前请求内流转。"""
 
