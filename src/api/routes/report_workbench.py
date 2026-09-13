@@ -224,7 +224,20 @@ async def preview_plan(request: ReportPlanRequest) -> dict[str, Any]:
         model_id=request.model_id,
     )
     with use_tenant_llm_selection(selection):
-        plan = await planner.parse(request.prompt, datasources=request.datasources, timezone=request.timezone)
+        plan = await planner.parse(
+            request.prompt,
+            datasources=request.datasources,
+            timezone=request.timezone,
+            divergence=request.divergence,
+        )
+        # 计划期发散在需求拆解之后单独走一次调用，使两者可独立降级与独立评测。
+        # 表名清单让模型知道"还可以查什么"，与 report.route 共用同一份目录。
+        from src.reporting.runner import ReportRunner
+
+        catalog = await ReportRunner._datasource_table_catalog(
+            list(plan.requested_datasources), int(identity.tenant_id)
+        )
+        plan = await planner.diverge(plan, datasources=request.datasources, catalog=catalog)
     await _resolve_plan_access(identity, plan)
     _plan_cache[(int(identity.tenant_id), int(identity.user_id), plan.canonical_hash())] = plan
     logger.info("报表计划预览完成", tenant_id=identity.tenant_id, user_id=identity.user_id, plan_hash=plan.canonical_hash())

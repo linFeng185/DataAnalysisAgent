@@ -167,7 +167,9 @@ class TestReportRunnerDatasourceFanout:
         # Arrange
         unit_a = AnalysisUnit(question="销售")
         unit_b = AnalysisUnit(question="财务")
-        plan = ReportPlan(requested_datasources=["a", "b", "c"], analysis_units=[unit_a, unit_b])
+        # 用保守档隔离基础扇出：档位总额度为 0，预占只剩「单元数 × 命中源数」这一项。
+        # 档位带来的最坏情况预占由 test_divergence.py 的 test_reserve_covers_worst_case_rounds 覆盖。
+        plan = ReportPlan(divergence="conservative", requested_datasources=["a", "b", "c"], analysis_units=[unit_a, unit_b])
 
         # Act：unit_a 命中 1 个源，unit_b 命中 2 个源
         adjusted = ReportRunner._reserve_plan(plan, {unit_a.unit_id: ["a"], unit_b.unit_id: ["a", "b"]})
@@ -188,8 +190,8 @@ class TestReportRunnerDatasourceFanout:
 
         monkeypatch.setattr(llm_client, "is_task_llm_available", lambda task: False)
 
-        # Act
-        plan = await ReportPlanner().parse("生成销售报表和库存报表", datasources=["a", "b", "c"])
+        # Act：保守档隔离基础扇出，档位项为 0
+        plan = await ReportPlanner().parse("生成销售报表和库存报表", datasources=["a", "b", "c"], divergence="conservative")
 
         # Assert
         assert plan.estimated.query_count == len(plan.analysis_units) * 3

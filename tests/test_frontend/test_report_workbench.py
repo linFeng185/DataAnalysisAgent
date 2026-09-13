@@ -179,3 +179,25 @@ class TestReportWorkbenchFrontend:
         assert "content.strength" in renderer
         assert "content.cross_source" in renderer
         assert "跨源分布级" in renderer
+
+    # 方法作用：验证生成面板含档位选择器、额度说明与建议单元分组。
+    # Args: self - pytest 测试类实例。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    def test_workbench_has_divergence_selector_and_budget_hint(self) -> None:
+        """用户必须能在预览前选定档位，并看到额度的含义。"""
+        # Arrange
+        page = Path("frontend/src/pages/ReportWorkbenchPage.tsx").read_text(encoding="utf-8")
+        api = Path("frontend/src/api/reportWorkbench.ts").read_text(encoding="utf-8")
+        types = Path("frontend/src/types/report.ts").read_text(encoding="utf-8")
+
+        # Act / Assert
+        assert "Segmented" in page
+        assert "发散档位" in page
+        # 额度说明必须写在界面上，用户才知道档位意味着什么
+        assert "计划期与运行期共享" in page
+        # 用户单元与建议单元分组展示，建议单元带理由
+        assert "你要求的分析" in page
+        assert "建议补充的分析" in page
+        assert "unit.rationale" in page
+        assert "ReportDivergenceLevel" in types
+        assert "divergence" in api

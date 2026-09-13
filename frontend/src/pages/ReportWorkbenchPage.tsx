@@ -1,6 +1,6 @@
 import { t, useLanguage } from '../i18n';
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { Alert, Button, Card, Drawer, Empty, Input, List, message, Select, Space, Statistic, Table, Tag, Typography } from 'antd';
+import { Alert, Button, Card, Drawer, Empty, Input, List, message, Segmented, Select, Space, Statistic, Table, Tag, Typography } from 'antd';
 import {
   ClockCircleOutlined,
   BarsOutlined,
@@ -24,6 +24,7 @@ import {
 } from '../api/reportWorkbench';
 import type { DatasourceConfig } from '../types';
 import type {
+  ReportDivergenceLevel,
   ReportJob,
   ReportJobDetailResponse,
   ReportPlan,
@@ -111,6 +112,7 @@ export default function ReportWorkbenchPage() {
   const language = useLanguage();
   const navigate = useNavigate();
   const [prompt, setPrompt] = useState('');
+  const [divergence, setDivergence] = useState<ReportDivergenceLevel>('standard');
   const [datasources, setDatasources] = useState<DatasourceConfig[]>([]);
   const [selectedDatasources, setSelectedDatasources] = useState<string[]>([]);
   const [models, setModels] = useState<ModelOption[]>([]);
@@ -194,7 +196,7 @@ export default function ReportWorkbenchPage() {
     }
     setPreviewing(true);
     try {
-      const result = await previewReportPlan(prompt.trim(), selectedDatasources, undefined, modelId, llmConnectionId);
+      const result = await previewReportPlan(prompt.trim(), selectedDatasources, undefined, modelId, llmConnectionId, divergence);
       setPreview(result);
       creationKey.current = crypto.randomUUID();
     } catch (error) {
@@ -370,6 +372,23 @@ export default function ReportWorkbenchPage() {
               style={{ width: '100%', marginTop: 8 }}
             />
           )}
+          <div style={{ marginTop: 12 }}>
+            <Typography.Text type="secondary">{t("发散档位")}</Typography.Text>
+            <Segmented
+              block
+              value={divergence}
+              onChange={value => { setDivergence(value as ReportDivergenceLevel); setPreview(null); }}
+              options={[
+                { value: 'conservative', label: t("保守") },
+                { value: 'standard', label: t("标准") },
+                { value: 'deep', label: t("深度") },
+              ]}
+              style={{ marginTop: 6 }}
+            />
+            <Typography.Paragraph type="secondary" style={{ marginTop: 6, marginBottom: 0, fontSize: 12 }}>
+              {t("档位决定系统可自主追加的分析单元总数（计划期与运行期共享）：保守 0 个、标准 3 个、深度 6 个。")}
+            </Typography.Paragraph>
+          </div>
           <Button type="primary" block icon={<SearchOutlined />} loading={previewing} onClick={() => void previewPlan()} style={{ marginTop: 12 }}>
             {t("生成计划")}
           </Button>
@@ -384,14 +403,25 @@ export default function ReportWorkbenchPage() {
             {preview.plan.warnings.length > 0 && <Alert type="warning" showIcon message={<List size="small" dataSource={preview.plan.warnings} renderItem={item => <List.Item>{item}</List.Item>} />} />}
             <List
               size="small"
-              header={t("分析单元")}
-              dataSource={preview.plan.analysis_units}
+              header={t("你要求的分析")}
+              dataSource={preview.plan.analysis_units.filter(unit => (unit.origin ?? 'user') === 'user')}
               renderItem={unit => <List.Item className="report-plan-unit">
                 <Typography.Text strong>{unit.unit_id}</Typography.Text>
                 <Typography.Text>{unit.question}</Typography.Text>
                 <Typography.Text type="secondary">{t("数据源：")}{unit.datasource || preview.plan.requested_datasources[0] || t("待绑定")}</Typography.Text>
               </List.Item>}
             />
+            {preview.plan.analysis_units.some(unit => unit.origin === 'diverged') && <List
+              size="small"
+              header={t("建议补充的分析")}
+              dataSource={preview.plan.analysis_units.filter(unit => unit.origin === 'diverged')}
+              renderItem={unit => <List.Item className="report-plan-unit">
+                <Typography.Text strong>{unit.unit_id}</Typography.Text>
+                <Typography.Text>{unit.question}</Typography.Text>
+                <Typography.Text type="secondary">{t("建议理由：")}{unit.rationale || t("未说明")}</Typography.Text>
+                <Typography.Text type="secondary">{t("数据源：")}{unit.datasource || t("待绑定")}</Typography.Text>
+              </List.Item>}
+            />}
             <Button type="primary" icon={<PlayCircleOutlined />} loading={creating} disabled={preview.plan.execution_mode === 'scheduled' && !preview.plan.frequency} onClick={() => void createJob()} style={{ marginTop: 12 }}>
               {preview.plan.execution_mode === 'scheduled' ? t("确认定时任务") : t("确认并立即生成")}
             </Button>

@@ -179,6 +179,36 @@ class ReportUnitRoutesOutput(StrictOutputModel):
     routes: list[ReportUnitRoute] = Field(default_factory=list, max_length=12)
 
 
+class ReportDivergeUnit(StrictOutputModel):
+    """计划期发散建议。契约里不含 unit_id，由服务端分配，避免与用户单元冲突。"""
+
+    question: str = Field(min_length=1, max_length=2000)
+    datasource: str = Field(default="", max_length=64)
+    rationale: str = Field(default="", max_length=500)
+    expected_signal: str = Field(default="", max_length=200)
+
+
+class ReportDivergeOutput(StrictOutputModel):
+    """计划期发散输出，最多 8 条建议，实际采纳量由档位额度决定。"""
+
+    proposed_units: list[ReportDivergeUnit] = Field(default_factory=list, max_length=8)
+
+
+class ReportSupplementUnit(StrictOutputModel):
+    """运行期补充建议。必须说明它解释或验证了哪一条已有发现。"""
+
+    question: str = Field(min_length=1, max_length=2000)
+    datasource: str = Field(default="", max_length=64)
+    rationale: str = Field(default="", max_length=500)
+    supports_finding: str = Field(default="", max_length=200)
+
+
+class ReportSupplementOutput(StrictOutputModel):
+    """运行期补查输出；空数组是最常见也最正确的结果。"""
+
+    proposed_units: list[ReportSupplementUnit] = Field(default_factory=list, max_length=6)
+
+
 T = TypeVar("T", bound=BaseModel)
 
 

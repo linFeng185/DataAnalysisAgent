@@ -19,6 +19,8 @@ export interface ReportEstimatedResources {
   estimated_seconds: number;
 }
 
+export type ReportDivergenceLevel = 'conservative' | 'standard' | 'deep';
+
 export interface ReportAnalysisUnit {
   unit_id: string;
   question: string;
@@ -27,6 +29,12 @@ export interface ReportAnalysisUnit {
   time_range: { kind: 'relative' | 'absolute' | 'all'; value: string };
   dimensions: string[];
   metrics: string[];
+  /** 单元来源：用户显式要求或系统发散建议。 */
+  origin?: 'user' | 'diverged';
+  /** 仅发散单元非空：为什么建议分析这个。 */
+  rationale?: string;
+  /** 发散单元产生阶段：计划期或运行期。 */
+  decided_by?: '' | 'plan' | 'runtime';
 }
 
 export interface ReportPlan {
@@ -41,6 +49,8 @@ export interface ReportPlan {
   permanent: boolean;
   requested_datasources: string[];
   analysis_units: ReportAnalysisUnit[];
+  /** 发散档位：一次性总授权额度，计划期与运行期共享。 */
+  divergence: ReportDivergenceLevel;
   share: {
     enabled: boolean;
     require_code: boolean;

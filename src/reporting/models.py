@@ -14,6 +14,39 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 _IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
 _TIMEZONE_RE = re.compile(r"^[A-Za-z0-9_./+-]{1,64}$")
 
+DivergenceLevel = Literal["conservative", "standard", "deep"]
+
+# 档位是一次性总授权额度，计划期与运行期共享同一份额度，避免成本随轮数倍增。
+_DIVERGENCE_UNIT_BUDGET: dict[str, int] = {"conservative": 0, "standard": 3, "deep": 6}
+# 运行期回路最大轮数与单轮追加上限。
+_DIVERGENCE_MAX_ROUNDS: dict[str, int] = {"conservative": 0, "standard": 1, "deep": 2}
+_DIVERGENCE_UNITS_PER_ROUND: dict[str, int] = {"conservative": 0, "standard": 2, "deep": 3}
+# 计划中分析单元总数的全局上限，发散不得突破。
+_MAX_PLAN_UNITS = 12
+# 因果措辞黑名单：提示词约束是软约束，服务端必须硬校验。
+_CAUSAL_PHRASE_RE = re.compile(r"导致|造成|因为|引起|致使|归因于")
+
+
+# 方法作用：返回指定档位允许系统自主追加的单元总数。
+# Args: level - 档位值。
+# Returns: 允许的追加单元数；未知档位按标准档处理。
+def divergence_unit_budget(level: str) -> int:
+    return _DIVERGENCE_UNIT_BUDGET.get(str(level or ""), _DIVERGENCE_UNIT_BUDGET["standard"])
+
+
+# 方法作用：返回指定档位允许的运行期回路轮数。
+# Args: level - 档位值。
+# Returns: 最大轮数；未知档位按标准档处理。
+def divergence_max_rounds(level: str) -> int:
+    return _DIVERGENCE_MAX_ROUNDS.get(str(level or ""), _DIVERGENCE_MAX_ROUNDS["standard"])
+
+
+# 方法作用：返回指定档位允许的单轮追加单元上限。
+# Args: level - 档位值。
+# Returns: 单轮上限；未知档位按标准档处理。
+def divergence_units_per_round(level: str) -> int:
+    return _DIVERGENCE_UNITS_PER_ROUND.get(str(level or ""), _DIVERGENCE_UNITS_PER_ROUND["standard"])
+
 
 class TimeRange(BaseModel):
     """分析单元的时间范围契约。"""
@@ -43,6 +76,12 @@ class AnalysisUnit(BaseModel):
     time_range: TimeRange = Field(default_factory=TimeRange)
     dimensions: list[str] = Field(default_factory=list, max_length=30)
     metrics: list[str] = Field(default_factory=list, max_length=30)
+    # 单元来源：用户显式要求，还是系统发散建议。进 canonical_hash。
+    origin: Literal["user", "diverged"] = "user"
+    # 仅发散单元非空：为什么建议分析这个。预览页展示，是发散可解释性的核心。
+    rationale: str = Field(default="", max_length=500)
+    # 发散单元由哪一阶段产生：计划期或运行期。
+    decided_by: Literal["", "plan", "runtime"] = ""
 
     # 方法作用：校验分析单元标识并去除重复维度和指标。
     # Args: self - 待校验的分析单元。
@@ -56,6 +95,18 @@ class AnalysisUnit(BaseModel):
             raise ValueError("分析单元数据源名称格式无效")
         self.dimensions = list(dict.fromkeys(item.strip() for item in self.dimensions if item.strip()))
         self.metrics = list(dict.fromkeys(item.strip() for item in self.metrics if item.strip()))
+        self.rationale = self.rationale.strip()
+        # 用户单元不得携带发散元信息，否则说明单元来源被误标。
+        if self.origin == "user":
+            if self.rationale:
+                raise ValueError("用户单元不允许携带 rationale")
+            if self.decided_by:
+                raise ValueError("用户单元不允许携带 decided_by")
+        else:
+            if not self.rationale:
+                raise ValueError("发散单元必须说明 rationale")
+            if self.decided_by not in {"plan", "runtime"}:
+                raise ValueError("发散单元必须标注 decided_by 为 plan 或 runtime")
         return self
 
 
@@ -114,6 +165,10 @@ class ReportPlan(BaseModel):
     permanent: bool = False
     requested_datasources: list[str] = Field(default_factory=list, max_length=20)
     analysis_units: list[AnalysisUnit] = Field(..., min_length=1, max_length=12)
+    # 发散档位。同一需求不同档位对应不同执行范围与成本上限，因此进 canonical_hash。
+    divergence: DivergenceLevel = "standard"
+    # 相对预览计划被用户删减掉的单元标识，保留审计线索。同样进 canonical_hash。
+    excluded_unit_ids: list[str] = Field(default_factory=list, max_length=12)
     share: SharePlan = Field(default_factory=SharePlan)
     warnings: list[str] = Field(default_factory=list, max_length=20)
     needs_confirmation: bool = False
@@ -170,6 +225,8 @@ class ReportPlanRequest(BaseModel):
 
     prompt: str = Field(..., min_length=1, max_length=20_000)
     datasources: list[str] = Field(default_factory=list, max_length=20)
+    # 发散档位由用户在预览前选定；模型无权决定成本上限。
+    divergence: DivergenceLevel = "standard"
     model_id: str = Field(default="", max_length=128)
     llm_connection_id: int | None = Field(default=None, ge=1)
     timezone: str = Field(default="Asia/Shanghai", max_length=64)

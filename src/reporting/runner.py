@@ -343,10 +343,11 @@ class ReportRunner:
             summary=str(analysis.get("summary", "") or ""),
         )
 
-    # 方法作用：读取各数据源的表名清单，供路由模型判断命中关系。
+    # 方法作用：读取各数据源的表名清单，供路由模型与计划期发散判断命中关系。
     # Args: requested - 已授权数据源名称；tenant_id - 当前租户。
     # Returns: 每个数据源一段紧凑表清单的 Prompt 文本。
-    async def _datasource_table_catalog(self, requested: list[str], tenant_id: int) -> str:
+    @staticmethod
+    async def _datasource_table_catalog(requested: list[str], tenant_id: int) -> str:
         from src.knowledge.schema_manager import get_schema_manager
 
         manager = get_schema_manager()
@@ -426,6 +427,11 @@ class ReportRunner:
             matched = routed.get(str(unit.unit_id))
             # 未出现在路由结果里的单元会退回全源检索，按 fallback 计入才不会低报。
             actual += len(matched) if matched is not None else fallback
+        # 运行期发散回路是数据驱动的，预占时无法知道会不会发生、会加几个单元，
+        # 因此按档位总额度上限预留。禁止"先跑再按实际补扣"，那会绕过配额。
+        from src.reporting.models import divergence_unit_budget
+
+        actual += divergence_unit_budget(str(getattr(plan, "divergence", "standard") or "standard")) * fallback
         actual = max(1, actual)
         estimated = plan.estimated.model_copy(update={
             "query_count": min(1000, actual),

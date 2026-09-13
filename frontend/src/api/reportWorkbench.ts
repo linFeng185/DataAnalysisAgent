@@ -1,6 +1,7 @@
 import { del, get, post } from './client';
 import type {
   PrivateReportResponse,
+  ReportDivergenceLevel,
   ReportDrilldownResponse,
   ReportJob,
   ReportJobDetailResponse,
@@ -57,6 +58,7 @@ export function previewReportPlan(
   timezone = 'Asia/Shanghai',
   modelId = '',
   llmConnectionId?: number,
+  divergence: ReportDivergenceLevel = 'standard',
 ): Promise<ReportPlanPreviewResponse> {
   // 显式带上命名连接与模型，后端才能用该连接做结构化规划；都不传时回退租户默认连接。
   return post<ReportPlanPreviewResponse>(`${REPORT_BASE}/plans`, {
@@ -65,6 +67,7 @@ export function previewReportPlan(
     timezone,
     model_id: modelId,
     llm_connection_id: llmConnectionId ?? null,
+    divergence,
   });
 }
 

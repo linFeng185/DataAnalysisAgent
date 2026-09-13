@@ -14,7 +14,9 @@ from src.llm.output_contracts import (
     ImageAnalysisOutput,
     IndicatorCatalogReviewOutput,
     PolishOutput,
+    ReportDivergeOutput,
     ReportPlanUnitsOutput,
+    ReportSupplementOutput,
     ReportUnitRoutesOutput,
     SQLGenerationOutput,
     TaskPlanOutput,
@@ -383,6 +385,44 @@ _INITIAL_PROMPTS: dict[str, PromptDefinition] = {
         ),
         output_model=ReportUnitRoutesOutput,
         # 路由要看清每个候选源的表清单，5 个源上百张表需要更大的输入预算。
+        context_budget=40000,
+    ),
+    "report.diverge": PromptDefinition(
+        prompt_id="report.diverge",
+        version="1.0.0",
+        task="report_diverge",
+        template=(
+            "你是报表分析发散助手。给定用户已确认的分析单元、每个数据源的表名清单和本次允许的建议数量上限，"
+            "提出最多 {limit} 个用户没要求、但会影响其结论的补充分析单元。"
+            "每个建议必须说明 rationale（为什么与已有需求相关）与 expected_signal（预期能看到什么信号）。"
+            "datasource 只能从给定清单里选，不确定时留空字符串，禁止凭猜测填写。"
+            "禁止提出与已有单元语义重复的建议；禁止在 rationale 里使用导致、造成、因为等因果措辞，"
+            "只能描述相关性与共变关系。"
+            "只输出 JSON：{{\"proposed_units\": [{{\"question\": \"完整业务问题\", \"datasource\": \"\", "
+            "\"rationale\": \"为什么相关\", \"expected_signal\": \"预期信号\"}}]}}。"
+            "确实没有值得补充的方向时返回空数组，不要为凑数编造。"
+        ),
+        output_model=ReportDivergeOutput,
+        # 与 report.route 对齐：发散同样需要看全表名清单才能建议"还可以查什么"。
+        context_budget=40000,
+    ),
+    "report.supplement": PromptDefinition(
+        prompt_id="report.supplement",
+        version="1.0.0",
+        task="report_supplement",
+        template=(
+            "你是报表分析补充助手。给定已有分析单元、这些单元实际取回数据后算出的显著发现"
+            "（环比、同比、趋势、异常、贡献度、分布），以及每个数据源的表名清单，"
+            "判断是否存在为了解释或验证这些发现而需要补充查询的分析单元。"
+            "只有当发现确实指向一个尚未覆盖的方向时才提出建议，每条必须说明 supports_finding"
+            "（它解释或验证哪一条已有发现）。"
+            "datasource 只能从给定清单里选，不确定时留空字符串。"
+            "禁止使用导致、造成、因为等因果措辞，只能描述相关性与共变关系。"
+            "只输出 JSON：{{\"proposed_units\": [{{\"question\": \"完整业务问题\", \"datasource\": \"\", "
+            "\"rationale\": \"为什么需要补查\", \"supports_finding\": \"它解释哪条发现\"}}]}}。"
+            "没有需要补充的方向时返回空数组——这是最常见也最正确的结果，不要为凑数编造。"
+        ),
+        output_model=ReportSupplementOutput,
         context_budget=40000,
     ),
     "sql.generate": PromptDefinition(

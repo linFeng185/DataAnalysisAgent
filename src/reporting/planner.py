@@ -10,7 +10,15 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 from src.logging_config import get_logger
-from src.reporting.models import AnalysisUnit, EstimatedResources, ReportPlan, SharePlan
+from src.reporting.models import (
+    _CAUSAL_PHRASE_RE,
+    _MAX_PLAN_UNITS,
+    AnalysisUnit,
+    EstimatedResources,
+    ReportPlan,
+    SharePlan,
+    divergence_unit_budget,
+)
 
 logger = get_logger(__name__)
 
@@ -25,6 +33,8 @@ _FREQUENCIES: tuple[tuple[str, str], ...] = (
 )
 # 报表规划任务标识，供 LLM 任务路由选择本地或租户配置的模型。
 _PLAN_LLM_TASK = "report_plan"
+# 计划期发散任务标识，与需求拆解分离，使其可独立降级与独立评测。
+_DIVERGE_LLM_TASK = "report_diverge"
 # 调度噪声词，否定前缀与词一起删除，避免把“不要定时”的残留“不要”当成分析单元。
 # 否定前缀只收多字词：单字“别/不”会误伤“类别每月”“区分每周”这类常见业务表述。
 _SCHEDULE_NOISE_RE = re.compile(
@@ -39,6 +49,18 @@ _SECTION_MARK_RE = re.compile(r"(?<![\d.])(?:\d{1,2}\s*[.、)](?!\d)|[一二三�
 _PIECE_TRIM_RE = re.compile(r"^[\s，,、；;。：:和及以及]+|[\s，,、；;。：:和及以及]+$")
 # 单元标识允许的字符集，与 models.AnalysisUnit 的校验保持一致。
 _UNIT_KEY_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
+# 时间范围单位换算，用于比较各单元跨度并让发散单元继承最长者。
+_SPAN_UNIT_DAYS: dict[str, int] = {"d": 1, "w": 7, "m": 30, "q": 90, "y": 365}
+
+
+# 方法作用：把时间范围值换算成天数，用于比较跨度长短。
+# Args: time_range - 单元的 TimeRange。
+# Returns: 估算天数；无法解析时返回 0。
+def _span_days(time_range: Any) -> int:
+    match = re.match(r"^(\d+)\s*([a-zA-Z]?)", str(getattr(time_range, "value", "") or "").strip())
+    if not match:
+        return 0
+    return int(match.group(1)) * _SPAN_UNIT_DAYS.get(match.group(2).lower(), 1)
 # 被否定的调度词，用户说“不要定时”时不能按定时意图处理；同样只认多字否定词。
 _NEGATED_SCHEDULE_RE = re.compile(
     r"(?:不要|不需要|无需|不用|禁止)\s*(?:定时|以后|之后|周期|每小时|每天|每周|每月)"
@@ -63,6 +85,7 @@ class ReportPlanner:
         *,
         datasources: list[str] | None = None,
         timezone: str = "Asia/Shanghai",
+        divergence: str = "standard",
     ) -> ReportPlan:
         logger.debug("报表计划解析入口", prompt_chars=len(prompt), datasource_count=len(datasources or []))
         normalized = " ".join(str(prompt).strip().split())
@@ -97,7 +120,10 @@ class ReportPlanner:
             warnings.append("团队成员授权首期仅支持指定用户或租户成员范围，不开放实时钻取")
         # 未绑定数据源的单元按“每个已选源各一次”计上界；已绑定源按 1 次计。
         source_upper_bound = max(1, len(requested))
+        # 发散单元尚未生成，但成本必须按最坏情况预估：额度用满即为上界。
+        divergent_upper_bound = min(divergence_unit_budget(divergence), _MAX_PLAN_UNITS - len(units))
         fanout = sum(1 if unit.datasource else source_upper_bound for unit in units)
+        fanout += max(0, divergent_upper_bound) * source_upper_bound
         plan = ReportPlan(
             execution_mode=execution_mode,
             frequency=frequency,
@@ -107,6 +133,7 @@ class ReportPlanner:
             permanent=permanent,
             requested_datasources=requested,
             analysis_units=units,
+            divergence=divergence,
             share=share,
             warnings=warnings,
             needs_confirmation=execution_mode == "scheduled" or permanent or share.enabled,
@@ -412,6 +439,129 @@ class ReportPlanner:
         if set(candidate.requested_datasources) != allowed_datasources:
             raise ValueError("结构化模型改变了已授权数据源集合")
         return candidate
+
+    # 方法作用：在计划期按档位额度提出补充分析单元。
+    # Args: plan - 已拆解的计划；datasources - 已授权数据源清单；catalog - 可选的每源表名清单文本。
+    # Returns: 追加了发散单元的计划；额度不足、模型不可用或调用失败时原样返回。
+    async def diverge(
+        self,
+        plan: ReportPlan,
+        *,
+        datasources: list[str] | None = None,
+        catalog: str = "",
+    ) -> ReportPlan:
+        divergence = str(plan.divergence)
+        user_units = [unit for unit in plan.analysis_units if unit.origin == "user"]
+        limit = min(divergence_unit_budget(divergence), _MAX_PLAN_UNITS - len(user_units))
+        if limit <= 0:
+            # 额度为 0 或全局单元上限已满是正常路径，不是降级。
+            logger.info("报表计划期发散跳过", divergence=divergence, user_units=len(user_units), limit=limit)
+            return plan
+        from src.llm.client import is_task_llm_available
+
+        if not is_task_llm_available(_DIVERGE_LLM_TASK):
+            logger.info("报表计划期发散跳过", reason="无可用模型", divergence=divergence)
+            return plan
+        summary = "\n".join(f"- {unit.question}" for unit in user_units)
+        try:
+            from src.llm.invocation import invoke_structured
+            from src.llm.output_contracts import ReportDivergeOutput
+            from src.llm.prompt_budget import PromptSection
+
+            sections = [
+                PromptSection("requirement", f"已确认的分析单元：\n{summary}", priority=100, min_chars=20, max_chars=4000),
+                PromptSection("limit", f"最多提出 {limit} 个建议。", priority=90, min_chars=10, max_chars=200),
+            ]
+            if catalog:
+                sections.append(PromptSection("catalog", f"各数据源表名清单：\n{catalog}", priority=80, min_chars=20, max_chars=30000))
+            output = await invoke_structured(
+                "report.diverge",
+                sections,
+                output_model=ReportDivergeOutput,
+                task=_DIVERGE_LLM_TASK,
+                temperature=0.0,
+                metadata={"node": "report_planner_diverge"},
+            )
+        except Exception:
+            # 发散失败只降级留痕，主链路必须继续。
+            logger.warning("报表计划期发散失败，按原需求继续", divergence=divergence, exc_info=True)
+            return self._with_warnings(plan, ["发散分析不可用，已按原需求生成计划"])
+        proposed = self._coerce_diverge_units(
+            [item.model_dump(mode="python") for item in output.proposed_units],
+            allowed_datasources=set(datasources or plan.requested_datasources),
+            decided_by="plan",
+            limit=limit,
+            reference_units=user_units,
+        )
+        if not proposed:
+            logger.info("报表计划期发散无建议", divergence=divergence)
+            return plan
+        return self._with_warnings(
+            plan.model_copy(update={"analysis_units": [*plan.analysis_units, *proposed]}),
+            [f"系统按{divergence}档追加了 {len(proposed)} 个补充分析单元，可在预览中取消"],
+        )
+
+    # 方法作用：把发散建议规范化为受控的 AnalysisUnit。
+    # Args: raw_units - 模型输出字典；allowed_datasources - 已授权数据源；decided_by - plan 或 runtime；limit - 本次采纳上限；reference_units - 用于继承时间范围的主单元。
+    # Returns: 通过契约校验的发散单元列表。
+    @staticmethod
+    def _coerce_diverge_units(
+        raw_units: list[dict[str, Any]],
+        *,
+        allowed_datasources: set[str],
+        decided_by: str,
+        limit: int,
+        reference_units: list[AnalysisUnit],
+    ) -> list[AnalysisUnit]:
+        time_range = ReportPlanner._inherit_time_range(reference_units)
+        units: list[AnalysisUnit] = []
+        for raw in raw_units[:limit]:
+            question = str(raw.get("question") or "").strip()
+            rationale = str(raw.get("rationale") or "").strip()
+            if not question:
+                continue
+            # 提示词只是软约束，因果措辞必须服务端硬校验。
+            if _CAUSAL_PHRASE_RE.search(rationale):
+                logger.warning("发散建议含因果措辞，已丢弃", question=question[:60])
+                continue
+            datasource = str(raw.get("datasource") or "").strip()
+            if datasource not in allowed_datasources:
+                # 越权或猜测的数据源清空，交给 report.route 重新定位。
+                datasource = ""
+            payload = {
+                "question": question,
+                "datasource": datasource,
+                "rationale": rationale or "系统建议的补充分析方向",
+                "origin": "diverged",
+                "decided_by": decided_by,
+                "priority": "secondary",
+                "time_range": time_range.model_dump(mode="python"),
+            }
+            try:
+                units.append(AnalysisUnit.model_validate(payload))
+            except ValueError:
+                logger.warning("发散建议未通过校验，已跳过", question=question[:60])
+        return units
+
+    # 方法作用：从主单元里挑出时间跨度最长的时间范围，供发散单元继承。
+    # Args: units - 参考单元列表。
+    # Returns: 选中的 TimeRange；没有主单元时返回默认值。
+    @staticmethod
+    def _inherit_time_range(units: list[AnalysisUnit]) -> Any:
+        primaries = [unit for unit in units if unit.priority == "primary"] or list(units)
+        if not primaries:
+            from src.reporting.models import TimeRange
+
+            return TimeRange()
+        return max(primaries, key=lambda unit: _span_days(unit.time_range)).time_range
+
+    # 方法作用：在计划上追加可读提示，保持原有字段不变。
+    # Args: plan - 原计划；messages - 追加的提示语。
+    # Returns: 追加提示后的计划。
+    @staticmethod
+    def _with_warnings(plan: ReportPlan, messages: list[str]) -> ReportPlan:
+        merged = list(dict.fromkeys([*plan.warnings, *[item for item in messages if item.strip()]]))
+        return plan.model_copy(update={"warnings": merged})
 
     # 方法作用：把模型给出的原始单元规范化为通过契约校验的 AnalysisUnit。
     # Args: raw_units - 模型输出的单元字典列表；allowed_datasources - 计划已授权数据源；prompt - 用户原始描述。
