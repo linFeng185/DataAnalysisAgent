@@ -55,6 +55,19 @@ _PROMPT_SCHEMA_MAX_CHARS = 60000
 # 截断处必须显式提示数量，且提示前置在行首，避免与清单一起被尾部截断。
 _RETRY_MAX_SCHEMA_ISSUES = 3
 _RETRY_MAX_AVAILABLE_COLUMNS = 10
+# EXPLAIN 错误回喂预算。layer4_explain 写入的 explain_errors 单条 message 最长
+# 500 字符（连接器侧已 [:500]），多条叠加会把 1800 字符的 retry_error 段撑爆。
+# 这里限条数（3 条，与 validation issues 上限一致）+ 限单条长度（400），
+# 并通过「另有 N 条」提示未列出的数量，避免截断变成静默丢弃。
+_RETRY_MAX_EXPLAIN_ERRORS = 3
+_RETRY_MAX_EXPLAIN_MESSAGE_CHARS = 400
+# 失败 SQL 回注预算。原值 3000 远超 retry_error 段的 1800 字符上限，
+# 多出来的部分本来就会被尾部截断砍掉，却会把排在它后面的收尾指令一起顶出去。
+# 收紧到 1000，让「错误原因 + 失败 SQL + 收尾指令」都落在可见前缀内。
+_RETRY_MAX_PREVIOUS_SQL_CHARS = 1000
+# 每张表进入 Prompt 的列数上限。命中列优先占位，其余按原列序补足——
+# 这个上限必须同时作用于「命中」与「未命中」两条路径，见 _prune_prompt_table_columns。
+_PROMPT_COLUMNS_PER_TABLE = 32
 _COLUMN_SYNONYMS: dict[str, tuple[str, ...]] = {
     "订单": ("order", "orders", "sale", "sales"),
     "金额": ("amount", "amt", "price", "revenue", "sales", "total"),
@@ -221,6 +234,10 @@ async def generate_sql_node(state: AnalysisState, config: RunnableConfig) -> dic
                 str(error.get("type", "")) for error in val_errors if isinstance(error, dict)
             ],
             has_execution_error=bool(exec_err),
+            # 探针补全：EXPLAIN 失败只落 explain_errors，不打印这一项时日志会显示
+            # 「validation_error_types=[] has_execution_error=False」，看起来像没有任何
+            # 错误被回喂，实际原因只是打错了字段。
+            explain_error_count=len(state.get("explain_errors", []) or []),
         )
 
     # 新轮次的 retry_count 由 prepare_turn 统一清零；节点内再次按历史判断会把同轮重试误判为新问题。
@@ -376,6 +393,8 @@ def _render_schema_issue_lines(issue: dict) -> list[str]:
     reference = f"{qualifier}.{column}" if qualifier else column
     key = f"{datasource}.{table}" if datasource and table else (table or datasource)
     message = str(issue.get("message", "") or "").strip()
+    if issue_type == "type_mismatch":
+        return [message or f"列 {reference} 存在类型或日期格式不匹配，必须依据 Schema 使用显式转换，不得改用不存在的列。"]
     if issue_type == "ambiguous_column":
         # 歧义列的 table 字段是多张候选表名的逗号列表，且 provided_by / available_columns
         # 均为空：绝不能套用「引用了不存在的字段」模板，否则模型会去改一个本来正确的列名。
@@ -533,20 +552,67 @@ def build_retry_context(state: AnalysisState, retry: int, tables: list[dict]) ->
             context_chars=len("\n".join(lines)),
         )
         return "\n".join(lines)
-    previous_sql = str(state.get("generated_sql", "") or "")[:3000]
+    previous_sql = str(state.get("generated_sql", "") or "")[:_RETRY_MAX_PREVIOUS_SQL_CHARS]
     execution_error = str(state.get("execution_error", "") or "")
-    errors: list[object] = list(validation_errors)
+    # EXPLAIN 校验失败（layer4_explain）只写 explain_errors，不写 validation_errors，
+    # 也不写 execution_error。不回注这一段，重试段就会渲染成「错误原因: []」，
+    # 模型看不到数据库报错原文，只能照着失败的 SQL 再抄一遍——实测三次重试产出的
+    # SQL 逐字节相同（ClickHouse code 184、Oracle ORA-00942 两条链路均命中）。
+    raw_explain_errors = [
+        error
+        for error in (state.get("explain_errors", []) or [])
+        if isinstance(error, dict)
+    ]
+    explain_errors, omitted_explain = _bounded_explain_errors(raw_explain_errors)
+    errors: list[object] = list(validation_errors) + explain_errors
     if execution_error:
         errors.append(execution_error)
-    context = (
-        f"## 第 {retry} 次重试：修正上一轮 SQL\n"
-        f"失败的 SQL: {previous_sql}\n"
-        f"错误原因: {json.dumps(errors, ensure_ascii=False)}\n"
-        "请严格检查列名、函数和数据类型是否来自当前 Schema。"
+    if omitted_explain:
+        errors.append(f"（另有 {omitted_explain} 条 EXPLAIN 错误未列出）")
+    reason = (
+        json.dumps(errors, ensure_ascii=False)
+        if errors
+        else "（上一轮未记录结构化错误，请按当前 Schema 逐列复核列名、函数与数据类型）"
     )
+    lines = [
+        f"## 第 {retry} 次重试：修正上一轮 SQL",
+        # 契约句必须前置：retry_error 段是「硬上限 + 尾部截断」，放在末尾
+        # 一旦超预算会被整行砍掉，模型就失去「不得照抄」这条核心约束。
+        "禁止逐字复用上一轮 SQL，必须针对下列错误原因修改后重新生成。",
+    ]
     if retry >= 2:
-        context += "\n这是最后一次尝试，必须使用 Schema 中明确列出的标识符。"
-    return context
+        lines.append("这是最后一次尝试，必须使用 Schema 中明确列出的标识符。")
+    # 错误原因排在失败 SQL 之前：截断先砍尾部，原因被砍掉等价于回到「错误原因: []」。
+    lines.append(f"错误原因: {reason}")
+    lines.append(f"失败的 SQL: {previous_sql}")
+    lines.append("请严格检查列名、函数和数据类型是否来自当前 Schema。")
+    logger.info(
+        "SQL 重试上下文通用分支完成",
+        retry=retry,
+        error_count=len(errors),
+        explain_error_count=len(explain_errors),
+        omitted_explain=omitted_explain,
+        context_chars=len("\n".join(lines)),
+    )
+    return "\n".join(lines)
+
+
+# 方法作用：把 EXPLAIN 校验错误压成有界的回注条目。
+# Args: explain_errors - layer4_explain 写入的结构化错误列表（元素为 dict）。
+# Returns: (回注用错误列表, 未列出的条数)。
+def _bounded_explain_errors(explain_errors: list[dict]) -> tuple[list[dict], int]:
+    """EXPLAIN 错误逐条限长、整体限条数，防止重试段被自身证据撑爆。"""
+    logger.debug("EXPLAIN 错误回注入口", total=len(explain_errors))
+    rendered: list[dict] = []
+    for error in explain_errors[:_RETRY_MAX_EXPLAIN_ERRORS]:
+        item = dict(error)
+        message = item.get("message")
+        if isinstance(message, str) and len(message) > _RETRY_MAX_EXPLAIN_MESSAGE_CHARS:
+            item["message"] = message[:_RETRY_MAX_EXPLAIN_MESSAGE_CHARS] + "（已截断）"
+        rendered.append(item)
+    omitted = max(0, len(explain_errors) - _RETRY_MAX_EXPLAIN_ERRORS)
+    logger.debug("EXPLAIN 错误回注完成", rendered=len(rendered), omitted=omitted)
+    return rendered, omitted
 
 
 # 将 state 中分散的业务证据组装为 SQL 模型可审计的上下文块。
@@ -1016,7 +1082,11 @@ def _check_table_hallucination(
         logger.info("表名幻觉校验跳过", reason="Schema 表为空")
         return []
     # 表名判定统一走共享校验模块，避免与 layer3 / execute_sql 的表名判定各自漂移
-    from src.security.sql_schema_validation import build_table_index, resolve_table_owner
+    from src.security.sql_schema_validation import (
+        build_table_index,
+        is_system_table,
+        resolve_table_owner,
+    )
 
     # 单源快照统一落到默认源名下：白名单真实生效（越界源的表被跳过，不再 fail-open），
     # 同时避开空白名单在热路径上每次校验都打「未提供数据源白名单」告警的噪音。
@@ -1054,6 +1124,11 @@ def _check_table_hallucination(
             for table in statement.find_all(exp.Table):
                 table_name = str(table.name or "").strip().lower()
                 if not table_name or table_name in cte_names or table_name in unknown:
+                    continue
+                # 系统伪表（如 Oracle 的 dual）合法但不在业务快照，判为幻觉会误拦正确 SQL、
+                # 触发无谓重试，重试次数耗尽后整个分析单元失败（线上实证）
+                if is_system_table(table_name, dialect):
+                    logger.debug("表名幻觉校验命中系统伪表", table=table_name, dialect=dialect)
                     continue
                 # 统一判定：归属唯一即合法；不存在才算幻觉候选
                 if resolve_table_owner(index, table_name) is None:
@@ -1271,40 +1346,29 @@ def _prune_prompt_table_columns(table: dict[str, Any], query: str) -> dict[str, 
         (_column_match_score(query, column, table_name), index, column)
         for index, column in enumerate(columns)
     ]
-    relevant = {
-        str(column.get("name", "") or "").strip().lower()
-        for score, _, column in scored
-        if score > 0
-    }
-    if relevant:
-        selected_names = required | relevant
-        # 相关列过多时仍保留稳定的高分顺序，防止大表重新撑爆 Prompt。
-        ranked_optional = sorted(
+    # 命中列优先，其余列按原列序补足到每表上限。命中与未命中两条路径必须都保留
+    # 「未命中但可用」的列：只保留 required|relevant 会让没有中文同义词的英文业务列
+    # （year_month、region_code、channel_code、scenario、net_amount）整体消失。
+    # 实测 125 张表的 retail 库被裁到只剩 278 列（retail_orders 仅 id/event_date/
+    # order_status），模型据此判定「字段不存在」并拒绝生成 SQL。
+    # 明显内部备注仍要排除，避免它们占用每表额度。
+    ranked_optional = sorted(
+        (
             (
-                (
-                    score,
-                    -index,
-                    str(column.get("name", "") or "").strip().lower(),
-                )
-                for score, index, column in scored
-                if str(column.get("name", "") or "").strip().lower() not in required
-            ),
-            reverse=True,
-        )
-        if len(selected_names) > 32:
-            selected_names = required | {
-                name for _, _, name in ranked_optional[: max(0, 32 - len(required))]
-            }
-    else:
-        # 问题没有命中字段时保留可解释字段，明显内部备注除外；避免空 Schema 诱导模型编造列。
-        visible = [
-            column for column in columns
-            if not _is_internal_schema_column(column)
-        ]
-        selected_names = required | {
-            str(column.get("name", "") or "").strip().lower()
-            for column in visible[:32]
-        }
+                score,
+                -index,
+                str(column.get("name", "") or "").strip().lower(),
+            )
+            for score, index, column in scored
+            if str(column.get("name", "") or "").strip().lower() not in required
+            and not _is_internal_schema_column(column)
+        ),
+        reverse=True,
+    )
+    selected_names = required | {
+        name
+        for _, _, name in ranked_optional[: max(0, _PROMPT_COLUMNS_PER_TABLE - len(required))]
+    }
     copied["columns"] = [
         column for column in columns
         if str(column.get("name", "") or "").strip().lower() in selected_names

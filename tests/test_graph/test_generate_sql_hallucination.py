@@ -209,3 +209,67 @@ class TestGenerateSQLHallucination:
 
         # Act / Assert
         assert after_generate_sql(state) == "build_response"
+
+
+class TestSystemPseudoTableWhitelist:
+    """覆盖系统伪表白名单：dual 是合法引用，不得判为幻觉（线上重试耗尽失败回归）。"""
+
+    # 方法作用：验证 Oracle 下 FROM dual 不判为幻觉。
+    # Args: self - pytest 用例实例。
+    # Returns: 无返回值，断言失败由 pytest 报告。
+    def test_oracle_dual_is_allowed(self) -> None:
+        """线上真实形态：SELECT ... FROM dual 被误拦，重试耗尽后单元失败。"""
+        logger.debug("test_oracle_dual_is_allowed 入口")
+        tables = [{"name": "orders"}]
+
+        result = _check_table_hallucination(
+            "SELECT TO_CHAR(SYSDATE - 90, 'YYYY-MM-DD') AS d FROM dual",
+            tables,
+            dialect="oracle",
+        )
+
+        assert result == []
+        logger.info("test_oracle_dual_is_allowed 完成")
+
+    # 方法作用：验证 MySQL 下 dual 同样放行。
+    # Args: self - pytest 用例实例。
+    # Returns: 无返回值，断言失败由 pytest 报告。
+    def test_mysql_dual_is_allowed(self) -> None:
+        """MySQL 也支持 SELECT ... FROM dual。"""
+        logger.debug("test_mysql_dual_is_allowed 入口")
+        tables = [{"name": "orders"}]
+
+        result = _check_table_hallucination("SELECT 1 FROM dual", tables, dialect="mysql")
+
+        assert result == []
+        logger.info("test_mysql_dual_is_allowed 完成")
+
+    # 方法作用：验证白名单按方言隔离，其他方言的 dual 仍判为幻觉。
+    # Args: self - pytest 用例实例。
+    # Returns: 无返回值，断言失败由 pytest 报告。
+    def test_dual_still_rejected_in_other_dialects(self) -> None:
+        """PostgreSQL 没有 dual 表，引用它确实是幻觉，不能跨库误放行。"""
+        logger.debug("test_dual_still_rejected_in_other_dialects 入口")
+        tables = [{"name": "orders"}]
+
+        result = _check_table_hallucination("SELECT 1 FROM dual", tables, dialect="postgres")
+
+        assert result == ["dual"]
+        logger.info("test_dual_still_rejected_in_other_dialects 完成")
+
+    # 方法作用：验证 dual 与真实幻觉表并存时仍只收集幻觉表。
+    # Args: self - pytest 用例实例。
+    # Returns: 无返回值，断言失败由 pytest 报告。
+    def test_hallucination_alongside_dual_still_detected(self) -> None:
+        """放行 dual 不得顺带放行真正的幻觉表。"""
+        logger.debug("test_hallucination_alongside_dual_still_detected 入口")
+        tables = [{"name": "orders"}]
+
+        result = _check_table_hallucination(
+            "SELECT * FROM dual JOIN invented_table ON 1 = 1",
+            tables,
+            dialect="oracle",
+        )
+
+        assert result == ["invented_table"]
+        logger.info("test_hallucination_alongside_dual_still_detected 完成")

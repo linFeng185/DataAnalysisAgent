@@ -393,6 +393,311 @@ class TestRetryContextSchemaHallucination:
         )
 
 
+class TestRetryContextExplainErrors:
+    """覆盖 EXPLAIN 校验失败必须回注真实错误原因的契约（spec/39 §8）。
+
+    回归背景：build_retry_context 只读 validation_errors 与 execution_error，
+    layer4_explain 写入的 explain_errors 从未进入重试 Prompt。现象是重试段渲染成
+    「错误原因: []」，模型拿不到 DB 报错文本，三次重试产出逐字节相同的 SQL
+    （实测 ClickHouse code 184 与 Oracle ORA-00942 两条链路均命中）。
+    """
+
+    # 方法作用：验证 EXPLAIN 失败时数据库错误文本被回注。
+    # Args: self - pytest 用例实例。
+    # Returns: 无返回值，断言失败由 pytest 报告。
+    def test_explain_error_reason_is_fed_back(self) -> None:
+        """只有 explain_errors 时，错误原因不得再渲染成空列表。"""
+        logger.debug("test_explain_error_reason_is_fed_back 入口")
+        from src.graph.nodes.generate_sql import build_retry_context
+
+        # Arrange：ClickHouse 真实故障报文
+        state = {
+            "generated_sql": (
+                'SELECT round(sum(attributed_revenue), 2) AS attributed_revenue, '
+                "uniqExact(order_id) AS attributed_order_count "
+                "FROM insight_order_attribution"
+            ),
+            "validation_errors": [],
+            "execution_error": "",
+            "explain_errors": [
+                {
+                    "type": "semantic_error",
+                    "message": (
+                        "Code: 184. DB::Exception: Aggregate function "
+                        "sum(attributed_revenue) is found inside another aggregate "
+                        "function in query. (ILLEGAL_AGGREGATION)"
+                    ),
+                }
+            ],
+        }
+
+        # Act
+        context = build_retry_context(state, 1, [])
+
+        # Assert：模型必须看到可据以改写的报错原文
+        assert "错误原因: []" not in context
+        assert "ILLEGAL_AGGREGATION" in context
+        assert "is found inside another aggregate" in context
+        logger.info("test_explain_error_reason_is_fed_back 完成")
+
+    # 方法作用：验证错误原因排在失败 SQL 之前，避免被尾部截断先砍掉。
+    # Args: self - pytest 用例实例。
+    # Returns: 无返回值，断言失败由 pytest 报告。
+    def test_explain_error_reason_precedes_failed_sql(self) -> None:
+        """retry_error section 是尾部截断，「原因」必须在「失败 SQL」之前。"""
+        logger.debug("test_explain_error_reason_precedes_failed_sql 入口")
+        from src.graph.nodes.generate_sql import build_retry_context
+
+        # Arrange
+        state = {
+            "generated_sql": 'SELECT SYSDATE FROM "dual"',
+            "validation_errors": [],
+            "execution_error": "",
+            "explain_errors": [
+                {
+                    "type": "semantic_error",
+                    "message": "ORA-00942: table or view does not exist",
+                }
+            ],
+        }
+
+        # Act
+        context = build_retry_context(state, 1, [])
+
+        # Assert
+        assert context.index("ORA-00942") < context.index("失败的 SQL")
+        logger.info("test_explain_error_reason_precedes_failed_sql 完成")
+
+    # 方法作用：验证超预算截断后错误原因与核心指令仍在可见前缀内。
+    # Args: self - pytest 用例实例。
+    # Returns: 无返回值，断言失败由 pytest 报告。
+    def test_explain_reason_survives_section_budget_truncation(self) -> None:
+        """数千字符失败 SQL + 500 字符报错，1800 段预算内原因必须可见。"""
+        logger.debug("test_explain_reason_survives_section_budget_truncation 入口")
+        from src.graph.nodes.generate_sql import build_retry_context
+
+        # Arrange
+        long_sql = "SELECT " + ", ".join(f"col_{index}" for index in range(400))
+        state = {
+            "generated_sql": long_sql,
+            "validation_errors": [],
+            "execution_error": "",
+            "explain_errors": [
+                {
+                    "type": "semantic_error",
+                    "message": "ORA-00942: table or view does not exist" + "x" * 464,
+                }
+            ],
+        }
+        section_max_chars = 1800
+
+        # Act
+        context = build_retry_context(state, 1, [])
+
+        # Assert
+        budgeted = context[:section_max_chars]
+        assert "ORA-00942" in budgeted
+        assert "禁止逐字复用上一轮 SQL" in budgeted
+        logger.info("test_explain_reason_survives_section_budget_truncation 完成")
+
+    # 方法作用：验证 EXPLAIN 错误条数受限且披露未列出的数量。
+    # Args: self - pytest 用例实例。
+    # Returns: 无返回值，断言失败由 pytest 报告。
+    def test_explain_errors_are_bounded_with_notice(self) -> None:
+        """错误很多时只渲染前 3 条，且必须显式提示剩余数量。"""
+        logger.debug("test_explain_errors_are_bounded_with_notice 入口")
+        from src.graph.nodes.generate_sql import build_retry_context
+
+        # Arrange
+        state = {
+            "generated_sql": "SELECT 1 FROM orders",
+            "validation_errors": [],
+            "execution_error": "",
+            "explain_errors": [
+                {"type": "semantic_error", "message": f"错误-{index}"}
+                for index in range(5)
+            ],
+        }
+
+        # Act
+        context = build_retry_context(state, 1, [])
+
+        # Assert
+        assert "错误-0" in context
+        assert "错误-2" in context
+        assert "错误-3" not in context
+        assert "另有 2 条 EXPLAIN 错误未列出" in context
+        logger.info("test_explain_errors_are_bounded_with_notice 完成")
+
+    # 方法作用：验证超长单条报错被截断并留下可见标记。
+    # Args: self - pytest 用例实例。
+    # Returns: 无返回值，断言失败由 pytest 报告。
+    def test_long_explain_message_is_truncated_with_marker(self) -> None:
+        """单条 message 过长必须截断，避免一条报错吃掉整个重试段预算。"""
+        logger.debug("test_long_explain_message_is_truncated_with_marker 入口")
+        from src.graph.nodes.generate_sql import build_retry_context
+
+        # Arrange：连续 900 个 y，任何 500 长度的窗口都能测出是否被截
+        state = {
+            "generated_sql": "SELECT 1 FROM orders",
+            "validation_errors": [],
+            "execution_error": "",
+            "explain_errors": [
+                {"type": "semantic_error", "message": "ORA-00942" + "y" * 900}
+            ],
+        }
+
+        # Act
+        context = build_retry_context(state, 1, [])
+
+        # Assert
+        assert "ORA-00942" in context
+        assert "y" * 500 not in context
+        assert "（已截断）" in context
+        logger.info("test_long_explain_message_is_truncated_with_marker 完成")
+
+    # 方法作用：验证 EXPLAIN 错误与旧字段错误同时存在时都会回注。
+    # Args: self - pytest 用例实例。
+    # Returns: 无返回值，断言失败由 pytest 报告。
+    def test_explain_errors_merge_with_validation_errors(self) -> None:
+        """通用分支必须同时带上 validation_errors 与 explain_errors。"""
+        logger.debug("test_explain_errors_merge_with_validation_errors 入口")
+        from src.graph.nodes.generate_sql import build_retry_context
+
+        # Arrange
+        state = {
+            "generated_sql": "SELECT amount FROM orders",
+            "validation_errors": [
+                {"type": "sql_semantic", "message": "校验器报出的语义问题"}
+            ],
+            "execution_error": "",
+            "explain_errors": [
+                {"type": "semantic_error", "message": "EXPLAIN 报出的数据库错误"}
+            ],
+        }
+
+        # Act
+        context = build_retry_context(state, 1, [])
+
+        # Assert
+        assert "校验器报出的语义问题" in context
+        assert "EXPLAIN 报出的数据库错误" in context
+        logger.info("test_explain_errors_merge_with_validation_errors 完成")
+
+    # 方法作用：验证无任何错误证据时给出可操作的兜底文案而非空列表。
+    # Args: self - pytest 用例实例。
+    # Returns: 无返回值，断言失败由 pytest 报告。
+    def test_empty_error_evidence_gives_actionable_fallback(self) -> None:
+        """结构化错误全空时不得渲染裸 `[]`，否则模型误以为没有错误。"""
+        logger.debug("test_empty_error_evidence_gives_actionable_fallback 入口")
+        from src.graph.nodes.generate_sql import build_retry_context
+
+        # Arrange
+        state = {
+            "generated_sql": "SELECT 1 FROM orders",
+            "validation_errors": [],
+            "execution_error": "",
+            "explain_errors": [],
+        }
+
+        # Act
+        context = build_retry_context(state, 1, [])
+
+        # Assert
+        assert "错误原因: []" not in context
+        assert "未记录结构化错误" in context
+        logger.info("test_empty_error_evidence_gives_actionable_fallback 完成")
+
+
+class TestExplainErrorsReachRetryPrompt:
+    """端到端接线：layer4_explain 拒绝后，下一轮 generate_sql 必须拿到 DB 报错原文。
+
+    单测 build_retry_context 只能证明「给了 explain_errors 会渲染」，
+    证明不了「layer4 写的 explain_errors 真的会流到 generate_sql 的入参里」。
+    这里跑真实 layer4_explain_node 与真实 generate_sql_node，只把最外层的
+    EXPLAIN 委托与 LLM 调用换成桩，钉住两个节点之间的接线。
+    """
+
+    # 方法作用：验证 layer4 写出的 explain_errors 经真实节点链路进入重试 Prompt。
+    # Args: self - pytest 用例实例；monkeypatch - pytest 补丁工具。
+    # Returns: 无返回值，断言失败由 pytest 报告。
+    async def test_layer4_explain_errors_reach_generate_sql_retry_prompt(
+        self, monkeypatch
+    ) -> None:
+        """EXPLAIN 拒绝 → _llm_generate 收到的 error_ctx 必须含 DB 原文。"""
+        logger.debug("test_layer4_explain_errors_reach_generate_sql_retry_prompt 入口")
+        import src.graph.nodes.generate_sql as generate_module
+        import src.security.sql_execution as sql_execution
+        from src.graph.nodes.layer4_explain import layer4_explain_node
+
+        # Arrange：ClickHouse 真实故障报文，SQL 用真实触发别名的写法
+        db_error = (
+            "Code: 184. DB::Exception: Aggregate function sum(attributed_revenue) "
+            "is found inside another aggregate function in query. (ILLEGAL_AGGREGATION)"
+        )
+        failed_sql = (
+            "SELECT round(sum(attributed_revenue), 2) AS attributed_revenue, "
+            "uniqExact(order_id) AS attributed_order_count "
+            "FROM insight_order_attribution"
+        )
+
+        # 只替换最外层 EXPLAIN 委托，layer4 的错误写回逻辑保持真实
+        async def fake_explain(sql, datasource, dialect, *, tenant_id=None):
+            logger.debug("EXPLAIN 委托桩命中", datasource=datasource, dialect=dialect)
+            return sql_execution.SQLExecutionResult(
+                success=False,
+                sql=sql,
+                dialect=dialect,
+                error=db_error,
+                error_type="sql_semantic",
+                details=[{"type": "semantic_error", "message": db_error}],
+            )
+
+        monkeypatch.setattr(sql_execution, "validate_and_explain_sql", fake_explain)
+        state = {
+            "user_query": "近 90 天归因收入",
+            "datasource": "ch",
+            "dialect": "clickhouse",
+            "generated_sql": failed_sql,
+            "relevant_tables": [{"name": "insight_order_attribution", "columns": []}],
+            "validation_errors": [],
+            "execution_error": "",
+        }
+        # layer4 依赖分组上下文（真实 read_contexts 要求完整分组 state），
+        # 仅在该节点调用期间替换，不干扰后面 generate_sql 的真实上下文解析
+        contexts = SimpleNamespace(
+            routing=SimpleNamespace(datasource="ch", intent="query", task_plan={}),
+            execution=SimpleNamespace(dialect="clickhouse", retry_count=0),
+            request=SimpleNamespace(user_query="近 90 天归因收入"),
+        )
+        with monkeypatch.context() as scope:
+            scope.setattr(
+                "src.graph.context.read_contexts", lambda _state: contexts, raising=False
+            )
+            layer4_update = await layer4_explain_node(state)
+
+        # Act：把 layer4 的真实产出喂给真实 generate_sql（retry_count=1 触发重试段）
+        captured: dict[str, object] = {}
+
+        async def fake_llm(**kwargs):
+            captured.update(kwargs)
+            return "SELECT 1", "", "ok"
+
+        monkeypatch.setattr(generate_module, "is_llm_available", lambda: True)
+        monkeypatch.setattr(generate_module, "_llm_generate", fake_llm)
+        await generate_module.generate_sql_node(
+            {**state, **layer4_update, "retry_count": 1}, {}
+        )
+
+        # Assert：接线两端都要成立
+        assert layer4_update["sql_valid"] is False
+        assert layer4_update["explain_errors"]
+        error_ctx = str(captured["error_ctx"])
+        assert "ILLEGAL_AGGREGATION" in error_ctx
+        assert "错误原因: []" not in error_ctx
+        logger.info("test_layer4_explain_errors_reach_generate_sql_retry_prompt 完成")
+
+
 # 方法作用：搭建「两张表都有 id、SQL 未加限定符引用 id」的真实 layer3 校验现场。
 # Args: monkeypatch - pytest 补丁工具，用于注入上下文与 SchemaManager 桩。
 # Returns: (state, tables) 元组：待校验 state 与合法表清单。

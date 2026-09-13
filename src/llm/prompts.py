@@ -139,6 +139,11 @@ DIALECT_CHEATSHEET = {
 - NULL处理: ifNull(col, default)
 - 聚合数组: groupArray(col)
 - LIMIT: LIMIT n
+- 聚合别名: 别名不得与聚合列同名（如 round(sum(x),2) AS x）。同 SELECT 列表里
+  再写 sum(x) 时，ClickHouse 会把 x 按别名展开成 round(sum(x),2)，得到
+  sum(round(sum(x),2)) 这种嵌套聚合，直接报 code 184 ILLEGAL_AGGREGATION
+  （Aggregate function ... is found inside another aggregate function）。
+  后续列要复用聚合结果，必须重写表达式或改用不同别名，禁止拿列名当别名
 """,
     "mysql": """MySQL 方言:
 - 日期截断: DATE(dt) / DATE_FORMAT(dt, '%Y-%m')
@@ -167,9 +172,17 @@ DIALECT_CHEATSHEET = {
     "oracle": """Oracle 方言:
 - 日期截断: TRUNC(dt, 'DD') / TRUNC(dt, 'MM')
 - 日期格式化: TO_CHAR(dt, 'YYYY-MM-DD')
+- 文本日期列(VARCHAR2 存日期): 不能直用日期函数(ORA-01722)；各列格式可能不一('YYYY-MM-DD' 或 'YYYY-MM-DD HH24:MI:SS')，优先用字符串比较 col >= TO_CHAR(SYSDATE-90,'YYYY-MM-DD') 与 SUBSTR(col,1,7) 取月份；用 TO_DATE 时格式串必须与值严格匹配，否则报 ORA-01830/01840
 - NULL处理: NVL(col, default)
 - 行数限制: FETCH FIRST n ROWS ONLY
 - 当前时间: SYSDATE / SYSTIMESTAMP
+- dual 表: 必须写不加引号的 FROM dual。FROM "dual" 会按大小写敏感解析，匹配不到
+  公共同义词 DUAL，EXPLAIN 与执行都会直接报 ORA-00942: table or view does not exist；
+  加引号的小写写法只适用于小写业务表（如 FROM "orders"）
+- 字符集类型: NVARCHAR2 列属于国家字符集，与 VARCHAR2 表达式不能出现在同一列上
+  （UNION 各分支、CASE 各分支、比较两侧都算），否则报 ORA-12704: character set
+  mismatch。Schema 里类型标为 NVARCHAR2 的列参与这类组合时必须先 TO_CHAR(col)
+  统一到数据库字符集，例如 UNION 中写成 SELECT TO_CHAR(col) AS x FROM t
 """,
     "mssql": """SQL Server 方言:
 - 日期截断: CAST(dt AS date) / DATETRUNC(month, dt)
