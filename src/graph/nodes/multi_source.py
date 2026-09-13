@@ -203,11 +203,20 @@ async def _analyze_one(
         execution_error = str(result.get("execution_error", "") or "")
         if validation_errors or explain_errors or execution_error or not sql:
             errors = validation_errors or explain_errors
-            error_message = "; ".join(
-                str(error.get("message", "SQL 子图执行失败"))
-                for error in errors
-                if isinstance(error, dict)
-            ) or execution_error or "SQL 生成失败"
+            error_message = (
+                "; ".join(
+                    str(error.get("message", "SQL 子图执行失败"))
+                    for error in errors
+                    if isinstance(error, dict)
+                )
+                or execution_error
+                or "SQL 生成失败"
+            )
+            # 模型判定证据缺口时不会产出 SQL，但子图已给出面向用户的具体原因
+            # （缺哪张表、缺哪个字段）。它只能进 user_error：error 会进日志与审计，
+            # 按契约不得回传给用户，丢弃它又会让上层退化成「SQL 生成失败」，
+            # 多源再汇总成「所有数据源查询均失败，请检查数据源状态和访问权限」。
+            user_error = str(result.get("input_explanation", "") or "").strip()
             logger.warning(
                 "多源 SQL 子图失败",
                 datasource=datasource,
@@ -219,6 +228,7 @@ async def _analyze_one(
             return SourceQueryResult.failed(
                 datasource,
                 error_message,
+                user_error=user_error,
                 validation_errors=validation_errors,
                 explain_errors=explain_errors,
                 error_type=str(result.get("execution_error_type", "") or ""),
@@ -236,7 +246,7 @@ async def _analyze_one(
             dialect=dialect,
             tables=len(result.get("relevant_tables", []) or []),
             full_count=int(result.get("query_result_full_count", len(data)) or len(data)),
-            truncated=bool(result.get("query_result_truncated", False)),
+            truncated=bool(result.get("query_result_truncated", False) or (result.get("query_result_statistics", {}) or {}).get("truncated") or len(data) > 50),
             masking=(result.get("query_result_statistics", {}) or {}).get("masking", {}),
         )
         logger.info(
@@ -800,6 +810,13 @@ async def merge_results_node(
     }
     chart = {"type": "table", "option": {}}
     all_data = _collect_merged_rows(ok, normalized_rows, normalized_batches)
+    # 来源上限、单源样本裁剪和合并上限都必须在分析前披露；精确聚合不是样本裁剪。
+    sampled_batches = normalized_batches if normalized_batches is not None else [result.get("data", []) for result in ok]
+    truncated = bool(
+        any(result.get("truncated", False) for result in ok)
+        or (normalized_rows is None and any(len(batch) > 30 for batch in sampled_batches))
+        or len(all_data) > 200
+    )
 
     if all_data:
         try:
@@ -809,6 +826,8 @@ async def merge_results_node(
 
             merged_state: AnalysisState = {
                 "query_result_sample": all_data[:200],
+                "query_result_truncated": truncated,
+                "query_result_statistics": {"row_count": len(all_data), "truncated": truncated},
                 "user_query": query,
                 "intent": contexts.routing.intent or "query",
                 "analysis_result": analysis,
@@ -844,7 +863,6 @@ async def merge_results_node(
         failed=len(fail),
         data_rows=len(all_data),
     )
-    truncated = len(all_data) > 200
     return {
         "analysis_result": analysis,
         "chart_config": chart,

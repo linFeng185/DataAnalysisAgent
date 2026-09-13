@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 from decimal import Decimal
+from typing import Any
 
 from src.logging_config import get_logger
 
@@ -140,9 +141,21 @@ def _find_numeric(rows: list[dict]) -> list[str]:
         return []
     cols = []
     for key in rows[0]:
-        if any(
-            isinstance(r.get(key), _NUMERIC_TYPES) and not isinstance(r.get(key), bool)
-            for r in rows
+        # 只看非空值：None 是缺失，不应拉低判定（多源合并后 scenario 这类列常有一半为 None）。
+        # 但非空值里混入了非数值类型就必须整列排除——同名逻辑列在不同库里类型可能不同
+        # （实测 mysql 的 region_code 是 'CN-BJ'、oracle 的是数字编码），按「任意一行是数值」
+        # 判定会让整列被当数值参与同比与排名，字符串值在 data_processor._f 里静默回退成 0，
+        # 指标失真且不报错。
+        present: list[Any] = []
+        for row in rows:
+            value = row.get(key)
+            if value is not None:
+                present.append(value)
+        if not present:
+            continue
+        if all(
+            isinstance(value, _NUMERIC_TYPES) and not isinstance(value, bool)
+            for value in present
         ):
             cols.append(key)
     logger.info("数值列识别完成", columns=cols)

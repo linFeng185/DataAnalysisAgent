@@ -218,6 +218,10 @@ async def build_response_node(state: AnalysisState) -> dict:
             "source": "prompt",
             "needs_input": True,
             "needs_time_range": False,
+            # 报表面板只认 error_message，缺了这两个键就会退化成默认文案「查询失败」，
+            # 模型给出的具体证据缺口（缺哪张表、缺哪个字段）会被整段丢掉。
+            "error_message": explanation,
+            "failure_reason": explanation,
             "user_query": contexts.request.user_query,
             "sql": "",
             "data": [],
@@ -231,12 +235,26 @@ async def build_response_node(state: AnalysisState) -> dict:
                       "reason": "等待补充参数时不生成图表"},
         }
     elif multi_source_results and not successful_sources:
+        # 只汇总各源的 user_error：它由子图给出、面向用户（缺哪张表、缺哪个字段）。
+        # error 含连接串/权限等内部细节，进日志与审计即可，回传给用户会泄露内部信息。
+        # 统一给「检查数据源状态和访问权限」则会把模型证据缺口引向数据源故障这个错误方向。
+        reasons = [
+            str(item.get("user_error", "") or "").strip()
+            for item in multi_source_results
+            if isinstance(item, dict)
+        ]
+        detail = "；".join(dict.fromkeys(reason for reason in reasons if reason))[:600]
+        logger.info(
+            "多源全部失败原因汇总",
+            datasource_count=len(multi_source_results),
+            has_detail=bool(detail),
+        )
         final_result = {
             "success": False,
             "status": "failed",
             "source": "multi_source_query",
             "error_code": "MULTI_SOURCE_FAILED",
-            "error_message": public_error_message("MULTI_SOURCE_FAILED"),
+            "error_message": detail or public_error_message("MULTI_SOURCE_FAILED"),
             "user_query": contexts.request.user_query,
             "sql": "",
             "sql_statements": [],

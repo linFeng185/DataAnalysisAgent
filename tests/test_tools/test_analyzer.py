@@ -320,3 +320,57 @@ class TestAnalyzeResultNode:
         assert result["statistics"]["numeric_columns"] == ["total_sales"]
         assert result["recommended_chart_type"] == "bar"
         logger.info("test_decimal_aggregation_recommends_bar_chart 完成", extra={"chart_type": result["recommended_chart_type"]})
+
+
+class TestNumericColumnDetection:
+    """覆盖数值列识别：多源合并后同名逻辑列类型冲突时不得误判。
+
+    回归 2026-09-13：`region_code` 在 mysql 是 'CN-BJ'、在 oracle 是数字编码，
+    合并后 30 行字符串 + 30 行整数。旧实现按「任意一行是数值」判定，
+    整列被当数值参与同比与排名，字符串值在 data_processor._f 里静默回退成 0，
+    region_rank_desc / region_rank_asc 排名失真且不报错。
+    """
+
+    # 方法作用：混入字符串的同名列必须整列排除。
+    # Args: self - 测试实例。
+    # Returns: 断言通过时无返回值。
+    def test_mixed_type_column_is_excluded(self) -> None:
+        from src.tools.analyzer import _find_numeric
+
+        rows = [{"region_code": "CN-BJ", "net_sales": 100.0} for _ in range(3)]
+        rows += [{"region_code": 1, "net_sales": 200.0} for _ in range(3)]
+
+        assert _find_numeric(rows) == ["net_sales"]
+
+    # 方法作用：一半为 None 不影响判定，非空值全是数值即保留。
+    # Args: self - 测试实例。
+    # Returns: 断言通过时无返回值。
+    def test_missing_values_do_not_disqualify(self) -> None:
+        from src.tools.analyzer import _find_numeric
+
+        rows = [{"deviation": 1.5} for _ in range(3)] + [{"deviation": None} for _ in range(3)]
+
+        assert _find_numeric(rows) == ["deviation"]
+
+    # 方法作用：全空列不算数值列。
+    # Args: self - 测试实例。
+    # Returns: 断言通过时无返回值。
+    def test_all_null_column_is_excluded(self) -> None:
+        from src.tools.analyzer import _find_numeric
+
+        rows = [{"yoy_pct": None, "order_count": 3} for _ in range(4)]
+
+        assert _find_numeric(rows) == ["order_count"]
+
+    # 方法作用：纯数值列与布尔值边界保持既有行为。
+    # Args: self - 测试实例。
+    # Returns: 断言通过时无返回值。
+    def test_pure_numeric_and_bool(self) -> None:
+        from src.tools.analyzer import _find_numeric
+
+        rows = [
+            {"amount": 1, "ratio": 0.5, "flag": True},
+            {"amount": 2, "ratio": 0.6, "flag": False},
+        ]
+
+        assert _find_numeric(rows) == ["amount", "ratio"]

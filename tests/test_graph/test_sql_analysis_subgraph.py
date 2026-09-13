@@ -143,3 +143,101 @@ class TestSQLAnalysisSubgraph:
         assert ("generate_sql", "layer3_validate") in worker_edges
         assert ("execute_sql", "generate_sql") in main_edges
         assert ("execute_sql", "generate_sql") in worker_edges
+
+
+class TestMultiSourceFailureReason:
+    """覆盖单源失败原因的回传：模型证据缺口不能被写成「SQL 生成失败」。
+
+    回归 2026-09-13：external_correlation 单元的两个源都是模型判定证据缺口拒答，
+    但多源节点丢弃了子图的 input_explanation，上层只能给出「SQL 生成失败」，
+    再汇总成「所有数据源查询均失败，请检查数据源状态和访问权限」，把用户引向
+    数据源故障这个错误方向。
+    """
+
+    # 方法作用：SQL 为空且无校验/执行错误时，必须回传子图给出的证据缺口说明。
+    # Args: self - 测试实例；monkeypatch - 补丁夹具。
+    # Returns: 断言通过时无返回值。
+    async def test_evidence_gap_becomes_error_message(self, monkeypatch) -> None:
+        # Arrange
+        import src.datasource.registry as registry_module
+        from src.graph.nodes.multi_source import _analyze_one
+
+        resolved = SimpleNamespace(schema=object(), dialect="mysql")
+        monkeypatch.setattr(
+            registry_module,
+            "get_registry",
+            lambda: SimpleNamespace(resolve_or_none=AsyncMock(return_value=resolved)),
+        )
+        gap = "无法生成该查询，存在以下证据缺口：缺少「地区」字段。"
+
+        class FakeSubgraph:
+            """返回「模型拒答」状态的子图替身。"""
+
+            # 方法作用：返回无 SQL 但带证据缺口说明的失败状态。
+            # Args: self - 子图替身；state - SQL 状态；config - RunnableConfig。
+            # Returns: 含 input_explanation 的失败状态。
+            async def ainvoke(self, state, config):
+                return {
+                    "generated_sql": "",
+                    "dialect": "mysql",
+                    "validation_errors": [],
+                    "explain_errors": [],
+                    "execution_error": "",
+                    "input_explanation": gap,
+                }
+
+        # Act
+        result = await _analyze_one(
+            "analytics",
+            {"user_query": "按地区统计订单净销售额", "selected_datasources": ["analytics"]},
+            config={},
+            subgraph=FakeSubgraph(),
+        )
+
+        # Assert
+        assert result["success"] is False
+        # 证据缺口走面向用户的 user_error；error 保持内部语义，不混入模型文案。
+        assert "缺少「地区」字段" in result["user_error"]
+        assert result["error"] == "SQL 生成失败"
+
+    # 方法作用：子图既无错误也无说明时保留兜底文案，不能返回空错误。
+    # Args: self - 测试实例；monkeypatch - 补丁夹具。
+    # Returns: 断言通过时无返回值。
+    async def test_missing_explanation_keeps_fallback(self, monkeypatch) -> None:
+        # Arrange
+        import src.datasource.registry as registry_module
+        from src.graph.nodes.multi_source import _analyze_one
+
+        resolved = SimpleNamespace(schema=object(), dialect="mysql")
+        monkeypatch.setattr(
+            registry_module,
+            "get_registry",
+            lambda: SimpleNamespace(resolve_or_none=AsyncMock(return_value=resolved)),
+        )
+
+        class FakeSubgraph:
+            """返回空 SQL 且不带任何说明的子图替身。"""
+
+            # 方法作用：返回只有空 SQL 的失败状态。
+            # Args: self - 子图替身；state - SQL 状态；config - RunnableConfig。
+            # Returns: 无说明的失败状态。
+            async def ainvoke(self, state, config):
+                return {
+                    "generated_sql": "",
+                    "dialect": "mysql",
+                    "validation_errors": [],
+                    "explain_errors": [],
+                    "execution_error": "",
+                }
+
+        # Act
+        result = await _analyze_one(
+            "analytics",
+            {"user_query": "查询", "selected_datasources": ["analytics"]},
+            config={},
+            subgraph=FakeSubgraph(),
+        )
+
+        # Assert
+        assert result["success"] is False
+        assert result["error"] == "SQL 生成失败"

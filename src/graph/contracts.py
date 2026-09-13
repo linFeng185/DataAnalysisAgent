@@ -159,6 +159,16 @@ class SourceQueryRequest(BaseModel):
         return worker_state
 
 
+# 产出为文字结论而非数据行的响应来源。这些单元（元数据说明、知识直答等）
+# 本来就不返回数据行，报表的「成功单元」判据必须据此区分，否则会把它们
+# 误判成部分完成，整份报表被拖成 partial。
+# 与 build_response 的 is_direct_response 判定保持一致。
+DIRECT_ANSWER_SOURCES = frozenset({
+    "llm_direct", "mcp_agent", "file_analysis", "market_research",
+    "forecast", "report", "external_action", "indicator_catalog",
+})
+
+
 class SourceQueryResult(BaseModel):
     """单源 SQL 子图的标准结果，失败时保留结构化阶段错误。"""
 
@@ -174,6 +184,10 @@ class SourceQueryResult(BaseModel):
     truncated: bool = False
     masking: MaskingMetadata = Field(default_factory=MaskingMetadata)
     error: str = ""
+    # 面向用户的失败说明：模型判定证据缺口时给出的具体原因（缺哪张表、缺哪个字段）。
+    # 必须与 error 分离——error 可能含连接串、权限等内部细节，只进日志与审计，
+    # 回传给用户会泄露内部信息（test_outcome.py 有专门断言守住这条边界）。
+    user_error: str = ""
     error_type: str = ""
     validation_errors: list[dict[str, Any]] = Field(default_factory=list)
     explain_errors: list[dict[str, Any]] = Field(default_factory=list)
