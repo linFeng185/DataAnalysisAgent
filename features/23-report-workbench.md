@@ -25,6 +25,7 @@
 | 23.19 | 指标口径溯源 | `src/reporting/runner.py`、`src/reporting/models.py`、`src/graph/subgraphs/report_workbench.py`、`frontend/src/components/report/ReportDocumentRenderer.tsx` | 把单元问题里 `@metric(...)` 引用解析出的**已批准口径**呈现在页面上，产出 `source_citation` block（该类型此前"定义了无产出"，本项填上）。**实现比原设计更简**：口径解析已由既有工作流在 `retrieve_schema`（`retrieve_schema.py:147-157`）内完成并写入 state 的 `activated_knowledge`，报表侧只需按 `source_id` 的 `metric:` 前缀筛出来透传，**零额外 LLM 调用、零额外查询**。原设计写的"按 `AnalysisUnit.metrics` 名称与别名精确匹配"是错的——既有机制解析的是问题文本里的 `@metric(code)` 引用，不存在名称匹配。**不做数值对照**（指标目录无目标值字段，只有 code/name/datasource/dialect/expression/description/unit）；不解析 `description` 自由文本；无引用即不产出区段。装饰性来源块构建失败时降级为不展示并记 warning，不让整份报表失败 | Phase 3 | 单测完成 | P2 |
 | 23.20 | 预览裁剪与计划单调删减 | `src/reporting/models.py`、`src/reporting/store.py`、`src/api/routes/report_workbench.py`、`migrations/028_report_job_preview_hash.sql` | `POST /jobs` 新增 `accepted_unit_ids`（`None` = 全部接受，`[]` = 422），服务端校验其为预览计划 `unit_ids` 的子集后重建 effective plan（重新走全部既有校验）；**只允许删减不允许新增**，故不构成越权；被删 id 记入 `ReportPlan.excluded_unit_ids` 保留审计线索；`plan_json` 存 effective、`plan_hash` 语义不变、新增 `preview_hash` 存审计凭证；与 `plan_override` 互斥。裁剪只作用于计划期单元，运行期追加由档位额度约束 | Phase 3 | 待开发 | P1 |
 | 23.21 | 报表运行计数统计 | `src/reporting/run_stats.py`、`src/llm/client.py`、`src/security/sql_execution.py`、`src/reporting/runner.py`、`src/reporting/store.py`、`src/reporting/models.py`、`migrations/029_report_run_stats.sql`、`frontend/src/pages/ReportWorkbenchPage.tsx` | 修复既有缺陷：`report_runs` 的 `query_count`/`token_usage` 写入的是 `plan.estimated` 的**估算值**而非实际发生值。新增五列真实计数 `llm_call_count`/`llm_failure_count`/`sql_query_count`/`sql_success_count`/`sql_failure_count`。用 contextvar 持有**可变**计数器对象（asyncio task 复制上下文后仍共享同一引用，若存不可变 int 会丢失子任务计数，这是必须避开的陷阱）。LLM 埋点在 `src/llm/client.py` 工厂层——唯一全覆盖层，`generate_sql` 等直连 `get_task_llm` 不走 `invocation.py`；SQL 埋点在 `validate_and_execute_sql()` 这一唯一执行入口。非报表路径无活动计数器时埋点为 no-op。既有 `query_count` 配额语义**保持不变**，界面可对比展示预估 vs 实际。设计见 `spec/43-report-run-statistics.md` | Phase 3 | 单测完成 | P2 |
+| 23.22 | 报表字段备注与生成字段描述 | `src/llm/output_contracts.py`、`src/llm/prompts.py`、`src/reporting/models.py`、`src/reporting/runner.py`、`src/reporting/document.py`、`frontend/src/components/report/ReportDocumentRenderer.tsx` | 表格列标题与 KPI 标题改为「列名（说明）」。两个来源都在既有链路里，**零新增查询与 LLM 调用**：数据源列备注取自旧工作流 state 的 `relevant_tables`（`retrieve_schema.py:179` 本就在输出 `columns[].comment`，此前被丢弃）；自生成字段说明由 `AnalysisOutput` 新增 `field_descriptions` 承载（该节点本就按单元执行）。优先级：**数据源备注 > 模型说明 > 原列名**，都没则不凭空补。关键约束：`content.columns` 必须保持**原列名**（前端 `dataIndex` 依赖它取值），显示标题走新增的 `content.column_labels` 映射。设计见 `spec/42` 第 18 节 | Phase 3 | 单测完成 | P2 |
 
 ## 依赖关系
 
@@ -49,7 +50,7 @@
 
 ## 模块收尾
 
-模块总计 21 项，已完成 17 项，待开发 4 项。这里的完成指当前编号描述的实现与测试状态，不表示真实 PostgreSQL、容灾演练或外部模型的生产验收完成。
+模块总计 22 项，已完成 18 项，待开发 4 项。这里的完成指当前编号描述的实现与测试状态，不表示真实 PostgreSQL、容灾演练或外部模型的生产验收完成。
 
 | 待开发项 | 不开发原因 | 可开发条件 | 预计开发时机 |
 |---|---|---|---|

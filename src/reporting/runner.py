@@ -51,6 +51,43 @@ def _extract_metric_citations(activated: Any) -> list[dict[str, Any]]:
     return list(citations.values())
 
 
+# 方法作用：从旧工作流的相关表证据里抽取列备注。
+# Args: tables - 工作流状态中的 relevant_tables 列表。
+# Returns: 列名到备注的映射；无备注的列不进入映射。
+def _extract_column_comments(tables: Any) -> dict[str, str]:
+    comments: dict[str, str] = {}
+    for table in list(tables or []):
+        if not isinstance(table, dict):
+            continue
+        for column in list(table.get("columns", []) or []):
+            if not isinstance(column, dict):
+                continue
+            name = str(column.get("name", "") or "")
+            comment = str(column.get("comment", "") or "").strip()
+            if name and comment:
+                comments[name] = comment
+    if comments:
+        logger.info("报表列备注已收集", comment_count=len(comments))
+    return comments
+
+
+# 方法作用：从分析结果里抽取结果字段的中文说明。
+# Args: analysis - 分析节点输出的结构化结果。
+# Returns: 字段名到说明的映射；说明为空的条目被丢弃。
+def _extract_field_descriptions(analysis: Any) -> dict[str, str]:
+    raw = analysis.get("field_descriptions") if isinstance(analysis, dict) else None
+    if not isinstance(raw, dict):
+        return {}
+    descriptions = {
+        str(key): str(value).strip()
+        for key, value in raw.items()
+        if str(key).strip() and str(value).strip()
+    }
+    if descriptions:
+        logger.info("报表结果字段说明已收集", field_count=len(descriptions))
+    return descriptions
+
+
 class ReportRunner:
     """执行报表工作台 Job，并把内部错误转换成用户可读状态。"""
 
@@ -293,6 +330,7 @@ class ReportRunner:
             (statistics.get("truncated") if isinstance(statistics, dict) else False)
             or result.get("query_result_truncated")
         )
+        analysis = final.get("analysis") or {}
         return UnitResult(
             unit_id=unit.unit_id,
             datasource=datasource,
@@ -300,7 +338,9 @@ class ReportRunner:
             rows=[dict(row) for row in rows if isinstance(row, dict)],
             truncated=truncated,
             metric_citations=_extract_metric_citations(result.get("activated_knowledge")),
-            summary=str((final.get("analysis") or {}).get("summary", "") or ""),
+            column_comments=_extract_column_comments(result.get("relevant_tables")),
+            field_descriptions=_extract_field_descriptions(analysis),
+            summary=str(analysis.get("summary", "") or ""),
         )
 
     # 方法作用：读取各数据源的表名清单，供路由模型判断命中关系。

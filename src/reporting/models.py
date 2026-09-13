@@ -272,6 +272,10 @@ class UnitResult(BaseModel):
     columns: list[str] = Field(default_factory=list, max_length=100)
     # 单元问题里 @metric(...) 引用解析出的已批准口径快照，供页面做口径溯源。
     metric_citations: list[dict[str, Any]] = Field(default_factory=list, max_length=20)
+    # 数据源列备注，键为列名。来自既有工作流的 relevant_tables，不额外查询。
+    column_comments: dict[str, str] = Field(default_factory=dict)
+    # 结果字段的中文说明，由分析模型给出。聚合与表达式计算字段主要靠它标注。
+    field_descriptions: dict[str, str] = Field(default_factory=dict)
     summary: str = ""
     warnings: list[str] = Field(default_factory=list, max_length=20)
     error_code: str = ""

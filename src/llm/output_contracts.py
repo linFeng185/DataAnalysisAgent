@@ -82,6 +82,8 @@ class AnalysisOutput(StrictOutputModel):
     """分析结果输出。"""
 
     summary: str = ""
+    # 结果字段的中文说明，键为结果列名。聚合或表达式计算出的字段尤其需要，供报表页做字段标注。
+    field_descriptions: dict[str, str] = Field(default_factory=dict)
     insights: list[str] = Field(default_factory=list)
     data_quality: list[str] = Field(default_factory=list)
     limitations: list[str] = Field(default_factory=list)

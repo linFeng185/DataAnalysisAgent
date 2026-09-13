@@ -183,6 +183,22 @@ def sanitize_value(value: Any, depth: int = 0) -> Any:
     return str(value)[:500]
 
 
+# 方法作用：为结果列生成带说明的显示标题。
+# Args: columns - 结果列名；comments - 数据源列备注；descriptions - 分析模型给出的字段说明。
+# Returns: 列名到显示标题的映射。取到说明时写成「列名（说明）」，否则保持原列名。
+def column_labels(
+    columns: list[str],
+    comments: dict[str, str] | None,
+    descriptions: dict[str, str] | None,
+) -> dict[str, str]:
+    lookup = {**(descriptions or {}), **(comments or {})}
+    labels: dict[str, str] = {}
+    for name in columns:
+        note = str(lookup.get(name, "") or "").strip()
+        labels[name] = f"{name}（{note}）" if note else name
+    return labels
+
+
 # 方法作用：为页面块计算稳定的响应式列跨度。
 # Args: block_type - 页面块类型；has_data - 是否有可展示数据。
 # Returns: ReportLayout 布局意图。
@@ -238,13 +254,14 @@ def build_report_document(
                 None,
             )
             if numeric_column:
+                kpi_labels = column_labels([numeric_column], getattr(result, "column_comments", None), getattr(result, "field_descriptions", None))
                 blocks.append(ReportBlock(
                     section_id=section_id,
                     type="kpi",
                     priority=95,
                     data_ref=data_ref,
-                    title=numeric_column,
-                    content={"value": safe_rows[0].get(numeric_column), "unit_id": section_id},
+                    title=kpi_labels[numeric_column],
+                    content={"value": safe_rows[0].get(numeric_column), "unit_id": section_id, "column_labels": kpi_labels},
                     layout=layout_for_block("kpi"),
                 ))
             columns = list(safe_rows[0].keys())
@@ -288,7 +305,12 @@ def build_report_document(
                 priority=70,
                 data_ref=data_ref,
                 title="明细样本",
-                content={"columns": columns[:50], "rows": safe_rows[:100], "page_size": 100},
+                content={
+                    "columns": columns[:50],
+                    "rows": safe_rows[:100],
+                    "page_size": 100,
+                    "column_labels": column_labels(columns[:50], getattr(result, "column_comments", None), getattr(result, "field_descriptions", None)),
+                },
                 layout=layout_for_block("table"),
             ))
         else:

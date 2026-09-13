@@ -918,7 +918,57 @@ C / D / F / G / H 之间无相互依赖，可并行；E 依赖 C 与 D。
 
 ---
 
-## 18. 与既有规格的关系
+## 18. 报表字段备注与生成字段描述（23.22）
+
+### 18.1 问题
+
+报表的表格列标题与 KPI 标题直接使用 SQL 结果列名。用户看不清字段含义，尤其是聚合与表达式产生的字段（如 `total_amount`、`sum_1`）。要求：**数据库列有备注时写成「列名（备注）」；自生成字段由大模型给出说明。**
+
+### 18.2 两个数据来源都已在既有链路里，零新增调用与查询
+
+| 来源 | 位置 | 说明 |
+|---|---|---|
+| 数据源列备注 | 旧工作流 state 的 `relevant_tables`（`retrieve_schema.py:179` 已在输出 `columns: [{name, type, comment}]`） | `runner._default_execute_unit` 已拿到该结果，只是此前丢弃了 |
+| 自生成字段说明 | `analysis.result` 的 `AnalysisOutput`（`output_contracts.py:81`） | 该节点本就按单元执行并看过结果行，**扩展输出契约不增加任何 LLM 调用** |
+
+### 18.3 契约与优先级
+
+- `AnalysisOutput` 新增 `field_descriptions: dict[str, str]`（带默认空字典，向后兼容）。
+- `UnitResult` 新增 `column_comments` 与 `field_descriptions` 两个映射。
+- `document.column_labels(columns, comments, descriptions)` 生成显示标题，**优先级：数据源备注 > 模型说明 > 原列名**。数据库注释是权威口径，模型说明不得覆盖它；自生成字段没有注释，才轮到模型说明。两处都没有则保持原列名，**不凭空补一个**。
+
+### 18.4 关键约束：数据键不得被改写
+
+前端表格的 `dataIndex` 依赖**原列名**去行数据里取值。因此 `content.columns` **必须保持原列名**，显示标题走新增的 `content.column_labels` 映射：
+
+```json
+{
+  "columns": ["月份", "amount"],
+  "column_labels": {"月份": "月份（统计月份）", "amount": "amount（含税金额）"},
+  "rows": [...]
+}
+```
+
+若把 `columns` 改成带备注的字符串，前端会取不到值——整张表变成空表。这条有专门测试断言（`test_table_block_carries_column_labels`）。
+
+KPI 块同理：`title` 用带备注的标题，同时下发 `column_labels`。
+
+### 18.5 提示词要求
+
+`DATA_ANALYSIS_SYSTEM` 增加第 14 条：**必须为每一个结果列给出简短中文说明**（值不超过 30 字），聚合与表达式字段要说清口径与单位，列名自明的也照写不留空。留空会让该字段退回原列名——这是可接受的降级，不是错误。
+
+### 18.6 降级
+
+| 场景 | 行为 |
+|---|---|
+| 数据源无列注释 | 用模型说明；都没有则用原列名 |
+| 模型未返回 `field_descriptions` | 用原列名，不报错（`StrictOutputModel` 兼容旧响应） |
+| 说明为空串或纯空白 | 视为无说明，不产出「列名（）」 |
+| 模型给出的键不在结果列里 | 静默忽略（`column_labels` 只遍历结果列） |
+
+---
+
+## 19. 与既有规格的关系
 
 ### 18.1 `spec/30-report-workbench.md:264` 已同步修订
 

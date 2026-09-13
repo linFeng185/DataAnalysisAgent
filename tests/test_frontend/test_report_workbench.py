@@ -152,3 +152,16 @@ class TestReportWorkbenchFrontend:
         assert "item.caveats" in renderer
         assert "'findings'" in types
         assert "dangerouslySetInnerHTML" not in renderer
+
+    # 方法作用：验证表格列标题使用后端下发的带备注标题。
+    # Args: self - pytest 测试类实例。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    def test_table_columns_use_backend_labels(self) -> None:
+        """字段备注要显示在列标题上，同时数据键必须仍是原列名。"""
+        # Arrange
+        renderer = Path("frontend/src/components/report/ReportDocumentRenderer.tsx").read_text(encoding="utf-8")
+
+        # Act / Assert
+        assert "column_labels" in renderer
+        # dataIndex 必须保持原列名，否则取不到行数据
+        assert "dataIndex: name" in renderer

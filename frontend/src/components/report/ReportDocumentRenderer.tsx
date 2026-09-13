@@ -41,8 +41,12 @@ function tableColumns(block: ReportBlock, rows: Record<string, unknown>[]): Arra
   const contentColumns = Array.isArray(block.content.columns) ? block.content.columns.filter((item): item is string => typeof item === 'string') : [];
   const inferred = rows.flatMap(row => Object.keys(row));
   const names = Array.from(new Set([...contentColumns, ...inferred])).slice(0, 50);
+  // 后端按「列名（备注或字段说明）」下发显示标题；拿不到时退回原始列名。
+  const labels = block.content.column_labels && typeof block.content.column_labels === 'object' && !Array.isArray(block.content.column_labels)
+    ? block.content.column_labels as Record<string, unknown>
+    : {};
   return names.map(name => ({
-    title: name,
+    title: typeof labels[name] === 'string' && labels[name] ? labels[name] as string : name,
     dataIndex: name,
     key: name,
     ellipsis: true,
