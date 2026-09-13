@@ -187,3 +187,216 @@ class TestSqlRewriter:
         assert "dateTrunc" not in rewritten
         assert "DATE_TRUNC" not in rewritten
         logger.info("test_rewrite_clickhouse_converts_datetrunc 完成")
+
+    # 验证模型写对的 Oracle dual 不会被标识符加引号改坏。
+    # Args: self - pytest 测试类实例。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    def test_rewrite_oracle_keeps_dual_unquoted(self):
+        """sqlglot 的 identify 会把 dual 渲染成 "dual"，而 "dual" 在 Oracle 必然 ORA-00942。"""
+        logger.debug("test_rewrite_oracle_keeps_dual_unquoted 入口")
+        # Arrange：这正是模型按方言提示写出的正确写法
+        sql = "SELECT TRUNC(SYSDATE, 'DD') AS d FROM dual"
+
+        # Act
+        rewritten = rewrite_sql(sql, "oracle")
+
+        # Assert：不得被加上引号
+        assert "FROM dual" in rewritten
+        assert '"dual"' not in rewritten
+        logger.info("test_rewrite_oracle_keeps_dual_unquoted 完成")
+
+    # 验证模型误写的 "dual" 会被确定性地去引号。
+    # Args: self - pytest 测试类实例。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    def test_rewrite_oracle_strips_quotes_from_dual(self):
+        """带引号的小写 "dual" 匹配不到公共同义词 DUAL，必须确定性改写。"""
+        logger.debug("test_rewrite_oracle_strips_quotes_from_dual 入口")
+        # Arrange：真实故障现场的写法
+        sql = (
+            "WITH \"bounds\" AS (SELECT TRUNC(SYSDATE, 'DD') - 89 AS \"start_date\" "
+            "FROM \"dual\") SELECT \"start_date\" FROM \"bounds\""
+        )
+
+        # Act
+        rewritten = rewrite_sql(sql, "oracle")
+
+        # Assert
+        assert "FROM dual" in rewritten
+        assert '"dual"' not in rewritten
+        logger.info("test_rewrite_oracle_strips_quotes_from_dual 完成")
+
+    # 验证撤销 dual 引号不会连带放宽小写业务表的引号。
+    # Args: self - pytest 测试类实例。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    def test_rewrite_oracle_only_unquotes_dual(self):
+        """小写业务表必须保留引号（不加引号会命中大写老表），只有 dual 例外。"""
+        logger.debug("test_rewrite_oracle_only_unquotes_dual 入口")
+        # Arrange
+        sql = "SELECT COUNT(*) FROM orders CROSS JOIN dual"
+
+        # Act
+        rewritten = rewrite_sql(sql, "oracle")
+
+        # Assert：orders 加引号、dual 不加引号，两者必须同时成立
+        assert '"orders"' in rewritten
+        assert "JOIN dual" in rewritten
+        assert '"dual"' not in rewritten
+        logger.info("test_rewrite_oracle_only_unquotes_dual 完成")
+
+    # 验证重复重写结果稳定，不会在两次调用间来回加删引号。
+    # Args: self - pytest 测试类实例。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    def test_rewrite_oracle_dual_is_idempotent(self):
+        """同一条 SQL 连续重写两次结果必须一致。"""
+        logger.debug("test_rewrite_oracle_dual_is_idempotent 入口")
+        # Arrange
+        sql = 'SELECT "o"."id" FROM "orders" "o" WHERE "o"."order_date" > SYSDATE - 90'
+
+        # Act
+        once = rewrite_sql(sql, "oracle")
+        twice = rewrite_sql(once, "oracle")
+
+        # Assert
+        assert once == twice
+        logger.info("test_rewrite_oracle_dual_is_idempotent 完成")
+
+    # 验证 dual 规则不外溢到其他方言。
+    # Args: self - pytest 测试类实例。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    def test_rewrite_dual_rule_is_oracle_scoped(self):
+        """其他方言不受 dual 规则影响，避免误伤同名标识符。"""
+        logger.debug("test_rewrite_dual_rule_is_oracle_scoped 入口")
+        # Arrange
+        sql = "SELECT d FROM dual_table"
+
+        # Act
+        rewritten = rewrite_sql(sql, "postgres")
+
+        # Assert：表名不该被改动内容
+        assert "dual_table" in rewritten
+        logger.info("test_rewrite_dual_rule_is_oracle_scoped 完成")
+
+    # 验证 Oracle 中与表同名的 CTE 会被重命名。
+    # Args: self - pytest 测试类实例。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    def test_rewrite_oracle_renames_cte_shadowing_table(self):
+        """Oracle 把同名 CTE 当递归 CTE 解析并报 ORA-32039，必须确定性改名。"""
+        logger.debug("test_rewrite_oracle_renames_cte_shadowing_table 入口")
+        # Arrange：CTE 名与物理表名同为 inventory
+        sql = (
+            'WITH "inventory" AS (SELECT "i"."product_id" AS "pid", '
+            'SUM("i"."quantity") AS "qty" FROM "inventory" "i" '
+            'GROUP BY "i"."product_id") SELECT "pid", "qty" FROM "inventory"'
+        )
+
+        # Act
+        rewritten = rewrite_sql(sql, "oracle")
+
+        # Assert
+        import sqlglot
+        from sqlglot import exp
+
+        tree = sqlglot.parse_one(rewritten, read="oracle")
+        with_node = tree.find(exp.With)
+        cte_names = [cte.alias_or_name for cte in with_node.expressions]
+        all_tables = [table.name for table in tree.find_all(exp.Table)]
+        # CTE 定义不得再与表同名
+        assert "inventory" not in cte_names
+        # 主查询必须引用改名后的 CTE，不能落空
+        assert cte_names[0] in all_tables
+        # CTE 内部对真实表的引用不得被改（那本来就是表）
+        assert "inventory" in all_tables
+        logger.info("test_rewrite_oracle_renames_cte_shadowing_table 完成")
+
+    # 验证不冲突的 CTE 名保持不变。
+    # Args: self - pytest 测试类实例。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    def test_rewrite_oracle_keeps_non_conflicting_cte(self):
+        """只有 CTE 内部引用了同名标识符才算冲突，正常 CTE 不得被改。"""
+        logger.debug("test_rewrite_oracle_keeps_non_conflicting_cte 入口")
+        # Arrange
+        sql = (
+            'WITH "delivery" AS (SELECT "o"."id" AS "oid" FROM "orders" "o") '
+            'SELECT "oid" FROM "delivery"'
+        )
+
+        # Act
+        rewritten = rewrite_sql(sql, "oracle")
+
+        # Assert
+        import sqlglot
+        from sqlglot import exp
+
+        tree = sqlglot.parse_one(rewritten, read="oracle")
+        cte_names = [cte.alias_or_name for cte in tree.find(exp.With).expressions]
+        assert cte_names == ["delivery"]
+        logger.info("test_rewrite_oracle_keeps_non_conflicting_cte 完成")
+
+    # 验证后续 CTE 与主查询对冲突 CTE 的引用都被同步改名。
+    # Args: self - pytest 测试类实例。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    def test_rewrite_oracle_syncs_all_cte_references(self):
+        """改名后所有引用点都要跟着改，否则查询会指向不存在的对象。"""
+        logger.debug("test_rewrite_oracle_syncs_all_cte_references 入口")
+        # Arrange：冲突 CTE 被主查询与后续 CTE 同时引用
+        sql = (
+            'WITH "orders" AS (SELECT "o"."id" AS "oid" FROM "orders" "o"), '
+            '"joined" AS (SELECT "j"."oid" AS "oid2" FROM "orders" "j") '
+            'SELECT "j"."oid2" FROM "joined" "j" JOIN "orders" "x" ON 1 = 1'
+        )
+
+        # Act
+        rewritten = rewrite_sql(sql, "oracle")
+
+        # Assert
+        import sqlglot
+        from sqlglot import exp
+
+        tree = sqlglot.parse_one(rewritten, read="oracle")
+        cte_names = [cte.alias_or_name for cte in tree.find(exp.With).expressions]
+        assert "orders" not in cte_names
+        renamed = cte_names[0]
+        # 后续 CTE 与主查询里原本指向该 CTE 的引用必须已改名
+        refs = [table.name for table in tree.find_all(exp.Table)]
+        assert refs.count(renamed) >= 2
+        logger.info("test_rewrite_oracle_syncs_all_cte_references 完成")
+
+    # 验证 CTE 改名规则不外溢到其他方言。
+    # Args: self - pytest 测试类实例。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    def test_rewrite_cte_rename_is_oracle_scoped(self):
+        """PostgreSQL 中 CTE 遮蔽同名表是合法语义，绝不能改名。"""
+        logger.debug("test_rewrite_cte_rename_is_oracle_scoped 入口")
+        # Arrange
+        sql = (
+            'WITH "inventory" AS (SELECT "i"."product_id" AS "pid" '
+            'FROM "inventory" "i") SELECT "pid" FROM "inventory"'
+        )
+
+        # Act
+        rewritten = rewrite_sql(sql, "postgres")
+
+        # Assert
+        assert "inventory_base" not in rewritten
+        assert '"inventory"' in rewritten
+        logger.info("test_rewrite_cte_rename_is_oracle_scoped 完成")
+
+    # 验证冲突 CTE 改名后可重复执行且结果稳定。
+    # Args: self - pytest 测试类实例。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    def test_rewrite_oracle_cte_rename_is_idempotent(self):
+        """连续重写两次结果必须一致，避免每次执行都追加后缀。"""
+        logger.debug("test_rewrite_oracle_cte_rename_is_idempotent 入口")
+        # Arrange
+        sql = (
+            'WITH "inventory" AS (SELECT "i"."product_id" AS "pid" '
+            'FROM "inventory" "i") SELECT "pid" FROM "inventory"'
+        )
+
+        # Act
+        once = rewrite_sql(sql, "oracle")
+        twice = rewrite_sql(once, "oracle")
+
+        # Assert
+        assert once == twice
+        logger.info("test_rewrite_oracle_cte_rename_is_idempotent 完成")

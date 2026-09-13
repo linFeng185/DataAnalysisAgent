@@ -70,7 +70,7 @@ async def layer3_validate_node(state: AnalysisState) -> dict:
             # 不带租户会落到平台级回落，多租户下可能读到别家数据源的 Schema 缓存。
             tenant_id, _ = resolve_request_identity(state)
             confirmed = await _recheck_with_full_snapshot(
-                sql, datasource, dialect_value, high_issues, tenant_id
+                sql, datasource, dialect_value, high_issues, tenant_id, tables_hint
             )
             if confirmed is not None:
                 high_issues = confirmed
@@ -84,6 +84,7 @@ async def layer3_validate_node(state: AnalysisState) -> dict:
                     "issues": [
                         {
                             "type": item.type,
+                            "message": item.describe(),
                             "datasource": item.datasource,
                             "table": item.table,
                             "column": item.column,
@@ -119,7 +120,7 @@ async def layer3_validate_node(state: AnalysisState) -> dict:
 
 # 方法作用：用权威全量快照复核阶段一的高置信问题，消除裁剪造成的假阳性。
 # Args: sql - 待校验 SQL；datasource - 数据源名；dialect - 方言；high_issues - 阶段一问题；
-#       tenant_id - 显式租户编号，供取数走租户隔离路径。
+#       tenant_id - 显式租户编号；tables_hint - 阶段一已知属性，仅用于补充快照缺失属性。
 # Returns: 复核后仍存在的问题列表；复核不可用时返回 None（回落阶段一结果）。
 async def _recheck_with_full_snapshot(
     sql: str,
@@ -127,6 +128,7 @@ async def _recheck_with_full_snapshot(
     dialect: str,
     high_issues: list,
     tenant_id: int | None = None,
+    tables_hint: list[dict] | None = None,
 ) -> list | None:
     """失败安全：任何异常都回落阶段一结果，不因复核失败阻断链路。"""
     logger.debug(
@@ -141,10 +143,28 @@ async def _recheck_with_full_snapshot(
         snapshot = await get_schema_manager().get_or_fetch_schema(
             datasource, user_query="", tenant_id=tenant_id
         )
+        known_columns = {
+            (str(table.get("name", "")), str(column.get("name", ""))): column
+            for table in (tables_hint or [])
+            for column in table.get("columns", [])
+            if isinstance(column, dict)
+        }
+        # 全量快照决定表列是否存在；缺失类型/格式不等于否定阶段一已确认的证据。
         tables = [
             {
                 "name": table.name,
-                "columns": [{"name": column.name} for column in table.columns],
+                "columns": [
+                    {
+                        "name": column.name,
+                        "type": getattr(column, "type", "") or known_columns.get((table.name, column.name), {}).get("type", ""),
+                        "value_format": getattr(column, "value_format", "") or (
+                            known_columns.get((table.name, column.name), {}).get("value_format", "")
+                            if not getattr(column, "type", "") or getattr(column, "type", "") == known_columns.get((table.name, column.name), {}).get("type")
+                            else ""
+                        ),
+                    }
+                    for column in table.columns
+                ],
             }
             for table in (snapshot.tables if snapshot else [])
         ]

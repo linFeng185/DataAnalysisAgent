@@ -354,6 +354,96 @@ def validate_sql_schema(sql, *, datasources, dialect, tables): ...
 - 多源时按 `issue.datasource` 分组标注
 - 保留 `retry >= 2` 的"最后一次尝试"提示
 
+**EXPLAIN 阶段失败的回喂契约**（2026-09-13 补充，来源：共享报表真实故障）：
+
+上面的分支只覆盖 `validation_errors`。`layer4_explain` 的失败写入的是 `explain_errors`，
+既不写 `validation_errors` 也不写 `execution_error`，于是重试段渲染成 `错误原因: []`，
+模型只拿到失败 SQL 却看不到数据库报错，三次重试产出逐字节相同的 SQL
+（实测 ClickHouse `code 184 ILLEGAL_AGGREGATION` 与 Oracle `ORA-00942` 两条链路）。
+
+通用兜底分支的契约：
+
+- **必须回注 `explain_errors`**：与 `validation_errors`、`execution_error` 合并后一起渲染
+- **有界回喂**：最多 3 条（`_RETRY_MAX_EXPLAIN_ERRORS`），单条 message 截到 400 字符
+  （`_RETRY_MAX_EXPLAIN_MESSAGE_CHARS`）并附「（已截断）」标记；未列出的条数必须显式
+  提示「另有 N 条 EXPLAIN 错误未列出」，禁止静默丢弃
+- **顺序约束**：`retry_error` section 是「硬上限 1800 字符 + 尾部截断」，因此
+  契约句（"禁止逐字复用上一轮 SQL"）与"错误原因"必须排在"失败的 SQL"之前，
+  否则超预算时先被砍掉的正是错误原因，等价于回到 `错误原因: []`
+- **失败 SQL 回注上限**：1000 字符（`_RETRY_MAX_PREVIOUS_SQL_CHARS`，原 3000）。
+  3000 远超 section 上限，超出部分本就会被截断砍掉，却会把排在它后面的指令顶出去
+- **无证据兜底**：结构化错误全空时渲染可操作文案，不得输出裸 `[]`
+- **分支优先级不变**：`hallucination` > `column_reference` > 通用兜底
+
+**Oracle 标识符加引号的确定性回退**（2026-09-13 补充，来源：同一次故障验收）：
+
+`sql_rewriter.rewrite_sql` 的 Layer 2 用 `sqlglot.transpile(..., identify=True)` 给所有
+标识符加引号，`dual` 也被加成了 `"dual"`。但 Oracle 的公共同义词是 `DUAL`（大写），
+带引号的小写 `"dual"` 按大小写敏感解析匹配不到对象，EXPLAIN 与执行都直接 `ORA-00942`。
+
+**这一层必须确定性修正，不能只靠 Prompt**：实测把规则写进 Oracle 方言速查表后，
+模型仍会在部分轮次写 `FROM "dual"`，且即使模型写对 `FROM dual`，Layer 2 也会把它改错。
+修法与 ClickHouse 的 `dateTrunc` 反转同构——在 Layer 2 之后加 Layer 4
+（`_ORACLE_DUAL_REVERSAL`）撤销 dual 的引号：
+
+- 只撤 `dual`。小写业务表（`"orders"`）必须保留引号，否则会命中大写老表
+- 正则收尾不能写 `\b`：引号是非单词字符，`"` 后接空格/行尾不构成单词边界，
+  加了反而一条都匹配不到（回退静默失效）
+- 覆盖 `FROM dual` 与 `JOIN dual` 两种出现位置
+
+**验收留证**：修复后重跑同一报表，分享链接指向的 v1 有「查询失败 ×1 / 执行失败 ×2 /
+无数据 ×1」，修复后的 v3、v4 零失败痕迹，12 个多源子查询全部成功。
+
+**Oracle 同名 CTE 的确定性重命名**（2026-09-13 补充，来源：同一报表的第二轮验收）：
+
+`WITH "inventory" AS (SELECT ... FROM "inventory")` 这种「CTE 名与表名同名」的写法，
+在 Oracle 里会被解析成递归 CTE 并抛 `ORA-32039`（recursive WITH clause must have
+column alias list）。PostgreSQL / ClickHouse 等方言允许 CTE 遮蔽同名表且语义完全不同，
+所以这条规则只在 Oracle 生效，实现在 `_oracle_rename_shadowing_ctes`（Layer 5）：
+
+- **判定依据**：CTE 体内引用了同名标识符 —— Oracle 正是这样判定递归的
+- **改名范围**：只改 CTE 定义名与「对 CTE 的引用」；CTE 体内对同名表的引用必须原样
+  保留，改了等于把「引用真实表」反转成「引用自己」
+- **定义名与引用名必须同样带引号**，否则渲染后大小写不一致、引用落空
+- **新名字要避开所有已占用标识符**，冲突时继续加后缀
+- 解析失败不阻断执行，返回 Layer 1/2 的成果，由下游报更具体的错
+
+实测：验收中两条 `ORA-32039` 失败 SQL 经重写后 EXPLAIN 全部通过；仅改名、其余标识符
+语义不变。
+
+**Oracle NVARCHAR2 的字符集约束**（2026-09-13 补充，同一故障）：
+
+`workforce_projects.year_month` 与 `workforce_payroll_items.year_month` 是 **NVARCHAR2**，
+而 `SUBSTR(VARCHAR2)` 产出的 `year_month` 是 VARCHAR2。UNION 把两者并到同一列上直接报
+`ORA-12704: character set mismatch`。
+
+**2026-09-13 用户确认调整：允许基于权威 Schema 的定向字符集重写。** 单靠方言提示
+仍出现上述错误；统一 SQL 边界已经解析 Registry，可把同一租户数据源的 `resolved.schema`
+传给 `rewrite_sql(sql, dialect, *, schema=None)`，不额外访问数据库，也不采用模型猜测的类型。
+
+- 仅 Oracle 启用；在现有方言修正之后，通过 sqlglot 作用域追踪集合运算
+  `UNION / UNION ALL / INTERSECT / MINUS` 的同位置输出列，以及 CTE、派生表的列别名。
+- 只有明确混用 `CHAR/VARCHAR2` 与 `NCHAR/NVARCHAR2` 的文本输出才修正：给数据库
+  字符集一侧加 `TO_NCHAR()`，统一到国家字符集，避免把国家字符集文本降级而丢失字符。
+  `SUBSTR` 的返回字符集沿用输入；显式 `TO_CHAR/TO_NCHAR/CAST` 和文本常量按实际类型识别。
+- 保留输出别名、CTE、集合运算类型、数值指标、连接、过滤、排序及聚合口径；不修改数据库
+  表结构，不把数值、日期或未知类型列强制转换为字符串，重复重写必须幂等。
+- 缺少 Schema、类型缺失/歧义、星号、无命名空间证据的限定表和不支持的表达式不猜测；
+  保留原 SQL 进入既有只读校验、EXPLAIN 和错误重试。解析异常保留堆栈且不记录完整 SQL。
+- `validate_and_explain_sql` 与 `validate_and_execute_sql` 共用此入口，返回值中的 `sql`
+  必须是实际使用的修正 SQL，保证执行、审计和报表展示一致。
+- 新增规则只记默认关闭的 DEBUG 计数；测试覆盖高频调用、异常回退、跨方言不干扰、
+  多层 CTE/集合运算和原始故障 SQL。真实 Oracle 的 EXPLAIN/有界执行验收与离线测试分开记录。
+
+CASE、一般比较及无法高置信解析的表达式继续由方言提示和既有错误重试处理，
+不在本次已确认的集合运算修复范围内。
+
+**本次实测留证**：加载新代码的独立进程按服务相同方式绑定 SchemaSyncService 已发布
+快照（143 张表），原始完整报表 SQL 重现 ORA-12704；定向增加两处 TO_NCHAR 后
+EXPLAIN 和有界执行均成功（4 行），原来的实际金额指标未被删除，返回 SQL 与实际执行
+一致且再次重写幂等。同步并发的共享页访问、共享 API 及刷新均返回 HTTP 200。
+现有服务未启用热更新，需重启后端加载补丁；未调用远程模型重跑整张报表或改动历史发布版本。
+
 ---
 
 ## 9. 观测（用户确认：结构化日志 + 指标计数）

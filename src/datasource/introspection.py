@@ -7,6 +7,8 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Mapping
+from typing import Any
 
 from src.datasource.config import DataSourceConfig
 from src.datasource.schema_snapshot import ColumnInfo, SchemaSnapshot, TableRelation, TableSchema
@@ -298,6 +300,186 @@ def _quote_clickhouse_identifier(identifier: str) -> str:
     return ".".join(f"`{part}`" for part in parts)
 
 
+# ── 文本日期列的值格式采样 ────────────────────────────────
+# 很多库里"日期"以文本存储（如 Oracle 的 VARCHAR2 存 'YYYY-MM-DD'），且同一库内
+# 不同列的格式可能不一致（'YYYY-MM-DD' vs 'YYYY-MM-DD HH24:MI:SS'）。模型看不到
+# 真实格式就会用错 TO_DATE 格式串（ORA-01830/01840）。这里采样少量值识别格式，
+# 写回 ColumnInfo.value_format 供 Prompt 标注，所有操作只读且失败降级。
+
+# 字符串族类型前缀：只有文本列才需要标注值格式
+_TEXT_TYPE_PREFIXES = (
+    "char", "varchar", "nvarchar", "nchar", "text", "string", "clob",
+)
+
+# 列名提示：含这些词才可能是「以文本存储的日期/时间列」，避免对全部文本列采样
+_DATE_LIKE_NAME_RE = re.compile(r"(date|time|_at$|day$|month$)", re.IGNORECASE)
+
+# 每次采样的行数上限
+_VALUE_FORMAT_SAMPLE_ROWS = 5
+
+# 值格式模式（顺序敏感）：带时间的模式必须排在纯日期模式之前，否则会被抢占
+_VALUE_FORMAT_PATTERNS: list[tuple[re.Pattern[str], str]] = [
+    (re.compile(r"^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}$"), "YYYY-MM-DD HH24:MI:SS"),
+    (re.compile(r"^\d{4}-\d{2}-\d{2}$"), "YYYY-MM-DD"),
+    (re.compile(r"^\d{4}/\d{2}/\d{2}$"), "YYYY/MM/DD"),
+    (re.compile(r"^\d{4}-\d{2}$"), "YYYY-MM"),
+    (re.compile(r"^\d{2}:\d{2}:\d{2}$"), "HH24:MI:SS"),
+]
+
+
+# 方法作用：剥离类型声明中的长度/精度后缀，返回基类型小写名。
+# Args: column_type - 类型字符串，如 "VARCHAR2(50)"。
+# Returns: 基类型小写名；空输入返回空串。
+def _base_column_type(column_type: str) -> str:
+    """VARCHAR2(50) -> varchar2。"""
+    normalized = str(column_type or "").strip().lower()
+    if not normalized:
+        return ""
+    return re.split(r"[(\s]", normalized, maxsplit=1)[0]
+
+
+# 方法作用：判断列是否为「字符串族类型 + 列名暗示日期/时间」的采样候选。
+# Args: name - 列名；column_type - 类型字符串。
+# Returns: 是候选返回 True。
+def is_date_like_text_column(name: str, column_type: str) -> bool:
+    """两个条件同时满足才算候选，避免对全部文本列发起采样。"""
+    base = _base_column_type(column_type)
+    if not base or not base.startswith(_TEXT_TYPE_PREFIXES):
+        return False
+    return bool(_DATE_LIKE_NAME_RE.search(str(name or "")))
+
+
+# 方法作用：从采样值识别统一的值格式标签。
+# Args: samples - 采样得到的原始值序列。
+# Returns: 全部非空样例命中同一模式时返回格式标签；无样例或格式混杂返回空串。
+def detect_value_format(samples: list[Any]) -> str:
+    """格式混杂或无法识别时返回空串：不标注胜过标注错误。"""
+    texts = [str(v).strip() for v in samples if v is not None and str(v).strip()]
+    if not texts:
+        return ""
+    for pattern, label in _VALUE_FORMAT_PATTERNS:
+        if all(pattern.match(text) for text in texts):
+            logger.debug("值格式识别完成", format=label, sample_count=len(texts))
+            return label
+    return ""
+
+
+# 方法作用：构建单列值格式采样 SQL，兼容各方言的行数限制语法。
+# Args: dialect_name - 方言名；quoted_table - 已引用表名；quoted_column - 已引用列名。
+# Returns: 采样语句；方言未知时返回空串。
+def _build_value_format_query(
+    dialect_name: str, quoted_table: str, quoted_column: str
+) -> str:
+    """Oracle 用 FETCH FIRST，MSSQL 用 TOP，其余用 LIMIT。"""
+    name = str(dialect_name or "").strip().lower()
+    limit = _VALUE_FORMAT_SAMPLE_ROWS
+    if name in {"mssql", "sqlserver"}:
+        return f"SELECT TOP {limit} {quoted_column} FROM {quoted_table}"
+    if name == "oracle":
+        return (
+            f"SELECT {quoted_column} FROM {quoted_table} "
+            f"FETCH FIRST {limit} ROWS ONLY"
+        )
+    if name in {"mysql", "postgres", "clickhouse", "sqlite"}:
+        return f"SELECT {quoted_column} FROM {quoted_table} LIMIT {limit}"
+    return ""
+
+
+# 方法作用：获取内省可用的 SQLAlchemy 方言对象，兼容延迟创建 Engine 的连接器。
+# Args: ds - 数据源配置或兼容对象。
+# Returns: 方言对象；不可得时返回 None。
+def _introspection_dialect(ds: Any) -> Any:
+    """与枚举采样的取方言方式保持一致：engine 优先，其次连接器内部 engine。"""
+    engine = getattr(ds, "engine", None)
+    if engine is None:
+        connector = getattr(ds, "connector", None)
+        engine = getattr(connector, "engine", None) or getattr(connector, "_engine", None)
+    return getattr(engine, "dialect", None)
+
+
+# 方法作用：按方言安全引用表名/列名，非法标识符抛 ValueError。
+# Args: dialect - SQLAlchemy 方言；identifier - 表名或列名。
+# Returns: 已引用标识符。
+def _quote_sampling_identifier(dialect: Any, identifier: str) -> str:
+    """标识符来自数据库元数据，仍按 SQLAlchemy 规则引用以防注入。"""
+    name = str(identifier or "")
+    if not name or "\x00" in name:
+        raise ValueError("SQL 标识符无效")
+    return dialect.identifier_preparer.quote_identifier(name)
+
+
+# 方法作用：从执行器返回的单行（Mapping 或序列）中取第一个值。
+# Args: row - 执行器返回的一行。
+# Returns: 第一个值；结构异常时返回 None。
+def _first_row_value(row: Any) -> Any:
+    """采样查询只 SELECT 一列，取首个值即可。"""
+    if isinstance(row, Mapping):
+        return next(iter(row.values()), None)
+    if isinstance(row, (list, tuple)):
+        return row[0] if row else None
+    # sqlalchemy Row 等序列对象：按索引取值，结构异常时记录堆栈后降级
+    try:
+        return row[0]
+    except Exception as exc:
+        logger.debug("采样行结构异常", error=str(exc), exc_info=True)
+        return None
+
+
+# 方法作用：采样候选列的值并识别其文本格式。
+# Args: ds - 数据源配置；table_name - 表名；columns - 已内省的列信息；executor - 异步 SQL 执行器。
+# Returns: {列名: 格式标签}；无候选、方言不可得或查询失败时返回空字典。
+async def sample_value_formats(
+    ds: DataSourceConfig,
+    table_name: str,
+    columns: list[ColumnInfo],
+    executor,
+) -> dict[str, str]:
+    """逐候选列采样少量值；任何失败都降级为不标注，绝不阻塞内省主流程。"""
+    logger.debug("列值格式采样入口", table=table_name, column_count=len(columns))
+    candidates = [c for c in columns if is_date_like_text_column(c.name, c.type)]
+    if not candidates:
+        return {}
+    dialect = _introspection_dialect(ds)
+    dialect_name = str(getattr(dialect, "name", "") or "")
+    if dialect is None or not _build_value_format_query(dialect_name, "t", "c"):
+        logger.warning(
+            "列值格式采样跳过", table=table_name, reason="方言不可得或不支持"
+        )
+        return {}
+    formats: dict[str, str] = {}
+    for column in candidates:
+        try:
+            quoted_table = _quote_sampling_identifier(dialect, table_name)
+            quoted_column = _quote_sampling_identifier(dialect, column.name)
+        except ValueError:
+            logger.warning(
+                "列值格式采样跳过",
+                table=table_name,
+                column=column.name,
+                reason="标识符非法",
+            )
+            continue
+        sql = _build_value_format_query(dialect_name, quoted_table, quoted_column)
+        try:
+            rows = await executor(ds, sql, {})
+        except Exception as exc:
+            # 采样是增强信息，任何失败都不能阻塞内省：记 warning 后继续下一列
+            logger.warning(
+                "列值格式采样查询失败",
+                table=table_name,
+                column=column.name,
+                error=str(exc)[:200],
+            )
+            continue
+        samples = [_first_row_value(row) for row in rows or []]
+        label = detect_value_format(samples)
+        if label:
+            formats[column.name] = label
+    if formats:
+        logger.info("列值格式识别完成", table=table_name, formats=formats)
+    return formats
+
+
 async def introspect_columns(
     ds: DataSourceConfig, table_name: str, executor
 ) -> list[ColumnInfo]:
@@ -330,6 +512,18 @@ async def introspect_columns(
                            else row.get("column_key") == "PRI" or row.get("is_primary_key", False),
             is_indexed=row.get("column_key", "") in ("PRI", "UNI", "MUL"),
         ))
+    # 采样识别文本日期列的值格式：让 schema 提示能标注「值格式 YYYY-MM-DD」，
+    # 避免模型用错 TO_DATE 格式串（ORA-01830/01840）。采样失败只降级不阻塞内省。
+    try:
+        formats = await sample_value_formats(ds, table_name, columns, executor)
+    except Exception as exc:
+        logger.warning(
+            "列值格式采样异常降级", table=table_name, error=str(exc)[:200]
+        )
+        formats = {}
+    for column in columns:
+        if fmt := formats.get(column.name):
+            column.value_format = fmt
     return columns
 
 

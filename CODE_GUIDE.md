@@ -350,6 +350,7 @@ checksum。执行器同时兼容历史 LF/CRLF 登记值，避免 Git 跨平台�
 - **Skill 供应链与运行隔离**：受管 Skill 默认要求可信 Ed25519 签名；非内置 tools.py 不在主进程导入，Worker 强制超时、资源、文件/网络权限、输出大小和契约校验
 - **跨轮结果索引**：`previous_turn_snapshot` 只保存来源、SQL 和可用性标记；明确 meta 追问校验数据源后从 HistoryStore 恢复
 - **统一 SQL 安全执行**：Graph Layer 3/4、执行节点和 DB Tools 均委托 `security/sql_execution.py`，Registry 方言覆盖调用方提示
+- **Oracle 集合运算字符集**：统一 SQL 边界将 Registry 已发布的 `resolved.schema` 传入 `rewrite_sql`，按作用域追踪 CTE/派生表输出；仅对明确混合普通字符集与国家字符集的同位置文本列补 `TO_NCHAR`，保留指标、别名和过滤。没有权威类型时不猜测，继续 EXPLAIN/重试；执行与状态写回使用同一份修正 SQL，规则不额外查询 Schema、不调用模型。
 - **向量后端一致性**：Chroma/Milvus/pgvector 共享等值、`not:key`、`$ne` 过滤 DSL，空过滤删除统一阻断
 - **节点级模型降级**：轻量任务本地模型不可用 → 确定性规则；远程任务需显式授权；仅开发/测试环境允许 PG 不可用时使用 MemorySaver，生产环境必须持久化 Checkpointer
 - **行情先持久化**：MarketDataProvider 请求成功后必须先写入 `market_bars`，写入失败不向分析层返回数据

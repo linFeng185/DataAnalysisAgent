@@ -492,12 +492,14 @@ async def validate_and_explain_sql(
         settings = get_settings()
         timeout_seconds = max(0.001, float(getattr(settings, "max_execution_time", 30)))
         async with asyncio.timeout(timeout_seconds):
-            _, connector, authoritative_dialect = await _resolve_sql_target(
+            resolved, connector, authoritative_dialect = await _resolve_sql_target(
                 datasource,
                 dialect,
                 tenant_id=tenant_id,
             )
-        rewritten_sql = rewrite_sql(sql, authoritative_dialect)
+        rewritten_sql = rewrite_sql(
+            sql, authoritative_dialect, schema=getattr(resolved, "schema", None),
+        )
         validation = validate_sql(rewritten_sql, authoritative_dialect)
         if not validation.valid:
             error_type = (
@@ -617,12 +619,14 @@ async def _run_validate_and_execute_sql(
         settings = get_settings()
         timeout_seconds = max(0.001, float(getattr(settings, "max_execution_time", 30)))
         async with asyncio.timeout(timeout_seconds):
-            _, connector, authoritative_dialect = await _resolve_sql_target(
+            resolved, connector, authoritative_dialect = await _resolve_sql_target(
                 datasource,
                 dialect,
                 tenant_id=tenant_id,
             )
-        rewritten_sql = rewrite_sql(sql, authoritative_dialect)
+        rewritten_sql = rewrite_sql(
+            sql, authoritative_dialect, schema=getattr(resolved, "schema", None),
+        )
         validation = validate_sql(rewritten_sql, authoritative_dialect)
         if not validation.valid:
             error_type = (

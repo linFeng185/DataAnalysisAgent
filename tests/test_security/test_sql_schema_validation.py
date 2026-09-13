@@ -1265,3 +1265,605 @@ class TestSchemaQualifierMisuse:
         assert [item for item in issues if item.confidence == "high"] == []
         assert all(item.type != "invalid_qualifier" for item in issues)
         logger.info("test_cte_qualifier_still_low_confidence 完成")
+
+
+class TestTypeAwareValidation:
+    """覆盖类型感知校验：日期函数打在字符串列上必须拦截（ORA-01722 回归）。"""
+
+    # 方法作用：构造 Oracle 零售域快照，日期列刻意用 VARCHAR2（复现线上真实数据形态）。
+    # Args: self - pytest 用例实例。
+    # Returns: 单表测试快照。
+    def _oracle_tables(self) -> list[dict]:
+        """orders 表：order_date 是 VARCHAR2 存 'YYYY-MM-DD'，created_at 才是真 DATE。"""
+        return [
+            {
+                "name": "orders",
+                "columns": [
+                    {"name": "id", "type": "NUMBER"},
+                    {"name": "order_date", "type": "VARCHAR2"},
+                    {"name": "created_at", "type": "DATE"},
+                    {"name": "total_amount", "type": "NUMBER"},
+                    {"name": "note", "type": "VARCHAR2"},
+                ],
+            }
+        ]
+
+    # 方法作用：验证 TRUNC(varchar2, fmt) 被判为类型不匹配并 high 拦截。
+    # Args: self - pytest 用例实例。
+    # Returns: 无返回值，断言失败由 pytest 报告。
+    def test_trunc_on_varchar2_column_blocked(self) -> None:
+        """复现 ORA-01722：TRUNC 对 VARCHAR2 列会按 NUMBER 隐式转换。"""
+        logger.debug("test_trunc_on_varchar2_column_blocked 入口")
+        from src.security.sql_schema_validation import validate_sql_schema
+
+        # Arrange：线上失败 SQL 的最小形态
+        sql = "SELECT TRUNC(o.order_date, 'MM') AS month_start FROM orders o"
+
+        # Act
+        issues = validate_sql_schema(
+            sql,
+            datasources=["oracle"],
+            dialect="oracle",
+            tables=self._oracle_tables(),
+        )
+
+        # Assert
+        high = [item for item in issues if item.confidence == "high"]
+        assert len(high) == 1
+        assert high[0].type == "type_mismatch"
+        assert high[0].column == "order_date"
+        logger.info("test_trunc_on_varchar2_column_blocked 完成")
+
+    # 方法作用：验证 TRUNC 单参数形态（sqlglot 解析为 Anonymous）同样被拦截。
+    # Args: self - pytest 用例实例。
+    # Returns: 无返回值，断言失败由 pytest 报告。
+    def test_trunc_single_arg_on_varchar2_blocked(self) -> None:
+        """TRUNC(col) 单参数形态也不得漏检。"""
+        logger.debug("test_trunc_single_arg_on_varchar2_blocked 入口")
+        from src.security.sql_schema_validation import validate_sql_schema
+
+        issues = validate_sql_schema(
+            "SELECT TRUNC(o.order_date) FROM orders o",
+            datasources=["oracle"],
+            dialect="oracle",
+            tables=self._oracle_tables(),
+        )
+
+        high = [item for item in issues if item.confidence == "high"]
+        assert len(high) == 1
+        assert high[0].type == "type_mismatch"
+        logger.info("test_trunc_single_arg_on_varchar2_blocked 完成")
+
+    # 方法作用：验证真实 DATE 列上的 TRUNC 不得被误伤。
+    # Args: self - pytest 用例实例。
+    # Returns: 无返回值，断言失败由 pytest 报告。
+    def test_trunc_on_date_column_passes(self) -> None:
+        """DATE 列上的 TRUNC 是合法写法，必须放行。"""
+        logger.debug("test_trunc_on_date_column_passes 入口")
+        from src.security.sql_schema_validation import validate_sql_schema
+
+        issues = validate_sql_schema(
+            "SELECT TRUNC(o.created_at, 'MM') FROM orders o",
+            datasources=["oracle"],
+            dialect="oracle",
+            tables=self._oracle_tables(),
+        )
+
+        assert [item for item in issues if item.confidence == "high"] == []
+        logger.info("test_trunc_on_date_column_passes 完成")
+
+    # 方法作用：验证 TO_CHAR(varchar2, fmt) 被拦截（fmt 被静默忽略会产生错误结果）。
+    # Args: self - pytest 用例实例。
+    # Returns: 无返回值，断言失败由 pytest 报告。
+    def test_to_char_on_varchar2_column_blocked(self) -> None:
+        """TO_CHAR 打在 VARCHAR2 上 fmt 无效，属静默错误，比报错更危险。"""
+        logger.debug("test_to_char_on_varchar2_column_blocked 入口")
+        from src.security.sql_schema_validation import validate_sql_schema
+
+        issues = validate_sql_schema(
+            "SELECT TO_CHAR(o.order_date, 'YYYY-MM') FROM orders o",
+            datasources=["oracle"],
+            dialect="oracle",
+            tables=self._oracle_tables(),
+        )
+
+        high = [item for item in issues if item.confidence == "high"]
+        assert len(high) == 1
+        assert high[0].type == "type_mismatch"
+        assert high[0].column == "order_date"
+        logger.info("test_to_char_on_varchar2_column_blocked 完成")
+
+    # 方法作用：验证 DATE 列上的 TO_CHAR 格式化正常放行。
+    # Args: self - pytest 用例实例。
+    # Returns: 无返回值，断言失败由 pytest 报告。
+    def test_to_char_on_date_column_passes(self) -> None:
+        """DATE 列格式化是合法写法。"""
+        logger.debug("test_to_char_on_date_column_passes 入口")
+        from src.security.sql_schema_validation import validate_sql_schema
+
+        issues = validate_sql_schema(
+            "SELECT TO_CHAR(o.created_at, 'YYYY-MM') FROM orders o",
+            datasources=["oracle"],
+            dialect="oracle",
+            tables=self._oracle_tables(),
+        )
+
+        assert [item for item in issues if item.confidence == "high"] == []
+        logger.info("test_to_char_on_date_column_passes 完成")
+
+    # 方法作用：验证 TO_DATE(varchar2, fmt) 这条正确修法不得被误伤。
+    # Args: self - pytest 用例实例。
+    # Returns: 无返回值，断言失败由 pytest 报告。
+    def test_to_date_on_varchar2_column_passes(self) -> None:
+        """TO_DATE 就是字符串转日期，是日志中模型自纠后的正确写法，必须放行。"""
+        logger.debug("test_to_date_on_varchar2_column_passes 入口")
+        from src.security.sql_schema_validation import validate_sql_schema
+
+        issues = validate_sql_schema(
+            "SELECT TRUNC(TO_DATE(o.order_date, 'YYYY-MM-DD'), 'MM') FROM orders o",
+            datasources=["oracle"],
+            dialect="oracle",
+            tables=self._oracle_tables(),
+        )
+
+        assert [item for item in issues if item.confidence == "high"] == []
+        logger.info("test_to_date_on_varchar2_column_passes 完成")
+
+    # 方法作用：验证 ADD_MONTHS 打在字符串列上同样被拦截。
+    # Args: self - pytest 用例实例。
+    # Returns: 无返回值，断言失败由 pytest 报告。
+    def test_add_months_on_varchar2_blocked(self) -> None:
+        """ADD_MONTHS 与 TRUNC 同属「输入必须是 DATE」的函数。"""
+        logger.debug("test_add_months_on_varchar2_blocked 入口")
+        from src.security.sql_schema_validation import validate_sql_schema
+
+        issues = validate_sql_schema(
+            "SELECT ADD_MONTHS(o.order_date, 1) FROM orders o",
+            datasources=["oracle"],
+            dialect="oracle",
+            tables=self._oracle_tables(),
+        )
+
+        high = [item for item in issues if item.confidence == "high"]
+        assert len(high) == 1
+        assert high[0].type == "type_mismatch"
+        logger.info("test_add_months_on_varchar2_blocked 完成")
+
+    # 方法作用：验证 NUMBER 列上的 TRUNC 不被误伤（TRUNC 也是数值函数）。
+    # Args: self - pytest 用例实例。
+    # Returns: 无返回值，断言失败由 pytest 报告。
+    def test_trunc_on_number_column_passes(self) -> None:
+        """TRUNC(number) 截断小数是合法用法。"""
+        logger.debug("test_trunc_on_number_column_passes 入口")
+        from src.security.sql_schema_validation import validate_sql_schema
+
+        issues = validate_sql_schema(
+            "SELECT TRUNC(o.total_amount) FROM orders o",
+            datasources=["oracle"],
+            dialect="oracle",
+            tables=self._oracle_tables(),
+        )
+
+        assert [item for item in issues if item.confidence == "high"] == []
+        logger.info("test_trunc_on_number_column_passes 完成")
+
+    # 方法作用：验证列类型缺失时降级放行，不产出 high 拦截。
+    # Args: self - pytest 用例实例。
+    # Returns: 无返回值，断言失败由 pytest 报告。
+    def test_missing_column_type_degrades(self) -> None:
+        """快照未携带类型信息时无法判定，按「无法判定不拦截」降级。"""
+        logger.debug("test_missing_column_type_degrades 入口")
+        from src.security.sql_schema_validation import validate_sql_schema
+
+        # Arrange：列只有名字没有 type
+        tables = [{"name": "orders", "columns": [{"name": "order_date"}]}]
+
+        issues = validate_sql_schema(
+            "SELECT TRUNC(o.order_date, 'MM') FROM orders o",
+            datasources=["oracle"],
+            dialect="oracle",
+            tables=tables,
+        )
+
+        assert [item for item in issues if item.confidence == "high"] == []
+        logger.info("test_missing_column_type_degrades 完成")
+
+    # 方法作用：验证非 Oracle 方言下同一 SQL 不被本特性拦截（本阶段只覆盖 Oracle）。
+    # Args: self - pytest 用例实例。
+    # Returns: 无返回值，断言失败由 pytest 报告。
+    def test_non_oracle_dialect_not_blocked(self) -> None:
+        """MySQL 的 TRUNC 语义不同，本阶段不纳入，避免误伤。"""
+        logger.debug("test_non_oracle_dialect_not_blocked 入口")
+        from src.security.sql_schema_validation import validate_sql_schema
+
+        issues = validate_sql_schema(
+            "SELECT TRUNC(o.order_date, 'MM') FROM orders o",
+            datasources=["mysql"],
+            dialect="mysql",
+            tables=self._oracle_tables(),
+        )
+
+        assert [item for item in issues if item.confidence == "high"] == []
+        logger.info("test_non_oracle_dialect_not_blocked 完成")
+
+
+class TestCteOutputScope:
+    """覆盖 CTE 输出列作用域：外层引用 CTE 不存在的列必须拦截（ORA-00904 回归）。"""
+
+    # 方法作用：构造带 CTE 重命名场景的 Oracle 快照。
+    # Args: self - pytest 用例实例。
+    # Returns: 单表测试快照。
+    def _tables(self) -> list[dict]:
+        """orders 表：外层误引用的 order_status 在 CTE 里已被改名。"""
+        return [
+            {
+                "name": "orders",
+                "columns": [
+                    {"name": "id", "type": "NUMBER"},
+                    {"name": "order_status", "type": "VARCHAR2"},
+                ],
+            }
+        ]
+
+    # 方法作用：验证外层引用 CTE 合法输出列正常放行（CTE 内改写不误伤）。
+    # Args: self - pytest 用例实例。
+    # Returns: 无返回值，断言失败由 pytest 报告。
+    def test_cte_valid_output_column_passes(self) -> None:
+        """agg CTE 输出 return_reason_category，外层正确引用它 → 放行。"""
+        logger.debug("test_cte_valid_output_column_passes 入口")
+        from src.security.sql_schema_validation import validate_sql_schema
+
+        # Arrange：线上失败 SQL 的 CTE 结构复现
+        sql = (
+            "WITH order_base AS (SELECT id AS order_id, order_status FROM orders), "
+            "agg AS (SELECT order_status AS return_reason_category FROM order_base) "
+            "SELECT return_reason_category FROM agg"
+        )
+
+        # Act
+        issues = validate_sql_schema(
+            sql, datasources=["oracle"], dialect="oracle", tables=self._tables()
+        )
+
+        # Assert：CTE 内的合法引用不报
+        assert [item for item in issues if item.confidence == "high"] == []
+        logger.info("test_cte_valid_output_column_passes 完成")
+
+    # 方法作用：验证外层引用 CTE 里不存在的列被判为 high 拦截。
+    # Args: self - pytest 用例实例。
+    # Returns: 无返回值，断言失败由 pytest 报告。
+    def test_cte_unknown_output_column_blocked(self) -> None:
+        """外层引用 agg 不存在的列 → unknown_column（high）。"""
+        logger.debug("test_cte_unknown_output_column_blocked 入口")
+        from src.security.sql_schema_validation import validate_sql_schema
+
+        sql = (
+            "WITH agg AS (SELECT order_status AS return_reason_category FROM orders) "
+            "SELECT CASE WHEN order_status = 'RETURNED' THEN 1 ELSE 0 END FROM agg"
+        )
+
+        issues = validate_sql_schema(
+            sql, datasources=["oracle"], dialect="oracle", tables=self._tables()
+        )
+
+        high = [item for item in issues if item.confidence == "high"]
+        assert len(high) == 1
+        assert high[0].type == "unknown_column"
+        assert high[0].column == "order_status"
+        # 回喂文案必须指明来源与可用列，否则模型只能继续猜
+        assert high[0].table == "agg"
+        assert "return_reason_category" in high[0].available_columns
+        logger.info("test_cte_unknown_output_column_blocked 完成")
+
+    # 方法作用：验证 CTE 含 SELECT * 时输出列无法枚举，降级放行。
+    # Args: self - pytest 用例实例。
+    # Returns: 无返回值，断言失败由 pytest 报告。
+    def test_cte_star_output_degrades(self) -> None:
+        """SELECT * 的 CTE 输出列不可枚举，必须退回低置信放行。"""
+        logger.debug("test_cte_star_output_degrades 入口")
+        from src.security.sql_schema_validation import validate_sql_schema
+
+        sql = "WITH agg AS (SELECT * FROM orders) SELECT order_status FROM agg"
+
+        issues = validate_sql_schema(
+            sql, datasources=["oracle"], dialect="oracle", tables=self._tables()
+        )
+
+        assert [item for item in issues if item.confidence == "high"] == []
+        logger.info("test_cte_star_output_degrades 完成")
+
+    # 方法作用：验证限定符指向 CTE 且列不存在时同样被拦截。
+    # Args: self - pytest 用例实例。
+    # Returns: 无返回值，断言失败由 pytest 报告。
+    def test_cte_qualifier_unknown_column_blocked(self) -> None:
+        """agg.order_status 中 order_status 不在 agg 输出列里 → 拦截。"""
+        logger.debug("test_cte_qualifier_unknown_column_blocked 入口")
+        from src.security.sql_schema_validation import validate_sql_schema
+
+        sql = (
+            "WITH agg AS (SELECT order_status AS return_reason_category FROM orders) "
+            "SELECT agg.order_status FROM agg"
+        )
+
+        issues = validate_sql_schema(
+            sql, datasources=["oracle"], dialect="oracle", tables=self._tables()
+        )
+
+        high = [item for item in issues if item.confidence == "high"]
+        assert len(high) == 1
+        assert high[0].column == "order_status"
+        logger.info("test_cte_qualifier_unknown_column_blocked 完成")
+
+    # 方法作用：验证限定符指向 CTE 且列存在时正常放行。
+    # Args: self - pytest 用例实例。
+    # Returns: 无返回值，断言失败由 pytest 报告。
+    def test_cte_qualifier_valid_column_passes(self) -> None:
+        """agg.return_reason_category 是合法引用。"""
+        logger.debug("test_cte_qualifier_valid_column_passes 入口")
+        from src.security.sql_schema_validation import validate_sql_schema
+
+        sql = (
+            "WITH agg AS (SELECT order_status AS return_reason_category FROM orders) "
+            "SELECT agg.return_reason_category FROM agg"
+        )
+
+        issues = validate_sql_schema(
+            sql, datasources=["oracle"], dialect="oracle", tables=self._tables()
+        )
+
+        assert [item for item in issues if item.confidence == "high"] == []
+        logger.info("test_cte_qualifier_valid_column_passes 完成")
+
+    # 方法作用：验证 CTE 链中未被 FROM 引用的上游 CTE 输出列对外层不可见。
+    # Args: self - pytest 用例实例。
+    # Returns: 无返回值，断言失败由 pytest 报告。
+    def test_cte_chain_unreferenced_cte_not_visible(self) -> None:
+        """线上真实形态：order_status 在 order_base 里，但外层 FROM 只引用 agg → 拦截。
+
+        sqlglot 把所有 CTE 都挂在 scope.sources 上，必须用 selected_sources
+        只看 FROM/JOIN 实际引用的来源，否则该越界引用会被上游 CTE 意外「救活」。
+        """
+        logger.debug("test_cte_chain_unreferenced_cte_not_visible 入口")
+        from src.security.sql_schema_validation import validate_sql_schema
+
+        sql = (
+            "WITH order_base AS (SELECT id AS order_id, order_status FROM orders), "
+            "agg AS (SELECT order_status AS return_reason_category FROM order_base) "
+            "SELECT CASE WHEN order_status = 'RETURNED' THEN 1 ELSE 0 END FROM agg"
+        )
+
+        issues = validate_sql_schema(
+            sql, datasources=["oracle"], dialect="oracle", tables=self._tables()
+        )
+
+        high = [item for item in issues if item.confidence == "high"]
+        assert len(high) == 1
+        assert high[0].type == "unknown_column"
+        assert high[0].column == "order_status"
+        logger.info("test_cte_chain_unreferenced_cte_not_visible 完成")
+
+    # 方法作用：验证直接引用定义该列的 CTE 时仍合法放行（不误伤）。
+    # Args: self - pytest 用例实例。
+    # Returns: 无返回值，断言失败由 pytest 报告。
+    def test_cte_chain_referenced_cte_visible(self) -> None:
+        """FROM 直接引用 order_base 时，order_status 是合法可见列。"""
+        logger.debug("test_cte_chain_referenced_cte_visible 入口")
+        from src.security.sql_schema_validation import validate_sql_schema
+
+        sql = (
+            "WITH order_base AS (SELECT id AS order_id, order_status FROM orders), "
+            "agg AS (SELECT order_status AS return_reason_category FROM order_base) "
+            "SELECT order_status FROM order_base"
+        )
+
+        issues = validate_sql_schema(
+            sql, datasources=["oracle"], dialect="oracle", tables=self._tables()
+        )
+
+        assert [item for item in issues if item.confidence == "high"] == []
+        logger.info("test_cte_chain_referenced_cte_visible 完成")
+
+
+class TestValueFormatValidation:
+    """覆盖 TO_DATE 格式串与列实际值格式的比对（ORA-01830/01840 回归）。"""
+
+    # 方法作用：构造带 value_format 的 Oracle 零售域快照。
+    # Args: self - pytest 用例实例。
+    # Returns: 单表测试快照。
+    def _tables(self) -> list[dict]:
+        """payment_time 为 19 位带时间格式，order_date 为 10 位纯日期格式。"""
+        return [
+            {
+                "name": "payments",
+                "columns": [
+                    {"name": "payment_time", "type": "VARCHAR2", "value_format": "YYYY-MM-DD HH24:MI:SS"},
+                ],
+            },
+            {
+                "name": "orders",
+                "columns": [
+                    {"name": "order_date", "type": "VARCHAR2", "value_format": "YYYY-MM-DD"},
+                ],
+            },
+        ]
+
+    # 方法作用：验证格式串短于实际值时被拦截（ORA-01830 的确定性形态）。
+    # Args: self - pytest 用例实例。
+    # Returns: 无返回值，断言失败由 pytest 报告。
+    def test_to_date_format_mismatch_blocked(self) -> None:
+        """线上真实失败：payment_time 是 19 位，TO_DATE 只用 'YYYY-MM-DD' → 拦截。"""
+        logger.debug("test_to_date_format_mismatch_blocked 入口")
+        from src.security.sql_schema_validation import validate_sql_schema
+
+        # Arrange：日志中的失败 SQL 最小形态
+        sql = "SELECT TO_DATE(p.payment_time, 'YYYY-MM-DD') FROM payments p"
+
+        # Act
+        issues = validate_sql_schema(
+            sql, datasources=["oracle"], dialect="oracle", tables=self._tables()
+        )
+
+        # Assert
+        high = [item for item in issues if item.confidence == "high"]
+        assert len(high) == 1
+        assert high[0].type == "type_mismatch"
+        assert high[0].column == "payment_time"
+        # 回喂文案必须给出正确格式与推荐写法
+        assert "YYYY-MM-DD HH24:MI:SS" in high[0].describe()
+        logger.info("test_to_date_format_mismatch_blocked 完成")
+
+    # 方法作用：验证格式串与列格式匹配时正常放行。
+    # Args: self - pytest 用例实例。
+    # Returns: 无返回值，断言失败由 pytest 报告。
+    def test_to_date_format_match_passes(self) -> None:
+        """正确的格式串必须放行，不得误伤。"""
+        logger.debug("test_to_date_format_match_passes 入口")
+        from src.security.sql_schema_validation import validate_sql_schema
+
+        sql = "SELECT TO_DATE(p.payment_time, 'YYYY-MM-DD HH24:MI:SS') FROM payments p"
+
+        issues = validate_sql_schema(
+            sql, datasources=["oracle"], dialect="oracle", tables=self._tables()
+        )
+
+        assert [item for item in issues if item.confidence == "high"] == []
+        logger.info("test_to_date_format_match_passes 完成")
+
+    # 方法作用：验证格式串大小写与空白差异不影响相等判定。
+    # Args: self - pytest 用例实例。
+    # Returns: 无返回值，断言失败由 pytest 报告。
+    def test_to_date_format_case_insensitive_passes(self) -> None:
+        """'yyyy-mm-dd hh24:mi:ss' 与列格式等价。"""
+        logger.debug("test_to_date_format_case_insensitive_passes 入口")
+        from src.security.sql_schema_validation import validate_sql_schema
+
+        sql = "SELECT TO_DATE(p.payment_time, 'yyyy-mm-dd hh24:mi:ss') FROM payments p"
+
+        issues = validate_sql_schema(
+            sql, datasources=["oracle"], dialect="oracle", tables=self._tables()
+        )
+
+        assert [item for item in issues if item.confidence == "high"] == []
+        logger.info("test_to_date_format_case_insensitive_passes 完成")
+
+    # 方法作用：验证推荐写法（字符串比较 + SUBSTR）不被误伤。
+    # Args: self - pytest 用例实例。
+    # Returns: 无返回值，断言失败由 pytest 报告。
+    def test_recommended_string_approach_passes(self) -> None:
+        """字符串比较与 SUBSTR 取月份是本库推荐写法。"""
+        logger.debug("test_recommended_string_approach_passes 入口")
+        from src.security.sql_schema_validation import validate_sql_schema
+
+        sql = (
+            "SELECT SUBSTR(p.payment_time, 1, 7) AS ym FROM payments p "
+            "WHERE p.payment_time >= TO_CHAR(SYSDATE - 90, 'YYYY-MM-DD')"
+        )
+
+        issues = validate_sql_schema(
+            sql, datasources=["oracle"], dialect="oracle", tables=self._tables()
+        )
+
+        assert [item for item in issues if item.confidence == "high"] == []
+        logger.info("test_recommended_string_approach_passes 完成")
+
+    # 方法作用：验证列格式未知时降级放行（不误判）。
+    # Args: self - pytest 用例实例。
+    # Returns: 无返回值，断言失败由 pytest 报告。
+    def test_unknown_column_format_degrades(self) -> None:
+        """采样未识别出格式的列跳过比对。"""
+        logger.debug("test_unknown_column_format_degrades 入口")
+        from src.security.sql_schema_validation import validate_sql_schema
+
+        # Arrange：列无 value_format 字段
+        tables = [{"name": "payments", "columns": [{"name": "payment_time", "type": "VARCHAR2"}]}]
+        sql = "SELECT TO_DATE(p.payment_time, 'YYYY-MM-DD') FROM payments p"
+
+        issues = validate_sql_schema(
+            sql, datasources=["oracle"], dialect="oracle", tables=tables
+        )
+
+        assert [item for item in issues if item.confidence == "high"] == []
+        logger.info("test_unknown_column_format_degrades 完成")
+
+    # 方法作用：验证 10 位纯日期列用 'YYYY-MM-DD' 正常放行。
+    # Args: self - pytest 用例实例。
+    # Returns: 无返回值，断言失败由 pytest 报告。
+    def test_plain_date_column_correct_fmt_passes(self) -> None:
+        """orders.order_date 用 'YYYY-MM-DD' 是正确的。"""
+        logger.debug("test_plain_date_column_correct_fmt_passes 入口")
+        from src.security.sql_schema_validation import validate_sql_schema
+
+        sql = "SELECT TO_DATE(o.order_date, 'YYYY-MM-DD') FROM orders o"
+
+        issues = validate_sql_schema(
+            sql, datasources=["oracle"], dialect="oracle", tables=self._tables()
+        )
+
+        assert [item for item in issues if item.confidence == "high"] == []
+        logger.info("test_plain_date_column_correct_fmt_passes 完成")
+
+    # 方法作用：验证非 Oracle 方言不做格式比对（各库格式串语法不同）。
+    # Args: self - pytest 用例实例。
+    # Returns: 无返回值，断言失败由 pytest 报告。
+    def test_non_oracle_dialect_skips(self) -> None:
+        """PostgreSQL 的 to_date 语法与 Oracle 不同，本阶段不纳入。"""
+        logger.debug("test_non_oracle_dialect_skips 入口")
+        from src.security.sql_schema_validation import validate_sql_schema
+
+        sql = "SELECT TO_DATE(p.payment_time, 'YYYY-MM-DD') FROM payments p"
+
+        issues = validate_sql_schema(
+            sql, datasources=["pg"], dialect="postgres", tables=self._tables()
+        )
+
+        assert [item for item in issues if item.confidence == "high"] == []
+        logger.info("test_non_oracle_dialect_skips 完成")
+
+
+class TestSystemPseudoTable:
+    """覆盖校验层的系统伪表放行（Oracle 的 dual）。"""
+
+    # 方法作用：验证 Oracle 下 dual 不产生 unknown_table 问题。
+    # Args: self - pytest 用例实例。
+    # Returns: 无返回值，断言失败由 pytest 报告。
+    def test_oracle_dual_not_unknown_table(self) -> None:
+        """dual 不在业务快照但引用合法，判为幻觉会误拦正确 SQL。"""
+        logger.debug("test_oracle_dual_not_unknown_table 入口")
+        from src.security.sql_schema_validation import validate_sql_schema
+
+        # Arrange
+        tables = [{"name": "orders", "columns": [{"name": "id"}]}]
+
+        # Act
+        issues = validate_sql_schema(
+            "SELECT TO_CHAR(SYSDATE - 90, 'YYYY-MM-DD') AS d FROM dual",
+            datasources=["oracle"],
+            dialect="oracle",
+            tables=tables,
+        )
+
+        # Assert
+        assert issues == []
+        logger.info("test_oracle_dual_not_unknown_table 完成")
+
+    # 方法作用：验证其他方言的 dual 仍按未知表上报（白名单按方言隔离）。
+    # Args: self - pytest 用例实例。
+    # Returns: 无返回值，断言失败由 pytest 报告。
+    def test_postgres_dual_still_flagged(self) -> None:
+        """PostgreSQL 没有 dual，引用它确实是未知表。"""
+        logger.debug("test_postgres_dual_still_flagged 入口")
+        from src.security.sql_schema_validation import validate_sql_schema
+
+        tables = [{"name": "orders", "columns": [{"name": "id"}]}]
+
+        issues = validate_sql_schema(
+            "SELECT 1 AS x FROM dual",
+            datasources=["pg"],
+            dialect="postgres",
+            tables=tables,
+        )
+
+        assert any(
+            item.type == "unknown_table" and item.table == "dual" for item in issues
+        )
+        logger.info("test_postgres_dual_still_flagged 完成")

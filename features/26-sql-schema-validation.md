@@ -1,6 +1,6 @@
 # 26. SQL Schema 校验层
 
-## 26. SQL Schema 校验层 (security/) `[P0:15 P1:3]`
+## 26. SQL Schema 校验层 (security/) `[P0:16 P1:3]`
 
 > 设计依据：spec/39-sql-schema-validation.md
 > 目标：建立唯一的 SQL ↔ Schema 校验实现，问答 / 多源 / 报表三条链路共用；校验基准按数据源取权威全量快照，消除基准差异与误杀。
@@ -61,9 +61,31 @@
 - Depends on: 4.5.1（layer3_validate Node）、4.7.3（列名预检验证）、6.x（SchemaManager）、12.x（安全模块）
 - 与 features/23-report-workbench.md 的关系：报表链路通过复用主图自动获得校验，**无独立功能点**
 
+### 26.7 Oracle 集合运算字符集修复
+
+| # | 功能 | 文件 | 描述 | 状态 | 优先级 |
+|---|------|------|------|------|--------|
+| 26.7.1 | 权威 Schema 驱动的字符集统一 | `src/tools/sql_rewriter.py`、`src/security/sql_execution.py` | 追踪 CTE/派生表输出，仅对集合运算中已确认的字符集冲突补 TO_NCHAR；保留指标、别名与过滤，未知类型回退原校验；EXPLAIN/执行共用修正结果 | 集成测试完成 | P0 |
+
+Depends on: 26.1.1（作用域校验）、3.5.1（Oracle 连接器）、12.x（统一 SQL 安全执行）；前置实现均已完成。
+
+验收（2026-09-13）：
+- 新增 55 项回归：`tests/test_tools/test_sql_rewriter_oracle_charset.py`、`tests/test_security/test_sql_execution_charset.py`，覆盖 AST 口径保持、字符类型、幂等、降级日志、跨方言、租户及 Layer4 状态写回。
+- 两组相关回归合计 574 通过、1 跳过；包括安全、连接器、DB Tools、SQL 子图、重试与报表模块；Python 语法检查与限定文件 Ruff 检查通过。
+- 真实 Oracle：原始完整报表 SQL 再现 ORA-12704；使用已发布权威快照后只增加 2 处 TO_NCHAR，EXPLAIN 通过、有界执行返回 4 行，保留实际金额指标；重复 EXPLAIN 和健康检查通过。
+- SQL 执行期间并发访问共享页面、共享接口及刷新均为 HTTP 200。验收使用加载新代码的独立进程；现有后端未启用热更新，需要重启后生效。未调用真实 LLM 重生成整张报表，未覆盖已发布版本；公共分享不涉及登录态刷新验收。
+
+### 2026-09-13 阶段二类型证据修复
+
+- 对应 26.2.1、26.2.4，保持既有已完成状态，补充节点集成及真实 Oracle 表达式验收。
+- 阶段二原先只序列化列名，丢弃 `type` 与 `value_format`，使阶段一已确认的文本日期错误被清除。现在完整传递属性；仅对全量快照中确实存在的同名表列补充阶段一已知的缺失属性，权威新类型/格式仍优先；空快照和异常仍回落阶段一。
+- `ValidationIssue.describe()` 随结构化 issue 传入生成重试，`type_mismatch` 使用准确类型与显式转换建议，不再退化为“未知字段引用错误”。重试仍不回注失败 SQL。
+- 真实 Oracle：读取租户 3 已发布快照，确认 `orders.order_date` 为 `VARCHAR2`、格式 `YYYY-MM-DD`；与故障同构的 `COALESCE(TRUNC(文本日期), TRUNC(SYSDATE))` 在 EXPLAIN 中复现 `ORA-00932`，新 layer3 在打库前拦截，重试提示包含 `VARCHAR2` 与 `TO_DATE`。按快照格式显式转换后，layer3、统一 EXPLAIN/有界执行通过，返回 2 行，后续健康检查成功。
+- 本轮两模块共新增 31 项回归，相关套件 505 通过、1 跳过；覆盖类型/格式保留、未知属性回退、权威新证据纠正旧基准、租户传递、条件路由、重试提示、重复渲染无噪声及异常堆栈保留。未用远程模型重新生成完整故障 SQL；独立进程的真实表达式验收不替代整报表验收。
+
 ### 模块收尾
 
-功能点共 18 项，已完成 18 项（18 项单测完成；其中 26.3.2 的降级留痕由 structlog `capture_logs` 断言守护），待开发 0 项。
+功能点共 19 项，已完成 19 项（18 项单测完成，26.7.1 集成测试完成），待开发 0 项。
 
 残留项（显式记录，不在本计划范围）：
 

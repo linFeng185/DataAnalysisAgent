@@ -16,6 +16,10 @@ class ColumnInfo:
     is_primary_key: bool = False
     is_indexed: bool = False  # 主键/唯一/普通索引
     enum_values: list[str] = field(default_factory=list)
+    # 文本列的值格式（内省采样识别），如 "YYYY-MM-DD"、"YYYY-MM-DD HH24:MI:SS"。
+    # 仅对「类型是字符串族但存日期文本」的列填充：提示模型 TO_DATE 的格式串
+    # 必须与值严格匹配，否则报 ORA-01830/01840。
+    value_format: str = ""
 
 
 @dataclass
@@ -88,8 +92,12 @@ class SchemaSnapshot:
                 for c in t.columns:
                     pk = " PK" if c.is_primary_key else ""
                     nullable = "" if c.is_nullable else " NOT NULL"
+                    # 值格式前置到说明列：文本日期列的格式串不匹配会直接报
+                    # ORA-01830/01840，必须让模型在 schema 里看到（schema 每次
+                    # 都进 Prompt，不像知识文档依赖检索命中）。
+                    format_note = f"值格式 {c.value_format}；" if c.value_format else ""
                     sections.append(
-                        f"| {c.name}{pk} | {c.type}{nullable} | {c.comment} |"
+                        f"| {c.name}{pk} | {c.type}{nullable} | {format_note}{c.comment} |"
                     )
                 if t.relations:
                     sections.append("\n**关联**:")

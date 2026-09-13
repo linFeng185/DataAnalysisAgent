@@ -13,7 +13,7 @@ from pydantic import BaseModel
 from sqlglot import exp
 
 from src.logging_config import get_logger
-from src.security.sql_execution import validate_sql
+from src.security.sql_execution import normalize_sql_dialect, validate_sql
 from src.security.tenant_policy import RequestIdentity
 
 logger = get_logger(__name__)
@@ -82,13 +82,16 @@ class KnowledgeEvolutionService:
         if not validation.valid:
             logger.warning("知识库自进化安全校验拒绝", dialect=dialect)
             return KnowledgeEvolutionResult(ignored_reason="validation_failed")
+        # sqlglot 不认项目里的方言别名（mssql 实为 tsql），必须先规范化，
+        # 否则 parse_one 抛 ValueError 而非 ParseError，异常逃逸到调用方。
+        parse_dialect = normalize_sql_dialect(dialect) or None
         try:
-            tree = sqlglot.parse_one(validation.sql, read=dialect or None)
+            tree = sqlglot.parse_one(validation.sql, read=parse_dialect)
         except sqlglot.errors.ParseError:
             return KnowledgeEvolutionResult(ignored_reason="parse_failed")
         if not isinstance(tree, (exp.Select, exp.Union)):
             return KnowledgeEvolutionResult(ignored_reason="not_query")
-        normalized_sql = tree.sql(dialect=dialect or None, pretty=False)
+        normalized_sql = tree.sql(dialect=parse_dialect, pretty=False)
         fingerprint = hashlib.sha256(
             f"{dialect.strip().lower()}\n{normalized_sql}".encode("utf-8"),
         ).hexdigest()

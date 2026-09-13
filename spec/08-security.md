@@ -297,11 +297,13 @@ def get_current_user_id():
 
 | 可见性 | 谁可见 | 典型场景 |
 |--------|--------|---------|
-| `system` | 仅超级管理员可通过管理 API 查看；Agent 内部可受信任使用 | SQL 方言手册、分析方法、数据质量规则、产品文档 |
+| `system` | 默认隐藏；可经管理 API 显式勾选后只读查看；仅超级管理员可管理 | SQL 方言手册、分析方法、数据质量规则、产品文档 |
 | `tenant` | 当前租户所有人 | 数据源文档、官方数据字典、指标口径、业务规则 |
 | `private`（用户上传默认） | 仅创建者 | 个人分析笔记、术语别名、临时补充知识 |
 
 写权限强制为：`system` 仅 `super_admin` 或配置目录扫描任务；`tenant` 仅 `tenant_admin/super_admin`；`private` 为当前登录用户。`tenant_admin` 不得操作系统知识或其他租户知识。
+
+管理 API 的 `include_system` 参数只放宽可见性，不放宽可管理性：`system` 的删除权恒由 `can_manage_knowledge_resource` 判定为 `super_admin` 独占，非超管的删除请求一律 403，不依赖前端置灰。检索链路（Agent 内部使用）不受该开关影响。知识库管理页的来源分层（`entry_kind`）与长期记忆条目排除见 `spec/44`。
 
 ChromaDB 写入统一注入 `metadata.tenant_id`、`metadata.owner_user_id`、`metadata.visibility`。读取时分别检索 `system`、当前租户 `tenant`、当前用户 `private` 三个范围，再去重和重排；禁止用一次缺少所有者条件的宽查询替代。冲突权重为租户官方知识 > 个人补充 > 系统通用知识，个人知识不能静默覆盖租户指标口径。
 

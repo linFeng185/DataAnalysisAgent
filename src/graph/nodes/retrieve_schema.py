@@ -180,6 +180,8 @@ async def retrieve_schema_node(state: AnalysisState) -> dict:
                           "is_indexed": getattr(c, "is_indexed", False),
                           "is_primary_key": getattr(c, "is_primary_key", False),
                           "is_nullable": getattr(c, "is_nullable", True),
+                          # 文本日期列的值格式：供校验层比对 TO_DATE 格式串（ORA-01830/01840）
+                          "value_format": getattr(c, "value_format", "") or "",
                           "enum_values": getattr(c, "enum_values", []) or
                           enum_dictionary.get(f"{t.name}.{c.name}", []) or
                           enum_dictionary.get(c.name, [])}
