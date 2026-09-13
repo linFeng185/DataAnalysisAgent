@@ -390,7 +390,7 @@ class UnitResult(BaseModel):
     @model_validator(mode="after")
     def infer_columns(self) -> "UnitResult":
         if not self.columns and self.rows:
-            self.columns = list(self.rows[0].keys())[:100]
+            self.columns = list(dict.fromkeys(column for row in self.rows for column in row))[:100]
         return self
 
 

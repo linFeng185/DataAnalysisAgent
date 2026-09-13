@@ -140,7 +140,7 @@ def _find_numeric(rows: list[dict]) -> list[str]:
         logger.info("数值列识别完成", columns=[])
         return []
     cols = []
-    for key in rows[0]:
+    for key in dict.fromkeys(column for row in rows for column in row):
         # 只看非空值：None 是缺失，不应拉低判定（多源合并后 scenario 这类列常有一半为 None）。
         # 但非空值里混入了非数值类型就必须整列排除——同名逻辑列在不同库里类型可能不同
         # （实测 mysql 的 region_code 是 'CN-BJ'、oracle 的是数字编码），按「任意一行是数值」

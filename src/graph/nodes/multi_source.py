@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 import time
 from decimal import Decimal, InvalidOperation
 from typing import Any
@@ -27,6 +28,26 @@ _SOURCES_KEY = "multi_source_results"
 _SOURCE_LABEL_COLUMNS = frozenset({
     "source", "datasource", "data_source", "database", "database_name",
 })
+_COMPATIBLE_COLUMN_ALIASES = (
+    frozenset({"total_customers", "customer_count", "customers_count"}),
+    frozenset({"order_count", "orders_total", "total_orders"}),
+    frozenset({"average_order_value", "avg_order_amount", "avg_order_value"}),
+    frozenset({"category_name", "product_category"}),
+    frozenset({"total_sales", "total_spent"}),
+)
+
+
+# 方法作用：只允许已知同义展示别名归一，禁止用类型与列位置推断业务指标相同。
+# Args: aliases - 各来源同位置的列名。
+# Returns: 别名同义且显式年份不冲突时返回 True。
+def _compatible_column_aliases(aliases: list[str]) -> bool:
+    if len(set(aliases)) == 1:
+        return True
+    normalized = {re.sub(r"_20\d{2}$", "", alias.casefold()) for alias in aliases}
+    years = {match.group() for alias in aliases if (match := re.search(r"20\d{2}$", alias))}
+    if len(years) > 1:
+        return False
+    return len(normalized) == 1 or any(normalized <= group for group in _COMPATIBLE_COLUMN_ALIASES)
 
 
 # 方法作用：并行调度所有已选数据源进入共用 SQL 子图。
@@ -354,6 +375,8 @@ def _build_cross_source_aggregation(
                 single_metrics.append(candidates[0])
 
             aliases = [column for column, _ in single_metrics]
+            if not _compatible_column_aliases(aliases):
+                return None
             canonical_column = max(aliases, key=aliases.count)
             try:
                 decimal_values[canonical_column] = [
@@ -460,6 +483,21 @@ def _strip_redundant_source_columns(
     rows: list[dict],
 ) -> list[dict]:
     """只删除名称明确且每行值都等于当前数据源名称的来源标签。"""
+    if any("(" in column for column in rows[0]) and result.get("sql"):
+        from sqlglot import exp, parse_one
+
+        try:
+            tree = parse_one(str(result["sql"]))
+            aliases = {
+                projection.this.sql().replace(" ", "").casefold(): projection.alias
+                for projection in tree.expressions
+                if isinstance(projection, exp.Alias)
+            } if isinstance(tree, exp.Select) else {}
+            renamed = {column: aliases.get(column.replace(" ", "").casefold(), column) for column in rows[0]}
+            if len(set(renamed.values())) == len(renamed):
+                rows = [{renamed.get(column, column): value for column, value in row.items()} for row in rows]
+        except Exception:
+            logger.debug("结果表达式别名恢复跳过", reason="原始 SQL 无法解析")
     datasource = str(result.get("datasource", ""))
     removable = {
         column
@@ -494,7 +532,7 @@ def _strip_redundant_source_columns(
 def _normalize_cross_source_rows(
     successful_results: list[dict],
 ) -> list[list[dict]] | None:
-    """仅在列宽和角色序列兼容时按列位置统一别名。"""
+    """仅在列宽、角色和已知同义别名均兼容时对齐；不同业务字段保留原名。"""
     logger.debug("跨源结果列契约对齐入口", source_count=len(successful_results))
     try:
         if len(successful_results) < 2:
@@ -559,6 +597,9 @@ def _normalize_cross_source_rows(
             [columns[index] for columns in source_columns]
             for index in range(column_width)
         ]
+        if any(not _compatible_column_aliases(aliases) for aliases in aliases_by_position):
+            logger.debug("跨源结果列契约对齐跳过", reason="同位置字段语义不同，保留原始字段")
+            return None
         canonical_columns = [
             _choose_canonical_column(aliases) for aliases in aliases_by_position
         ]
@@ -625,7 +666,7 @@ def _build_merge_context(query: str, results: list[dict]) -> str:
         )
         parts.append(f"SQL: {result.get('sql', '')[:300]}")
         parts.append(f"数据 (前3行): {result.get('data', [])[:3]}")
-        parts.append(f"总行数: {len(result.get('data', []))}")
+        parts.append(f"当前有界样本行数: {len(result.get('data', []))}；查询返回计数: {result.get('full_count', '未知')}；样本截断: {bool(result.get('truncated', False))}。仅展示前三行，不能据此判断全量范围或所有指标值。")
     context = "\n\n".join(parts)
     logger.debug("构建跨源分析上下文完成", source_count=len(results), chars=len(context))
     return context
@@ -748,7 +789,6 @@ async def merge_results_node(
 
     # 基础摘要（LLM 不可用时使用）
     summary = f"已从 {len(ok)} 个数据源获取数据。"
-    summary_from_llm = False
     if fail:
         summary += f" {len(fail)} 个数据源查询失败: {', '.join(r['datasource'] for r in fail)}。"
 
@@ -798,7 +838,6 @@ async def merge_results_node(
                         exc_info=True,
                     )
                     summary = raw_summary.strip() or summary
-                summary_from_llm = bool(summary.strip())
         except Exception as e:
             logger.warning("LLM 跨源合并失败", error=str(e))
 
@@ -826,8 +865,15 @@ async def merge_results_node(
 
             merged_state: AnalysisState = {
                 "query_result_sample": all_data[:200],
+                "query_result_full_count": sum(int(result.get("full_count", len(result.get("data", [])))) for result in ok),
                 "query_result_truncated": truncated,
                 "query_result_statistics": {"row_count": len(all_data), "truncated": truncated},
+                "generated_sql": "\n\n".join(f"-- {result['datasource']}\n{result.get('sql', '')}" for result in ok),
+                "business_rules_text": "\n".join(
+                    f"来源 {result['datasource']}：字段 {list(dict.fromkeys(column for row in result.get('data', []) for column in row))}；"
+                    f"查询返回 {result.get('full_count', '未知')} 行；截断 {bool(result.get('truncated', False))}。"
+                    for result in ok
+                ) + "\n不同来源独有字段的缺位不等于业务空值或零；未经键、粒度和口径核验不能直接相加或计算相关系数。",
                 "user_query": query,
                 "intent": contexts.routing.intent or "query",
                 "analysis_result": analysis,
@@ -847,8 +893,6 @@ async def merge_results_node(
                 config=presentation_config,
             )
             analysis = presented.get("analysis_result", analysis)
-            if summary_from_llm:
-                analysis = {**analysis, "summary": summary}
             chart = presented.get("chart_config", chart)
         except Exception as e:
             logger.warning("跨源分析/图表生成失败", error=str(e))

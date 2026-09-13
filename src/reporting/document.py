@@ -325,7 +325,7 @@ def build_report_document(
                     content={"value": safe_rows[0].get(numeric_column), "unit_id": section_id, "column_labels": kpi_labels},
                     layout=layout_for_block("kpi"),
                 ))
-            columns = list(safe_rows[0].keys())
+            columns = list(dict.fromkeys(column for row in safe_rows for column in row))
             label_column = columns[0]
             value_column = numeric_column or (columns[-1] if columns else "value")
             chart_option: dict[str, Any] = {

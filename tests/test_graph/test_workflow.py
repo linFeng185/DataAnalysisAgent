@@ -770,7 +770,7 @@ class TestMultiSource:
 
             # Assert：比较问题调用 LLM，且不因列别名不一致丢失客户数。
             rows = result["query_result_sample"]
-            assert result["analysis_result"]["summary"] == "两库客户数相同，PostgreSQL 订单总额更高。"
+            assert result["analysis_result"]["summary"] == "统计分析完成"
             assert rows[0]["total_customers"] == 100000
             assert rows[1]["total_customers"] == 100000
             assert all("customer_count" not in row for row in rows)
