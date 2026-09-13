@@ -318,7 +318,10 @@ checksum。执行器同时兼容历史 LF/CRLF 登记值，避免 Git 跨平台�
 - **日志粒度以"可回测推理"为准**：INFO 只留主要节点的边界、关键决策（路由/选源）、结论（生成/校验/执行/发布）与错误；每次调用都会触发的调用内基础设施细节（LLM provider 解析链、可用性检查、方言重写、逐列数值提取）一律 debug。常规读请求的访问日志由 `api_access.default_access_log` 收敛为 `none`，异常仍走 `API 访问异常`，登录/注册/分享/数据源与 Schema 变更等安全路由保留 `security`/`audit` 审计。单次报表运行由此减少约 35% 的 INFO 记录
 - **覆盖率门禁**：`coverage run -m pytest -q -m "not live_llm"` 后执行 `coverage report`，branch coverage 最低 67%，生产模块禁止 0% 覆盖
 - **多源失败隔离**：每个 worker 独立执行 Schema/SQL/Layer3/EXPLAIN/Execute，不可达来源返回来源级错误
-- **跨源列契约**：按全部结果行识别 dimension/metric 角色，角色序列兼容时按位置统一任意数量列；冲突时保留原字段
+- **跨源列契约**：统计、单元模型与页面从全部有界行提取有序联合字段；只允许已知同义别名或可核验 SQL 投影别名恢复。列数和 dimension/metric 角色相同不代表同一指标，异义字段保留原名与来源，缺位不补零。
+- **报表执行证据**：年度范围继承到发散单元，查询去重包含问题和路由来源；禁用旧补查标记必须在 AnalysisState 中声明，保证穿过真实编译图。质量章节在所有数据单元与关系处理后汇总，不能独立询问模型是否执行过查询。
+- **分析预算与回退**：模型样本按来源交错，并提供确定性样本日期范围、来源计数和 SQL。最终结果分析不被旧前三行摘要覆盖；JSON 契约异常最多在同一超时预算内重试一次，失败仍带堆栈回退，不静默丢弃额外对象。
+- **深度并发与关闭**：ClickHouse 共享只读客户端禁用自动 session ID；DataSourceRegistry 经 AppContext 关闭，等待活动连接及缓存失效产生的释放任务，不能依赖事件循环结束后的析构。
 - **最终 SQL 展示**：多源 worker 返回 execute_sql 方言重写/权限注入后的 SQL，响应通过 sql_statements 按来源展示
 - **并行流隔离**：SSE 使用 LangChain run_id 派生 stream_id，前端按调用实例缓冲 token；原始 reasoning_content 仅做服务端受控诊断
 - **安全阻断**：layer3 使用 sqlglot AST 只读白名单，阻断 DDL/DML、SELECT INTO 和状态变更函数；表/列解析异常失败关闭
