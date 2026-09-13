@@ -82,3 +82,16 @@
 | 多 Worker 同步互斥和崩溃恢复 | 当前测试使用共享 Fake 存储，未运行真实 PostgreSQL 多进程 | 隔离 PostgreSQL 环境及至少两个 Worker | 上线前预发布验收 |
 | 各实际数据库驱动的取消行为 | 只验收本地驱动和受控异步清理，不接触业务数据库 | 各数据库只读账号与可中断的测试查询 | 对应数据库插件上线前 |
 | 外部插件生产发行包 | 真实 entry point + SQLite 测试已通过，尚无用户指定的生产插件包 | 审核后的发行包及各 Worker 一致的驱动依赖 | 新数据库类型接入时 |
+
+## 2026-09-13 同步超限改为持久化排队（需求 8）
+
+原实现在本 Worker 运行中任务数达到硬编码 `3` 时直接抛 429 拒绝，该限制值既不在配置里也无法调整；用户反馈「超过数量的同步任务被直接中断」。现改为排队，扩展 25.6 与 25.10 的语义（**不新增独立功能编号**，两项状态仍为集成测试完成）。
+
+- `schema_sync_jobs.status` 新增 `queued`（迁移 `031_schema_sync_queue.sql`：按 `pg_constraint` 实际名重建 CHECK 约束，并新增 `(started_at, datasource) WHERE status='queued'` 部分索引）。
+- 新增配置 `max_schema_sync_concurrent`（默认 3，范围 1-100）。以 `max_` 开头，因此自动进入 `src/runtime/settings.py` 的 `LIVE_FIELDS` 白名单，可通过 `PUT /admin/runtime-settings` 热改。
+- 调度：`SchemaSyncService` 新增 `start_scheduler`/`stop_scheduler`（`close()` 内调用），每 2 秒按 `(started_at, datasource)` 先进先出认领 `queued` 行；认领复用与直接启动**相同的会话级 advisory lock**，并以 `status='queued' AND run_id` 匹配的条件更新保证「取消与认领只有一个胜出，不复活已取消行」。
+- 崩溃回收只处理 `running`/`cancelling`，`queued` 行不持有 advisory lock、天然可被重新认领，**不会被误判为 failed**。
+- 排队中可直接取消（不再 409）；`publishing` 阶段取消仍返回 409。同一数据源重复启动仍是 409。
+- 排队位置按**同租户**口径计算（用户只能看见本租户数据源；全局口径会显示与感知不符的数字，也会泄露其他租户的排队规模），下发为 `queue_position`，界面显示「排队中（前面还有 N 个）」，`0` 时显示「排队中（即将开始）」。
+- 已知边界：排队触发条件是「**本 Worker** 运行中任务数 ≥ 上限」，因此本 Worker 空闲时新启动的任务不会排在别处排队任务之后；被排队任务会在 ≤2 秒内被任意空闲 Worker 认领，单 Worker 部署下无实际饥饿。若要全局严格 FIFO，需改为「队列非空即排队」。
+- 测试：`tests/test_knowledge/test_schema_sync_queue.py`（13 例：并发满返回 `queued` 而不抛 429、FIFO 认领顺序、租户口径位置、崩溃回收不误伤排队行、排队 cancel 成功 / publishing 仍 409、认领跳过被占用源、调度循环异常不致死、启停幂等）与 `tests/test_frontend/test_schema_sync_queue.py`（4 例静态契约）。真实 PostgreSQL 迁移在**回滚事务内**验证了幂等性、约束名与索引；多 Worker 竞争仍属上面的部署验收边界。

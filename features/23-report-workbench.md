@@ -119,3 +119,15 @@
 - 23.10：取消写入 `cancelled`；只有成功预占的运行才释放并发槽；报表会话以显式租户、用户及 run_id 隔离，避免依赖请求上下文或复用分析单元名。
 - 验证：开启隔离浏览器用例、排除真实模型和数据源标记后的完整回归为 `1597 passed, 1 deselected`；前端构建通过，ECharts 图表相关代码由约 1.15 MB 降至约 0.74 MB。PostgreSQL 运行键使用 SQLite 唯一约束验证，不等同于真实 PostgreSQL 多实例验收。相关文件 Ruff 通过；全项目存在 5 处本轮未修改文件的历史导入排序问题，未夹带修改。
 - 前序可靠性批次未覆盖 23.11～23.14；这些能力已在本页前述续开发批次实现，当前状态以总表为准。
+
+## 2026-09-13 工作台拆分、后台计划、通知、链接管理与额度重置（需求 1～4）
+
+本批次扩展 23.1、23.7、23.8、23.9 四项语义并新增 23.23～23.25；总表 23.1～23.22 的既有编号与状态不变。
+
+| # | 功能 | 文件 | 描述 | 状态 |
+|---|------|------|------|------|
+| 23.23 | 计划后台生成与报表资源接口 | `src/reporting/plan_worker.py`、`src/reporting/store.py`、`src/api/routes/report_workbench.py`、`src/bootstrap.py`、`src/llm/prompts.py`、`src/llm/output_contracts.py`、`migrations/032_report_backend_planning.sql` | 点「生成计划」立即建记录（`planning`）并返回，后台复用既有 Planner 解析出计划与标题：成功置 `draft`（未生成）、失败置 `plan_failed` 且把可读原因写入 `plan_error`，两者都发个人通知；`report_jobs` 新增 `title`/`divergence`/`datasources_json`/`plan_error` 四列与创建时间索引，status 约束加 `plan_failed`。新接口 `POST/GET /reports`、`GET/PATCH/DELETE /reports/{id}`、`POST /reports/{id}/run|retry-plan`、`GET /reports/{id}/pages`；**点「生成计划」不预占额度，点「生成」才预占 `jobs_created`**，计划可改（只允许删减发散单元）；列表按创建时间倒序、租户管理员可看全租户并按用户筛选。旧 `POST /plans` 与 `POST /jobs` 保留为兼容入口 | 单测完成 |
+| 23.24 | 链接管理与分享访问统计 | `src/reporting/share_analytics.py`、`src/reporting/store.py`、`src/api/routes/report_workbench.py`、`frontend/src/pages/LinkManagementPage.tsx`、`frontend/src/pages/SharedReportPage.tsx`、`migrations/030_report_share_analytics.sql` | 新增 `report_share_visits`（访客类型、身份、停留时长）与 `report_tenant_settings`（记录登录访客身份开关、每用户永久报表上限）。停留时长由前端埋点：只累计页面可见时间、每 30 秒以**累积值幂等**上报、卸载用 `fetch keepalive` 补发。租户内分享平铺列表（租户管理员可见全租户并可下架他人链接，其他角色仅自己创建）、最近访问的系统用户及停留时长、批量撤销、租户级设置读写；列表按系统用户与非系统用户**分列**访问量并给出总时长与平均时长 | 单测完成 |
+| 23.25 | 额度已用量重置与永久页面上限 | `src/reporting/quota_reset.py`、`src/reporting/quota.py`、`src/reporting/store.py`、`src/api/routes/report_workbench.py`、`frontend/src/components/report/quotaResetFields.ts`、`ReportPolicyEditor.tsx`、`frontend/src/pages/AdminPage.tsx` | `POST /admin/quota-usage/reset` 支持单用户/多用户/全租户，`fields` 只能取 `jobs_created`/`runs_started`/`llm_tokens`/`share_links` 四个按月字段；只清当前周期用量、**不改上限**，字段白名单来自唯一常量，跨租户与本期无用量行不计入且不让整次请求失败，每个实际清零用户各写一条审计。延期与永久能力下放给 `analyst`；永久页面数受租户级 `max_permanent_reports_per_user` 约束（0 为不限制，租户管理员本人不受限） | 单测完成 |
+
+本批迁移：`030`（分享访问与租户设置）、`032`（后台计划四列与状态约束）、`033`/`034`（通用通知三表、删除旧 `analysis_notifications`）。通用通知模块与「自动化」菜单摘除见 `features/18-frontend.md`。测试：`tests/test_reporting/test_backend_planning.py`、`test_share_analytics.py`、`test_quota_usage_reset.py`、`tests/test_notifications/`、`tests/test_frontend/test_report_pages.py`、`test_link_management_page.py`、`test_report_quota_reset.py`。

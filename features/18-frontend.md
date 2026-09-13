@@ -157,4 +157,15 @@
 2026-09-06：指标与脱敏功能经开发完成后通过 Python 回归及四条真实 Edge 界面用例。
 日常离线套件（含此前两条报表浏览器测试）共 1675 passed、1 deselected；未调用远程 LLM。
 
+## 2026-09-13 报表工作台三子页与通知中心（需求 1、2、3）
+
+本轮新增两项功能点，模块功能点由 70 项增至 **72 项**，均已完成（前端契约测试通过）。18.1.2 的菜单/路由随之扩展。
+
+| # | 功能 | 文件 | 描述 | 状态 | 优先级 |
+|---|------|------|------|------|--------|
+| 18.15 | 报表工作台三子页 | `frontend/src/pages/ReportCreatePage.tsx`、`ReportListPage.tsx`、`LinkManagementPage.tsx`、`frontend/src/report/promptExamples.ts`、`frontend/src/report/status.ts` | 父菜单拆成创建报表 / 报表信息 / 链接管理三个子项，各按 `report.create_page` / `report.list` / `report.link_manage` 控制可见性，旧 `/report-workbench` 重定向到创建页；创建页左表单右案例（案例为纯静态数据文件，不调接口，点击仅回填提示词）；报表信息页 7 列（标题/数据源/发散档位/状态/运行次数/下次运行时间/创建时间）按创建时间倒序，租户管理员可按用户筛选，非终态 2.5 秒轮询，详情抽屉含计划查看与发散单元删减、调度编辑、逐页延期/永久与「生成」「重试计划」「删除」；旧「自动化」菜单与路由摘除 | 单测完成 | P1 |
+| 18.16 | 通知中心 | `frontend/src/components/notifications/`、`frontend/src/pages/NotificationsPage.tsx`、`frontend/src/hooks/useNotifications.ts`、`frontend/src/api/notifications.ts` | 顶栏铃铛（未读角标、0 隐藏、99+ 截断）与收件箱抽屉/整页；四类通知展示、标记已读、全部已读、软删；发布界面按角色开放（平台通知仅超管、租户与用户群仅租户管理员，个人通知不在此发布）；租户级渠道配置，敏感项只显示「已配置」不回显明文，并明示邮件与飞书/Slack 暂不外发；WebSocket 推送（握手复用 HttpOnly Cookie，URL 不带令牌）断线指数退避重连、长连不可用降级 60 秒轮询，未读数以推送值为准不做本地自增；StrictMode 双挂载不产生多余连接 | 单测完成 | P1 |
+
+界面支撑：共享状态映射抽到 `frontend/src/report/status.ts`（与后端状态枚举同源），案例数据独立成文件便于维护；通知铃铛经 `App.tsx` 顶栏接入，路由 `/notifications` 懒加载。前端契约测试新增 `tests/test_frontend/test_report_pages.py`（14 例）与 `test_notifications_ui.py`（17 例），并把 `test_p3_experience.py` 里「自动化菜单存在」的断言改为「菜单/路由/引用均已移除，页面文件保留」。`npx tsc -b` 退出码 0；前端套件 177 passed、22 skipped（浏览器用例默认 skip）。
+
 ---
