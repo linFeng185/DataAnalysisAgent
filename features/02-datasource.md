@@ -77,6 +77,11 @@
 | 2.6.5 | ColumnInfo 定义 | 同上 | dataclass: name / type / comment / is_nullable / is_primary_key / enum_values | 单测完成 | P0 |
 | 2.6.6 | TableRelation 定义 | 同上 | dataclass: target_table / join_key / relation_type | 单测完成 | P0 |
 
+### 2026-09-13 连接资源释放回归
+
+- DataSourceRegistry 注册 AppContext 异步关闭器，关闭时清理缓存、复用原连接释放路径并等待失效释放任务；重复关闭幂等。`tests/test_datasource/test_registry_shutdown.py` 验证活动连接与待释放连接都被等待。
+- 真实深度报表此前在进程结束时报 aiomysql `Event loop is closed`，修复后第八轮完整生成及关闭日志没有该异常。详细验收见 `features/23-report-workbench.md`；不涉及凭证轮换或 Vault 能力。
+
 ### 模块收尾
 
 模块功能点共 47 项，已完成 47 项，待开发 0 项。

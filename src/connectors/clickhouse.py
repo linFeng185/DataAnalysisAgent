@@ -296,6 +296,8 @@ class ClickHouseConnector(ConnectorBase):
                 database=self.config.database or "default",
                 connect_timeout=connect_timeout,
                 query_retries=query_retries,
+                # 共享只读客户端不依赖会话状态，关闭自动会话以支持并行报表查询。
+                autogenerate_session_id=False,
             )
             logger.info("ClickHouse 同步客户端创建完成", datasource=self.config.name)
             return client

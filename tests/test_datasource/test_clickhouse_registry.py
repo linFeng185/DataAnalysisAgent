@@ -82,6 +82,7 @@ class TestClickHouseRegistryAdapter:
         assert client_options["port"] == 8123
         assert client_options["connect_timeout"] == 5
         assert client_options["query_retries"] == 0
+        assert client_options["autogenerate_session_id"] is False
         tcp_probe.assert_called_once_with(("93.184.216.34", 8123), timeout=5)
         assert client_options["host"] == "93.184.216.34"
 

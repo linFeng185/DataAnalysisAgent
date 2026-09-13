@@ -50,6 +50,11 @@
 | 3.5.5 | close() | 同上 | 在线程池释放同步连接池 | 单测完成 | P1 |
 | 3.5.6 | 驱动级执行超时 | `src/connectors/oracle.py`、`src/connectors/mssql.py` | Oracle call_timeout 与 SQL Server 查询超时纳入统一执行预算 | 单测完成 | P0 |
 
+### 2026-09-13 ClickHouse 并发回归
+
+- 深度报表共用只读客户端时，自动 session ID 导致并发查询报 `Attempt to execute concurrent queries within the same session`。客户端显式传入 `autogenerate_session_id=False`，不改变出站验证、只读和执行上限。
+- 参数契约单测与完整真实报表重跑通过，最后一轮数据库执行无 ERROR。详见 `features/23-report-workbench.md`；不是通过串行化所有查询或掩盖连接器异常规避。
+
 ### 模块收尾
 
 模块功能点共 23 项，已完成 23 项，待开发 0 项。

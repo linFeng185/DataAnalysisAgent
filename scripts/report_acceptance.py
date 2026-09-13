@@ -90,7 +90,5 @@ async def main() -> None:
 
 
 if __name__ == "__main__":
-    from src.main import selector_event_loop_factory
-
-    with asyncio.Runner(loop_factory=selector_event_loop_factory) as runner:
+    with asyncio.Runner(loop_factory=asyncio.SelectorEventLoop) as runner:
         runner.run(main())

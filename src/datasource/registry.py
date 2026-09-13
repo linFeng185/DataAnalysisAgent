@@ -51,6 +51,7 @@ def get_registry() -> "DataSourceRegistry":
     result = get_app_context().get_or_create(
         "datasource_registry",
         DataSourceRegistry,
+        closer=DataSourceRegistry.close,
     )
     logger.debug("获取数据源 Registry 完成")
     return result
@@ -58,6 +59,22 @@ def get_registry() -> "DataSourceRegistry":
 
 class DataSourceRegistry:
     """统一入口。内置模式启动时自动填充，外挂模式由 API 动态填充。"""
+
+    # 方法作用：在应用退出且事件循环仍可用时释放全部连接与已排队的释放任务。
+    # Args: self - 数据源注册表。
+    # Returns: 无返回值。
+    async def close(self) -> None:
+        """不将异步连接释放留给事件循环关闭后的垃圾回收。"""
+        logger.debug("数据源注册表关闭入口", cached_count=len(self._cache))
+        configs = list(self._cache.items())
+        self._cache.clear()
+        for cache_key, config in configs:
+            self._release_runtime_config(config, cache_key[1])
+        pending = list(self._pending_release_tasks)
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
+            self._pending_release_tasks.difference_update(pending)
+        logger.info("数据源注册表关闭完成", released_count=len(configs))
 
     def __init__(self) -> None:
         self._providers: dict[str, DataSourceProvider] = {}
