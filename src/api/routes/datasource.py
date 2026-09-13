@@ -135,7 +135,8 @@ async def _with_sync_status(items: list[dict], tenant_id: int) -> list[dict]:
     # Args: item - 当前数据源摘要。
     # Returns: 不修改 Registry 原摘要的状态副本；失败或超时记为 unknown。
     async def enrich(item: dict) -> dict:
-        state = {"status": "idle", "phase": "", "table_count": 0, "error": ""}
+        # queue_position 非排队时保持 null，前端据此只在排队中显示「前面还有 N 个」。
+        state = {"status": "idle", "phase": "", "table_count": 0, "error": "", "queue_position": None}
         if service is not None:
             try:
                 async with semaphore:
@@ -147,7 +148,7 @@ async def _with_sync_status(items: list[dict], tenant_id: int) -> list[dict]:
             except Exception:
                 logger.error("数据源同步状态读取失败", tenant_id=tenant_id, datasource=item["name"], exc_info=True)
                 # 失败与超时都必须降级为 unknown，绝不能伪装成 idle 或已完成。
-                state = {"status": "unknown", "error": "同步状态暂时不可用，请稍后重试"}
+                state = {"status": "unknown", "error": "同步状态暂时不可用，请稍后重试", "queue_position": None}
         return {**item, "schema_sync": state}
 
     try:
@@ -159,7 +160,7 @@ async def _with_sync_status(items: list[dict], tenant_id: int) -> list[dict]:
         # 兜底：极端情况下（底层读取不可取消）整批降级，避免请求无限挂起。
         logger.error("数据源同步状态批量读取超出总预算", tenant_id=tenant_id, count=len(items))
         results = [
-            {**item, "schema_sync": {"status": "unknown", "error": "同步状态暂时不可用，请稍后重试"}}
+            {**item, "schema_sync": {"status": "unknown", "error": "同步状态暂时不可用，请稍后重试", "queue_position": None}}
             for item in items
         ]
     # 列表路由被前端轮询，成功明细必须留在 DEBUG，否则每次请求都产生一条 INFO。

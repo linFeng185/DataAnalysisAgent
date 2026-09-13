@@ -56,7 +56,7 @@ class TestDatasourcePageLifecycle:
         source = Path("frontend/src/pages/DatasourcePage.tsx").read_text(encoding="utf-8")
 
         # Act：轮询必须有进行中同步守卫，并以列表为依赖以便状态变化时启停
-        guarded = "['running', 'cancelling'].includes(item.schema_sync?.status || '')" in source
+        guarded = "['running', 'cancelling', 'queued'].includes(item.schema_sync?.status || '')" in source
         depends_on_list = "}, [datasources]);" in source
 
         # Assert
@@ -93,7 +93,7 @@ class TestDatasourcePageLifecycle:
         guard = source.split("const active = datasources.some", 1)[1].split("if (!active)", 1)[0]
 
         # Assert
-        assert "['running', 'cancelling'].includes(item.schema_sync?.status || '')" in guard
+        assert "['running', 'cancelling', 'queued'].includes(item.schema_sync?.status || '')" in guard
         assert "item.schema_sync?.status === 'unknown'" in guard, "unknown 行不会让轮询续期，页面无法自愈"
         assert "item.sync_read_error" in guard, "读取失败行不会让轮询续期，页面无法自愈"
         assert "if (!active) return undefined;" in source, "缺少全部终态即停的守卫，会变成永不停止的轮询"
@@ -112,8 +112,8 @@ class TestDatasourcePageLifecycle:
         # Assert
         assert len(start_button) == 1, "未找到唯一的「同步表结构」按钮"
         assert "unknown" not in start_button[0], "unknown 仍在禁用「同步表结构」"
-        assert "['running', 'cancelling'].includes(datasource.schema_sync?.status || '')" in start_button[0], \
-            "确认进行中的同步必须继续禁用「同步表结构」"
+        assert "['running', 'cancelling', 'queued'].includes(datasource.schema_sync?.status || '')" in start_button[0], \
+            "确认进行中或排队中的同步必须继续禁用「同步表结构」"
 
     # 方法作用：验证发布阶段禁用终止时给出原因，且 running 但 phase 未知不会误禁。
     # Args: self - pytest 测试类实例。
@@ -126,7 +126,7 @@ class TestDatasourcePageLifecycle:
 
         # Act：取出终止按钮所在区块的禁用条件和 Tooltip 文案
         cancel_block = source.split("void changeSync(datasource, true)}", 1)[0].split(
-            "{['running', 'cancelling'].includes(datasource.schema_sync?.status || '') && (", 1)[1]
+            "{['running', 'cancelling', 'queued'].includes(datasource.schema_sync?.status || '') && (", 1)[1]
         explains = "发布阶段不可终止，避免留下半发布快照" in cancel_block
         tooltip_guarded = "<Tooltip title={datasource.schema_sync?.phase === 'publishing' ? t(" in cancel_block
 

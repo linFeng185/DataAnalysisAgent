@@ -39,10 +39,10 @@ async def schema_sync_status(datasource: str = Query(..., min_length=1, max_leng
 
 # 为已授权数据源启动共享互斥的后台同步。
 # Args: datasource - 当前数据源。
-# Returns: 启动后的共享任务状态。
+# Returns: 启动或排队后的共享任务状态。
 @router.post("/schema/sync", status_code=202)
 async def start_schema_sync(datasource: str = Query(..., min_length=1, max_length=64)) -> dict:
-    """重复启动返回 409，不创建第二个实际同步任务。"""
+    """并发已满时返回排队状态；同一数据源重复启动仍返回 409，不创建第二个实际同步任务。"""
     from src.knowledge.schema_sync import get_schema_sync
     tenant, name = await _sync_scope(datasource, write=True)
     return await get_schema_sync().start(tenant, name)
@@ -267,6 +267,9 @@ async def refresh_schema(datasource: str = Query(default="")):
         raise HTTPException(404, f"数据源 '{datasource}' 未找到") from exc
     from src.knowledge.schema_sync import get_schema_sync
     result = await get_schema_sync().start(identity.tenant_id, datasource, wait=True)
+    if result["status"] == "queued":
+        # 等待型旧接口不能假装成功：并发已满时明确告知已排队，让调用方改看状态接口。
+        raise HTTPException(409, "当前 Worker 并发已满，已进入排队，请稍后在数据源页面查看进度")
     if result["status"] != "succeeded":
         raise HTTPException(409 if result["status"] == "cancelled" else 503, result.get("error") or "表结构同步未完成")
     return {**result, "status": "ok", "message": "同步完成"}

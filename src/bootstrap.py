@@ -78,6 +78,8 @@ async def _start_schema_sync(settings: Settings) -> None:
     logger.debug("表结构同步服务启动入口")
     service = SchemaSyncService()
     get_app_context().set_resource("schema_sync", service, closer=SchemaSyncService.close)
+    # 并发满时写入的排队行由调度循环按先进先出认领，随应用生命周期启停。
+    await service.start_scheduler()
     logger.info("表结构同步服务已启动")
 
 

@@ -131,12 +131,14 @@ export interface ChatResponse {
 }
 
 export interface SchemaSyncStatus {
-  status: 'idle' | 'running' | 'cancelling' | 'succeeded' | 'cancelled' | 'failed' | 'unknown';
+  status: 'idle' | 'running' | 'queued' | 'cancelling' | 'succeeded' | 'cancelled' | 'failed' | 'unknown';
   phase?: string;
   error?: string;
   table_count?: number;
   finished_at?: string;
   run_id?: string;
+  // 同租户内排在本行前面的排队任务数；0 表示下一个执行，非排队时为 null。
+  queue_position?: number | null;
 }
 
 export interface DatasourceConfig {

@@ -88,7 +88,16 @@ export default function DatasourcePage() {
   const [selectedNames, setSelectedNames] = useState<string[]>([]);
   const syncLocks = useRef(new Set<string>());
   const revision = useRef(0);
-  const syncLabels: Record<string, string> = { idle: t("未同步"), running: t("同步中"), cancelling: t("终止中"), succeeded: t("同步完成"), cancelled: t("已终止"), failed: t("同步失败"), unknown: t("同步状态读取失败") };
+  const syncLabels: Record<string, string> = { idle: t("未同步"), running: t("同步中"), queued: t("排队中"), cancelling: t("终止中"), succeeded: t("同步完成"), cancelled: t("已终止"), failed: t("同步失败"), unknown: t("同步状态读取失败") };
+
+  // 方法作用：把同步状态渲染成状态列文案，排队中附带队列位置。
+  // Args: state - 当前行的共享同步状态。
+  // Returns: 排队中显示「前面还有 N 个」，其他状态返回状态标签。
+  const syncLabel = (state: SchemaSyncStatus): string => {
+    if (state.status !== 'queued') return syncLabels[state.status] || state.status;
+    const ahead = Number(state.queue_position ?? 0);
+    return ahead > 0 ? t("排队中（前面还有 {value0} 个）", { value0: ahead }) : t("排队中（即将开始）");
+  };
 
   // 方法作用：每次打开表单刷新插件目录，不使用前端硬编码数据库枚举。
   // Args: 无。
@@ -125,10 +134,11 @@ export default function DatasourcePage() {
   // Args: 无，读取当前列表状态。
   // Returns: 卸载或进入空闲时停止轮询。
   useEffect(() => {
-    // unknown 表示本轮没读到状态，读取失败提示表示本轮刷新失败，两者都不是终态：
-    // 必须继续轮询才能自愈；只有全部行落到 idle/succeeded/cancelled/failed 时才停表，避免空闲空转。
+    // unknown 表示本轮没读到状态，读取失败提示表示本轮刷新失败，排队表示还没轮到执行：
+    // 三者都不是终态，必须继续轮询才能自动刷新成运行中；只有全部行落到
+    // idle/succeeded/cancelled/failed 时才停表，避免空闲空转。
     const active = datasources.some(item =>
-      ['running', 'cancelling'].includes(item.schema_sync?.status || '')
+      ['running', 'cancelling', 'queued'].includes(item.schema_sync?.status || '')
       || item.schema_sync?.status === 'unknown'
       || Boolean(item.sync_read_error));
     if (!active) return undefined;
@@ -167,7 +177,15 @@ export default function DatasourcePage() {
       const state = await post<SchemaSyncStatus>(`/schema/sync${cancel ? '/cancel' : ''}?datasource=${encodeURIComponent(source.name)}`, {});
       revision.current += 1;
       setDatasources(items => items.map(item => item.name === source.name ? { ...item, schema_sync: state } : item));
-      if (!cancel) message.success(t("表结构同步已启动"));
+      if (!cancel) {
+        // 排队是正常状态而不是失败：明确告诉用户前面还有几个任务。
+        const ahead = Number(state.queue_position ?? 0);
+        if (state.status === 'queued') {
+          message.info(ahead > 0
+            ? t("已进入排队，前面还有 {value0} 个同步任务", { value0: ahead })
+            : t("已进入排队，即将开始同步"));
+        } else message.success(t("表结构同步已启动"));
+      }
     } catch (error) {
       message.error(error instanceof Error ? error.message : t("同步失败"));
       await load();
@@ -365,15 +383,16 @@ export default function DatasourcePage() {
               const state: SchemaSyncStatus = source.schema_sync || { status: 'idle' };
               // 状态列只展示读到的事实，本轮读取失败的原因与状态共存于同一行的悬浮提示。
               const hint = [source.sync_read_error, state.error || state.finished_at].filter(Boolean).join('；');
-              return <Tooltip title={hint}><Tag color={['running', 'cancelling'].includes(state.status) ? 'processing' : state.status === 'succeeded' ? 'success' : ['failed', 'unknown'].includes(state.status) ? 'error' : 'default'}>{syncLabels[state.status] || state.status}</Tag></Tooltip>;
+              return <Tooltip title={hint}><Tag color={['running', 'queued', 'cancelling'].includes(state.status) ? 'processing' : state.status === 'succeeded' ? 'success' : ['failed', 'unknown'].includes(state.status) ? 'error' : 'default'}>{syncLabel(state)}</Tag></Tooltip>;
             } },
             ...(canManage ? [{
               title: t("操作"), key: 'action', width: 300, fixed: 'right' as const,
               render: (_: unknown, datasource: DatasourceConfig) => (
                 <Space size={4}>
-                  {/* unknown 只代表没读到状态，不等于正在同步：只有确认进行中才禁止重复启动。 */}
-                  <Button size="small" disabled={pendingSync.includes(datasource.name) || ['running', 'cancelling'].includes(datasource.schema_sync?.status || '')} onClick={() => void changeSync(datasource)}>{t("同步表结构")}</Button>
-                  {['running', 'cancelling'].includes(datasource.schema_sync?.status || '') && (
+                  {/* unknown 只代表没读到状态，不等于正在同步；排队中后端仍返回 409，同样禁止重复启动。 */}
+                  <Button size="small" disabled={pendingSync.includes(datasource.name) || ['running', 'cancelling', 'queued'].includes(datasource.schema_sync?.status || '')} onClick={() => void changeSync(datasource)}>{t("同步表结构")}</Button>
+                  {['running', 'cancelling', 'queued'].includes(datasource.schema_sync?.status || '') && (
+                    // 排队中的任务也能终止（后端直接置为已取消，也不会再被调度认领）；
                     // 发布阶段仍禁止终止（后端会返回 409），但必须把原因显式告诉用户。
                     <Tooltip title={datasource.schema_sync?.phase === 'publishing' ? t("发布阶段不可终止，避免留下半发布快照") : ''}>
                       <Button danger size="small" disabled={pendingSync.includes(datasource.name) || datasource.schema_sync?.status === 'cancelling' || datasource.schema_sync?.phase === 'publishing'} onClick={() => void changeSync(datasource, true)}>{t("终止同步")}</Button>

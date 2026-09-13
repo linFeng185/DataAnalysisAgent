@@ -453,3 +453,5 @@ managed_skills_dir: data/skills
 metrics_docs_dir: docs/metrics
 # 用途：系统知识只读目录，分号分隔，启动时按 checksum 增量扫描 | 默认值：空 | 生效范围：需重启
 system_knowledge_dirs: ""
+# 用途：每个 Worker 同时运行的表结构同步任务数上限，超出后自动排队等待 | 默认值：3（允许 1-100）| 生效范围：热生效
+max_schema_sync_concurrent: 3

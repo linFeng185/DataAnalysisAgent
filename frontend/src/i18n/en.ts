@@ -976,3 +976,7 @@ const en: Record<string, string> = {
   "可选：绑定数据源": "Optional: bind a data source",
 };
 export default en;
+  "排队中（即将开始）": "Queued (starting soon)",
+  "排队中（前面还有 {value0} 个）": "Queued ({value0} ahead)",
+  "已进入排队，前面还有 {value0} 个同步任务": "Queued; {value0} sync jobs ahead",
+  "已进入排队，即将开始同步": "Queued; starting soon",
