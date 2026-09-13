@@ -39,7 +39,7 @@ _TABLE_LEXICAL_HINTS: dict[str, tuple[str, ...]] = {
     "归因": ("attribut",),
     "广告": ("ad_", "ads", "campaign", "creative", "placement", "impression"),
     "订单": ("order",),
-    "销售": ("sale", "revenue", "spending"),
+    "销售": ("sale", "revenue", "spending", "order"),
     "地区": ("region",),
     "区域": ("region",),
     "渠道": ("channel",),

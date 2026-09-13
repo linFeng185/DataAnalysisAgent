@@ -178,3 +178,20 @@ class TestLexicalTableHints:
         tables = [SimpleNamespace(name="retail_orders")]
 
         assert SchemaManager._lexical_hit_tables("zzz_unmatched", tables) == set()
+
+    # 方法作用：验证未显式写订单的销售问题仍保留承载销售金额的订单事实表。
+    # Args: self - 测试实例。
+    # Returns: 无返回值。
+    def test_sales_keeps_order_fact_without_order_keyword(self) -> None:
+        """真实促销深挖问题曾因漏掉 retail_orders 被错误判成没有销售数据。"""
+        # Arrange
+        tables = [SimpleNamespace(name=name) for name in ("retail_orders", "retail_promotions", "retail_customer_notes")]
+
+        # Act
+        hits = SchemaManager._lexical_hit_tables("按年月、地区统计促销活动期间的销售提升幅度与促销后回落幅度", tables)
+
+        # Assert
+        assert "retail_orders" in hits
+        assert "retail_promotions" in hits
+        assert "retail_customer_notes" not in hits
+        assert SchemaManager._lexical_hit_tables("销售提升", []) == set()
