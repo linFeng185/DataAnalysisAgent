@@ -87,6 +87,96 @@ class TestReserveCarriesDetails:
         assert excinfo.value.requested == 47
 
 
+class TestPersistedPathRejection:
+    """验证 PostgreSQL 持久化路径的拒绝也带具体数值。
+
+    真实运行暴露：该分支原先只抛 "QUOTA_EXCEEDED: persisted quota"，
+    内存分支改了、PG 分支没改，提示因此仍退回通用文案。而用户跑的是 PG。
+    """
+
+    # 方法作用：构造一个"原子检查拒绝"的持久化 Store 替身。
+    # Args: usage - get_quota_usage 的返回；raise_on_usage - 是否让用量查询抛错。
+    # Returns: 具备最小契约的假 Store。
+    @staticmethod
+    def _store(usage: dict | None = None, *, raise_on_usage: bool = False):
+        class FakeStore:
+            _memory = False
+
+            async def get_quota_policy(self, tenant_id, user_id):
+                return None
+
+            async def reserve_quota(self, identity, increments, policy, start, end):
+                # 原子检查拒绝：真实实现里 UPDATE ... WHERE 不匹配时返回 None。
+                return None
+
+            async def get_quota_usage(self, identity, period_start):
+                if raise_on_usage:
+                    raise RuntimeError("数据库不可用")
+                return dict(usage or {})
+
+        return FakeStore()
+
+    # 方法作用：验证 PG 路径拒绝时提示指明维度与数值。
+    # Args: self - 测试实例。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    async def test_persisted_rejection_explains_dimension(self) -> None:
+        """用户要看到「哪一项、上限多少、本次需要多少」。"""
+        # Arrange
+        from src.reporting.quota import (
+            QuotaExceededError,
+            QuotaManager,
+            QuotaPolicy,
+            describe_quota_error,
+        )
+
+        quota = QuotaManager(store=self._store(), default_policy=QuotaPolicy(max_queries_per_run=16))
+        identity = type("Identity", (), {"tenant_id": 3, "user_id": 3, "role": "tenant_admin"})()
+
+        # Act / Assert
+        with pytest.raises(QuotaExceededError) as excinfo:
+            await quota.reserve(identity, runs=1, units=1, queries=27)
+        assert excinfo.value.field == "queries"
+        assert excinfo.value.limit == 16
+        assert excinfo.value.requested == 27
+        assert "27" in describe_quota_error(excinfo.value)
+        assert "16" in describe_quota_error(excinfo.value)
+
+    # 方法作用：验证用量快照不可用时拒绝本身不受影响。
+    # Args: self - 测试实例。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    async def test_persisted_rejection_survives_usage_failure(self) -> None:
+        """复算只是为了让提示更好读，不能因此改变拒绝结果或抛出别的异常。"""
+        # Arrange
+        from src.reporting.quota import (
+            QuotaExceededError,
+            QuotaManager,
+            QuotaPolicy,
+            describe_quota_error,
+        )
+
+        quota = QuotaManager(store=self._store(raise_on_usage=True), default_policy=QuotaPolicy(max_queries_per_run=16))
+        identity = type("Identity", (), {"tenant_id": 3, "user_id": 3, "role": "tenant_admin"})()
+
+        # Act / Assert：仍然抛配额异常，只是提示退回通用文案
+        with pytest.raises(QuotaExceededError) as excinfo:
+            await quota.reserve(identity, runs=1, units=1, queries=27)
+        assert describe_quota_error(excinfo.value) == "本周期报表配额不足，请联系租户管理员"
+
+    # 方法作用：验证快照字段名与复算代码一致。
+    # Args: self - 测试实例。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    def test_snapshot_fields_used_by_explanation_exist(self) -> None:
+        """写错字段名会被 except 吞掉并静默退回通用文案，这条断言防止再犯。"""
+        # Arrange
+        from src.reporting.quota import QuotaSnapshot
+
+        # Act
+        fields = set(QuotaSnapshot.__dataclass_fields__)
+
+        # Assert
+        assert {"jobs_remaining", "runs_remaining", "concurrent_remaining", "tokens_remaining", "shares_remaining"} <= fields
+
+
 class TestSystemLimitEnforcement:
     """验证系统上限真正生效：租户管理员不得越界配置。"""
 

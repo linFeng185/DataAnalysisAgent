@@ -40,6 +40,24 @@ QUOTA_FIELD_LABELS: dict[str, str] = {
 }
 
 
+# 方法作用：构造配额校验三元组（本次累计值、上限、字段名）。
+# Args: policy - 生效策略；usage - 周期累计用量；increments - 本次请求量（jobs/runs/concurrent/units/queries/rows/tokens/shares）。
+# Returns: 可逐一比较的三元组序列；内存分支与持久化分支的失败说明共用同一份。
+def build_quota_checks(policy: "QuotaPolicy", usage: "QuotaUsage", increments: tuple[int, ...]) -> tuple[tuple[int, int, str], ...]:
+    jobs, runs, concurrent, units, queries, rows, tokens, shares = increments
+    return (
+        (usage.jobs_created + jobs, policy.max_jobs_created, "jobs_created"),
+        (usage.runs_started + runs, policy.max_runs_started, "runs_started"),
+        (usage.concurrent_runs + concurrent, policy.max_concurrent_runs, "concurrent_runs"),
+        # 单元/查询/行数是「单次」上限，不与周期用量累加。
+        (units, policy.max_analysis_units_per_run, "analysis_units"),
+        (queries, policy.max_queries_per_run, "queries"),
+        (rows, policy.max_rows_per_query, "rows"),
+        (usage.llm_tokens + tokens, policy.max_llm_tokens, "llm_tokens"),
+        (usage.share_links + shares, policy.max_share_links, "share_links"),
+    )
+
+
 # 方法作用：把配额拒绝转成带具体数值的可读提示。
 # Args: error - 配额异常。
 # Returns: 带维度、上限与本次需求的提示；缺失数值信息时回退到通用文案。
@@ -196,6 +214,31 @@ class QuotaManager:
         self._policies[(int(tenant_id), int(user_id))] = policy
         logger.info("报表用户配额策略已更新", tenant_id=int(tenant_id), user_id=int(user_id))
 
+    # 方法作用：持久化预占被拒后复算被拒维度，只为生成可定位的提示。
+    # Args: policy - 生效策略；identity - 当前身份；increments - 本次请求量；timezone_name - 周期时区。
+    # Returns: (字段名, 上限, 请求量)；无法判定时返回空字段与零值。
+    async def _explain_rejection(self, policy: QuotaPolicy, identity: Any, increments: tuple[int, ...], timezone_name: str) -> tuple[str, int, int]:
+        try:
+            snapshot = await self.snapshot(identity, timezone_name)
+        except Exception:
+            logger.warning("配额拒绝维度复算失败，回退通用提示", exc_info=True)
+            return "", 0, 0
+        # snapshot 给出的是剩余额度，换算回已用量后复用同一份校验表。
+        usage = QuotaUsage(
+            jobs_created=policy.max_jobs_created - snapshot.jobs_remaining,
+            runs_started=policy.max_runs_started - snapshot.runs_remaining,
+            concurrent_runs=policy.max_concurrent_runs - snapshot.concurrent_remaining,
+            analysis_units=0,
+            queries=0,
+            rows=0,
+            llm_tokens=policy.max_llm_tokens - snapshot.tokens_remaining,
+            share_links=policy.max_share_links - snapshot.shares_remaining,
+        )
+        for next_value, limit, field_name in build_quota_checks(policy, usage, increments):
+            if next_value > limit:
+                return field_name, limit, next_value
+        return "", 0, 0
+
     # 方法作用：原子预占任务、运行、查询和 Token 资源。
     # Args: identity - 当前身份；jobs/runs/concurrent/units/queries/rows/tokens/shares - 本次预占量；timezone_name - 周期时区。
     # Returns: 预占后的 QuotaSnapshot；任一上限不足抛出 QuotaExceededError。
@@ -233,23 +276,22 @@ class QuotaManager:
                 period_end,
             )
             if row is None:
-                raise QuotaExceededError("QUOTA_EXCEEDED: persisted quota")
+                # 持久化路径的原子检查只回「被拒」，不说是哪一项。用同一份策略与
+                # 用量快照复算一遍，只为把维度与数值补进提示；权威判定仍是上面
+                # 那条原子 SQL，这里的复算不参与放行。
+                field_name, limit, requested = await self._explain_rejection(policy, identity, increments, timezone_name)
+                raise QuotaExceededError(
+                    "QUOTA_EXCEEDED: persisted quota" + (f" field={field_name} limit={limit} requested={requested}" if field_name else ""),
+                    field=field_name,
+                    limit=limit,
+                    requested=requested,
+                )
             return self._snapshot(policy, QuotaUsage(jobs_created=int(row.get("jobs_created", 0)), runs_started=int(row.get("runs_started", 0)), concurrent_runs=int(row.get("concurrent_runs", 0)), analysis_units=int(row.get("analysis_units", 0)), queries=int(row.get("queries", 0)), rows=int(row.get("rows", 0)), llm_tokens=int(row.get("llm_tokens", 0)), share_links=int(row.get("share_links", 0))), period_start, period_end)
         lock = self._locks.setdefault(key, asyncio.Lock())
         async with lock:
             policy = self._policies.get((tenant_id, user_id), self.default_policy)
             usage = self._usage.setdefault(key, QuotaUsage())
-            checks = (
-                (usage.jobs_created + jobs, policy.max_jobs_created, "jobs_created"),
-                (usage.runs_started + runs, policy.max_runs_started, "runs_started"),
-                (usage.concurrent_runs + concurrent, policy.max_concurrent_runs, "concurrent_runs"),
-                (units, policy.max_analysis_units_per_run, "analysis_units"),
-                (queries, policy.max_queries_per_run, "queries"),
-                (rows, policy.max_rows_per_query, "rows"),
-                (usage.llm_tokens + tokens, policy.max_llm_tokens, "llm_tokens"),
-                (usage.share_links + shares, policy.max_share_links, "share_links"),
-            )
-            for next_value, limit, field_name in checks:
+            for next_value, limit, field_name in build_quota_checks(policy, usage, increments):
                 if next_value > limit:
                     logger.warning(
                         "报表配额预占拒绝",
