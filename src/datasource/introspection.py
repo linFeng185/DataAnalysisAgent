@@ -100,8 +100,54 @@ def _parse_nullable(value) -> bool:
     return value is not False
 
 
+# 方言 → 库内命名空间的默认值。仅 Postgres / MSSQL 需要：它们的 schema 在库内，
+# 而 MySQL / ClickHouse 的命名空间就是连接的 database，无需默认值。
+DEFAULT_NAMESPACE = {
+    "postgres": "public",
+    "mssql": "dbo",
+}
+
+
+# 方法作用：解析数据源实际使用的命名空间，供元数据查询的 schema / database 过滤。
+# Args: ds - 数据源配置。
+# Returns: 命名空间字符串；该方言无命名空间概念时返回空串。
+def resolve_namespace(ds: DataSourceConfig) -> str:
+    """按方言语义确定命名空间。
+
+    MySQL / ClickHouse 的命名空间就是连接的 database；Postgres / MSSQL 取配置的
+    extra_params.schema，未显式配置时回落方言默认值（public / dbo）；
+    SQLite 等无命名空间概念的方言返回空串。
+    """
+    logger.debug("解析命名空间入口", dialect=ds.dialect, database=ds.database)
+    if ds.dialect in {"mysql", "clickhouse"}:
+        resolved = str(ds.database or "")
+    else:
+        configured = str((ds.extra_params or {}).get("schema", "") or "").strip()
+        resolved = configured or DEFAULT_NAMESPACE.get(ds.dialect, "")
+    logger.info("解析命名空间完成", dialect=ds.dialect, namespace=resolved)
+    return resolved
+
+
+# 方言 → 表名列表查询。`:schema` 占位符由 resolve_namespace 的取值绑定：
+# Postgres 原先写死 `schemaname = 'public'`，使非 public schema 的数据源永远列不出表；
+# MSSQL 原先按 TABLE_CATALOG（库名）过滤，无法区分同库不同 schema 的同名表。
+TABLE_NAME_QUERY = {
+    "clickhouse": "SELECT name FROM system.tables WHERE database = :schema",
+    "mysql": "SELECT TABLE_NAME AS name FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = :schema AND TABLE_TYPE = 'BASE TABLE'",
+    "postgres": "SELECT tablename AS name FROM pg_catalog.pg_tables WHERE schemaname = :schema",
+    "oracle": """
+            SELECT TABLE_NAME AS name
+            FROM ALL_TABLES
+            WHERE OWNER = SYS_CONTEXT('USERENV', 'CURRENT_SCHEMA')
+            ORDER BY TABLE_NAME
+        """,
+    "mssql": "SELECT TABLE_NAME AS name FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = :schema AND TABLE_TYPE = 'BASE TABLE' ORDER BY TABLE_NAME",
+    "sqlite": "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name",
+}
+
+
 COLUMNS_QUERY = {
-    "clickhouse": "SELECT name, type, comment FROM system.columns WHERE table = :table",
+    "clickhouse": "SELECT name, type, comment FROM system.columns WHERE table = :table AND database = :schema",
     "mysql": """
         SELECT COLUMN_NAME AS name, COLUMN_TYPE AS type,
                COLUMN_COMMENT AS comment, IS_NULLABLE AS is_nullable,
@@ -117,13 +163,18 @@ COLUMNS_QUERY = {
         FROM INFORMATION_SCHEMA.COLUMNS c
         LEFT JOIN pg_catalog.pg_description pgd
             ON pgd.objsubid = c.ordinal_position
-            AND pgd.objoid = (SELECT oid FROM pg_class WHERE relname = :table)
+            AND pgd.objoid = (
+                SELECT cls.oid FROM pg_class cls
+                JOIN pg_namespace ns ON ns.oid = cls.relnamespace
+                WHERE cls.relname = :table AND ns.nspname = :schema
+            )
         LEFT JOIN (
             SELECT ku.column_name FROM INFORMATION_SCHEMA.TABLE_CONSTRAINTS tc
             JOIN INFORMATION_SCHEMA.KEY_COLUMN_USAGE ku ON tc.constraint_name = ku.constraint_name
             WHERE tc.constraint_type = 'PRIMARY KEY' AND tc.table_name = :table
+              AND tc.table_schema = :schema
         ) pk ON c.column_name = pk.column_name
-        WHERE c.table_name = :table
+        WHERE c.table_name = :table AND c.table_schema = :schema
     """,
     "oracle": """
         SELECT c.COLUMN_NAME AS name, c.DATA_TYPE AS type,
@@ -155,9 +206,9 @@ COLUMNS_QUERY = {
         LEFT JOIN (
             SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.KEY_COLUMN_USAGE
             WHERE OBJECTPROPERTY(OBJECT_ID(CONSTRAINT_NAME), 'IsPrimaryKey') = 1
-              AND TABLE_NAME = :table
+              AND TABLE_NAME = :table AND TABLE_SCHEMA = :schema
         ) pk ON c.COLUMN_NAME = pk.COLUMN_NAME
-        WHERE c.TABLE_NAME = :table
+        WHERE c.TABLE_NAME = :table AND c.TABLE_SCHEMA = :schema
         ORDER BY c.ORDINAL_POSITION
     """,
     "sqlite": "PRAGMA table_info({table})",
@@ -176,6 +227,7 @@ FK_QUERY = {
         JOIN INFORMATION_SCHEMA.KEY_COLUMN_USAGE kcu ON tc.constraint_name = kcu.constraint_name
         JOIN INFORMATION_SCHEMA.CONSTRAINT_COLUMN_USAGE ccu ON tc.constraint_name = ccu.constraint_name
         WHERE tc.constraint_type = 'FOREIGN KEY' AND tc.table_name = :table
+          AND tc.table_schema = :schema
     """,
     "clickhouse": None,
     "oracle": """
@@ -200,6 +252,7 @@ FK_QUERY = {
                COL_NAME(fkc.referenced_object_id, fkc.referenced_column_id) AS target_column
         FROM sys.foreign_key_columns fkc
         WHERE OBJECT_NAME(fkc.parent_object_id) = :table
+          AND OBJECT_SCHEMA_NAME(fkc.parent_object_id) = :schema
     """,
     "sqlite": "PRAGMA foreign_key_list({table})",
 }
@@ -207,14 +260,14 @@ FK_QUERY = {
 ROW_COUNT_QUERY = {
     "clickhouse": "SELECT COUNT(*) AS count FROM {table}",
     "mysql": "SELECT TABLE_ROWS AS table_rows FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = :database AND TABLE_NAME = :table",
-    "postgres": "SELECT reltuples::bigint AS count FROM pg_class WHERE relname = :table",
+    "postgres": "SELECT cls.reltuples::bigint AS count FROM pg_class cls JOIN pg_namespace ns ON ns.oid = cls.relnamespace WHERE cls.relname = :table AND ns.nspname = :schema",
     "oracle": """
         SELECT NUM_ROWS AS count
         FROM ALL_TABLES
         WHERE TABLE_NAME = :table_name
           AND OWNER = SYS_CONTEXT('USERENV', 'CURRENT_SCHEMA')
     """,
-    "mssql": "SELECT SUM(row_count) AS count FROM sys.dm_db_partition_stats WHERE OBJECT_ID = OBJECT_ID(:table) AND index_id IN (0,1)",
+    "mssql": "SELECT SUM(row_count) AS count FROM sys.dm_db_partition_stats WHERE OBJECT_ID = OBJECT_ID(:schema + '.' + :table) AND index_id IN (0,1)",
     "sqlite": "SELECT COUNT(*) AS count FROM {table}",
 }
 
@@ -257,7 +310,8 @@ async def introspect_columns(
         sql = sql.format(table=_quote_sqlite_identifier(table_name))
     try:
         result = await executor(ds, sql, {
-            "table": table_name, "table_name": table_name, "database": ds.database,
+            "table": table_name, "table_name": table_name,
+            "database": ds.database, "schema": resolve_namespace(ds),
         })
     except Exception as exc:
         if is_metadata_permission_error(exc):
@@ -290,7 +344,8 @@ async def introspect_foreign_keys(
         sql = sql.format(table=_quote_sqlite_identifier(table_name))
     try:
         result = await executor(ds, sql, {
-            "table": table_name, "table_name": table_name, "database": ds.database,
+            "table": table_name, "table_name": table_name,
+            "database": ds.database, "schema": resolve_namespace(ds),
         })
     except Exception as exc:
         if is_metadata_permission_error(exc):
@@ -322,7 +377,8 @@ async def estimate_row_count(
         sql = sql.format(table=_quote_clickhouse_identifier(table_name))
     try:
         result = await executor(ds, sql, {
-            "table": table_name, "table_name": table_name, "database": ds.database,
+            "table": table_name, "table_name": table_name,
+            "database": ds.database, "schema": resolve_namespace(ds),
         })
         if result:
             count = result[0].get("count", 0) or result[0].get("table_rows", 0) or 0
@@ -391,25 +447,14 @@ async def introspect_database(
 # Returns: 表名列表；未知方言抛出 ValueError。
 async def _list_tables(ds: DataSourceConfig, executor) -> list[str]:
     """列出所有表。"""
-    sql_map = {
-        "clickhouse": "SELECT name FROM system.tables WHERE database = :database",
-        "mysql": "SELECT TABLE_NAME AS name FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = :database AND TABLE_TYPE = 'BASE TABLE'",
-        "postgres": "SELECT tablename AS name FROM pg_catalog.pg_tables WHERE schemaname = 'public'",
-        "oracle": """
-            SELECT TABLE_NAME AS name
-            FROM ALL_TABLES
-            WHERE OWNER = SYS_CONTEXT('USERENV', 'CURRENT_SCHEMA')
-            ORDER BY TABLE_NAME
-        """,
-        "mssql": "SELECT TABLE_NAME AS name FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_CATALOG = :database AND TABLE_TYPE = 'BASE TABLE' ORDER BY TABLE_NAME",
-        "sqlite": "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name",
-    }
-    if ds.dialect not in sql_map:
+    if ds.dialect not in TABLE_NAME_QUERY:
         logger.error("列出数据表失败", dialect=ds.dialect, reason="未知方言")
         raise ValueError(f"不支持的数据源方言: {ds.dialect}")
-    sql = sql_map[ds.dialect]
+    sql = TABLE_NAME_QUERY[ds.dialect]
     try:
-        result = await executor(ds, sql, {"database": ds.database})
+        result = await executor(ds, sql, {
+            "database": ds.database, "schema": resolve_namespace(ds),
+        })
     except Exception as exc:
         if is_metadata_permission_error(exc):
             raise _permission_error(ds, "tables", exc) from exc

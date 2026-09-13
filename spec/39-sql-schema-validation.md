@@ -132,6 +132,7 @@ class ValidationIssue:
         "unknown_column",       # 列在该表（或本 scope 所有物理表）中不存在
         "cross_table_column",   # 列名在别的表存在，但不属于被引用表（跨表错配）
         "ambiguous_column",     # 未限定列在多张表中同时存在（DB 会报 ambiguous）
+        "invalid_qualifier",    # 列限定符等于某表的 schema 名（无效限定符，见 §10.8）
         "parse_error",          # SQL 解析失败
     ]
     datasource: str                        # 该引用所属数据源，跨源比较的唯一依据
@@ -377,12 +378,24 @@ def validate_sql_schema(sql, *, datasources, dialect, tables): ...
 必须显式记录，且在实现中以 warning 呈现，**不得静默当作"校验通过"**：
 
 1. **`SELECT *` / `SELECT t.*`**：AST 不展开星号（实测 `columns=[]`）。无法校验列。
-2. **命名空间**：`TableSchema.name`（`src/datasource/schema_snapshot.py:30-40`）不含 schema/database；实跑 `analytics.orders` 时 `analytics` 落在 `node.db` 被丢弃。**当前仅按表名匹配**，多 schema 同名表无法区分。为此在 `tables` 上预留可选 `schema` 字段。实测：`SELECT analytics.created_at FROM analytics.orders` 返回 `[]`（不产出任何低置信 issue），只留 `reason=cte_qualifier` 的 warning——命名空间前缀走的是"限定符无法判定"分支，而不是独立的命名空间判定（见 §9 reason 清单）。
+2. **命名空间**：`TableSchema.name`（`src/datasource/schema_snapshot.py:30-40`）不含 schema/database；实跑 `analytics.orders` 时 `analytics` 落在 `node.db`。**当前仅按表名匹配**，多 schema 同名表无法区分。为此在 `tables` 上预留可选 `schema` 字段。
+   **内省侧的命名空间已修正**（`src/datasource/introspection.py`）：新增 `resolve_namespace(ds)` 统一解析命名空间（MySQL/ClickHouse 用 `database`；Postgres/MSSQL 用 `extra_params.schema`，未配置时回落 `public`/`dbo`），表名、列、外键、行数四类查询全部改为 `:schema` 绑定，不再写死 `'public'`、不再误用 `TABLE_CATALOG`（库名）。**剩余缺口**：`TableSchema` 仍不携带命名空间，故校验基准依然只能按表名匹配。实测：`SELECT analytics.created_at FROM analytics.orders` 返回 `[]`（不产出任何低置信 issue），只留 `reason=cte_qualifier` 的 warning——命名空间前缀走的是"限定符无法判定"分支，而不是独立的命名空间判定（见 §9 reason 清单）。
 3. **方言特有表函数 / `UNNEST` / `LATERAL`**：需按方言实测补充，不在本设计承诺范围内。
 4. **快照与真实库漂移**：校验基准是各级缓存拼出的快照，若快照本身与真实库不一致，校验无法发现。属独立议题。
 5. **未限定列的 CTE 歧义**：scope 内存在 CTE/派生表时，未限定列零命中只能判为低置信。
 6. **`HAVING <未限定幻觉列>`**：实测 sqlglot 把 HAVING 中的未限定引用当作输出列引用，不进入 `scope.columns`，因此该幻觉列永不参与校验，连"无法判定"的 warning 分支都到不了 → **实测 PASS 且完全静默**（`SELECT SUM(amount) AS total FROM orders GROUP BY customer_id HAVING ghost_col > 100` 零 issue、零相关 warning，日志里无任何线索；与第 7 条的 UNION 盲区不同，那条至少留 warning）。投影别名放行机制的同源代价，接受。
 7. **`UNION` 末尾 `ORDER BY <幻觉列>`**：实测外层 Union scope 的 `sources={}`（`resolved_count=0 total_table_count=0`），未限定列走"零命中且无物理表候选（`not resolved`）"分支放行，但该分支**会留痕** → 实测 PASS（`SELECT id FROM orders UNION ALL SELECT id FROM orders ORDER BY ghost_col` 零 issue，但有 1 条 `列引用无法判定` warning，reason=`cte_or_unresolved`）。即"零 issue"不等于"零留痕"：本条可在日志中查到，第 6 条 HAVING 盲区则查不到任何东西。属未限定列归属判定的边界缺口，接受；补基底判定前不得当作"已校验通过"。
+
+8. **列限定符写成 schema 名（已修复，保留形态记录）**：`SELECT analytics.col FROM analytics.orders`
+   里的 `analytics` 是 schema 名而非表名或别名。sqlglot 把表名放 `node.name`、schema 放 `node.db`，
+   而 `scope.sources` 的键只有表名，故该限定符在 `local_tables` 中查不到 → 旧实现走「限定符指向
+   CTE」分支**静默放行，该列完全不参与校验**（实测 postgres/mysql/clickhouse/mssql 一致）。
+   Postgres 规则：无别名时表别名就是表名，用 schema 名限定列本身非法（DB 报
+   `missing FROM-clause entry for table`），因此本可提前拦截并给出可操作提示，而不是留到打库。
+   **已修**：`_collect_column_issues` 收集本 scope 各表节点的 `node.db` 为 `scope_schemas`，
+   限定符命中它时产出高置信 `invalid_qualifier`，`describe()` 给出「改用表名限定，或先给表起别名
+   再用该别名限定」的操作指引。实测 10 形态无回退：表名限定、三段限定 `schema.table.col`、
+   显式别名、派生表与 CTE 限定均照常放行。
 
 ---
 

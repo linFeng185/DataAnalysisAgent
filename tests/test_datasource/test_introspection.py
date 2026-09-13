@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from unittest.mock import MagicMock
 
 import pytest
+
+logger = logging.getLogger(__name__)
 
 from src.datasource.config import DataSourceConfig
 from src.datasource.introspection import (
@@ -297,6 +300,9 @@ class TestIntrospectDatabase:
 
         回归背景: sql_map 缺 mssql 键时回退 postgres 的 pg_catalog.pg_tables，
         MSSQL 报 208 Invalid object name，导致表列表为空、该数据源被跳过。
+
+        命名空间过滤用 TABLE_SCHEMA（schema）而非 TABLE_CATALOG（库名）：后者只限定到
+        库，无法区分同库不同 schema 的同名表，会让快照混入不属于该 schema 的表。
         """
         captured: dict[str, object] = {}
 
@@ -310,7 +316,7 @@ class TestIntrospectDatabase:
         assert names == ["customers", "orders"]
         assert "pg_catalog.pg_tables" not in str(captured["sql"])
         assert "INFORMATION_SCHEMA.TABLES" in str(captured["sql"])
-        assert "TABLE_CATALOG = :database" in str(captured["sql"])
+        assert "TABLE_SCHEMA = :schema" in str(captured["sql"])
         assert "BASE TABLE" in str(captured["sql"])
 
     # 方法作用：验证未知方言不会静默执行 PostgreSQL 系统表查询。
@@ -406,3 +412,129 @@ class TestIntrospectDatabase:
             introspect_database(_ds("mysql"), _exec, ["t1", "t2"])
         )
         assert schema.tables == []
+
+
+# ================================================================
+# 命名空间（schema / database）限定 — 元数据查询必须按方言限定命名空间
+# ================================================================
+
+def _ds_with_schema(dialect: str, schema: str) -> DataSourceConfig:
+    """构造带命名空间配置的数据源。
+
+    Args: dialect - 方言；schema - 该数据源的命名空间配置。
+    Returns: 附带 extra_params.schema 的数据源配置。
+    """
+    config = _ds(dialect)
+    config.extra_params = {"schema": schema}
+    return config
+
+
+class TestNamespaceScoping:
+    """覆盖元数据查询的命名空间限定与默认值回落。"""
+
+    # 方法作用：验证各方言的命名空间解析与默认值回落。
+    # Args: self - pytest 用例实例。
+    # Returns: 无返回值，断言失败由 pytest 报告。
+    def test_resolve_namespace_defaults_and_configured(self) -> None:
+        """Postgres 缺省 public、MSSQL 缺省 dbo；显式配置优先；无命名空间方言返回空串。"""
+        logger.debug("test_resolve_namespace_defaults_and_configured 入口")
+        from src.datasource.introspection import resolve_namespace
+
+        # Assert：库内命名空间方言的默认值
+        assert resolve_namespace(_ds("postgres")) == "public"
+        assert resolve_namespace(_ds("mssql")) == "dbo"
+        # Assert：显式配置覆盖默认值
+        assert resolve_namespace(_ds_with_schema("postgres", "analytics")) == "analytics"
+        assert resolve_namespace(_ds_with_schema("mssql", "sales")) == "sales"
+        # Assert：MySQL / ClickHouse 的命名空间就是连接的 database
+        assert resolve_namespace(_ds("mysql")) == "test_db"
+        assert resolve_namespace(_ds("clickhouse")) == "test_db"
+        # Assert：SQLite 无命名空间概念
+        assert resolve_namespace(_ds("sqlite")) == ""
+        logger.info("test_resolve_namespace_defaults_and_configured 完成")
+
+    # 方法作用：验证 Postgres 表名查询不再写死 public。
+    # Args: self - pytest 用例实例。
+    # Returns: 无返回值，断言失败由 pytest 报告。
+    def test_postgres_table_query_is_not_hardcoded_to_public(self) -> None:
+        """写死 'public' 会让非 public schema 的数据源永远列不出表。"""
+        logger.debug("test_postgres_table_query_is_not_hardcoded_to_public 入口")
+        from src.datasource.introspection import TABLE_NAME_QUERY
+
+        sql = TABLE_NAME_QUERY["postgres"]
+
+        assert "schemaname = :schema" in sql
+        assert "'public'" not in sql
+        logger.info("test_postgres_table_query_is_not_hardcoded_to_public 完成")
+
+    # 方法作用：验证 MSSQL 表名查询按 schema 而非 catalog 过滤。
+    # Args: self - pytest 用例实例。
+    # Returns: 无返回值，断言失败由 pytest 报告。
+    def test_mssql_table_query_filters_by_schema(self) -> None:
+        """TABLE_CATALOG 是库名，无法区分同库不同 schema 的同名表。"""
+        logger.debug("test_mssql_table_query_filters_by_schema 入口")
+        from src.datasource.introspection import TABLE_NAME_QUERY
+
+        assert "TABLE_SCHEMA = :schema" in TABLE_NAME_QUERY["mssql"]
+        logger.info("test_mssql_table_query_filters_by_schema 完成")
+
+    # 方法作用：验证列查询限定命名空间，避免跨 schema 同名表列被混在一起。
+    # Args: self - pytest 用例实例。
+    # Returns: 无返回值，断言失败由 pytest 报告。
+    def test_column_queries_are_namespace_scoped(self) -> None:
+        """Postgres / MSSQL / ClickHouse 的列查询原本完全不过滤命名空间。"""
+        logger.debug("test_column_queries_are_namespace_scoped 入口")
+
+        assert "table_schema = :schema" in COLUMNS_QUERY["postgres"]
+        assert "TABLE_SCHEMA = :schema" in COLUMNS_QUERY["mssql"]
+        assert "database = :schema" in COLUMNS_QUERY["clickhouse"]
+        logger.info("test_column_queries_are_namespace_scoped 完成")
+
+    # 方法作用：验证外键与行数查询同样限定命名空间。
+    # Args: self - pytest 用例实例。
+    # Returns: 无返回值，断言失败由 pytest 报告。
+    def test_foreign_key_and_row_count_are_namespace_scoped(self) -> None:
+        """Postgres / MSSQL 的外键与行数查询漏过滤会让同名表互相污染。"""
+        logger.debug("test_foreign_key_and_row_count_are_namespace_scoped 入口")
+
+        for dialect in ("postgres", "mssql"):
+            assert ":schema" in FK_QUERY[dialect], f"{dialect} 外键查询必须限定命名空间"
+            assert ":schema" in ROW_COUNT_QUERY[dialect], f"{dialect} 行数查询必须限定命名空间"
+        logger.info("test_foreign_key_and_row_count_are_namespace_scoped 完成")
+
+    # 方法作用：验证 executor 收到 schema 参数，SQL 里的占位符才能绑上。
+    # Args: self - pytest 用例实例。
+    # Returns: 无返回值，断言失败由 pytest 报告。
+    def test_executor_receives_schema_parameter(self) -> None:
+        """参数没传下去，:schema 会绑定失败。"""
+        logger.debug("test_executor_receives_schema_parameter 入口")
+        captured: dict = {}
+
+        async def _capture(ds, sql, params):
+            captured.update(params)
+            return []
+
+        asyncio.run(
+            introspect_columns(_ds_with_schema("postgres", "analytics"), "orders", _capture)
+        )
+
+        assert captured["schema"] == "analytics"
+        assert captured["table"] == "orders"
+        logger.info("test_executor_receives_schema_parameter 完成")
+
+    # 方法作用：验证表名列表查询按解析出的命名空间取值，未配置时回落方言默认值。
+    # Args: self - pytest 用例实例。
+    # Returns: 无返回值，断言失败由 pytest 报告。
+    def test_list_tables_passes_resolved_schema(self) -> None:
+        """MSSQL 未配置 schema 时应回落 dbo，而不是传空串。"""
+        logger.debug("test_list_tables_passes_resolved_schema 入口")
+        captured: dict = {}
+
+        async def _capture(ds, sql, params):
+            captured.update(params)
+            return [{"name": "orders"}]
+
+        asyncio.run(_list_tables(_ds("mssql"), _capture))
+
+        assert captured["schema"] == "dbo"
+        logger.info("test_list_tables_passes_resolved_schema 完成")

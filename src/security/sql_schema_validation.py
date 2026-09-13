@@ -19,6 +19,7 @@ IssueType = Literal[
     "unknown_column",
     "cross_table_column",
     "ambiguous_column",
+    "invalid_qualifier",
     "parse_error",
 ]
 Confidence = Literal["high", "low"]
@@ -65,6 +66,11 @@ class ValidationIssue:
         if self.type == "cross_table_column":
             providers = ", ".join(self.provided_by[:5]) or "未知"
             return f"列 '{reference}' 不属于表 {self.table}（该列属于: {providers}）"
+        if self.type == "invalid_qualifier":
+            return (
+                f"列限定符 '{self.qualifier}' 不是有效的表名或别名（它看起来是 schema 名）。"
+                "无别名时表别名就是表名，请改用表名限定，或先给表起别名再用该别名限定。"
+            )
         return f"列 '{reference}' 不在表 {self.table} 的可用列中"
 
 
@@ -363,6 +369,13 @@ def _collect_column_issues(
             if isinstance(node, exp.Table)
         }
         has_cte_or_derived = len(local_tables) < len(scope.sources)
+        # 本 scope 各表节点携带的 schema 限定名。列限定符若等于它，属「用 schema 名限定列」
+        # 的无效形态（无别名时表别名就是表名），必须拦截而非当作 CTE 限定符静默放行。
+        scope_schemas = {
+            str(node.db).strip().lower()
+            for node in scope.sources.values()
+            if isinstance(node, exp.Table) and str(node.db or "").strip()
+        }
         owners = {
             table: resolve_table_owner(index, table) for table in local_tables.values()
         }
@@ -401,7 +414,13 @@ def _collect_column_issues(
             if qualifier:
                 issues.extend(
                     _check_qualified_column(
-                        column_name, qualifier, local_tables, owners, index
+                        column_name,
+                        qualifier,
+                        local_tables,
+                        owners,
+                        scope_schemas,
+                        default_source,
+                        index,
                     )
                 )
             else:
@@ -452,18 +471,39 @@ def _is_star_projection(node: Any) -> bool:
 
 # 方法作用：校验带限定符的列是否属于限定符指向的真实表。
 # Args: column_name - 列名（小写）；qualifier - 限定符（小写）；local_tables - 别名 -> 真实表；
-#       owners - 真实表 -> 归属源；index - 权威索引。
+#       owners - 真实表 -> 归属源；scope_schemas - 本 scope 各表携带的 schema 限定名；
+#       default_source - issue 归属源；index - 权威索引。
 # Returns: 问题列表；限定符指向 CTE、归属不明或该表列信息为空时返回空。
 def _check_qualified_column(
     column_name: str,
     qualifier: str,
     local_tables: Mapping[str, str],
     owners: Mapping[str, str | None],
+    scope_schemas: set[str],
+    default_source: str,
     index: Mapping[tuple[str, str], frozenset[str]],
 ) -> list[ValidationIssue]:
     """按表归属校验限定列，跨表错配与未知列分别成 issue。"""
     real_table = local_tables.get(qualifier)
     if real_table is None:
+        if qualifier in scope_schemas:
+            # 限定符等于某张表的 schema 名：这是无效限定符（无别名时表别名就是表名，
+            # 不能用 schema 名限定列），DB 会报 missing FROM-clause entry。
+            # 必须拦截并给出可操作提示，否则该列会被当作 CTE 限定符而完全不参与校验。
+            logger.warning(
+                "列限定符无效",
+                qualifier=qualifier,
+                column=column_name,
+                reason="schema_qualifier",
+            )
+            return [
+                ValidationIssue(
+                    type="invalid_qualifier",
+                    datasource=default_source,
+                    column=column_name,
+                    qualifier=qualifier,
+                )
+            ]
         # 限定符指向 CTE 或派生表：无法判定，放行并记 warning。
         logger.warning("列引用无法判定", reason="cte_qualifier", qualifier=qualifier)
         return []

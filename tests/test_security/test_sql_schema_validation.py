@@ -1148,3 +1148,120 @@ class _MetricRecorder:
         logger.debug("_MetricRecorder.record_schema_validation 入口")
         self.recorded.append(kwargs)
         logger.info("_MetricRecorder.record_schema_validation 完成")
+
+
+class TestSchemaQualifierMisuse:
+    """覆盖「schema 名被误用为列限定符」的形态。
+
+    背景：sqlglot 把 `FROM analytics.orders` 的表名放在 `node.name`、schema 放在 `node.db`，
+    而 `scope.sources` 的键只有表名（`orders`）。于是 `SELECT analytics.col FROM analytics.orders`
+    里的限定符 `analytics` 在 `local_tables` 中查不到，会走「限定符指向 CTE」分支被静默放行，
+    导致该列**完全不参与校验**。Postgres 规则：无别名时表别名就是表名，用 schema 名限定列
+    本身非法，DB 会报 `missing FROM-clause entry`——所以必须拦截并给出可操作提示，
+    而不是把问题留到打库。
+    """
+
+    # 方法作用：验证 schema 限定符被拦为高置信，而非静默放行。
+    # Args: self - pytest 用例实例。
+    # Returns: 无返回值，断言失败由 pytest 报告。
+    def test_schema_qualifier_is_rejected(self) -> None:
+        """SELECT analytics.bogus_col FROM analytics.orders 必须拦截。"""
+        logger.debug("test_schema_qualifier_is_rejected 入口")
+        from src.security.sql_schema_validation import validate_sql_schema
+
+        tables = [{"name": "orders", "columns": [{"name": "amount"}]}]
+
+        issues = validate_sql_schema(
+            "SELECT analytics.bogus_col FROM analytics.orders",
+            datasources=["pg_main"],
+            dialect="postgres",
+            tables=tables,
+        )
+
+        high = [item for item in issues if item.confidence == "high"]
+        assert len(high) == 1
+        assert high[0].type == "invalid_qualifier"
+        assert high[0].qualifier == "analytics"
+        assert high[0].column == "bogus_col"
+        logger.info("test_schema_qualifier_is_rejected 完成")
+
+    # 方法作用：验证即便列名合法，schema 限定符本身仍被拒。
+    # Args: self - pytest 用例实例。
+    # Returns: 无返回值，断言失败由 pytest 报告。
+    def test_schema_qualifier_rejected_for_valid_column_too(self) -> None:
+        """列存在不代表限定符合法：DB 仍会拒绝该 SQL。"""
+        logger.debug("test_schema_qualifier_rejected_for_valid_column_too 入口")
+        from src.security.sql_schema_validation import validate_sql_schema
+
+        tables = [{"name": "orders", "columns": [{"name": "amount"}]}]
+
+        issues = validate_sql_schema(
+            "SELECT analytics.amount FROM analytics.orders",
+            datasources=["pg_main"],
+            dialect="postgres",
+            tables=tables,
+        )
+
+        high = [item for item in issues if item.confidence == "high"]
+        assert len(high) == 1
+        assert high[0].type == "invalid_qualifier"
+        logger.info("test_schema_qualifier_rejected_for_valid_column_too 完成")
+
+    # 方法作用：验证用表名限定是合法写法，不得误伤。
+    # Args: self - pytest 用例实例。
+    # Returns: 无返回值，断言失败由 pytest 报告。
+    def test_table_name_qualifier_still_passes(self) -> None:
+        """SELECT orders.amount FROM analytics.orders 是合法的。"""
+        logger.debug("test_table_name_qualifier_still_passes 入口")
+        from src.security.sql_schema_validation import validate_sql_schema
+
+        tables = [{"name": "orders", "columns": [{"name": "amount"}]}]
+
+        issues = validate_sql_schema(
+            "SELECT orders.amount FROM analytics.orders",
+            datasources=["pg_main"],
+            dialect="postgres",
+            tables=tables,
+        )
+
+        assert issues == []
+        logger.info("test_table_name_qualifier_still_passes 完成")
+
+    # 方法作用：验证三段限定名（schema.table.col）仍正常工作。
+    # Args: self - pytest 用例实例。
+    # Returns: 无返回值，断言失败由 pytest 报告。
+    def test_schema_qualified_three_part_column_passes(self) -> None:
+        """SELECT analytics.orders.amount 的限定符是表名，不应被当作 schema 误用。"""
+        logger.debug("test_schema_qualified_three_part_column_passes 入口")
+        from src.security.sql_schema_validation import validate_sql_schema
+
+        tables = [{"name": "orders", "columns": [{"name": "amount"}]}]
+
+        issues = validate_sql_schema(
+            "SELECT analytics.orders.amount FROM analytics.orders",
+            datasources=["pg_main"],
+            dialect="postgres",
+            tables=tables,
+        )
+
+        assert issues == []
+        logger.info("test_schema_qualified_three_part_column_passes 完成")
+
+    # 方法作用：验证限定符指向 CTE 时仍低置信放行，不被误判为 schema 误用。
+    # Args: self - pytest 用例实例。
+    # Returns: 无返回值，断言失败由 pytest 报告。
+    def test_cte_qualifier_still_low_confidence(self) -> None:
+        """CTE 限定符与 schema 限定符必须区分对待。"""
+        logger.debug("test_cte_qualifier_still_low_confidence 入口")
+        from src.security.sql_schema_validation import validate_sql_schema
+
+        tables = [{"name": "orders", "columns": [{"name": "id"}]}]
+        sql = "WITH t AS (SELECT id FROM orders) SELECT t.id FROM t"
+
+        issues = validate_sql_schema(
+            sql, datasources=["pg_main"], dialect="postgres", tables=tables
+        )
+
+        assert [item for item in issues if item.confidence == "high"] == []
+        assert all(item.type != "invalid_qualifier" for item in issues)
+        logger.info("test_cte_qualifier_still_low_confidence 完成")
