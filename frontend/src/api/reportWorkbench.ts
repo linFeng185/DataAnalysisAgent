@@ -66,6 +66,27 @@ export function updatePageLifecycle(reportId: string, days: number | null): Prom
   return post<Record<string, unknown>>(`${REPORT_BASE}/reports/${encodeURIComponent(reportId)}/${action}`, days === null ? {} : { days });
 }
 
+/** 逐页生命周期操作结果；permanent 为 true 时 expires_at 为 null。 */
+export interface ReportPageLifecycleResult {
+  report_id: string;
+  expires_at: string | null;
+  permanent: boolean;
+}
+
+// 方法作用：按页面 id 延长有效期，服务端约束单次最多 30 天。
+// Args: reportId - 页面版本 id；days - 延期天数（7 或 30）。
+// Returns: 更新后的有效期与永久标记。
+export function extendReportPage(reportId: string, days: number): Promise<ReportPageLifecycleResult> {
+  return post<ReportPageLifecycleResult>(`${REPORT_BASE}/reports/${encodeURIComponent(reportId)}/extend`, { days });
+}
+
+// 方法作用：按页面 id 设为永久保留；超出租户永久报表上限时服务端返回 409，原因需原样展示。
+// Args: reportId - 页面版本 id。
+// Returns: 更新后的有效期（null 表示永久）与永久标记。
+export function makeReportPagePermanent(reportId: string): Promise<ReportPageLifecycleResult> {
+  return post<ReportPageLifecycleResult>(`${REPORT_BASE}/reports/${encodeURIComponent(reportId)}/permanent`, {});
+}
+
 // 方法作用：解析报表工作台计划预览请求。
 // Args: prompt - 自然语言报表描述；datasources - 当前用户选择的数据源；timezone - 租户时区；modelId - 显式选择的模型；llmConnectionId - 模型所属命名连接。
 // Returns: 结构化计划、哈希和资源估算。

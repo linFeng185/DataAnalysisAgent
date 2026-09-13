@@ -901,14 +901,25 @@ class ReportStore:
             row = await connection.fetchrow("SELECT id,run_id,datasource,dialect,sql_text AS sql FROM report_live_queries WHERE id=$1::uuid AND run_id=$2::uuid AND tenant_id=$3", query_id, version.run_id, identity.tenant_id)
         return dict(row) if row else None
 
-    # 方法作用：读取当前身份可访问的最新报表版本。
-    # Args: report_id - 报表 ID；identity - 当前身份。
-    # Returns: 最新版本或 None。
+    # 方法作用：读取当前身份可访问的页面版本，页面版本 id 优先、任务 id 回退取最新页。
+    # Args: report_id - 页面版本 id 或任务 id；identity - 当前身份。
+    # Returns: 命中的页面版本或 None。
     async def get_report_version(self, report_id: str, identity: Any) -> ReportVersionRecord | None:
+        """每次运行产生的页面必须独立可访问（设计 48 第 7.4 节），因此同一参数先按页面版本 id 精确命中，未命中再当任务 id 取最新页。"""
         if self._memory:
+            # 页面版本 id 精确命中：多页面场景下非最新页面也要能按自己的 id 取到正文。
+            row = self._versions.get(str(report_id))
+            if row is not None and row.get("deleted_at") is None and self._visible(row, identity):
+                logger.debug("页面版本按版本 id 命中", report_id=str(report_id), version=int(row.get("version", 0) or 0))
+                return self._to_version(row)
+            # 回退到任务 id：兼容旧查看页与只持有任务 id 的调用方。
             rows = [row for row in self._versions.values() if row["report_id"] == str(report_id) and self._visible(row, identity) and row.get("deleted_at") is None]
             row = next((item for item in rows if item.get("is_latest")), None) or (max(rows, key=lambda item: item["version"]) if rows else None)
             return self._to_version(row) if row else None
+        if not _is_uuid(report_id):
+            # 非 UUID 既不是页面版本 id 也不是任务 id：直接按不存在处理，避免数据库转型错误。
+            logger.info("报表页面读取未命中", report_id=str(report_id), reason="invalid_identifier")
+            return None
         pool = await self._pool()
         from src.memory.pg_pool import pg_pool_connection
 
@@ -916,7 +927,8 @@ class ReportStore:
         user_id = int(getattr(identity, "user_id", 0) or 0)
         role = str(getattr(identity, "role", "") or "")
         async with pg_pool_connection(pool, tenant_id, user_id, role) as connection:
-            row = await connection.fetchrow("SELECT v.* FROM report_versions v JOIN report_jobs j ON j.id=v.job_id WHERE v.report_id=$1::uuid AND v.tenant_id=$2 AND v.deleted_at IS NULL AND ($3<>'super_admin' AND ($3='tenant_admin' OR j.user_id=$4)) ORDER BY v.is_latest DESC,v.version DESC LIMIT 1", str(report_id), tenant_id, role, user_id)
+            # ORDER BY 第一项让「页面版本 id 命中」排在「任务 id 回退」之前，与内存分支判定一致。
+            row = await connection.fetchrow("SELECT v.* FROM report_versions v JOIN report_jobs j ON j.id=v.job_id WHERE (v.id=$1::uuid OR v.report_id=$1::uuid) AND v.tenant_id=$2 AND v.deleted_at IS NULL AND ($3<>'super_admin' AND ($3='tenant_admin' OR j.user_id=$4)) ORDER BY (v.id=$1::uuid) DESC,v.is_latest DESC,v.version DESC LIMIT 1", str(report_id), tenant_id, role, user_id)
         return self._to_version(row) if row else None
 
     # 方法作用：锁定页面后更新有效期，并收紧而不延长既有分享授权。
@@ -943,11 +955,15 @@ class ReportStore:
         else:
             from src.memory.pg_pool import pg_pool_connection
 
+            if not _is_uuid(report_id):
+                logger.info("页面生命周期更新未命中", report_id=str(report_id), reason="invalid_identifier")
+                return None
             pool = await self._pool()
             tenant_id, user_id, role = int(identity.tenant_id), int(identity.user_id), str(identity.role)
             async with pg_pool_connection(pool, tenant_id, user_id, role) as connection:
                 async with connection.transaction():
-                    row = await connection.fetchrow("SELECT v.* FROM report_versions v JOIN report_jobs j ON j.id=v.job_id WHERE v.report_id=$1::uuid AND v.tenant_id=$2 AND v.deleted_at IS NULL AND ($3='tenant_admin' OR j.user_id=$4) ORDER BY v.is_latest DESC,v.version DESC LIMIT 1 FOR UPDATE OF v", report_id, tenant_id, role, user_id)
+                    # 与 get_report_version 同一套定位规则：页面版本 id 优先，任务 id 回退到最新页。
+                    row = await connection.fetchrow("SELECT v.* FROM report_versions v JOIN report_jobs j ON j.id=v.job_id WHERE (v.id=$1::uuid OR v.report_id=$1::uuid) AND v.tenant_id=$2 AND v.deleted_at IS NULL AND ($3='tenant_admin' OR j.user_id=$4) ORDER BY (v.id=$1::uuid) DESC,v.is_latest DESC,v.version DESC LIMIT 1 FOR UPDATE OF v", report_id, tenant_id, role, user_id)
                     if row is None:
                         return None
                     version = self._to_version(row)
@@ -971,6 +987,34 @@ class ReportStore:
         expiry = None if request.permanent else max(now, previous or now) + timedelta(days=request.days or 0)
         document = {**version.document, "expires_at": expiry.isoformat() if expiry else None}
         return expiry, document, cls._checksum(document, version.data_manifest)
+
+    # 方法作用：统计指定用户在当前租户内已保存的永久页面数量，供永久报表上限校验。
+    # Args: identity - 发起校验的当前身份（决定数据库会话的租户与角色）；user_id - 被统计的用户。
+    # Returns: 永久页面数量（deleted_at IS NULL 且 expires_at IS NULL）。
+    async def count_permanent_versions_for_user(self, identity: Any, user_id: int) -> int:
+        """口径与租户设置里的 max_permanent_reports_per_user 一致：只统计当前租户、未清理、无限期的页面。"""
+        tenant_id = int(getattr(identity, "tenant_id", 0) or 0)
+        target_user_id = int(user_id or 0)
+        logger.debug("永久页面计数入口", tenant_id=tenant_id, target_user_id=target_user_id)
+        if self._memory:
+            count = 0
+            for row in self._versions.values():
+                if int(row.get("tenant_id", 0) or 0) != tenant_id or row.get("deleted_at") is not None or row.get("expires_at") is not None:
+                    continue
+                # 归属按所属任务的拥有者判定；内存里没有任务行（单元测试直接写页面）时回退到页面写入身份。
+                job = self._jobs.get(str(row.get("job_id", "")))
+                owner = int((job or {}).get("user_id", row.get("user_id", 0)) or 0)
+                if owner == target_user_id:
+                    count += 1
+        else:
+            pool = await self._pool()
+            from src.memory.pg_pool import pg_pool_connection
+
+            # 用调用方身份开会话，让租户级 RLS 继续生效；统计本身只回传计数，不返回任何页面内容。
+            async with pg_pool_connection(pool, tenant_id, int(getattr(identity, "user_id", 0) or 0), str(getattr(identity, "role", "") or "")) as connection:
+                count = int(await connection.fetchval("SELECT COUNT(*) FROM report_versions v JOIN report_jobs j ON j.id=v.job_id WHERE v.tenant_id=$1 AND j.user_id=$2 AND v.deleted_at IS NULL AND v.expires_at IS NULL", tenant_id, target_user_id) or 0)
+        logger.info("永久页面计数完成", tenant_id=tenant_id, target_user_id=target_user_id, count=count)
+        return count
 
     # 方法作用：按任务读取当前身份可访问的最新不可变报表版本。
     # Args: job_id - 报表任务 ID；identity - 当前租户身份。

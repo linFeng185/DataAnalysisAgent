@@ -336,3 +336,137 @@ class TestReportListPage:
         assert "export function createReportJob" in api
         # PATCH 由 client 统一提供
         assert "import { del, get, patch, post } from './client';" in api
+
+
+class TestReportPageLifecycleActions:
+    """覆盖需求 2.3、2.4：页面列表逐页延期、设为永久、过期管理与上限原因透传。"""
+
+    # 方法作用：验证页面列表用 GET /reports/{id}/pages 作为数据源并保留查看入口。
+    # Args: self - pytest 测试类实例。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    def test_page_list_uses_pages_endpoint_and_keeps_view_action(self) -> None:
+        """页面列表必须独立读取，最新页面过期（详情 410）时逐页操作才不会一起失效。"""
+        # Arrange
+        page = Path(LIST_PAGE).read_text(encoding="utf-8")
+
+        # Act / Assert
+        assert "const result = await fetchReportPages(reportId);" in page
+        assert "dataSource={pageList}" in page
+        assert "setPageList(result.pages || [])" in page
+        assert "pageExpiryTag(item.expires_at)" in page
+        assert "fetchReportPages" in page
+        # 详情 410 时页面列表仍要渲染出来
+        assert "{pageList.length > 0 && renderPageList()}" in page
+        assert "页面列表仍可管理" in page
+
+    # 方法作用：验证每页都有「查看」「延长 7 天」「延长 30 天」「设为永久」四类操作。
+    # Args: self - pytest 测试类实例。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    def test_each_page_exposes_view_extend_and_permanent_actions(self) -> None:
+        """逐页生命周期操作必须调各自的接口，延期天数由界面如实下发。"""
+        # Arrange
+        page = Path(LIST_PAGE).read_text(encoding="utf-8")
+        api = Path(API).read_text(encoding="utf-8")
+
+        # Act / Assert
+        assert 'navigate(`/reports/${encodeURIComponent(item.id)}`)' in page
+        assert "void extendPage(item, 7)" in page
+        assert "void extendPage(item, 30)" in page
+        assert "void makePermanent(item)" in page
+        # 接口路径与请求体
+        assert "extendReportPage" in api
+        assert "`${REPORT_BASE}/reports/${encodeURIComponent(reportId)}/extend`, { days }" in api
+        assert "makeReportPagePermanent" in api
+        assert "`${REPORT_BASE}/reports/${encodeURIComponent(reportId)}/permanent`, {}" in api
+        assert "export function extendReportPage" in api
+        assert "export function makeReportPagePermanent" in api
+        # 单次最多 30 天由后端约束，界面给出说明
+        assert "延期每次最多 30 天" in page
+
+    # 方法作用：验证页面标签覆盖永久、到期时间、最新与「已过期但可延期」。
+    # Args: self - pytest 测试类实例。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    def test_page_tags_cover_permanent_expiry_latest_and_expired(self) -> None:
+        """永久页面显示「永久有效」，有限期显示到期时间，最新页与过期页各有标签。"""
+        # Arrange
+        page = Path(LIST_PAGE).read_text(encoding="utf-8")
+
+        # Act / Assert
+        assert '<Tag color="green">{t("永久有效")}</Tag>' in page
+        assert '{t("有效至 {value0}", { value0: formatReportTime(expiresAt) })}' in page
+        assert '<Tag color="green">{t("最新")}</Tag>' in page
+        assert '<Tag color="red">{t("已过期")} {formatReportTime(expiresAt)}</Tag>' in page
+        assert '<Tag color="orange">{t("已过期，仍可延期")}</Tag>' in page
+        # 过期页面不提供查看：按钮禁用并说明 410 语义
+        assert "disabled={expired}" in page
+        assert "页面已过期，查看会返回 410；可先延期再查看" in page
+        assert "const expired = isPageExpired(item.expires_at);" in page
+
+    # 方法作用：验证「设为永久」按能力显示、永久页不再重复提供，并对过期页面保留延期入口。
+    # Args: self - pytest 测试类实例。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    def test_capability_gates_permanent_action(self) -> None:
+        """无 report.permanent 时隐藏按钮并说明原因；已是永久的页面不出现该按钮。"""
+        # Arrange
+        page = Path(LIST_PAGE).read_text(encoding="utf-8")
+
+        # Act / Assert
+        assert "const canExtend = capabilities.includes('report.extend');" in page
+        assert "const canPermanent = capabilities.includes('report.permanent');" in page
+        assert "{canExtend && <Button" in page
+        assert "{canPermanent && !permanent && <Popconfirm" in page
+        assert "const permanent = !item.expires_at;" in page
+        # 隐藏原因必须写在界面上
+        assert "当前账号没有「永久保存」能力" in page
+        assert "当前账号没有「页面延期」能力" in page
+        # 页面已过期但可延期：过期不阻止延期按钮
+        assert "{canExtend && <Button" in page
+        assert "disabled={expired}" in page and "disabled={!canExtend}" not in page
+
+    # 方法作用：验证「设为永久」有二次确认，延期不需要确认。
+    # Args: self - pytest 测试类实例。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    def test_permanent_action_requires_confirmation(self) -> None:
+        """永久化不可逆，必须先确认；延期可逆，不弹确认框。"""
+        # Arrange
+        page = Path(LIST_PAGE).read_text(encoding="utf-8")
+
+        # Act / Assert
+        assert 'title={t("确认把该页面设为永久？")}' in page
+        assert 'okText={t("设为永久")}' in page
+        assert 'cancelText={t("取消")}' in page
+        assert "onConfirm={() => void makePermanent(item)}" in page
+
+    # 方法作用：验证 409（永久超上限）原因原样透传，并覆盖 410/404 等业务原因。
+    # Args: self - pytest 测试类实例。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    def test_lifecycle_errors_pass_server_reason_through(self) -> None:
+        """409 等业务原因必须原样展示，不能被泛化成「操作失败」。"""
+        # Arrange
+        page = Path(LIST_PAGE).read_text(encoding="utf-8")
+
+        # Act / Assert
+        assert "function lifecycleErrorText" in page
+        assert "if (error instanceof ApiError && error.message) return error.message;" in page
+        # 失败提示走透传函数，不再走会改写 403 文案的通用 errorText
+        assert "message.error(lifecycleErrorText(extendError, t(\"页面延期失败\")));" in page
+        assert "message.error(lifecycleErrorText(permanentError, t(\"设为永久失败\")));" in page
+        # 上限说明在界面上可见
+        assert "受租户永久报表上限约束" in page
+
+    # 方法作用：验证逐页操作成功后详情与页面列表一起刷新。
+    # Args: self - pytest 测试类实例。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    def test_page_action_refreshes_detail_and_page_list(self) -> None:
+        """操作后必须重新读取，避免列表与详情显示两份不同的有效期。"""
+        # Arrange
+        page = Path(LIST_PAGE).read_text(encoding="utf-8")
+
+        # Act / Assert
+        assert "const refreshAfterPageAction = async (reportId: string): Promise<void> => {" in page
+        assert "if (reportId) await loadDetail(reportId, { silent: true });" in page
+        assert "await loadPages(reportId);" in page
+        assert "await refreshAfterPageAction(reportId);" in page
+        # 最新页面过期时详情 410，页面 id 必须来自打开详情时记住的记录 id
+        assert "const reportId = detailReportId;" in page
+        assert "setDetailReportId(reportId);" in page

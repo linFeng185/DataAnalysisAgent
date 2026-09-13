@@ -13,10 +13,13 @@ import type { Dayjs } from 'dayjs';
 import { ApiError } from '../api/client';
 import {
   deleteReport,
+  extendReportPage,
   fetchReportDetail,
   fetchReportList,
+  fetchReportPages,
   fetchReportPermissions,
   fetchReportQuota,
+  makeReportPagePermanent,
   retryReportPlan,
   runReport,
   updateReportPlan,
@@ -73,6 +76,24 @@ function pageExpiryTag(expiresAt: string | null | undefined): ReactNode {
     : <Typography.Text>{t("有效至 {value0}", { value0: formatReportTime(expiresAt) })}</Typography.Text>;
 }
 
+// 方法作用：判断页面是否已过期；永久页面（expires_at 为空）永不过期。
+// Args: expiresAt - 页面有效期时间戳，null 表示永久。
+// Returns: 已过期返回 true。
+function isPageExpired(expiresAt: string | null | undefined): boolean {
+  if (!expiresAt) return false;
+  const timestamp = new Date(expiresAt).getTime();
+  return Number.isFinite(timestamp) && timestamp <= Date.now();
+}
+
+// 方法作用：把逐页生命周期操作的失败原因原样展示；409 超上限等业务原因不得被泛化成「操作失败」。
+// Args: error - 捕获到的异常；fallback - 无可用消息时的回退文案。
+// Returns: 展示给用户的中文错误消息。
+function lifecycleErrorText(error: unknown, fallback: string): string {
+  // ApiError.message 就是服务端 detail（例如「永久报表已达上限 3，请联系租户管理员调整」），必须原样透传。
+  if (error instanceof ApiError && error.message) return error.message;
+  return error instanceof Error && error.message ? error.message : fallback;
+}
+
 // 方法作用：把报表标题回退为提示词摘要，避免标题为空时整列空白。
 // Args: item - 报表摘要；maxLength - 摘要最大字符数。
 // Returns: 展示用标题文本。
@@ -112,6 +133,12 @@ export default function ReportListPage() {
   const [detail, setDetail] = useState<ReportDetailResponse | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
   const [detailError, setDetailError] = useState('');
+  // 页面列表单独读 GET /reports/{id}/pages：最新页面过期时合并入口会 410，但逐页生命周期仍要可管理。
+  const [pageList, setPageList] = useState<ReportPageSummary[]>([]);
+  // 当前打开的报表记录 id：最新页面过期时详情返回 410，不能依赖 detail.report.id 继续操作页面。
+  const [detailReportId, setDetailReportId] = useState('');
+  // 正在执行的逐页操作标识，形如「页面id:7」，用于对应按钮的 loading 态。
+  const [pageActionId, setPageActionId] = useState('');
   // 被取消勾选的发散单元：只允许删减，服务端会拒绝任何不在计划里的标识。
   const [excludedUnitIds, setExcludedUnitIds] = useState<string[]>([]);
   const [savingPlan, setSavingPlan] = useState(false);
@@ -128,7 +155,8 @@ export default function ReportListPage() {
 
   // 用户筛选只对租户管理员开放：其他角色传 user_id 会被服务端拒绝。
   const isTenantAdmin = user?.role === 'tenant_admin';
-  // 永久保留需要独立能力；能力未加载成功时按无能力处理（禁用并提示）。
+  // 延期与永久保留都需要独立能力；能力未加载成功时按无能力处理（隐藏并说明原因，避免必然 403 的按钮）。
+  const canExtend = capabilities.includes('report.extend');
   const canPermanent = capabilities.includes('report.permanent');
 
   // 方法作用：按筛选与分页读取报表列表；静默模式用于轮询时不闪加载态。
@@ -214,14 +242,75 @@ export default function ReportListPage() {
     }
   }, []);
 
+  // 方法作用：读取该报表全部页面版本摘要，作为页面列表的唯一数据源。
+  // Args: reportId - 报表记录标识。
+  // Returns: 异步读取完成后无返回值。
+  const loadPages = useCallback(async (reportId: string): Promise<void> => {
+    if (!reportId) return;
+    try {
+      const result = await fetchReportPages(reportId);
+      setPageList(result.pages || []);
+    } catch (pageError) {
+      // 页面列表失败只留排障线索，不把详情整体打回错误态（详情主体仍可用）。
+      console.debug('报表页面列表读取失败', pageError instanceof Error ? pageError.message : pageError);
+    }
+  }, []);
+
+  // 方法作用：页面操作成功后统一刷新，保证详情与页面列表看到同一份最新数据。
+  // Args: reportId - 报表记录标识。
+  // Returns: 异步刷新完成后无返回值。
+  const refreshAfterPageAction = async (reportId: string): Promise<void> => {
+    if (reportId) await loadDetail(reportId, { silent: true });
+    await loadPages(reportId);
+  };
+
+  // 方法作用：按页面 id 延长有效期，每次最多 30 天由服务端校验。
+  // Args: page - 目标页面摘要；days - 延期天数（7 或 30）。
+  // Returns: 异步操作完成后无返回值。
+  const extendPage = async (page: ReportPageSummary, days: number): Promise<void> => {
+    const reportId = detailReportId;
+    setPageActionId(`${page.id}:${days}`);
+    try {
+      const result = await extendReportPage(page.id, days);
+      message.success(result.expires_at
+        ? t("已延长 {value0} 天，新的有效期至 {value1}", { value0: days, value1: formatReportTime(result.expires_at) })
+        : t("已延长 {value0} 天", { value0: days }));
+      await refreshAfterPageAction(reportId);
+    } catch (extendError) {
+      message.error(lifecycleErrorText(extendError, t("页面延期失败")));
+    } finally {
+      setPageActionId('');
+    }
+  };
+
+  // 方法作用：把单个页面设为永久保留，超出永久报表上限时原样展示服务端原因。
+  // Args: page - 目标页面摘要。
+  // Returns: 异步操作完成后无返回值。
+  const makePermanent = async (page: ReportPageSummary): Promise<void> => {
+    const reportId = detailReportId;
+    setPageActionId(`${page.id}:permanent`);
+    try {
+      await makeReportPagePermanent(page.id);
+      message.success(t("已设为永久有效"));
+      await refreshAfterPageAction(reportId);
+    } catch (permanentError) {
+      message.error(lifecycleErrorText(permanentError, t("设为永久失败")));
+    } finally {
+      setPageActionId('');
+    }
+  };
+
   // 方法作用：打开某条报表的详情抽屉并加载计划、运行与页面版本。
   // Args: reportId - 报表标识。
   // Returns: 异步读取完成后无返回值。
   const openDetail = async (reportId: string): Promise<void> => {
     setDetailOpen(true);
     setDetail(null);
+    setDetailReportId(reportId);
+    setPageList([]);
     setExcludedUnitIds([]);
-    await loadDetail(reportId);
+    // 详情与页面列表并行读取：最新页面过期时详情 410，页面列表仍要能支撑延期操作。
+    await Promise.all([loadDetail(reportId), loadPages(reportId)]);
   };
 
   // 列表或详情仍在变化时按固定间隔刷新；全部落到终态后停表，不再空转请求。
@@ -231,10 +320,14 @@ export default function ReportListPage() {
     if (!needsPolling && !detailActive) return undefined;
     const timer = window.setInterval(() => {
       if (needsPolling) void loadReports({ silent: true });
-      if (detailActive && detail) void loadDetail(detail.report.id, { silent: true });
+      if (detailActive && detail) {
+        void loadDetail(detail.report.id, { silent: true });
+        // 运行中新生成的页面要能在页面列表里看到，因此与详情同频刷新。
+        void loadPages(detail.report.id);
+      }
     }, POLL_INTERVAL_MS);
     return () => window.clearInterval(timer);
-  }, [needsPolling, detailActive, detail, loadReports, loadDetail]);
+  }, [needsPolling, detailActive, detail, loadReports, loadDetail, loadPages]);
 
   // 方法作用：提交生成，把未生成的报表投入执行并预占额度。
   // Args: 无，读取当前详情。
@@ -399,7 +492,11 @@ export default function ReportListPage() {
     {
       title: t("有效期"),
       dataIndex: 'expires_at',
-      render: (value: string | null) => pageExpiryTag(value),
+      render: (_, item) => <Space size={4} wrap>
+        {pageExpiryTag(item.expires_at)}
+        {/* 过期只是正文不可读：后端允许延期，界面必须把「已过期但可延期」说清楚 */}
+        {isPageExpired(item.expires_at) && canExtend && <Tag color="orange">{t("已过期，仍可延期")}</Tag>}
+      </Space>,
     },
     {
       title: t("最新"),
@@ -411,15 +508,71 @@ export default function ReportListPage() {
     {
       title: t("操作"),
       key: 'page_actions',
-      width: 100,
-      render: (_, item) => <Button
-        type="link"
-        size="small"
-        icon={<EyeOutlined />}
-        onClick={() => navigate(`/reports/${encodeURIComponent(item.id)}`)}
-      >{t("查看")}</Button>,
+      width: 300,
+      render: (_, item) => {
+        const expired = isPageExpired(item.expires_at);
+        // 永久页面（expires_at 为空）不再提供「设为永久」。
+        const permanent = !item.expires_at;
+        return <Space size={4} wrap>
+          {/* 过期页面点「查看」必然 410，因此禁用并说明原因（禁用按钮需要 span 包裹才能触发 Tooltip） */}
+          <Tooltip title={expired ? t("页面已过期，查看会返回 410；可先延期再查看") : ''}>
+            <span>
+              <Button
+                type="link"
+                size="small"
+                icon={<EyeOutlined />}
+                disabled={expired}
+                onClick={() => navigate(`/reports/${encodeURIComponent(item.id)}`)}
+              >{t("查看")}</Button>
+            </span>
+          </Tooltip>
+          {canExtend && <Button
+            size="small"
+            loading={pageActionId === `${item.id}:7`}
+            onClick={() => void extendPage(item, 7)}
+          >{t("延长 7 天")}</Button>}
+          {canExtend && <Button
+            size="small"
+            loading={pageActionId === `${item.id}:30`}
+            onClick={() => void extendPage(item, 30)}
+          >{t("延长 30 天")}</Button>}
+          {canPermanent && !permanent && <Popconfirm
+            title={t("确认把该页面设为永久？")}
+            description={t("设为永久后不再过期；受租户永久报表上限约束，超出上限时服务端会拒绝并给出原因。")}
+            okText={t("设为永久")}
+            cancelText={t("取消")}
+            onConfirm={() => void makePermanent(item)}
+          ><Button size="small" loading={pageActionId === `${item.id}:permanent`}>{t("设为永久")}</Button></Popconfirm>}
+        </Space>;
+      },
     },
   ];
+
+  // 方法作用：渲染页面版本列表与逐页生命周期操作，详情 410（最新页面过期）时同样可用。
+  // Args: 无，读取 pageList、能力状态与加载态。
+  // Returns: 页面列表区块。
+  const renderPageList = (): ReactNode => <div>
+    <Typography.Title level={5}>{t("页面列表")}</Typography.Title>
+    {pageList.length === 0
+      ? <Empty description={t("暂无页面版本")} />
+      : <Table<ReportPageSummary>
+        size="small"
+        rowKey="id"
+        pagination={false}
+        dataSource={pageList}
+        columns={pageColumns}
+      />}
+    <Typography.Text type="secondary" style={{ display: 'block', marginTop: 8 }}>
+      {t("每次运行都会保留为独立页面，可按页面分别延期或设为永久；延期每次最多 30 天。")}
+    </Typography.Text>
+    {/* 能力缺失时按钮已隐藏：这里把「为什么看不到」说清楚 */}
+    {!canExtend && <Typography.Text type="secondary" style={{ display: 'block' }}>
+      {t("当前账号没有「页面延期」能力，如需延长页面有效期，请联系租户管理员在报表权限里开通。")}
+    </Typography.Text>}
+    {!canPermanent && <Typography.Text type="secondary" style={{ display: 'block' }}>
+      {t("当前账号没有「永久保存」能力，「设为永久」按钮已隐藏；请联系租户管理员开通。")}
+    </Typography.Text>}
+  </div>;
 
   const plan = detail?.plan ?? null;
   const status = detail?.report.status;
@@ -513,14 +666,20 @@ export default function ReportListPage() {
       width={760}
       open={detailOpen}
       destroyOnHidden
-      onClose={() => { setDetailOpen(false); setDetail(null); setDetailError(''); setExcludedUnitIds([]); }}
+      onClose={() => { setDetailOpen(false); setDetail(null); setDetailError(''); setExcludedUnitIds([]); setPageList([]); setDetailReportId(''); }}
     >
       {detailError
-        ? <Alert
-          type="error"
-          showIcon
-          message={detailError}
-        />
+        ? <Space direction="vertical" size={16} style={{ width: '100%' }}>
+          <Alert
+            type="error"
+            showIcon
+            message={detailError}
+            description={pageList.length > 0
+              ? t("页面列表仍可管理：最新页面过期后查看会返回 410，但每个页面都可以延期或设为永久。")
+              : undefined}
+          />
+          {pageList.length > 0 && renderPageList()}
+        </Space>
         : detailLoading || !detail
           ? <Skeleton active />
           : <Space direction="vertical" size={16} style={{ width: '100%' }}>
@@ -652,18 +811,7 @@ export default function ReportListPage() {
               </Space>
             </div>
 
-            <div>
-              <Typography.Title level={5}>{t("页面列表")}</Typography.Title>
-              {detail.pages.length === 0
-                ? <Empty description={t("暂无页面版本")} />
-                : <Table<ReportPageSummary>
-                  size="small"
-                  rowKey="id"
-                  pagination={false}
-                  dataSource={detail.pages}
-                  columns={pageColumns}
-                />}
-            </div>
+            {renderPageList()}
           </Space>}
     </Drawer>
   </Space>;

@@ -202,6 +202,42 @@ def _require_report_owner(identity: Any, report: dict[str, Any]) -> None:
         raise HTTPException(403, "只能以报表创建者身份操作，不能用管理员权限替代业务用户")
 
 
+# 方法作用：校验「有限期转永久」是否超出租户配置的永久报表上限。
+# Args: identity - 当前身份；report_id - 页面标识或任务标识；store - 报表 Store。
+# Returns: 校验通过无返回值；超限时抛出 HTTP 409 并写拒绝审计。
+async def _enforce_permanent_limit(identity: Any, report_id: str, store: Any) -> None:
+    """0 表示不限制；已是永久的页面不计数（幂等）；租户管理员本人不受限。"""
+    role = str(getattr(identity, "role", "") or "")
+    # 取舍：上限由租户管理员配置，若管理员本人也受自己配置的上限约束，一旦把上限改小到低于自己已有的永久页面数，
+    # 就再无法保存永久报表、只能改数据库解围；因此管理员豁免该上限（不是绕过权限校验：能力校验仍先于本函数执行）。
+    if role == "tenant_admin":
+        return
+    # 只有「由有限期转为永久」才计数：已经是永久页面的重复调用必须保持幂等，不得报 409。
+    version = await store.get_report_version(report_id, identity)
+    if version is None or version.expires_at is None:
+        return
+    settings = await store.get_tenant_settings(int(getattr(identity, "tenant_id", 0) or 0))
+    # 设置行不存在或显式配 0 时按「不限制」处理。
+    limit = int(settings.get("max_permanent_reports_per_user", 0) or 0)
+    if limit <= 0:
+        return
+    permanent_count = await store.count_permanent_versions_for_user(identity, int(getattr(identity, "user_id", 0) or 0))
+    if permanent_count < limit:
+        logger.debug("永久报表上限校验通过", report_id=report_id, limit=limit, permanent_count=permanent_count)
+        return
+    logger.warning("永久报表数量超限", report_id=report_id, user_id=getattr(identity, "user_id", 0), limit=limit, permanent_count=permanent_count)
+    # 审计先于抛错写入：被拒绝的请求不能改动任何页面数据，但必须留痕。
+    await store.record_audit({
+        "tenant_id": getattr(identity, "tenant_id", 0),
+        "user_id": getattr(identity, "user_id", 0),
+        "report_id": report_id,
+        "action": "page_lifecycle",
+        "result": "denied",
+        "metadata": {"reason": "permanent_limit_reached", "limit": limit, "permanent_count": permanent_count},
+    })
+    raise HTTPException(409, f"永久报表已达上限 {limit}，请联系租户管理员调整")
+
+
 # 方法作用：在计划阶段重新解析当前身份可用的数据源和行列授权。
 # Args: identity - 当前请求身份；plan - 待执行报表计划。
 # Returns: 数据源名称到授权摘要的映射。
@@ -823,9 +859,12 @@ async def get_page_lifecycle(report_id: str) -> dict[str, Any]:
 async def update_page_lifecycle(report_id: str, request: PageLifecycleRequest) -> dict[str, Any]:
     """不会自动延长、恢复或新建任何旧分享授权。"""
     identity = get_current_identity()
-    logger.debug("页面生命周期 API 入口", report_id=report_id, user_id=identity.user_id)
+    logger.debug("页面生命周期 API 入口", report_id=report_id, user_id=identity.user_id, permanent=request.permanent, days=request.days)
     await _require_capability(identity, "report.permanent" if request.permanent else "report.extend")
     store = get_report_store()
+    if request.permanent:
+        # PUT /lifecycle 与 POST /permanent 共用本处理函数，永久上限校验只需在这里做一次。
+        await _enforce_permanent_limit(identity, report_id, store)
     version = await store.update_page_lifecycle(report_id, identity, **request.model_dump())
     if version is None:
         raise HTTPException(404, "报表不存在或无权访问")
