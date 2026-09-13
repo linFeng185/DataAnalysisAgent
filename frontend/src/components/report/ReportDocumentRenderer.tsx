@@ -159,6 +159,37 @@ function renderBlock(
       </div> : <Typography.Paragraph type="secondary">{displayText(content.source || content.sources || content.summary)}</Typography.Paragraph>;
       break;
     }
+    case 'findings': {
+      const items = Array.isArray(content.items)
+        ? content.items.filter((item): item is Record<string, unknown> => Boolean(item && typeof item === 'object'))
+        : [];
+      body = items.length > 0 ? <div className="report-findings-content">
+        <List
+          size="small"
+          dataSource={items}
+          renderItem={item => <List.Item>
+            <Space direction="vertical" size={2}>
+              <Typography.Text>
+                {displayText(item.label)}
+                {item.value === null || item.value === undefined ? '' : `：${displayText(item.value)}`}
+                {item.change_ratio === null || item.change_ratio === undefined ? '' : `（${t("变化")} ${displayText(item.change_ratio)}%）`}
+              </Typography.Text>
+              {item.baseline ? <Typography.Text type="secondary">{displayText(item.baseline)}</Typography.Text> : null}
+              {Array.isArray(item.caveats) && item.caveats.length > 0
+                ? <Typography.Text type="warning">{item.caveats.map(value => displayText(value)).join('；')}</Typography.Text>
+                : null}
+            </Space>
+          </List.Item>}
+        />
+        <Typography.Paragraph type="secondary" className="report-findings-method" style={{ marginTop: 8, marginBottom: 0 }}>
+          {t("计算方法：")}{displayText(content.method)}
+        </Typography.Paragraph>
+        {Array.isArray(content.limitations) && content.limitations.length > 0
+          ? <Typography.Paragraph type="warning" style={{ marginBottom: 0 }}>{content.limitations.map(value => displayText(value)).join('；')}</Typography.Paragraph>
+          : null}
+      </div> : <Empty description={t("暂无深挖发现")} />;
+      break;
+    }
     case 'narrative':
     default:
       body = <Typography.Paragraph style={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>{displayText(content.summary || content.text || content.message)}</Typography.Paragraph>;

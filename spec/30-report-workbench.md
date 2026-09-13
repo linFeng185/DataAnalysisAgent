@@ -212,10 +212,11 @@ ReportWorkbenchSubgraph（每次运行独立 thread_id）
 | `report_retrieve_schema` | 按单元按需加载相关 Schema、可信业务规则和指标口径 | 是 | `SchemaEvidence[]` |
 | `report_plan_queries` | 为每个单元生成一个或多个只读查询计划，禁止直接执行 SQL | 是 | `QueryPlan[]` |
 | `report_execute_units` | 有界并行执行查询，复用 SQL 安全和 ACL 链路 | 瞬态错误可重试 | `UnitResult[]` |
-| `report_profile_results` | 计算行数、数值列、时间粒度、缺失、异常和代表性 | 是（确定性） | `DataProfile[]` |
+| `report_profile_results` | 统计每个单元返回行数，无数据时补充可读说明 | 否（确定性） | `UnitResult[]`（带 warnings） |
+| `report_analyze_units` | 对已取回数据做确定性深挖：环比、同比（跨度≥一年）、趋势、异常、贡献度、分布形态。统计逻辑复用 `src/tools/processors.py`，报表侧只做参数推导与严谨性补强（IQR+MAD 双判据、R² 门槛、样本截断披露），**不经过 LLM** | 否（确定性） | `UnitFinding[]` |
 | `report_build_relations` | 发现并验证跨单元的键、时间窗口和指标关系 | 是（确定性优先） | `RelationEvidence[]` |
-| `report_analyze_units` | 每个单元独立生成结构化洞察、限制和建议 | 是（结构化输出修复） | `UnitAnalysis[]` |
 | `report_synthesize_insights` | 汇总单元并做交叉分析，区分事实、统计关系和假设 | 是（结构化输出修复） | `CrossBusinessAnalysis` |
+| `report_attach_metric_refs` | 汇总单元问题里 `@metric(...)` 引用解析出的已批准口径，供页面做口径溯源 | 否（确定性） | `MetricCitation[]` |
 | `report_plan_layout` | 根据内容重要性、数据类型和屏幕断点规划页面块 | 是 | `ReportDocument` |
 | `report_validate_document` | 校验 DSL、引用、数量、脱敏标记、交互指令和资源大小 | 否，失败需修复/降级 | `ValidatedReportDocument` |
 | `report_persist_version` | 以不可变版本写页面、数据清单和摘要，更新 Job 状态 | 事务可重试 | `ReportVersion` |

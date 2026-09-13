@@ -24,7 +24,7 @@ _FORBIDDEN_OPTION_KEYS = {
     "onClick", "onclick", "event", "url", "image", "html", "script",
 }
 _DANGEROUS_TEXT_RE = re.compile(r"(?:function\s*\(|=>|<\s*script|javascript:|data:text/html)", re.I)
-_BLOCK_TYPES = {"kpi", "narrative", "chart", "table", "insight_list", "relationship", "quality", "source_citation", "callout"}
+_BLOCK_TYPES = {"kpi", "narrative", "chart", "table", "insight_list", "relationship", "quality", "source_citation", "callout", "findings"}
 
 
 # 方法作用：递归校验 ECharts option 只能包含普通 JSON 值和白名单节点。
@@ -85,7 +85,7 @@ class ReportBlock(BaseModel):
 
     id: str = Field(default_factory=lambda: f"block_{uuid4().hex[:10]}", max_length=64)
     section_id: str = Field(..., min_length=1, max_length=64)
-    type: Literal["kpi", "narrative", "chart", "table", "insight_list", "relationship", "quality", "source_citation", "callout"]
+    type: Literal["kpi", "narrative", "chart", "table", "insight_list", "relationship", "quality", "source_citation", "callout", "findings"]
     priority: int = Field(default=50, ge=0, le=100)
     data_ref: str = ""
     evidence_refs: list[str] = Field(default_factory=list, max_length=20)
@@ -196,6 +196,7 @@ def layout_for_block(block_type: str, has_data: bool = True) -> ReportLayout:
         "relationship": (8, 6, 4),
         "quality": (4, 4, 4),
         "source_citation": (4, 4, 4),
+        "findings": (12, 8, 4),
         "callout": (12, 8, 4),
     }
     desktop, tablet, mobile = spans.get(block_type, spans["narrative"])

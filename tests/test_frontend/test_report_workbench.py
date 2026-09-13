@@ -136,3 +136,19 @@ class TestReportWorkbenchFrontend:
         assert "item.expression" in renderer
         # 复用既有的安全文本转换，不引入 HTML 注入面
         assert "dangerouslySetInnerHTML" not in renderer
+
+    # 方法作用：验证深挖发现块渲染计算方法与样本披露。
+    # Args: self - pytest 测试类实例。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    def test_renderer_shows_findings_with_method_and_caveats(self) -> None:
+        """深挖结论必须连同计算方法与样本局限一起展示。"""
+        # Arrange
+        renderer = Path("frontend/src/components/report/ReportDocumentRenderer.tsx").read_text(encoding="utf-8")
+        types = Path("frontend/src/types/report.ts").read_text(encoding="utf-8")
+
+        # Act / Assert
+        assert "case 'findings'" in renderer
+        assert "content.method" in renderer
+        assert "item.caveats" in renderer
+        assert "'findings'" in types
+        assert "dangerouslySetInnerHTML" not in renderer

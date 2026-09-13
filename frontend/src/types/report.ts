@@ -140,7 +140,8 @@ export type ReportBlockType =
   | 'relationship'
   | 'quality'
   | 'source_citation'
-  | 'callout';
+  | 'callout'
+  | 'findings';
 
 export interface ReportLayout {
   desktop: { col_span: number; row_span: number };

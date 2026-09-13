@@ -231,9 +231,11 @@ _DIVERGENCE_UNITS_PER_ROUND: dict[str, int] = {
 
 **时间列识别**（按优先级，命中即止）：
 
-1. `retrieve_schema` 阶段拿到的 schema 元数据中列类型为 `DATE` / `DATETIME` / `TIMESTAMP` 的列（权威）。
-2. 复用既有 `_is_time_key(column)`（`relations.py:379`）—— 已有实现，含时间键命名启发。
-3. **都没有 → 不识别为时间序列**，与时间相关的处理器（`yoy` / `mom` / `trend` / `seasonal`）全部跳过。**不靠列名瞎猜。**
+> **实现修正（2026-09-12 落地时）**：本节原写"优先用 schema 元数据中的 `DATE`/`DATETIME`/`TIMESTAMP` 列类型"，**不可实现**。`report_retrieve_schema` 产出的 `resolved_units`（`report_workbench.py:124-129`）只带列**名**（`columns` / `dimensions` / `metrics`），**不带列类型**；要拿到类型需下钻 schema 快照。改用下面这条更强的判据。
+
+1. **按列值能否解析为日期**：对列的前 50 个取值尝试常见日期格式（`%Y-%m-%d %H:%M:%S` / `%Y-%m-%d` / `%Y/%m/%d` / `%Y-%m` / `%Y/%m` / `%Y`），解析成功率 ≥ 80% 才认作时间列。**这比列名启发强**——它用的是真实数据，不是猜测。多列同时满足时取解析成功数最多者。
+2. 无列满足阈值 → 复用既有 `_is_time_key(column)`（`relations.py:379`）做命名兜底。
+3. **都没有 → 不识别为时间序列**，与时间相关的加工（环比 / 同比 / 趋势）全部跳过。**不靠列名瞎猜。**
 
 **数值列识别**：
 

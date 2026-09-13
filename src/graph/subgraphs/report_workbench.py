@@ -30,6 +30,7 @@ class ReportWorkbenchState(TypedDict, total=False):
     relations: list[RelationEvidence]
     cross_business_analysis: dict[str, Any]
     metric_citations: list[dict[str, Any]]
+    unit_findings: list[Any]
     artifact: ReportArtifact
     run_status: str
     execute_unit: Any
@@ -279,6 +280,7 @@ async def report_plan_layout(state: ReportWorkbenchState) -> dict[str, Any]:
     if state.get("cross_business_analysis", {}).get("limitations"):
         artifact.document.limitations.extend(state["cross_business_analysis"]["limitations"])
     _append_metric_citations(artifact, list(state.get("metric_citations", []) or []))
+    _append_findings(artifact, list(state.get("unit_findings", []) or []), list(state.get("resolved_units", []) or []))
     aggregation = state.get("cross_business_analysis", {}).get("aggregation", {})
     if aggregation.get("status") == "success":
         from src.reporting.document import (
@@ -295,6 +297,78 @@ async def report_plan_layout(state: ReportWorkbenchState) -> dict[str, Any]:
         artifact.document.sections.append(ReportSection(id=data_ref, title="跨源样本聚合", subtitle="同一明确粒度，按来源分别统计；不代表全量业务总额", blocks=[ReportBlock(section_id=data_ref, type="table", title="授权样本的分组统计", data_ref=data_ref, content={"columns": list(rows[0]) if rows else [], "rows": rows}, layout=layout_for_block("table"))]))
     await _log_step(state, "report_plan_layout", "succeeded")
     return {"artifact": artifact}
+
+
+# 方法作用：对每个成功单元做确定性深挖，产出可披露的发现条目。
+# Args: state - 含 unit_results 与 resolved_units 的状态。
+# Returns: 全部单元的发现条目列表。
+async def report_analyze_units(state: ReportWorkbenchState) -> dict[str, Any]:
+    await _log_step(state, "report_analyze_units", "running")
+    from src.reporting.profiling import profile_unit
+
+    metrics_by_unit = {
+        str(item.get("unit_id", "")): [str(name) for name in (item.get("metrics", []) or [])]
+        for item in state.get("resolved_units", [])
+    }
+    collected: list[Any] = []
+    for result in state.get("unit_results", []):
+        # 失败单元没有数据可加工；无命中数据源的单元行集为空，自然不产出。
+        if getattr(result, "status", "") == "failed":
+            continue
+        collected.extend(profile_unit(
+            unit_id=result.unit_id,
+            rows=list(result.rows),
+            columns=list(result.columns),
+            metrics=metrics_by_unit.get(result.unit_id, []),
+            truncated=bool(getattr(result, "truncated", False)),
+        ))
+    await _log_step(state, "report_analyze_units", "succeeded")
+    logger.info("报表确定性深挖汇总完成", unit_count=len(state.get("unit_results", [])), finding_count=len(collected))
+    return {"unit_findings": collected}
+
+
+# 方法作用：把确定性深挖发现追加为页面区段。
+# Args: artifact - 已构建的页面产物；findings - 发现条目；units - 已解析单元摘要。
+# Returns: 无返回值；无发现或区段校验失败时保持页面不变。
+def _append_findings(artifact: ReportArtifact, findings: list[Any], units: list[dict[str, Any]]) -> None:
+    if not findings:
+        return
+    from src.reporting.document import ReportBlock, ReportSection, layout_for_block
+
+    questions = {str(item.get("unit_id", "")): str(item.get("question", "") or "") for item in units}
+    blocks: list[ReportBlock] = []
+    for index, finding in enumerate(findings):
+        by_unit = questions.get(finding.unit_id, "") or finding.unit_id
+        blocks.append(ReportBlock(
+            id=f"finding-{index}-{finding.category}",
+            section_id="findings",
+            type="findings",
+            title=f"{by_unit} · {finding.title}",
+            data_ref="",
+            content={
+                "category": finding.category,
+                "method": finding.method,
+                "truncated": bool(finding.truncated),
+                "limitations": list(finding.limitations),
+                "items": [item.model_dump(mode="json") for item in finding.items],
+            },
+            layout=layout_for_block("findings"),
+        ))
+    try:
+        section = ReportSection(
+            id="findings",
+            title="确定性深挖发现",
+            subtitle="由已取回数据直接计算，不经过模型转述；每条附计算方法",
+            blocks=blocks,
+        )
+    except ValueError:
+        logger.warning(
+            "深挖发现区段被页面校验拒绝，已降级为不展示",
+            finding_count=len(findings),
+            exc_info=True,
+        )
+        return
+    artifact.document.sections.append(section)
 
 
 # 方法作用：把已批准指标口径追加为页面来源区段。
@@ -377,6 +451,7 @@ def build_report_workbench_subgraph():
     graph.add_node("report_plan_queries", report_plan_queries)
     graph.add_node("report_execute_units", report_execute_units)
     graph.add_node("report_profile_results", report_profile_results)
+    graph.add_node("report_analyze_units", report_analyze_units)
     graph.add_node("report_build_relations", report_build_relations)
     graph.add_node("report_synthesize_insights", report_synthesize_insights)
     graph.add_node("report_attach_metric_refs", report_attach_metric_refs)
@@ -388,7 +463,8 @@ def build_report_workbench_subgraph():
     graph.add_edge("report_retrieve_schema", "report_plan_queries")
     graph.add_edge("report_plan_queries", "report_execute_units")
     graph.add_edge("report_execute_units", "report_profile_results")
-    graph.add_edge("report_profile_results", "report_build_relations")
+    graph.add_edge("report_profile_results", "report_analyze_units")
+    graph.add_edge("report_analyze_units", "report_build_relations")
     graph.add_edge("report_build_relations", "report_synthesize_insights")
     graph.add_edge("report_synthesize_insights", "report_attach_metric_refs")
     graph.add_edge("report_attach_metric_refs", "report_plan_layout")
