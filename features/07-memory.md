@@ -61,4 +61,21 @@
 | 7.5.4 | 动态 Prompt token 预算检查 | `src/memory/context_builder.py` | 扣除 Prompt/输出预留后按模型窗口计算 80% 触发、55% 目标和 92% 硬保护；显式上限仅能收紧预算 | 单测完成 |
 | 7.5.5 | 异步预计算摘要 | `src/memory/context_builder.py` | LLM 优先生成摘要 (_summarize_turns_llm)，失败回退规则拼接；摘要输入自身受 Token 上限保护，session_archive 同步支持 | 单测完成 |
 
+### 7.6 长期记忆管理（spec/44）
+
+| # | 功能 | 文件 | 描述 | 状态 | 优先级 |
+|---|------|------|------|------|--------|
+| 7.6.1 | list_memories() | `src/memory/long_term_store.py` | PostgreSQL 权威表分页查询，归属恒为当前用户 private 范围 | 单测完成 | P1 |
+| 7.6.2 | get_memory() | 同上 | 按 ID 直查并校验归属，失败返回 None | 单测完成 | P1 |
+| 7.6.3 | delete_memory() | 同上 | PG 删除后经 `_delete_vector_or_queue` 补偿队列同步向量库 | 单测完成 | P1 |
+| 7.6.4 | 记忆管理 API | `src/api/routes/memory.py` | GET /memory、GET/DELETE /memory/{id}；越权返回 404；删除记 audit 日志 | 单测完成 | P1 |
+
+### 7.7 嵌入后端（spec/46）
+
+| # | 功能 | 文件 | 描述 | 状态 | 优先级 |
+|---|------|------|------|------|--------|
+| 7.7.1 | ONNX 嵌入后端 | `src/memory/embedding_backend.py` | onnxruntime + tokenizers 加载 onnx/model.onnx；mean pooling + L2 归一化；启动导入 5.42s→0.12s | 单测完成 | P1 |
+| 7.7.2 | 双后端共用 | `src/memory/vector_store_milvus.py`、`vector_store_pg.py` | Milvus 与 PG 共用同一嵌入实现，编码契约统一为 list[str]→list[list[float]] | 单测完成 | P1 |
+| 7.7.3 | 数值一致性验证 | `spec/46` §3 | 与 SentenceTransformer 输出余弦 1.000000，最大绝对差 1.71e-07 | 单测完成 | P1 |
+
 ---

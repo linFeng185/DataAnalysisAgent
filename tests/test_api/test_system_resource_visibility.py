@@ -46,11 +46,11 @@ class TestSystemResourceVisibility:
         assert [item["name"] for item in result["skills"]] == ["private-skill"]
         logger.info("test_regular_user_cannot_list_system_skills 完成")
 
-    # 方法作用：验证普通用户的知识管理查询不会请求 system 过滤组。
+    # 方法作用：验证普通用户默认不请求 system 过滤组，勾选后才只读参与查询。
     # Args: self - pytest 测试类实例；monkeypatch - 依赖补丁。
     # Returns: 无返回值，断言失败时由 pytest 报告。
     async def test_regular_user_cannot_query_system_knowledge(self, monkeypatch) -> None:
-        """system 知识原文不能进入普通用户的管理 API 查询。"""
+        """system 知识默认不进入普通用户的管理 API 查询，仅显式勾选后可见。"""
         logger.debug("test_regular_user_cannot_query_system_knowledge 入口")
         import src.api.auth as auth
         import src.knowledge.retrieval as retrieval
@@ -75,26 +75,44 @@ class TestSystemResourceVisibility:
         monkeypatch.setattr(vector_store, "get_vector_store", lambda: _async_value(store))
         monkeypatch.setattr(
             retrieval,
-            "build_accessible_knowledge_filters",
-            lambda category="": [
-                {"visibility": "system"},
-                {"visibility": "private", "tenant_id": 2, "owner_user_id": 9},
-            ],
+            "build_admin_visible_filters",
+            lambda category="", include_system=False: (
+                ([{"visibility": "system"}] if include_system else [])
+                + [{"visibility": "private", "tenant_id": 2, "owner_user_id": 9}]
+            ),
         )
         monkeypatch.setattr(auth, "get_current_tenant_id", lambda: 2)
         monkeypatch.setattr(auth, "get_current_user_id", lambda: 9)
         monkeypatch.setattr(auth, "get_current_role", lambda: "analyst")
 
-        result = await list_knowledge(
+        # 默认不勾选：system 过滤组不得进入查询。
+        default_result = await list_knowledge(
             category=None,
             search=None,
             knowledge_scope=None,
+            entry_kind="document",
+            include_system=False,
             page=1,
             page_size=20,
         )
 
-        assert result["total"] == 0
+        assert default_result["total"] == 0
         assert requested == ["private"]
+
+        # 显式勾选后：system 参与查询，但删除权仍由授权判定拒绝。
+        requested.clear()
+        system_result = await list_knowledge(
+            category=None,
+            search=None,
+            knowledge_scope=None,
+            entry_kind="document",
+            include_system=True,
+            page=1,
+            page_size=20,
+        )
+
+        assert system_result["total"] == 0
+        assert requested == ["system", "private"]
         logger.info("test_regular_user_cannot_query_system_knowledge 完成")
 
     # 方法作用：验证普通用户的 MCP 列表既不合并运行时 system 配置也不查询数据库 system 行。

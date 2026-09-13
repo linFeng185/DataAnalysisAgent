@@ -105,6 +105,18 @@
 | 6.9.5 | 范围化文档上传 | `src/knowledge/upload_manager.py`、`file_store.py` | 上传范围、数据源绑定、多标签 metadata 与文件 ACL | 单测完成 | P0 |
 | 6.9.6 | 系统知识目录扫描 | `src/knowledge/system_scanner.py` | SYSTEM_KNOWLEDGE_DIRS 启动扫描、checksum 幂等摄取 | 单测完成 | P1 |
 
+### 6.10 知识库管理页治理（spec/44）
+
+| # | 功能 | 文件 | 描述 | 状态 | 优先级 |
+|---|------|------|------|------|--------|
+| 6.10.1 | 管理视角可见范围 | `src/knowledge/retrieval.py` | build_admin_visible_filters：超管含 system，非超管默认仅 tenant+private | 单测完成 | P1 |
+| 6.10.2 | 系统知识只读查看 | `src/api/routes/knowledge.py` | include_system 放宽可见性但不放宽删除权，非超管删除恒 403 | 单测完成 | P1 |
+| 6.10.3 | 来源分层展示 | 同上 | entry_kind：document/introspect/all；长期记忆条目全档位排除 | 单测完成 | P1 |
+| 6.10.4 | 创建人展示 | 同上 | owner_username 批量映射只查当前页；兼容 tenant 范围的 uploaded_by_user_id 键（原为只写不读） | 单测完成 | P2 |
+| 6.10.5 | 删除权限一致性 | 同上 | 列表 can_delete 与删除接口共用 visibility 默认值（失败关闭） | 单测完成 | P1 |
+| 6.10.6 | 列表查询缓存 | `src/knowledge/management_cache.py` | 按身份与筛选的 TTL 缓存，键含 include_system，写操作按租户失效 | 单测完成 | P1 |
+| 6.10.7 | 授权判定组合缓存 | `src/api/routes/knowledge.py` | 同组合条目共用一次判定，实测 6330 条从 2.43s 降至 1.2ms | 单测完成 | P1 |
+
 ### 模块收尾
 
 模块功能点共 57 项，已完成 56 项，待开发 1 项。

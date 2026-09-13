@@ -56,13 +56,13 @@ class TestTenantPolicyMatrix:
         assert policy.requires_authentication(is_probe=is_probe) is required
         logger.info("test_authentication_requirement_matrix 完成")
 
-    # 方法作用：验证租户过滤条件按部署模式和显式查询统一生成。
+    # 方法作用：验证租户过滤条件在任何部署模式下都无条件生成。
     # Args: self - pytest 测试类实例。
     # Returns: 无返回值，断言失败时由 pytest 报告。
     @pytest.mark.parametrize(
         ("multi_tenant", "explicit", "expected"),
         [
-            (False, False, {}),
+            (False, False, {"tenant_id": "4"}),
             (False, True, {"tenant_id": "4"}),
             (True, False, {"tenant_id": "4"}),
             (True, True, {"tenant_id": "4"}),
@@ -74,7 +74,9 @@ class TestTenantPolicyMatrix:
         explicit: bool,
         expected: dict[str, str],
     ) -> None:
-        """单租户旧数据默认不加过滤，显式租户和多租户必须精确过滤。"""
+        """租户过滤与部署模式无关：entries 的 tenant_id 由写入侧无条件写入，
+        读取侧必须对称，否则 multi_tenant 默认 False（fail-open）时同一向量库里
+        多租户条目会互相可见。单租户下该过滤恒真。"""
         logger.debug("test_tenant_filter_matrix 入口")
         from src.security.tenant_policy import TenantPolicy
 

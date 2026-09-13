@@ -41,3 +41,7 @@
 | [41-report-visual-templates.md](41-report-visual-templates.md) | 报表视觉模板体系设计（配色 · 字体 · 密度） | 动态 |
 | [42-report-divergent-analysis.md](42-report-divergent-analysis.md) | 报表智能发散分析设计（扩单元 · 深挖 · 关联 · 基准） | 动态 |
 | [43-report-run-statistics.md](43-report-run-statistics.md) | 报表运行计数统计设计（LLM 调用 · SQL 执行 · 成败） | 动态 |
+| [44-knowledge-governance-and-memory-ui.md](44-knowledge-governance-and-memory-ui.md) | 知识库治理、上传交互与长期记忆管理设计 | 动态 |
+| [45-knowledge-governance-and-memory-ui-implementation-plan.md](45-knowledge-governance-and-memory-ui-implementation-plan.md) | 知识库治理与长期记忆管理实施计划（8 个 Task） | 动态 |
+| [46-embedding-backend-onnx.md](46-embedding-backend-onnx.md) | 嵌入后端切换 ONNX Runtime（消除 transformers 启动延迟） | 动态 |
+| [47-configurable-embedding-model.md](47-configurable-embedding-model.md) | 可替换嵌入模型与自动重编码（模型指纹 collection · 后台异步重建） | 动态 |

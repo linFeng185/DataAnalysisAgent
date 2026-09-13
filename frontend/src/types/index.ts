@@ -323,6 +323,7 @@ export interface KnowledgeEntry {
   tags: string[];
   tenant_id?: number | null;
   owner_user_id?: number | null;
+  owner_username?: string;
   can_delete: boolean;
   is_builtin: boolean;
 }
@@ -337,6 +338,7 @@ export interface KnowledgeDoc {
   tag_ids: number[];
   tenant_id?: number | null;
   owner_user_id?: number | null;
+  owner_username?: string;
   can_delete: boolean;
   is_builtin: boolean;
 }

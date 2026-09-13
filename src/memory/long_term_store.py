@@ -276,6 +276,117 @@ class LongTermMemoryStore:
                 logger.warning("PG 偏好查询失败，降级 VectorStore", error=str(exc), exc_info=True)
         return await self._get_prefs_from_vector(current_identity)
 
+    # 方法作用：分页列出当前用户 private 范围的长期记忆。
+    # Args: memory_type - 可选类型过滤；search - 内容关键词；page/page_size - 分页。
+    # Returns: (记忆字典列表, 总数)；数据库不可用时返回 ([], 0)。
+    async def list_memories(
+        self,
+        memory_type: str = "",
+        search: str = "",
+        page: int = 1,
+        page_size: int = 20,
+    ) -> tuple[list[dict[str, Any]], int]:
+        """列表走 PostgreSQL 权威表，不访问向量库。"""
+        logger.debug(
+            "长期记忆列表入口",
+            memory_type=memory_type,
+            has_search=bool(search),
+            page=page,
+            page_size=page_size,
+        )
+        identity = self._resolve_identity(None)
+        offset = max(page - 1, 0) * page_size
+        # 归属条件恒定写死，不接受任何外部参数覆盖。
+        conditions = ["tenant_id = $1", "owner_user_id = $2", "visibility = 'private'"]
+        params: list[Any] = [identity.tenant_id, identity.user_id]
+        if memory_type:
+            params.append(memory_type)
+            conditions.append(f"memory_type = ${len(params)}")
+        if search:
+            params.append(f"%{search}%")
+            conditions.append(f"content ILIKE ${len(params)}")
+        where = " AND ".join(conditions)
+        limit_idx = len(params) + 1
+        offset_idx = len(params) + 2
+        try:
+            async with self._pg_identity_connection(identity) as conn:
+                if conn is None:
+                    logger.info("长期记忆列表回退", reason="PostgreSQL 未配置")
+                    return [], 0
+                total = await conn.fetchval(
+                    f"SELECT count(*) FROM long_term_memories WHERE {where}",
+                    *params,
+                )
+                rows = await conn.fetch(
+                    "SELECT id, memory_type, scope, content, payload, access_count, "
+                    "confidence, ttl_days, created_at, last_accessed_at "
+                    f"FROM long_term_memories WHERE {where} "
+                    f"ORDER BY created_at DESC LIMIT ${limit_idx} OFFSET ${offset_idx}",
+                    *params, page_size, offset,
+                )
+            items = [dict(row) for row in rows]
+            logger.info("长期记忆列表完成", total=int(total or 0), returned=len(items))
+            return items, int(total or 0)
+        except Exception as exc:
+            logger.error("长期记忆列表失败", error=str(exc), exc_info=True)
+            return [], 0
+
+    # 方法作用：按 ID 读取当前用户的一条长期记忆。
+    # Args: memory_id - 记忆 ID。
+    # Returns: 记忆字典；不存在或非本人时返回 None。
+    async def get_memory(self, memory_id: str) -> dict[str, Any] | None:
+        """按 ID 直查，归属校验失败一律返回 None。"""
+        logger.debug("长期记忆详情入口", memory_id=memory_id)
+        identity = self._resolve_identity(None)
+        try:
+            async with self._pg_identity_connection(identity) as conn:
+                if conn is None:
+                    logger.info("长期记忆详情回退", reason="PostgreSQL 未配置")
+                    return None
+                row = await conn.fetchrow(
+                    "SELECT id, memory_type, scope, content, payload, access_count, "
+                    "confidence, ttl_days, created_at, last_accessed_at "
+                    "FROM long_term_memories WHERE id = $1 "
+                    "AND tenant_id = $2 AND owner_user_id = $3 AND visibility = 'private'",
+                    memory_id, identity.tenant_id, identity.user_id,
+                )
+            if row is None:
+                logger.info("长期记忆详情未命中", memory_id=memory_id)
+                return None
+            logger.info("长期记忆详情完成", memory_id=memory_id)
+            return dict(row)
+        except Exception as exc:
+            logger.error("长期记忆详情失败", memory_id=memory_id, error=str(exc), exc_info=True)
+            return None
+
+    # 方法作用：删除当前用户的一条长期记忆，并保持向量库一致。
+    # Args: memory_id - 记忆 ID。
+    # Returns: 删除成功返回 True；不属于当前用户或不存在返回 False。
+    async def delete_memory(self, memory_id: str) -> bool:
+        """PG 删除后走既有补偿队列清理向量条目。"""
+        logger.debug("长期记忆删除入口", memory_id=memory_id)
+        identity = self._resolve_identity(None)
+        try:
+            async with self._pg_identity_connection(identity) as conn:
+                if conn is None:
+                    logger.info("长期记忆删除回退", reason="PostgreSQL 未配置")
+                    return False
+                deleted = await conn.fetchval(
+                    "DELETE FROM long_term_memories WHERE id = $1 "
+                    "AND tenant_id = $2 AND owner_user_id = $3 AND visibility = 'private' "
+                    "RETURNING id",
+                    memory_id, identity.tenant_id, identity.user_id,
+                )
+            if deleted is None:
+                logger.warning("长期记忆删除未命中", memory_id=memory_id)
+                return False
+            await self._delete_vector_or_queue([memory_id])
+            logger.info("长期记忆删除完成", memory_id=memory_id)
+            return True
+        except Exception as exc:
+            logger.error("长期记忆删除失败", memory_id=memory_id, error=str(exc), exc_info=True)
+            return False
+
     # 方法作用：兼容旧测试入口，从 VectorStore 查询指定用户偏好。
     # Args: self - 当前 Store；user_id - 用户标识。
     # Returns: 偏好映射，存储故障时为空字典。

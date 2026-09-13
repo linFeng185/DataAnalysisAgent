@@ -62,6 +62,14 @@ from src.api.routes.knowledge import (
     router as knowledge_router,
 )
 from src.api.routes.llm_admin import router as llm_admin_router
+from src.api.routes.memory import (
+    delete_memory,
+    get_memory,
+    list_memories,
+)
+from src.api.routes.memory import (
+    router as memory_router,
+)
 from src.api.routes.management import (
     forecast_asset,
     health,
@@ -147,6 +155,7 @@ for domain_router in (
     visualization_router,
     knowledge_router,
     llm_admin_router,
+    memory_router,
     grafana_router,
     optimization_router,
     report_workbench_router,

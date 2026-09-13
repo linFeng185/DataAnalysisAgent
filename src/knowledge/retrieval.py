@@ -114,6 +114,50 @@ def build_accessible_knowledge_filters(
     return filters
 
 
+# 方法作用：构造知识库管理页的可见范围过滤，超管与显式勾选时包含 system。
+# Args: category - 可选分类下推条件；include_system - 非超管是否放宽只读查看系统知识。
+# Returns: 管理页可用的 metadata 过滤条件组列表。
+def build_admin_visible_filters(
+    category: str = "",
+    *,
+    include_system: bool = False,
+) -> list[dict[str, Any]]:
+    """管理页可见范围：system（条件性）+ 本租户 tenant + 本人 private。"""
+    logger.debug("构造管理页可见过滤入口", category=category, include_system=include_system)
+    from src.api.auth import (
+        get_current_tenant_id,
+        get_current_user_id,
+        is_platform_super_admin,
+    )
+
+    policy = get_tenant_policy()
+    current_tenant_id = get_current_tenant_id()
+    current_user_id = get_current_user_id()
+    shared: dict[str, Any] = {}
+    if category:
+        shared["category"] = category
+
+    filters: list[dict[str, Any]] = []
+    # 超管默认即含 system；非超管仅在显式勾选时放宽为只读可见。
+    if is_platform_super_admin() or include_system:
+        filters.append({"visibility": "system", **shared})
+
+    tenant_filter: dict[str, Any] = {"visibility": "tenant", **shared}
+    private_filter: dict[str, Any] = {"visibility": "private", **shared}
+    if policy.tenant_filter(current_tenant_id, explicit=False):
+        tenant_filter["tenant_id"] = current_tenant_id
+        private_filter["tenant_id"] = current_tenant_id
+    private_filter["owner_user_id"] = current_user_id
+    filters.extend([tenant_filter, private_filter])
+    logger.debug(
+        "构造管理页可见过滤完成",
+        scope_count=len(filters),
+        tenant_id=current_tenant_id,
+        user_id=current_user_id,
+    )
+    return filters
+
+
 # 将 VectorStore 搜索结果转换成带来源定位的 Evidence。
 # Args: result - VectorSearchResult；default_version - 缺少元数据时的版本回退值。
 # Returns: 可供分析产物和 API 返回的 Evidence。

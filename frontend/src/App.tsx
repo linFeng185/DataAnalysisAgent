@@ -7,7 +7,7 @@ import {
   CheckCircleOutlined, LoadingOutlined,
   ThunderboltOutlined, ReadOutlined, ApiOutlined,
   SafetyCertificateOutlined, LogoutOutlined, UserOutlined,
-  MenuOutlined, ScheduleOutlined,
+  MenuOutlined, ScheduleOutlined, BulbOutlined,
 } from '@ant-design/icons';
 import { AuthProvider } from './hooks/AuthContext';
 import { useAuth } from './hooks/AuthContext';
@@ -32,6 +32,7 @@ const SchemaPage = lazy(() => import('./pages/SchemaPage'));
 const HistoryPage = lazy(() => import('./pages/HistoryPage'));
 const SkillsPage = lazy(() => import('./pages/SkillsPage'));
 const KnowledgePage = lazy(() => import('./pages/KnowledgePage'));
+const MemoryPage = lazy(() => import('./pages/MemoryPage'));
 const MetricsPage = lazy(() => import('./pages/MetricsPage'));
 const McpPage = lazy(() => import('./pages/McpPage'));
 const AdminPage = lazy(() => import('./pages/AdminPage'));
@@ -143,6 +144,7 @@ function AppContent() {
     user?.role !== 'viewer'
       ? { key: 'knowledge', icon: <ReadOutlined />, label: <NavLink to="/knowledge">{t("知识库")}</NavLink> }
       : null,
+    { key: 'memory', icon: <BulbOutlined />, label: <NavLink to="/memory">{t("我的记忆")}</NavLink> },
     reportMenuAllowed === true && user?.role !== 'super_admin'
       ? { key: 'report-workbench', icon: <ScheduleOutlined />, label: <NavLink to="/report-workbench">{t("报表工作台")}</NavLink> }
       : null,
@@ -232,6 +234,7 @@ function AppContent() {
                 <Route path="/history" element={<HistoryPage />} />
                 <Route path="/skills" element={<SkillsPage />} />
                 <Route path="/knowledge" element={<KnowledgePage />} />
+                <Route path="/memory" element={<MemoryPage />} />
                 <Route path="/metric-catalog" element={<MetricsPage />} />
                 <Route path="/report-workbench" element={<ReportRoute />} />
                 <Route path="/reports/:reportId" element={<ReportViewerPage />} />

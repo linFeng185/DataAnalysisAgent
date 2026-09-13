@@ -110,12 +110,20 @@ class TenantPolicy:
         if tenant_id < 0:
             logger.error("生成租户过滤失败", tenant_id=tenant_id)
             raise ValueError("tenant_id 不能为负数")
-        result = (
-            {"tenant_id": str(tenant_id)}
-            if self.multi_tenant or explicit
-            else {}
+        # 无条件返回租户过滤：条目 metadata 的 tenant_id 由写入侧无条件写入，
+        # 读取侧必须对称。否则 multi_tenant 默认 False（fail-open）时，
+        # 同一个向量库里多租户的历史条目会互相可见——实测不带 tenant_id 过滤时
+        # 租户 1 与租户 3 的表条目会同时被召回。
+        # 单租户部署下所有条目租户相同，该过滤恒真，不改变行为。
+        # visibility=system 的共享档不经过本方法，其跨租户语义不受影响。
+        result = {"tenant_id": str(tenant_id)}
+        logger.debug(
+            "生成租户过滤完成",
+            applied=True,
+            tenant_id=tenant_id,
+            explicit=explicit,
+            multi_tenant=self.multi_tenant,
         )
-        logger.debug("生成租户过滤完成", applied=bool(result), tenant_id=tenant_id)
         return result
 
     # 方法作用：校验请求身份是否满足当前部署模式的最小安全要求。

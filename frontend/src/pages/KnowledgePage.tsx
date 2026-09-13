@@ -1,8 +1,9 @@
 import { t, useLanguage } from '../i18n';
 import { useState, useEffect, useRef, useMemo, type ReactNode } from 'react';
-import { Card, Table, Tag, Tabs, Typography, Empty, message, Input, Button, Space, Select, InputNumber, Modal, notification, Popconfirm, Descriptions, Segmented, Switch, Tooltip } from 'antd';
-import { UploadOutlined, FileTextOutlined, DatabaseOutlined, LoadingOutlined, DeleteOutlined, GlobalOutlined, TeamOutlined, UserOutlined, TagsOutlined, PlusOutlined } from '@ant-design/icons';
+import { Card, Table, Tag, Tabs, Typography, Empty, message, Input, Button, Space, Select, InputNumber, Modal, notification, Popconfirm, Descriptions, Segmented, Switch, Tooltip, Slider, Checkbox } from 'antd';
+import { UploadOutlined, FileTextOutlined, DatabaseOutlined, LoadingOutlined, DeleteOutlined, GlobalOutlined, TeamOutlined, UserOutlined, TagsOutlined, PlusOutlined, CheckOutlined } from '@ant-design/icons';
 import { get, post, patch } from '../api/client';
+import { fetchDatasourceCatalog } from '../api/datasourceCatalog';
 import type { KnowledgeEntry, KnowledgeDoc, KnowledgeScope, KnowledgeTag } from '../types';
 import { useAuth } from '../hooks/AuthContext';
 import dayjs from 'dayjs';
@@ -42,6 +43,9 @@ export default function KnowledgePage() {
   const [search, setSearch] = useState('');
   const [catFilter, setCatFilter] = useState<string | undefined>();
   const [scopeFilter, setScopeFilter] = useState<'all' | KnowledgeScope>('all');
+  const [entryKind, setEntryKind] = useState<'document' | 'introspect' | 'all'>('document');
+  // 系统知识默认隐藏，勾选后仅只读查看，且状态不持久化。
+  const [includeSystem, setIncludeSystem] = useState(false);
   const [loading, setLoading] = useState(false);
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(20);
@@ -52,6 +56,8 @@ export default function KnowledgePage() {
     scope: KnowledgeScope; tagIds: number[]; datasource: string;
   }>({ strategy: 'auto', chunkSize: 800, chunkOverlap: 100, category: '', scope: role === 'super_admin' ? 'system' : 'private', tagIds: [], datasource: '' });
   const [cfgOpen, setCfgOpen] = useState(false);
+  const [datasourceOptions, setDatasourceOptions] = useState<{ value: string; label: string }[]>([]);
+  const [tagPanelOpen, setTagPanelOpen] = useState(false);
   const [pendingFiles, setPendingFiles] = useState<File[]>([]);
   const [taskIds, setTaskIds] = useState<string[]>([]);
   const [taskStates, setTaskStates] = useState<Record<string, { status: string; chunks: number; error: string }>>({});
@@ -70,6 +76,19 @@ export default function KnowledgePage() {
   const [globalTagGroup, setGlobalTagGroup] = useState('custom');
   const fileRef = useRef<HTMLInputElement>(null);
   const tagSearchTimer = useRef<number | null>(null);
+
+  // 上传配置弹窗打开时才拉取数据源候选，避免页面加载时的额外请求。
+  useEffect(() => {
+    if (!cfgOpen) return;
+    let cancelled = false;
+    void (async () => {
+      try {
+        const items = await fetchDatasourceCatalog();
+        if (!cancelled) setDatasourceOptions(items.map(item => ({ value: item.name, label: item.name })));
+      } catch { if (!cancelled) message.error(t("无法加载数据源列表")); }
+    })();
+    return () => { cancelled = true; };
+  }, [cfgOpen]);
 
   const uploadScopeOptions = useMemo(() => {
     const scopes: KnowledgeScope[] = role === 'super_admin'
@@ -111,6 +130,8 @@ export default function KnowledgePage() {
       if (catFilter) params.set('category', catFilter);
       const selectedScope = scope ?? scopeFilter;
       if (selectedScope !== 'all') params.set('knowledge_scope', selectedScope);
+      params.set('entry_kind', entryKind);
+      if (includeSystem) params.set('include_system', 'true');
       params.set('page', String(curPage));
       params.set('page_size', String(curSize));
       const data = await get<{ entries: KnowledgeEntry[]; total: number; page: number; page_size: number }>(`/knowledge?${params.toString()}`);
@@ -122,7 +143,8 @@ export default function KnowledgePage() {
 
   const loadDocs = async () => {
     try {
-      const data = await get<{ docs: KnowledgeDoc[] }>('/knowledge/docs');
+      const data = await get<{ docs: KnowledgeDoc[] }>(
+        includeSystem ? '/knowledge/docs?include_system=true' : '/knowledge/docs');
       setDocs(data.docs || []);
     } catch { /* empty */ }
   };
@@ -303,6 +325,17 @@ export default function KnowledgePage() {
         <div>
           <Space wrap style={{ marginBottom: 12 }}>
             {scopeFilterControl}
+            <Segmented value={entryKind}
+              onChange={value => { setEntryKind(value as 'document' | 'introspect' | 'all'); setPage(1); void loadEntries(1); }}
+              options={[
+                { value: 'document', label: t("文档知识") },
+                { value: 'introspect', label: t("Schema 内省") },
+                { value: 'all', label: t("全部") },
+              ]} />
+            <Checkbox checked={includeSystem}
+              onChange={event => { setIncludeSystem(event.target.checked); setPage(1); void loadEntries(1); }}>
+              {t("显示系统知识")}
+            </Checkbox>
             <Select style={{ width: 130 }} value={catFilter} onChange={v => { setCatFilter(v); setPage(1); loadEntries(1); }}
               allowClear placeholder={t("全部类别")} options={allCategories.map(c => ({ value: c, label: c }))} />
             <Input.Search placeholder={t("搜索内容")} value={search}
@@ -319,6 +352,8 @@ export default function KnowledgePage() {
                   const meta = SCOPE_META[scope] || SCOPE_META.private;
                   return <Tag color={meta.color} icon={meta.icon}>{meta.label}</Tag>;
                 } },
+              { title: t("创建人"), dataIndex: 'owner_username', width: 100,
+                render: (value: string) => value || t("系统") },
               { title: t("类别"), dataIndex: 'category', width: 90,
                 render: v => v ? <Tag color={catColorMap[v] || 'default'}>{v}</Tag> : '-' },
               { title: t("源文件"), dataIndex: 'source_file', width: 140, ellipsis: true },
@@ -335,7 +370,12 @@ export default function KnowledgePage() {
                 } },
               { title: '', key: 'actions', width: 36,
                 render: (_: unknown, r: KnowledgeEntry) => (
-                  !r.can_delete ? (
+                  r.scope === 'system' || r.source === 'auto_introspect' ? (
+                    <Tooltip title={t("随表结构自动维护")}>
+                      <Button size="small" danger disabled icon={<DeleteOutlined />}
+                        onClick={e => e.stopPropagation()} />
+                    </Tooltip>
+                  ) : !r.can_delete ? (
                     <Tooltip title={t("无删除权限")}>
                       <Button size="small" danger disabled icon={<DeleteOutlined />}
                         onClick={e => e.stopPropagation()} />
@@ -384,6 +424,8 @@ export default function KnowledgePage() {
                   const meta = SCOPE_META[scope] || SCOPE_META.private;
                   return <Tag color={meta.color} icon={meta.icon}>{meta.label}</Tag>;
                 } },
+              { title: t("创建人"), dataIndex: 'owner_username', width: 100,
+                render: (value: string) => value || t("系统") },
               { title: t("标签"), dataIndex: 'tag_ids', width: 160,
                 render: (ids: number[]) => {
                   const names = (ids || []).map(id => tags.find(tag => tag.id === id)?.name).filter(Boolean);
@@ -472,6 +514,7 @@ export default function KnowledgePage() {
               </Tag>
             </Descriptions.Item>
             <Descriptions.Item label={t("类别")}><Tag color={catColorMap[entryDetail.category] || 'default'}>{entryDetail.category || '—'}</Tag></Descriptions.Item>
+            <Descriptions.Item label={t("创建人")}>{entryDetail.owner_username || t("系统")}</Descriptions.Item>
             <Descriptions.Item label={t("源文件")}>{entryDetail.source_file || '—'}</Descriptions.Item>
             <Descriptions.Item label={t("来源")}><Tag color={entryDetail.source === 'user_upload' ? 'orange' : 'green'}>{entryDetail.source || '—'}</Tag></Descriptions.Item>
             <Descriptions.Item label={t("标签")}>
@@ -498,6 +541,7 @@ export default function KnowledgePage() {
                   {SCOPE_META[docDetail.scope]?.label || docDetail.scope}
                 </Tag>
               </Descriptions.Item>
+              <Descriptions.Item label={t("创建人")}>{docDetail.owner_username || t("系统")}</Descriptions.Item>
               <Descriptions.Item label={t("大小")}>{(docDetail.size / 1024).toFixed(1)} KB</Descriptions.Item>
               <Descriptions.Item label={t("修改时间")}>{docDetail.modified ? dayjs.unix(docDetail.modified).format('YYYY-MM-DD HH:mm') : '—'}</Descriptions.Item>
               <Descriptions.Item label={t("标签")}>
@@ -549,25 +593,58 @@ export default function KnowledgePage() {
                 )),
               }))} /></div>
           <div><Typography.Text strong>{t("数据源")}</Typography.Text>
-            <Input placeholder={t("可选数据源名称")} value={uploadCfg.datasource}
-              onChange={event => setUploadCfg(current => ({ ...current, datasource: event.target.value }))} /></div>
+            <Select style={{ width: '100%' }} value={uploadCfg.datasource || undefined}
+              options={datasourceOptions} showSearch allowClear
+              placeholder={t("可选：绑定数据源")}
+              filterOption={(input, option) => String(option?.value || '').toLowerCase().includes(input.toLowerCase())}
+              onChange={value => setUploadCfg(current => ({ ...current, datasource: value || '' }))} /></div>
           <div><Typography.Text strong>{t("标签")}</Typography.Text>
             <Select mode="multiple" style={{ width: '100%' }} value={uploadCfg.tagIds}
+              open={tagPanelOpen} onOpenChange={setTagPanelOpen}
               loading={tagLoading} showSearch filterOption={false} onSearch={handleTagSearch}
               onFocus={() => { void loadTags(); }}
               onChange={(tagIds: number[]) => setUploadCfg(current => ({ ...current, tagIds }))}
-              options={selectableTags.map(tag => ({
-                value: tag.id,
-                label: `${tag.name}${tag.scope === 'private' ? t(" · 个人") : ''}`,
-              }))} placeholder={t("搜索并选择标签")} /></div>
-          <Space.Compact style={{ width: '100%' }}>
-            <Input value={personalTagName} maxLength={128} placeholder={t("新建个人标签")}
-              disabled={!user}
-              onChange={event => setPersonalTagName(event.target.value)}
-              onPressEnter={() => { void createPersonalTag(); }} />
-            <Button icon={<PlusOutlined />} disabled={!user || !personalTagName.trim()}
-              onClick={() => { void createPersonalTag(); }}>{t("新建")}</Button>
-          </Space.Compact>
+              options={selectableTags.map(tag => ({ value: tag.id, label: tag.name }))}
+              placeholder={t("搜索并选择标签")}
+              dropdownRender={() => (
+                <div style={{ padding: 8, maxWidth: 420 }}>
+                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, maxHeight: 240, overflow: 'auto' }}>
+                    {selectableTags.map(tag => {
+                      const checked = uploadCfg.tagIds.includes(tag.id);
+                      return (
+                        <div key={tag.id} role="button" tabIndex={0}
+                          onClick={() => setUploadCfg(current => ({
+                            ...current,
+                            tagIds: checked
+                              ? current.tagIds.filter(id => id !== tag.id)
+                              : [...current.tagIds, tag.id],
+                          }))}
+                          onKeyDown={event => { if (event.key === 'Enter') event.currentTarget.click(); }}
+                          style={{
+                            position: 'relative', cursor: 'pointer', userSelect: 'none',
+                            padding: '4px 10px', borderRadius: 6, fontSize: 12,
+                            border: `1px solid ${checked ? '#91caff' : '#d9d9d9'}`,
+                            background: checked ? '#e6f4ff' : '#fff',
+                            color: checked ? '#1677ff' : '#333',
+                          }}>
+                          {tag.name}{tag.scope === 'private' ? t(" · 个人") : ''}
+                          {checked && (
+                            <CheckOutlined style={{ position: 'absolute', right: 2, bottom: 2, fontSize: 9 }} />
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                  <Space.Compact style={{ width: '100%', marginTop: 8 }}>
+                    <Input value={personalTagName} maxLength={128} placeholder={t("新建个人标签")}
+                      disabled={!user}
+                      onChange={event => setPersonalTagName(event.target.value)}
+                      onPressEnter={() => { void createPersonalTag(); }} />
+                    <Button icon={<PlusOutlined />} disabled={!user || !personalTagName.trim()}
+                      onClick={() => { void createPersonalTag(); }}>{t("新建")}</Button>
+                  </Space.Compact>
+                </div>
+              )} /></div>
           <div><Typography.Text strong>{t("知识类别")}</Typography.Text>
             <Input placeholder={t("如 sales_metrics")} value={uploadCfg.category}
               onChange={e => setUploadCfg(p => ({ ...p, category: e.target.value }))} /></div>
@@ -585,11 +662,26 @@ export default function KnowledgePage() {
               )}
             /></div>
           <div><Typography.Text strong>{t("块大小")}</Typography.Text>
-            <InputNumber style={{ width: '100%' }} min={200} max={4000} value={uploadCfg.chunkSize}
-              onChange={v => setUploadCfg(p => ({ ...p, chunkSize: v || 800 }))} /></div>
+            <Space style={{ width: '100%' }}>
+              <Slider style={{ flex: 1 }} min={200} max={4000} step={100} value={uploadCfg.chunkSize}
+                onChange={value => setUploadCfg(p => {
+                  const maxOverlap = Math.min(500, value - 1);
+                  return { ...p, chunkSize: value, chunkOverlap: Math.min(p.chunkOverlap, maxOverlap) };
+                })} />
+              <InputNumber min={200} max={4000} step={100} style={{ width: 96 }} value={uploadCfg.chunkSize}
+                onChange={value => setUploadCfg(p => {
+                  const chunkSize = value || 800;
+                  const maxOverlap = Math.min(500, chunkSize - 1);
+                  return { ...p, chunkSize, chunkOverlap: Math.min(p.chunkOverlap, maxOverlap) };
+                })} /></Space></div>
           <div><Typography.Text strong>{t("重叠")}</Typography.Text>
-            <InputNumber style={{ width: '100%' }} min={0} max={500} value={uploadCfg.chunkOverlap}
-              onChange={v => setUploadCfg(p => ({ ...p, chunkOverlap: v || 100 }))} /></div>
+            <Space style={{ width: '100%' }}>
+              <Slider style={{ flex: 1 }} min={0} max={Math.min(500, uploadCfg.chunkSize - 1)} step={10}
+                value={uploadCfg.chunkOverlap}
+                onChange={value => setUploadCfg(p => ({ ...p, chunkOverlap: value }))} />
+              <InputNumber min={0} max={Math.min(500, uploadCfg.chunkSize - 1)} step={10} style={{ width: 96 }}
+                value={uploadCfg.chunkOverlap}
+                onChange={value => setUploadCfg(p => ({ ...p, chunkOverlap: value || 0 }))} /></Space></div>
         </Space>
       </Modal>
     </div>

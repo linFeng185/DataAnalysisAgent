@@ -101,103 +101,280 @@ def _knowledge_where(extra: dict | None = None, owner_only: bool = False) -> dic
     return {"$and": conditions}
 
 
+# 方法作用：把来源档位编译为 metadata 过滤条件，长期记忆条目在所有档位下排除。
+# Args: entry_kind - document / introspect / all。
+# Returns: 可直接并入 metadata 过滤字典的条件。
+def _entry_kind_filters(entry_kind: str) -> dict[str, str]:
+    """来源分层：document 排除内省，introspect 只取内省，all 保留其余。"""
+    logger.debug("知识条目来源档位解析入口", entry_kind=entry_kind)
+    if entry_kind == "document":
+        result = {"not:source": "auto_introspect", "not:resource_kind": "long_term_memory"}
+    elif entry_kind == "introspect":
+        result = {"source": "auto_introspect", "not:resource_kind": "long_term_memory"}
+    elif entry_kind == "all":
+        result = {"not:resource_kind": "long_term_memory"}
+    else:
+        logger.warning("知识条目来源档位无效", entry_kind=entry_kind)
+        raise ValueError(f"不支持的来源档位: {entry_kind}")
+    logger.debug("知识条目来源档位解析完成", entry_kind=entry_kind, condition_count=len(result))
+    return result
+
+
+# 方法作用：解析条目 metadata 中的创建人 ID，兼容 tenant 范围的 uploaded_by_user_id 键。
+# Args: meta - 条目的 metadata 字典。
+# Returns: 创建人用户 ID；无主或缺失时返回 None 或 0。
+def _resolve_owner_user_id(meta: dict) -> object:
+    """tenant 范围条目把上传者写在 uploaded_by_user_id，需回退读取。"""
+    logger.debug("条目创建人 ID 解析入口", has_owner_key="owner_user_id" in meta)
+    owner_user_id = meta.get("owner_user_id")
+    if owner_user_id in (None, 0):
+        owner_user_id = meta.get("uploaded_by_user_id", owner_user_id)
+    logger.debug("条目创建人 ID 解析完成", resolved=owner_user_id)
+    return owner_user_id
+
+
+# 方法作用：把 owner_user_id 映射为用户名，缺失或无主时返回空串。
+# Args: owner_user_id - 条目 metadata 中的所有者 ID；usernames - 批量查询得到的 ID 到用户名映射。
+# Returns: 用户名；无主或用户不存在时返回空字符串。
+def _normalize_owner_username(owner_user_id: object, usernames: dict[int, str]) -> str:
+    """创建人展示名，避免逐条查询用户表。"""
+    logger.debug("创建人映射入口", owner_user_id=owner_user_id)
+    if owner_user_id in (None, "", 0):
+        logger.debug("创建人映射完成", owner_username="", reason="无主")
+        return ""
+    try:
+        result = usernames.get(int(owner_user_id), "")
+        logger.debug("创建人映射完成", owner_user_id=owner_user_id, matched=bool(result))
+        return result
+    except (TypeError, ValueError) as exc:
+        logger.warning("创建人映射失败", owner_user_id=owner_user_id, error=str(exc))
+        return ""
+
+
+# 方法作用：批量加载当前页涉及的创建人用户名，避免逐条查询。
+# Args: user_ids - 当前页出现过的 owner_user_id 集合。
+# Returns: ID 到用户名的映射；数据库不可用时返回空映射。
+async def _load_usernames(user_ids: list) -> dict[int, str]:
+    """一次 SQL 取回当前页创建人，禁止在循环内查询。"""
+    logger.debug("批量加载创建人入口", user_count=len(user_ids))
+    from src.api.auth import get_current_role, get_current_tenant_id, get_current_user_id
+    from src.knowledge.governance import normalize_role
+    from src.memory.pg_pool import pg_connection
+
+    targets: list[int] = []
+    for uid in user_ids:
+        if uid in (None, "", 0):
+            continue
+        try:
+            targets.append(int(uid))
+        except (TypeError, ValueError):
+            logger.warning("创建人 ID 非法，已跳过", owner_user_id=uid)
+    targets = sorted(set(targets))
+    if not targets:
+        logger.info("批量加载创建人完成", source="skipped", count=0)
+        return {}
+    try:
+        async with pg_connection(
+            tenant_id=get_current_tenant_id(),
+            user_id=get_current_user_id(),
+            role=normalize_role(get_current_role()),
+        ) as conn:
+            if conn is None:
+                logger.info("批量加载创建人回退", reason="PostgreSQL 未配置")
+                return {}
+            rows = await conn.fetch(
+                "SELECT id, username FROM users WHERE id = ANY($1::int[])",
+                targets,
+            )
+        result = {int(row["id"]): str(row["username"]) for row in rows}
+        logger.info("批量加载创建人完成", source="postgres", count=len(result))
+        return result
+    except Exception as exc:
+        logger.error("批量加载创建人失败", error=str(exc), exc_info=True)
+        return {}
+
+
+# 方法作用：按可见范围与属主组合批量判定删除权限，同组合只判定一次。
+# Args: entries - 待判定的条目列表，原地补充 can_delete；
+#       role/current_tenant_id/current_user_id - 当前身份；
+#       can_manage - 授权判定函数，默认取 governance 实现。
+# Returns: 无返回值。
+def _judge_delete_permission(
+    entries: list,
+    *,
+    role: str,
+    current_tenant_id: int,
+    current_user_id: int,
+    can_manage: object = None,
+) -> None:
+    """组合缓存消除逐条授权开销，六千条降至个位数次调用。"""
+    logger.debug("条目删除权限判定入口", entry_count=len(entries), role=role)
+    if can_manage is None:
+        from src.knowledge.governance import can_manage_knowledge_resource
+        can_manage = can_manage_knowledge_resource
+    cache: dict[tuple, bool] = {}
+    for entry in entries:
+        # 内省、目录扫描与系统写入条目一律不可通过 API 删除。
+        if entry.get("source") != "user_upload":
+            entry["can_delete"] = False
+            continue
+        key = (entry["scope"], entry.get("tenant_id"), entry.get("owner_user_id"))
+        allowed = cache.get(key)
+        if allowed is None:
+            allowed = bool(can_manage(
+                entry["scope"],
+                role=role,
+                current_tenant_id=current_tenant_id,
+                resource_tenant_id=entry.get("tenant_id"),
+                current_user_id=current_user_id,
+                owner_user_id=entry.get("owner_user_id"),
+            ))
+            cache[key] = allowed
+        entry["can_delete"] = allowed
+    # 循环内进度按项目规则只用 debug。
+    logger.debug("条目删除权限判定完成", entry_count=len(entries), combination_count=len(cache))
+
+
+# 方法作用：为当前页条目补齐删除权限与创建人用户名。
+# Args: entries - 当前页条目列表，原地补充 can_delete 与 owner_username 字段。
+# Returns: 无返回值。
+async def _decorate_entries(entries: list) -> None:
+    """只对当前页执行授权判定与创建人映射，避免全量逐条开销。"""
+    logger.debug("条目权限与创建人装饰入口", entry_count=len(entries))
+    if not entries:
+        logger.info("条目权限与创建人装饰完成", entry_count=0)
+        return
+    from src.api.auth import get_current_role, get_current_tenant_id, get_current_user_id
+
+    role = get_current_role()
+    current_tenant_id = get_current_tenant_id()
+    current_user_id = get_current_user_id()
+    _judge_delete_permission(
+        entries,
+        role=role,
+        current_tenant_id=current_tenant_id,
+        current_user_id=current_user_id,
+    )
+    usernames = await _load_usernames([entry.get("owner_user_id") for entry in entries])
+    for entry in entries:
+        entry["owner_username"] = _normalize_owner_username(
+            entry.get("owner_user_id"), usernames,
+        )
+    logger.info("条目权限与创建人装饰完成", entry_count=len(entries), owner_count=len(usernames))
+
+
 @router.get("/knowledge")
-# 方法作用：按当前身份、范围和分类分页列出知识条目。
-# Args: category - 分类；search - 搜索词；knowledge_scope - 范围；page/page_size - 分页参数。
+# 方法作用：按当前身份、范围、来源档位和分类分页列出知识条目。
+# Args: category - 分类；search - 搜索词；knowledge_scope - 范围；
+#       entry_kind - 来源档位（document/introspect/all）；include_system - 是否只读查看系统知识；
+#       page/page_size - 分页参数。
 # Returns: 知识条目分页结果；存储失败抛出 HTTP 500。
 async def list_knowledge(
     category: str | None = Query(default=None),
     search: str | None = Query(default=None),
     knowledge_scope: str | None = None,
+    entry_kind: str = Query(default="document"),
+    include_system: bool = Query(default=False),
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=20, ge=10, le=100),
 ):
-    """按当前身份列出系统、租户和个人知识条目。"""
+    """按当前身份、范围与来源档位列出可见知识条目。"""
     logger.debug(
         "知识库列表入口",
         category=category or "",
         search=search or "",
         knowledge_scope=knowledge_scope or "",
+        entry_kind=entry_kind,
+        include_system=include_system,
         page=page,
         page_size=page_size,
     )
     try:
-        from src.api.auth import is_platform_super_admin
+        from src.api.auth import get_current_role, get_current_tenant_id, get_current_user_id
         from src.knowledge.governance import normalize_knowledge_scope
-        from src.knowledge.retrieval import build_accessible_knowledge_filters
+        from src.knowledge.management_cache import get_management_list_cache
+        from src.knowledge.retrieval import build_admin_visible_filters
         from src.memory.vector_store import get_vector_store
 
         store = await get_vector_store()
-        filter_groups = build_accessible_knowledge_filters(category=category or "")
-        if not is_platform_super_admin():
-            filter_groups = [
-                filters for filters in filter_groups
-                if filters.get("visibility") != "system"
-            ]
+        # 管理页视角：超管含 system；非超管默认仅本租户与本人，勾选后只读可见 system。
+        filter_groups = build_admin_visible_filters(
+            category=category or "",
+            include_system=include_system,
+        )
+        kind_filters = _entry_kind_filters(entry_kind)
+        filter_groups = [{**group, **kind_filters} for group in filter_groups]
         if knowledge_scope:
             normalized_scope = normalize_knowledge_scope(knowledge_scope).value
             filter_groups = [
                 filters for filters in filter_groups
                 if filters.get("visibility") == normalized_scope
             ]
-        results_by_id = {}
-        for filters in filter_groups:
-            scoped_results = await store.get_by_filter(filters, limit=10000)
-            logger.info(
-                "知识库分范围查询完成",
-                visibility=filters.get("visibility", ""),
-                count=len(scoped_results),
-            )
-            for result in scoped_results:
-                results_by_id[result.id] = result
-        results = list(results_by_id.values())
-        logger.info(
-            "知识库查询完成",
-            total_ids=len(results),
-            scope_count=len(filter_groups),
+        current_tenant_id = get_current_tenant_id()
+        # 缓存键不含 search：关键词过滤在缓存值上完成，避免每个搜索词各存一份全量列表。
+        cache = get_management_list_cache()
+        cache_key = (
+            get_current_role(),
+            current_tenant_id,
+            get_current_user_id(),
+            category or "",
+            knowledge_scope or "",
+            entry_kind,
+            # include_system 必须进键：否则取消勾选后仍会从缓存返回系统知识。
+            include_system,
         )
-        entries = []
-        from src.api.auth import get_current_role, get_current_tenant_id, get_current_user_id
-        from src.knowledge.governance import can_manage_knowledge_resource
-
-        for result in results:
-            meta = dict(result.metadata or {})
-            is_user = meta.get("source") == "user_upload"
-            visibility = str(meta.get("visibility", "system" if not is_user else "tenant"))
-            resource_tenant_id = meta.get("tenant_id")
-            if resource_tenant_id is None and visibility != "system":
-                resource_tenant_id = get_current_tenant_id()
-            can_delete = is_user and can_manage_knowledge_resource(
-                visibility,
-                role=get_current_role(),
-                current_tenant_id=get_current_tenant_id(),
-                resource_tenant_id=resource_tenant_id,
-                current_user_id=get_current_user_id(),
-                owner_user_id=meta.get("owner_user_id"),
+        entries = cache.get(cache_key)
+        if entries is None:
+            results_by_id = {}
+            for filters in filter_groups:
+                scoped_results = await store.get_by_filter(filters, limit=10000)
+                logger.info(
+                    "知识库分范围查询完成",
+                    visibility=filters.get("visibility", ""),
+                    count=len(scoped_results),
+                )
+                for result in scoped_results:
+                    results_by_id[result.id] = result
+            results = list(results_by_id.values())
+            logger.info(
+                "知识库查询完成",
+                total_ids=len(results),
+                scope_count=len(filter_groups),
             )
-            entries.append({
-                "id": result.id,
-                "content": result.content,
-                "category": meta.get("category", ""),
-                "datasource": meta.get("datasource", ""),
-                "table_name": meta.get("table_name", ""),
-                "source": meta.get("source", "unknown"),
-                "source_file": meta.get("source_file", ""),
-                "scope": visibility,
-                "tag_ids": json.loads(meta.get("tag_ids_json", "[]") or "[]"),
-                "tags": _normalize_knowledge_tags(meta.get("tags", "")),
-                "is_builtin": meta.get("visibility") == "system" or not is_user,
-                "tenant_id": resource_tenant_id,
-                "owner_user_id": meta.get("owner_user_id"),
-                "can_delete": can_delete,
-            })
+            # 构建不含 can_delete 与创建人的条目，授权判定与查库只作用于当前页。
+            entries = []
+            for result in results:
+                meta = dict(result.metadata or {})
+                # 失败关闭：缺失 visibility 的条目按 private 处理，与删除接口口径一致。
+                visibility = str(meta.get("visibility") or "private")
+                resource_tenant_id = meta.get("tenant_id")
+                if resource_tenant_id is None and visibility != "system":
+                    resource_tenant_id = current_tenant_id
+                entries.append({
+                    "id": result.id,
+                    "content": result.content,
+                    "category": meta.get("category", ""),
+                    "datasource": meta.get("datasource", ""),
+                    "table_name": meta.get("table_name", ""),
+                    "source": meta.get("source", "unknown"),
+                    "source_file": meta.get("source_file", ""),
+                    "scope": visibility,
+                    "tag_ids": json.loads(meta.get("tag_ids_json", "[]") or "[]"),
+                    "tags": _normalize_knowledge_tags(meta.get("tags", "")),
+                    "is_builtin": visibility == "system" or meta.get("source") != "user_upload",
+                    "tenant_id": resource_tenant_id,
+                    "owner_user_id": _resolve_owner_user_id(meta),
+                })
+            cache.set(cache_key, entries)
         if search:
             q = search.lower()
             entries = [e for e in entries if q in e["content"].lower()
                        or q in e.get("table_name", "").lower()]
         total = len(entries)
         start = (page - 1) * page_size
-        paged = entries[start:start + page_size]
+        # 分页切片必须拷贝，否则装饰 can_delete 会污染缓存或原始条目。
+        paged = [dict(entry) for entry in entries[start:start + page_size]]
+        await _decorate_entries(paged)
         result = {"entries": paged, "total": total, "page": page, "page_size": page_size}
         logger.info("知识库列表完成", total=total, returned=len(paged))
         return result
@@ -295,6 +472,12 @@ async def _schedule_knowledge_uploads(
         except Exception as exc:
             logger.error("知识文档任务调度失败", filename=uploaded_file.filename, exc_info=True)
             errors.append({"file": uploaded_file.filename, "error": str(exc)})
+    if tasks:
+        # 上传完成后立即失效管理列表缓存，避免新文档在 TTL 内不可见。
+        from src.api.auth import get_current_tenant_id
+        from src.knowledge.management_cache import get_management_list_cache
+
+        get_management_list_cache().invalidate_tenant(get_current_tenant_id())
     logger.info("调度知识文档上传完成", tasks=len(tasks), errors=len(errors))
     return tasks, errors
 
@@ -652,8 +835,11 @@ async def test_knowledge_search(q: str = Query(default=""), datasource: str = Qu
 
 
 @router.get("/knowledge/docs")
-async def list_knowledge_docs():
-    """列出当前身份可见文档并附带服务端删除权限。"""
+# 方法作用：列出当前身份可见文档并附带服务端删除权限与创建人。
+# Args: include_system - 是否放宽只读查看系统文档（超管默认可见）。
+# Returns: 文档摘要列表与总数。
+async def list_knowledge_docs(include_system: bool = Query(default=False)):
+    """列出当前身份可见文档并附带服务端删除权限与创建人。"""
     from src.api.auth import (
         get_current_role,
         get_current_tenant_id,
@@ -663,12 +849,14 @@ async def list_knowledge_docs():
     from src.knowledge.file_store import get_file_store
     from src.knowledge.governance import can_manage_knowledge_resource
 
-    logger.debug("知识文档列表 API 入口", role=get_current_role())
+    logger.debug("知识文档列表 API 入口", role=get_current_role(), include_system=include_system)
     docs = await get_file_store().list_files()
-    if not is_platform_super_admin():
+    if not is_platform_super_admin() and not include_system:
         docs = [doc for doc in docs if str(doc.get("scope", "")) != "system"]
+    usernames = await _load_usernames([doc.get("owner_user_id") for doc in docs])
     for doc in docs:
-        scope = str(doc.get("scope", "system" if doc.get("is_builtin") else "private"))
+        # 失败关闭：缺失 scope 的文档按 private 处理，与删除接口口径一致。
+        scope = str(doc.get("scope") or "private")
         doc["can_delete"] = not doc.get("is_builtin", False) and can_manage_knowledge_resource(
             scope,
             role=get_current_role(),
@@ -677,22 +865,23 @@ async def list_knowledge_docs():
             current_user_id=get_current_user_id(),
             owner_user_id=doc.get("owner_user_id"),
         )
+        doc["owner_username"] = _normalize_owner_username(doc.get("owner_user_id"), usernames)
     result = {"docs": docs, "total": len(docs)}
     logger.info("知识文档列表 API 完成", total=len(docs), role=get_current_role())
     return result
 
 
 @router.get("/knowledge/docs/{doc_name}/content")
-async def get_doc_content(doc_name: str, knowledge_scope: str = ""):
+async def get_doc_content(doc_name: str, knowledge_scope: str = "", include_system: bool = False):
     """获取已索引文档的内容（从 PG 读取，回退磁盘）。"""
     from src.api.auth import is_platform_super_admin
     from src.knowledge.file_store import get_file_store
-    if knowledge_scope == "system" and not is_platform_super_admin():
+    if knowledge_scope == "system" and not is_platform_super_admin() and not include_system:
         raise HTTPException(404, f"文档 '{doc_name}' 未找到")
     store = get_file_store()
     doc = await store.get_by_name(doc_name, knowledge_scope=knowledge_scope)
     if doc:
-        if str(doc.get("scope", "")) == "system" and not is_platform_super_admin():
+        if str(doc.get("scope", "")) == "system" and not is_platform_super_admin() and not include_system:
             raise HTTPException(404, f"文档 '{doc_name}' 未找到")
         raw = doc["file_data"]
         size = doc["size"]
@@ -731,17 +920,17 @@ async def get_doc_content(doc_name: str, knowledge_scope: str = ""):
 
 
 @router.get("/knowledge/docs/{doc_name}/raw")
-async def get_doc_raw(doc_name: str, knowledge_scope: str = ""):
+async def get_doc_raw(doc_name: str, knowledge_scope: str = "", include_system: bool = False):
     """返回原始文件（从 PG 读取，回退磁盘，用于 PDF iframe 渲染）。"""
     from fastapi.responses import Response
 
     from src.api.auth import is_platform_super_admin
     from src.knowledge.file_store import get_file_store
-    if knowledge_scope == "system" and not is_platform_super_admin():
+    if knowledge_scope == "system" and not is_platform_super_admin() and not include_system:
         raise HTTPException(404, f"文档 '{doc_name}' 未找到")
     doc = await get_file_store().get_by_name(doc_name, knowledge_scope=knowledge_scope)
     if doc:
-        if str(doc.get("scope", "")) == "system" and not is_platform_super_admin():
+        if str(doc.get("scope", "")) == "system" and not is_platform_super_admin() and not include_system:
             raise HTTPException(404, f"文档 '{doc_name}' 未找到")
         return Response(content=bytes(doc["file_data"]), media_type=doc["content_type"])
     if knowledge_scope and knowledge_scope != "system":
@@ -853,6 +1042,10 @@ async def delete_knowledge_entry(entry_id: str):
             )
             raise HTTPException(403, "无权删除该知识条目")
         await store.delete_by_ids([entry_id])
+        # 删除后立即失效管理列表缓存。
+        from src.knowledge.management_cache import get_management_list_cache
+
+        get_management_list_cache().invalidate_tenant(current_tenant_id)
         result = {"status": "ok", "id": entry_id}
         logger.info("删除知识条目 API 完成", entry_id=entry_id, visibility=visibility)
         return result
@@ -926,6 +1119,10 @@ async def delete_knowledge_doc(doc_name: str, knowledge_scope: str = ""):
         await store.delete_by_ids([entry.id for entry in manageable])
     if not deleted_file and not manageable:
         raise HTTPException(404, f"文档 '{doc_name}' 未找到")
+    # 删除后立即失效管理列表缓存。
+    from src.knowledge.management_cache import get_management_list_cache
+
+    get_management_list_cache().invalidate_tenant(get_current_tenant_id())
     result = {"status": "ok", "doc": doc_name}
     logger.info(
         "删除知识文档 API 完成",

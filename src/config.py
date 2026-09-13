@@ -135,6 +135,18 @@ def _default_api_access_policies() -> list[ApiAccessRouteConfig]:
             id="model_test", path="/api/v1/models/test", methods=["POST"],
             auth="jwt_or_admin_key", access_log="audit", description="模型连通性测试",
         ),
+        ApiAccessRouteConfig(
+            id="memory_list", path="/api/v1/memory", methods=["GET"],
+            auth="jwt", access_log="standard", description="长期记忆列表",
+        ),
+        ApiAccessRouteConfig(
+            id="memory_detail", path="/api/v1/memory/{memory_id}", path_type="template",
+            methods=["GET"], auth="jwt", access_log="standard", description="长期记忆详情",
+        ),
+        ApiAccessRouteConfig(
+            id="memory_delete", path="/api/v1/memory/{memory_id}", path_type="template",
+            methods=["DELETE"], auth="jwt", access_log="audit", description="删除长期记忆",
+        ),
     ]
 
 

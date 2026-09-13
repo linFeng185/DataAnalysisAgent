@@ -628,9 +628,15 @@ class TestKnowledgeVectorStoreRoutes:
         monkeypatch.setattr(auth, "get_current_user_id", lambda: 7)
         monkeypatch.setattr(auth, "is_platform_super_admin", lambda: False)
         monkeypatch.setattr(vector_module, "get_vector_store", AsyncMock(return_value=store))
+        # 创建人映射不得访问真实 PostgreSQL，测试内以空映射替代。
+        import src.api.routes.knowledge as knowledge_module
+        monkeypatch.setattr(knowledge_module, "_load_usernames", AsyncMock(return_value={}))
 
         # Act
-        result = await routes.list_knowledge(category="metric", search=None, page=1, page_size=20)
+        result = await routes.list_knowledge(
+            category="metric", search=None, entry_kind="document",
+            include_system=False, page=1, page_size=20,
+        )
 
         # Assert
         assert result["total"] == 1
@@ -655,7 +661,10 @@ class TestKnowledgeVectorStoreRoutes:
 
         # Act / Assert
         with pytest.raises(HTTPException) as caught:
-            await routes.list_knowledge(category=None, search=None, page=1, page_size=20)
+            await routes.list_knowledge(
+                category=None, search=None, entry_kind="document",
+                include_system=False, page=1, page_size=20,
+            )
         assert caught.value.status_code == 500
         assert caught.value.detail == "知识库加载失败"
 
