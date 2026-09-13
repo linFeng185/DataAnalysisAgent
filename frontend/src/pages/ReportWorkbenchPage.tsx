@@ -12,6 +12,7 @@ import {
 } from '@ant-design/icons';
 import { useNavigate } from 'react-router-dom';
 import { get } from '../api/client';
+import { DEFAULT_TEMPLATE_ID, reportTemplates, resolveTemplate } from '../report/templates';
 import {
   createReportJob,
   fetchReportJob,
@@ -115,6 +116,8 @@ export default function ReportWorkbenchPage() {
   const [divergence, setDivergence] = useState<ReportDivergenceLevel>('standard');
   // 被用户取消勾选的单元。只允许删减，服务端会拒绝任何不属于预览计划的标识。
   const [excludedUnitIds, setExcludedUnitIds] = useState<string[]>([]);
+  // 模板不进计划哈希，因此切换它不需要重新预览。
+  const [templateId, setTemplateId] = useState<string>(DEFAULT_TEMPLATE_ID);
   const [datasources, setDatasources] = useState<DatasourceConfig[]>([]);
   const [selectedDatasources, setSelectedDatasources] = useState<string[]>([]);
   const [models, setModels] = useState<ModelOption[]>([]);
@@ -243,6 +246,7 @@ export default function ReportWorkbenchPage() {
         true,
         creationKey.current || (creationKey.current = crypto.randomUUID()),
         acceptedUnitIds,
+        templateId,
       );
       const jobId = typeof result.job_id === 'string' ? result.job_id : '';
       setPreview(null);
@@ -396,6 +400,27 @@ export default function ReportWorkbenchPage() {
             />
             <Typography.Paragraph type="secondary" style={{ marginTop: 6, marginBottom: 0, fontSize: 12 }}>
               {t("档位决定系统可自主追加的分析单元总数（计划期与运行期共享）：保守 0 个、标准 3 个、深度 6 个。")}
+            </Typography.Paragraph>
+          </div>
+          <div style={{ marginTop: 12 }}>
+            <Typography.Text type="secondary">{t("报表模板")}</Typography.Text>
+            <Select
+              value={templateId}
+              onChange={setTemplateId}
+              options={reportTemplates.map(template => {
+                const tokens = resolveTemplate(template.id).tokens;
+                return {
+                  value: template.id,
+                  label: <span className="report-template-option">
+                    <span className="report-template-swatch" style={{ background: tokens.accent, borderColor: tokens.border }} />
+                    {t(template.name)} · {t(template.description)}
+                  </span>,
+                };
+              })}
+              style={{ width: '100%', marginTop: 6 }}
+            />
+            <Typography.Paragraph type="secondary" style={{ marginTop: 6, marginBottom: 0, fontSize: 12 }}>
+              {t("模板只影响呈现样式，不改变取数范围与成本，因此随时切换都不会要求重新预览。")}
             </Typography.Paragraph>
           </div>
           <Button type="primary" block icon={<SearchOutlined />} loading={previewing} onClick={() => void previewPlan()} style={{ marginTop: 12 }}>

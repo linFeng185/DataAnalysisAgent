@@ -329,7 +329,7 @@ async def create_job(request: ReportJobCreateRequest) -> dict[str, Any]:
         # plan_json 存裁剪后的有效计划，plan_hash 仍是它的校验和；
         # preview_hash 单独记录客户端提交的预览凭证，用于审计「这份计划来自哪次预览」。
         job, created, quota = await store.create_job_with_quota(
-            identity, request.prompt, plan, request.idempotency_key, quota_manager, request.plan_hash
+            identity, request.prompt, plan, request.idempotency_key, quota_manager, request.plan_hash, request.template_id
         )
     except QuotaExceededError as exc:
         raise HTTPException(429, "本周期报表任务配额已用尽") from exc

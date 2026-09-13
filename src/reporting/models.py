@@ -252,6 +252,10 @@ class ReportJobCreateRequest(BaseModel):
     # 用户在预览页勾选保留的单元。None 表示全部接受（与既有行为一致）；
     # 显式空数组表示全部取消，属非法请求。只允许删减，不允许新增。
     accepted_unit_ids: list[str] | None = Field(default=None, max_length=12)
+    # 视觉模板标识。**不进 ReportPlan、不进 canonical_hash**：模板只影响呈现，
+    # 不改变执行范围与成本，因此不该让改配色触发重新预览与重新确认。
+    # 只校格式不校清单：清单在前端注册表，后端再存一份必然脱钩。
+    template_id: str | None = Field(default=None, max_length=32, pattern=r"^[a-z0-9_-]{1,32}$")
     confirm: bool = False
     idempotency_key: str = Field(default="", max_length=128)
 
@@ -363,6 +367,8 @@ class ReportJobRecord(BaseModel):
     plan_hash: str = ""
     # 客户端提交的预览凭证，用于审计「这份计划来自哪次预览」。
     preview_hash: str = ""
+    # 创建任务时选定的视觉模板；为空表示使用前端默认模板。
+    template_id: str | None = None
     status: str = "draft"
     runs_started: int = 0
     next_run_at: datetime | None = None

@@ -45,6 +45,8 @@ class ReportWorkbenchState(TypedDict, total=False):
     report_id: str
     job_id: str
     run_id: str
+    # 任务创建时选定的视觉模板标识；后端只透传，不解释其取值。
+    template_id: str
 
 
 # 方法作用：在节点边界记录可审计的节点状态，不写入敏感输入。
@@ -293,7 +295,7 @@ async def report_synthesize_insights(state: ReportWorkbenchState) -> dict[str, A
 # Returns: ReportArtifact。
 async def report_plan_layout(state: ReportWorkbenchState) -> dict[str, Any]:
     await _log_step(state, "report_plan_layout", "running")
-    artifact = build_report_document(state["plan"], list(state.get("unit_results", [])), report_id=state.get("report_id"), relations=list(state.get("relations", [])))
+    artifact = build_report_document(state["plan"], list(state.get("unit_results", [])), report_id=state.get("report_id"), relations=list(state.get("relations", [])), template_id=str(state.get("template_id") or "insight"))
     if state.get("cross_business_analysis", {}).get("limitations"):
         artifact.document.limitations.extend(state["cross_business_analysis"]["limitations"])
     _append_metric_citations(artifact, list(state.get("metric_citations", []) or []))

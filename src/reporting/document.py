@@ -252,6 +252,7 @@ def build_report_document(
     *,
     report_id: str | None = None,
     relations: list[RelationEvidence] | None = None,
+    template_id: str = "insight",
 ) -> ReportArtifact:
     logger.debug("报表页面构建入口", unit_count=len(results))
     resolved_report_id = report_id or str(uuid4())
@@ -391,6 +392,8 @@ def build_report_document(
         navigation.append("relations")
     document = ReportDocument(
         report_id=resolved_report_id,
+        # 后端只承载模板标识，不承载任何颜色或密度取值：视觉真源在前端注册表。
+        theme={"template_id": template_id or "insight"},
         title="经营分析报表",
         subtitle=f"共 {len(results)} 个分析单元，页面默认保留 {plan.page_ttl_days} 天" if not plan.permanent else "永久有效页面",
         navigation=navigation,

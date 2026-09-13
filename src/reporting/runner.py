@@ -176,6 +176,8 @@ class ReportRunner:
                 "report_id": job_id,
                 "job_id": job_id,
                 "run_id": run.id,
+                # 模板只影响呈现，随 Job 落库并原样透传给页面文档。
+                "template_id": str(getattr(job, "template_id", "") or "insight"),
             }
             if effective_authorized is not None:
                 graph_state["authorized_datasources"] = effective_authorized

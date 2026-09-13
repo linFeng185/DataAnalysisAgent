@@ -17,22 +17,52 @@ body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sa
 .report-plan-summary { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin: 16px 0; }
 .report-plan-unit { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
 .report-job-row { cursor: pointer; }
-.report-job-row:hover { background: #fafafa; }
+.report-job-row:hover { background: var(--report-accent-soft, #fafafa); }
 .report-status-line { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-.report-document { width: min(1440px, 100%); margin: 0 auto; padding: 24px; box-sizing: border-box; }
-.report-document-header { border-bottom: 1px solid #f0f0f0; padding-bottom: 18px; margin-bottom: 22px; }
+
+/* 报表视觉一律消费 --report-* 变量：这些变量由 TemplateScope 按模板注入，
+   作用域限定在 .report-theme 内，不污染应用其余部分。 */
+.report-document {
+  width: min(1440px, 100%);
+  margin: 0 auto;
+  padding: calc(var(--report-space-unit, 16px) * 1.5);
+  box-sizing: border-box;
+  background: var(--report-bg, #f7f8fa);
+  color: var(--report-text-primary, #1f2329);
+  font-family: var(--report-font, inherit);
+}
+.report-document-header { border-bottom: 1px solid var(--report-border, #f0f0f0); padding-bottom: 18px; margin-bottom: 22px; }
 .report-document-header .ant-typography { margin-bottom: 6px; }
+.report-document-header h2.ant-typography { font-family: var(--report-heading-font, inherit); }
 .report-document-limitations { margin-bottom: 22px; }
-.report-section { scroll-margin-top: 20px; margin: 0 0 30px; }
-.report-section-heading { margin-bottom: 12px; }
-.report-section-heading .ant-typography { margin: 0 0 4px; }
-.report-section-grid { display: grid; grid-template-columns: repeat(12, minmax(0, 1fr)); gap: 16px; align-items: start; }
+.report-section { scroll-margin-top: 20px; margin: 0 0 calc(var(--report-space-unit, 16px) * 2); }
+.report-section-heading { margin-bottom: 12px; padding-left: 10px; border-left: 3px solid var(--report-accent, transparent); }
+.report-section-heading .ant-typography { margin: 0 0 4px; font-family: var(--report-heading-font, inherit); }
+.report-section-grid { display: grid; grid-template-columns: repeat(12, minmax(0, 1fr)); gap: var(--report-space-unit, 16px); align-items: start; }
 .report-block { grid-column: span var(--report-desktop-span, 12); min-width: 0; }
-.report-block .ant-card { height: 100%; overflow: hidden; }
+.report-block .ant-card {
+  height: 100%;
+  overflow: hidden;
+  background: var(--report-surface, #ffffff);
+  border-color: var(--report-border, #f0f0f0);
+  border-radius: var(--report-radius, 8px);
+  box-shadow: var(--report-shadow, none);
+}
 .report-block .ant-card-body { min-width: 0; }
+/* 块类型差异化：长文限宽提升可读性，图表与 KPI 调整留白与字号。 */
+.report-block-narrative .ant-card-body { max-width: 72ch; }
+.report-block-kpi .ant-statistic-content { color: var(--report-accent, inherit); }
+.report-block-kpi .ant-card-body { padding: calc(var(--report-space-unit, 16px) * 0.75); }
+.report-block-chart .ant-card-body { padding: calc(var(--report-space-unit, 16px) * 1.25); }
 .report-relationship-content .ant-typography { margin-bottom: 6px; }
+.report-citation-content .ant-typography { margin-bottom: 6px; }
+.report-findings-method { font-size: 12px; }
 .report-share-url { word-break: break-all; }
-.report-run-stats { width: 100%; margin-bottom: 14px; padding-bottom: 10px; border-bottom: 1px solid #f0f0f0; }
+/* 模板选项的色卡：用主色圆点让用户在切换前就能分辨风格 */
+.report-template-option { display: inline-flex; align-items: center; gap: 6px; }
+.report-template-swatch { display: inline-block; width: 12px; height: 12px; border-radius: 50%; border: 1px solid transparent; flex: none; }
+.report-template-switcher { flex-wrap: wrap; }
+.report-run-stats { width: 100%; margin-bottom: 14px; padding-bottom: 10px; border-bottom: 1px solid var(--report-border, #f0f0f0); }
 
 @media (max-width: 1100px) {
   .report-workbench-grid { grid-template-columns: minmax(0, 1fr); }

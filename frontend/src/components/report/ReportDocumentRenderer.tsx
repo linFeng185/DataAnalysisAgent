@@ -3,6 +3,10 @@ import { lazy, Suspense, type CSSProperties, type ReactNode } from 'react';
 import { Alert, Button, Card, Empty, List, Space, Statistic, Table, Tag, Typography } from 'antd';
 import type { EChartsOption } from 'echarts';
 import type { ReportBlock, ReportDocument, ReportDrilldownDefinition } from '../../types/report';
+import { densityMetrics, resolveTemplate, type ReportTemplateTokens } from '../../report/templates';
+import { withChartBaseline } from './chartBase';
+import TemplateScope from './TemplateScope';
+import { useReportTemplate } from '../../hooks/useReportTemplate';
 
 const ReactECharts = lazy(() => import('../EChartsView'));
 
@@ -10,6 +14,8 @@ interface ReportDocumentRendererProps {
   document: ReportDocument;
   dataManifest: Record<string, Record<string, unknown>[]>;
   onDrilldown?: (definition: ReportDrilldownDefinition, filters: Record<string, unknown>) => void;
+  /** 可选：由阅读页控制的模板 id。不传时使用文档记录的模板。 */
+  templateId?: string;
 }
 // 方法作用：把未知页面内容转换为不执行 HTML 的可见文本。
 // Args: value - DSL 内容中的未知值。
@@ -83,7 +89,8 @@ function renderBlock(
   block: ReportBlock,
   document: ReportDocument,
   manifest: Record<string, Record<string, unknown>[]>,
-  onDrilldown?: (definition: ReportDrilldownDefinition, filters: Record<string, unknown>) => void,
+  onDrilldown: ((definition: ReportDrilldownDefinition, filters: Record<string, unknown>) => void) | undefined,
+  tokens: ReportTemplateTokens,
 ): ReactNode {
   const rows = rowsForBlock(block, manifest);
   const content = block.content || {};
@@ -98,9 +105,9 @@ function renderBlock(
       body = block.echarts_option ? (
         <Suspense fallback={<Typography.Text type="secondary">{t("图表加载中...")}</Typography.Text>}>
           <ReactECharts
-            option={block.echarts_option as EChartsOption}
+            option={withChartBaseline(block.echarts_option, tokens) as EChartsOption}
             notMerge
-            style={{ height: 320, width: '100%' }}
+            style={{ height: densityMetrics(tokens).chartHeight, width: '100%' }}
             onEvents={definition && onDrilldown ? {
               click: (params: unknown) => onDrilldown(definition, chartFilters(definition, params)),
             } : undefined}
@@ -212,9 +219,12 @@ function renderBlock(
 // 方法作用：渲染后端签发的动态报表文档和响应式区段。
 // Args: document - 已通过后端 DSL 校验的报表文档；dataManifest - 脱敏数据清单；onDrilldown - 可选 Drilldown 回调。
 // Returns: 报表页面 React 节点。
-export default function ReportDocumentRenderer({ document, dataManifest, onDrilldown }: ReportDocumentRendererProps) {
+export default function ReportDocumentRenderer({ document, dataManifest, onDrilldown, templateId }: ReportDocumentRendererProps) {
   useLanguage();
-  return <div className="report-document">
+  const [recordedTemplateId] = useReportTemplate(document);
+  const activeTemplateId = templateId || recordedTemplateId;
+  const tokens = resolveTemplate(activeTemplateId).tokens;
+  return <TemplateScope templateId={activeTemplateId}><div className="report-document">
     <header className="report-document-header">
       <Typography.Title level={2}>{document.title}</Typography.Title>
       {document.subtitle && <Typography.Paragraph type="secondary">{document.subtitle}</Typography.Paragraph>}
@@ -229,8 +239,8 @@ export default function ReportDocumentRenderer({ document, dataManifest, onDrill
         {section.subtitle && <Typography.Text type="secondary">{section.subtitle}</Typography.Text>}
       </div>
       <div className="report-section-grid">
-        {[...section.blocks].sort((left, right) => right.priority - left.priority).map(block => renderBlock(block, document, dataManifest, onDrilldown))}
+        {[...section.blocks].sort((left, right) => right.priority - left.priority).map(block => renderBlock(block, document, dataManifest, onDrilldown, tokens))}
       </div>
     </section>)}
-  </div>;
+  </div></TemplateScope>;
 }

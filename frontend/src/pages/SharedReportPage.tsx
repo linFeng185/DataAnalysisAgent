@@ -5,6 +5,8 @@ import { LockOutlined, ReloadOutlined } from '@ant-design/icons';
 import { useParams } from 'react-router-dom';
 import ReportDocumentRenderer from '../components/report/ReportDocumentRenderer';
 import ReportDrilldownModal from '../components/report/ReportDrilldownModal';
+import TemplateSwitcher from '../components/report/TemplateSwitcher';
+import { useReportTemplate } from '../hooks/useReportTemplate';
 import {
   fetchSharedDrilldown,
   fetchSharedReport,
@@ -20,6 +22,8 @@ export default function SharedReportPage() {
   const { token } = useParams<{ token: string }>();
   const [report, setReport] = useState<ReportSharedResponse | null>(null);
   const [loading, setLoading] = useState(true);
+  // 初始值取文档记录的模板；分享对象也能按自己的偏好临时换风格。
+  const [templateId, setTemplateId] = useReportTemplate(report?.document ?? null);
   const [error, setError] = useState('');
   const [locked, setLocked] = useState(false);
   const [unlockOpen, setUnlockOpen] = useState(false);
@@ -117,8 +121,8 @@ export default function SharedReportPage() {
   return <div>
     {locked && <div className="report-document"><Alert type="info" showIcon icon={<LockOutlined />} message={t("该分享需要授权码")} action={<Button type="primary" onClick={() => setUnlockOpen(true)}>{t("输入授权码")}</Button>} /></div>}
     {report && <>
-      <div className="report-document report-viewer-toolbar"><Tag color="blue">{t("公开快照 · 版本")} {report.version}</Tag><Typography.Text type="secondary">{t("页面内容来自固定脱敏版本")}</Typography.Text></div>
-      <ReportDocumentRenderer document={report.document} dataManifest={report.data_manifest} onDrilldown={(definition, filters) => void loadDrilldown(definition, filters)} />
+      <div className="report-document report-viewer-toolbar"><Tag color="blue">{t("公开快照 · 版本")} {report.version}</Tag><Typography.Text type="secondary">{t("页面内容来自固定脱敏版本")}</Typography.Text><TemplateSwitcher value={templateId} onChange={setTemplateId} /></div>
+      <ReportDocumentRenderer document={report.document} dataManifest={report.data_manifest} templateId={templateId} onDrilldown={(definition, filters) => void loadDrilldown(definition, filters)} />
     </>}
     <Modal title={t("解锁分享报表")} open={unlockOpen} onCancel={() => setUnlockOpen(false)} footer={null} destroyOnHidden>
       <Form layout="vertical" onFinish={values => void unlock(values as { authorization_code: string })}>

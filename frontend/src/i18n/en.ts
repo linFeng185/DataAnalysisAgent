@@ -1,5 +1,14 @@
 // 静态界面词典；业务数据、SQL 和模型原文不进入翻译通道。
 const en: Record<string, string> = {
+  "报表模板": "Report template",
+  "模板只影响呈现样式，不改变取数范围与成本，因此随时切换都不会要求重新预览。": "Templates only affect presentation, not data scope or cost, so switching never requires re-previewing.",
+  "专业分析风，紧凑清晰，适合日常经营分析": "Professional analytics style, compact and clear",
+  "墨玉": "Ink",
+  "深色看板，适合投屏与大屏展示": "Dark dashboard, suited to screen casting and large displays",
+  "纸感": "Paper",
+  "米白底与衬线标题，适合长文叙事型报告": "Off-white background with serif headings, suited to long-form reports",
+  "商务": "Business",
+  "中性灰蓝，克制方正，适合对外汇报": "Neutral gray-blue, restrained, suited to external briefings",
   "本次运行计数": "Counts for this run",
   "大模型调用 {value0} 次：成功 {value1}，失败 {value2}": "LLM calls: {value0} (ok {value1}, failed {value2})",
   "SQL 执行 {value0} 次：成功 {value1}，失败 {value2}": "SQL executions: {value0} (ok {value1}, failed {value2})",

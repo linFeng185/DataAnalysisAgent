@@ -81,6 +81,7 @@ export function createReportJob(
   confirm: boolean,
   idempotencyKey: string,
   acceptedUnitIds?: string[] | null,
+  templateId?: string,
 ): Promise<Record<string, unknown>> {
   return post<Record<string, unknown>>(`${REPORT_BASE}/jobs`, {
     prompt,
@@ -90,6 +91,8 @@ export function createReportJob(
     idempotency_key: idempotencyKey,
     // 不传表示全部接受；传数组表示只保留列表中的单元。空数组由服务端拒绝。
     accepted_unit_ids: acceptedUnitIds ?? null,
+    // 模板不进计划哈希：改配色不需要重新预览与重新确认。
+    template_id: templateId || null,
   });
 }
 

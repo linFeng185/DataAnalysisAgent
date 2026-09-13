@@ -5,6 +5,8 @@ import { ArrowLeftOutlined, DeleteOutlined, ReloadOutlined, ShareAltOutlined, Te
 import { useNavigate, useParams } from 'react-router-dom';
 import ReportDocumentRenderer from '../components/report/ReportDocumentRenderer';
 import ReportDrilldownModal from '../components/report/ReportDrilldownModal';
+import TemplateSwitcher from '../components/report/TemplateSwitcher';
+import { useReportTemplate } from '../hooks/useReportTemplate';
 import { createReportShare, fetchPrivateDrilldown, fetchPrivateReport, fetchReportShares, revokeReportShare } from '../api/reportWorkbench';
 import type { ReportDrilldownDefinition, ReportDrilldownResponse, PrivateReportResponse, ReportShareRequest, ReportShareResponse, ReportShareSummary } from '../types/report';
 import { fetchPageLifecycle, updatePageLifecycle, type PageLifecycle } from '../api/reportWorkbench';
@@ -28,6 +30,8 @@ export default function ReportViewerPage() {
   const navigate = useNavigate();
   const [report, setReport] = useState<PrivateReportResponse | null>(null);
   const [loading, setLoading] = useState(true);
+  // 初始值取文档记录的模板，加载完成前回退默认模板。
+  const [templateId, setTemplateId] = useReportTemplate(report?.document ?? null);
   const [error, setError] = useState('');
   const [lifecycle, setLifecycle] = useState<PageLifecycle | null>(null);
   const [lifecycleLoading, setLifecycleLoading] = useState(false);
@@ -198,12 +202,14 @@ export default function ReportViewerPage() {
         <Tag>{t("版本")} {report.version}</Tag>
       </Space>
       <Space>
+        {/* 模板切换只影响本机这次浏览，不写回服务端、不改报表版本 */}
+        <TemplateSwitcher value={templateId} onChange={setTemplateId} />
         {lifecycleActions}
         <Button icon={<TeamOutlined />} onClick={() => { setSharesOpen(true); void loadShares(); }}>{t("管理分享")}</Button>
         <Button icon={<ShareAltOutlined />} onClick={() => { setShareResult(null); shareForm.resetFields(); setShareOpen(true); }}>{t("分享")}</Button>
       </Space>
     </div>
-    <ReportDocumentRenderer document={report.document} dataManifest={report.data_manifest} onDrilldown={(definition, filters) => void loadDrilldown(definition, filters)} />
+    <ReportDocumentRenderer document={report.document} dataManifest={report.data_manifest} templateId={templateId} onDrilldown={(definition, filters) => void loadDrilldown(definition, filters)} />
     <ReportDrilldownModal
       open={Boolean(drilldown)}
       loading={drilldownLoading}
