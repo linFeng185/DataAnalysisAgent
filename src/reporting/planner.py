@@ -480,6 +480,9 @@ class ReportPlanner:
                 output_model=ReportDivergeOutput,
                 task=_DIVERGE_LLM_TASK,
                 temperature=0.0,
+                # 模板里的 {limit} 必须走 system_values：它是 System Prompt 的变量，
+                # 不是 user 段落。只放进 sections 会在 render 时抛 KeyError 并整批降级。
+                system_values={"limit": str(limit)},
                 metadata={"node": "report_planner_diverge"},
             )
         except Exception:

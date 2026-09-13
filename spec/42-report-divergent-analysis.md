@@ -37,7 +37,7 @@
 |---|---|---|---|
 | 1 | **`report_analyze_units` 节点在代码中不存在**（`spec/30:217` 声称存在） | 节点清单 `report_workbench.py:316-325` | 规格与代码不符 |
 | 2 | **`report_profile_results` 只做 `len(rows)` 计数**（`spec/30:215` 声称算数值列/时间粒度/缺失/异常/代表性） | `report_workbench.py:225-236` | 规格与代码不符 |
-| 3 | **报表路径未注入 `capability="report"`**，`classify_intent`（`contracts.py:275-282`）把单元问句判为 `sql_analysis`，旧的自主补查回环（`workflow.py:237-281`）**实际可达**（`spec/30:264` 声称不可达） | `runner.py:207-219` | 发散会让单元数上升，放大了这个未受控回环的代价 |
+| 3 | **报表路径未注入 `suppress_supplemental_query` 标志**，`classify_intent`（`contracts.py:275-282`）把单元问句判为 `sql_analysis`，旧的自主补查回环（`workflow.py:237-281`）**实际可达**（`spec/30:264` 声称不可达） | `runner.py:207-219` | 发散会让单元数上升，放大了这个未受控回环的代价 |
 | 4 | **`yoy` 与 `mom` 的 `process()` 实现完全相同**（都是 `v[i] vs v[i-1]`），但 `yoy` 输出被标为"同比均值" —— 它算的是**环比** | `processors.py:13` 与 `:26` | 复用 processors 会把错误标签带进 23.16 的"同比"数字 |
 | 5 | **`UnitResult` 不携带截断信号**，`rows` 上限 1000（`models.py:267`） | — | 无法判断样本是否被截断，统计结论的样本披露没有依据。**截断信号在旧工作流 state 里其实已经存在**（`query_result_statistics.truncated`、`query_result_truncated`，见 `execute_sql.py:182-183`），只是 `runner._default_execute_unit` 构造 `UnitResult` 时丢弃了它 |
 | 6 | **图表硬编码 `bar`** | `document.py:256` | 时间序列与分布结果用柱状图表达不合理 |
@@ -628,9 +628,16 @@ ALTER TABLE report_jobs ADD COLUMN IF NOT EXISTS preview_hash VARCHAR(80);
 
 ### 11.1 必须一起修的旧回环漏洞（1.3 第 3 条）
 
-`runner.py:207-219` 的 `app.ainvoke` 未注入 `capability="report"`，`classify_intent`（`contracts.py:275-282`）会把单元问句判为 `sql_analysis`，从而允许触发 `after_analyze_result` 的**旧**自主补查回环（`workflow.py:237-281`）。该回环轮数上限默认 2（`max_supplemental_query_rounds`）、**无配额预占、无档位控制**。
+`runner.py:207-219` 的 `app.ainvoke` 没有关闭旧回环，`after_analyze_result`（`workflow.py:237-281`）对 `intent ∈ {query, aggregation, trend, attribution}` 且 `evidence_status="supplementable"` 的单元仍会触发**旧**自主补查回环。该回环轮数上限默认 2（`max_supplemental_query_rounds`）、**无配额预占、无档位控制**。
 
-**修复**：`_default_execute_unit` 的 state 显式注入 `capability="report"`（该字段已是 state 的既有键），使报表路径按 `spec/30:264` 的声明**真的不进入旧回环**。
+**修复**：`_default_execute_unit` 的 state 显式注入 `suppress_supplemental_query=True`，并在 `after_analyze_result` 的 `can_supplement` 复合条件上追加 `and not state.get("suppress_supplemental_query")`。这与既有的 `not state.get("previous_result_restored")`、`not state.get("execution_error")` 完全同构。
+
+> **落地修正（2026-09-13 首次真实运行后）**：原设计写的是"注入 `capability="report"` 关闭回环"，**这个做法有两重错误**，已在真实环境验证：
+>
+> 1. **它是空操作**。`_infer_capability`（`contracts.py:262-292`）完全按问题文本推断 capability，**不读 state 里预置的值**，注入的值当场被覆盖。真实日志里单元执行仍是 `capability=sql_analysis`。
+> 2. **若真生效会更糟**。`after_analyze_result` 的路由映射是 `{"forecast": "forecast_subgraph", "report": "report_subgraph"}`（`workflow.py:276-279`），而 `report_subgraph` 是主图里的**真实节点**。capability 变成 `report` 会把单元路由去生成报告而不是取数，比原问题严重得多。
+>
+> 教训也落在测试上：原用例只断言"state 里那个键的值等于 report"，**通过却毫无行为保证**。现行用例改成把回环的全部前置条件造齐、先断言不带标志时**确实**会路由到 `supplemental_query`，再断言带标志时被拦下——只有这样才能证明标志是真正的拦阻点。
 
 **必须最先做**。理由：本设计新增了报表**自己的**受控回路，若旧的未受控回路仍然可达，两套回路会叠加，成本失控。
 
@@ -730,7 +737,7 @@ src/graph/subgraphs/
                                                         新增条件边 report_decide_supplement；
                                                         修正节点清单（对齐 spec/30:215-217）
 
-src/reporting/runner.py                          [修改] 1) _default_execute_unit 注入 capability="report"
+src/reporting/runner.py                          [修改] 1) _default_execute_unit 注入 `suppress_supplemental_query` 标志
                                                         （前置修复，见 11.1）
                                                         2) _reserve_plan 按最坏情况预占（见 11.3）
 
@@ -756,7 +763,7 @@ frontend/src/
 | 客户端签发执行范围 | `accepted_unit_ids` 只允许**删减**预览计划的子集；执行范围不可能变大 |
 | 计划防篡改 | `plan_override` 的哈希校验逻辑**完全不变**；裁剪走独立参数，二者互斥 |
 | 成本失控 | 档位总额度 + 轮数上限 + 单轮上限 + 12 单元上限 + **最坏情况预占** 五重约束 |
-| 旧回环叠加 | 11.1 注入 `capability="report"` 关闭旧回环，避免与新的受控回路叠加 |
+| 旧回环叠加 | 11.1 注入 `suppress_supplemental_query` 标志关闭旧回环，避免与新的受控回路叠加 |
 | 因果越界 | 提示词软约束 + 服务端因果措辞黑名单硬校验；`report_synthesize_insights` 既有"不升级为因果"原则不变 |
 | 越权数据源 | 发散建议的 `datasource` 不在授权清单时清空；仍走既有 `report.route` + `_resolve_plan_access`，无旁路 |
 | 脱敏 | 深挖与跨源关联都在**已脱敏**的行集上进行（沿用既有链路），不新增原始数据出口 |
@@ -864,7 +871,7 @@ frontend/src/
 | `test_plan_hash_stores_effective_checksum` | `plan_json` 与 `plan_hash` 自洽 |
 | `test_preview_hash_records_original_credential` | `preview_hash` 等于客户端提交值 |
 | `test_preview_hash_equals_plan_hash_when_no_trimming` | 未裁剪时两者相等 |
-| `test_runner_injects_report_capability` | `_default_execute_unit` 注入 `capability="report"`（11.1 前置修复回归） |
+| `test_execute_unit_suppresses_supplemental_loop` | `_default_execute_unit` 注入 `suppress_supplemental_query` 标志（11.1 前置修复回归） |
 
 ### 15.7 前端契约 `tests/test_frontend/test_report_findings.py`（新增）
 
@@ -895,7 +902,7 @@ frontend/src/
 
 | 阶段 | 内容 | 依赖 |
 |---|---|---|
-| **A（前置修复）** | 1) `runner` 注入 `capability="report"`；2) 修 `processors.yoy` 的既有 bug；3) `UnitResult.truncated` 透传；4) `query_count` 上限 | 无，**必须最先做** |
+| **A（前置修复）** | 1) `runner` 注入 `suppress_supplemental_query` 标志；2) 修 `processors.yoy` 的既有 bug；3) `UnitResult.truncated` 透传；4) `query_count` 上限 | 无，**必须最先做** |
 | B | 契约与档位额度（`models.py` + planner 估算 + `test_divergence.py` 契约部分） | 无，与 A 并行 |
 | C | 深挖适配层（`profiling.py` + `report_analyze_units` 节点 + `test_profiling_adapter.py`） | A、B |
 | D | 计划期发散（`prompts.py` `report.diverge` + `planner.diverge`） | B |
@@ -983,9 +990,9 @@ KPI 块同理：`title` 用带备注的标题，同时下发 `column_labels`。
 
 ### 18.1 `spec/30-report-workbench.md:264` 已同步修订
 
-原文声称"报表路径**默认不进入**旧的单轮自主补查回环"。本设计仍保证这一点（11.1 注入 `capability="report"` 关闭**旧的** `after_analyze_result` 回环），但新增了**报表自己的**受控回路，因此该节已补充限定语：
+原文声称"报表路径**默认不进入**旧的单轮自主补查回环"。本设计仍保证这一点（11.1 注入 `suppress_supplemental_query` 标志 关闭**旧的** `after_analyze_result` 回环），但新增了**报表自己的**受控回路，因此该节已补充限定语：
 
-> 报表路径**不进入旧的单轮自主补查回环**（由 `runner.py` 注入 `capability="report"` 关闭）……**报表自身的发散补充回路**是独立机制，与上面被关闭的旧回环无关：它在已取回数据之后运行，受档位额度（保守 0 / 标准 3 / 深度 6，计划期与运行期共享）、轮数上限（0/1/2）与单轮上限（0/2/3）三重约束；进入回路前必须先通过确定性前置筛选，无显著发现时不消耗 LLM 调用；`runner` 必须按最坏情况预占配额；页面 `limitations` 必须披露自主追加单元数量。
+> 报表路径**不进入旧的单轮自主补查回环**（由 `runner.py` 注入 `suppress_supplemental_query` 标志关闭）……**报表自身的发散补充回路**是独立机制，与上面被关闭的旧回环无关：它在已取回数据之后运行，受档位额度（保守 0 / 标准 3 / 深度 6，计划期与运行期共享）、轮数上限（0/1/2）与单轮上限（0/2/3）三重约束；进入回路前必须先通过确定性前置筛选，无显著发现时不消耗 LLM 调用；`runner` 必须按最坏情况预占配额；页面 `limitations` 必须披露自主追加单元数量。
 
 修订已按项目规则（CLAUDE.md「发现 SPEC 设计有问题：先提出修改方案，用户确认后修改 `spec/`，再修改代码」）随本设计一并落盘。
 
@@ -995,7 +1002,7 @@ KPI 块同理：`title` 用带备注的标题，同时下发 `column_labels`。
 |---|---|
 | `spec/30:217` `report_analyze_units` 节点不存在 | **补齐**：用该名称作为深挖节点，节点清单同步更新 |
 | `spec/30:215` `report_profile_results` 只数行数 | **补齐**：由 `report_analyze_units` 承担真实深挖；`report_profile_results` 保留其行数统计职责或并入前者，实现时二选一并更新 `spec/30` |
-| `spec/30:264` 报表路径不进补查回环 | **修正代码 + 修订规格**：11.1 注入 `capability="report"`；补充限定语见 18.1 |
+| `spec/30:264` 报表路径不进补查回环 | **修正代码 + 修订规格**：11.1 注入 `suppress_supplemental_query` 标志；补充限定语见 18.1 |
 | `processors.yoy` 实为环比 | **修 bug**：阶段 A |
 | `UnitResult` 丢弃了旧工作流已有的截断信号 | **透传 `truncated`**：阶段 A。不新增 `total_rows`——原始行数在现有链路不可得 |
 | 图表硬编码 `bar` | **修正**：用 `ProcessorResult.chart_type`，回退仍为 `bar` |

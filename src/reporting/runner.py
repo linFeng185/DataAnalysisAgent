@@ -307,10 +307,12 @@ class ReportRunner:
             "user_id": int(identity.get("user_id", 0) or 0),
             "user_role": str(identity.get("role", "") or ""),
             "session_id": session_id,
-            # 显式声明报表能力：否则 classify_intent 会把单元问句判成 sql_analysis，
-            # 从而允许触发旧的自主补查回环（workflow.py:237-281）。该回环没有配额
-            # 预占与档位控制，与报表自身的受控发散回路叠加会让成本失控。
-            "capability": "report",
+            # 显式抑制旧的自主补查回环（workflow.py:237-281）。该回环没有配额预占
+            # 与档位控制，与报表自身的受控发散回路叠加会让成本失控。
+            # 不能用 capability="report" 实现：_infer_capability 只按问题文本推断、
+            # 会覆盖预置值；而且它真生效时 after_analyze_result 会把单元路由到
+            # report_subgraph（生成报告而不是取数），后果比原问题更严重。
+            "suppress_supplemental_query": True,
             "request_rate_limit_checked": True,
         }, {"configurable": {"thread_id": thread_id}})
         final = dict(result.get("final_response", {}) or {})

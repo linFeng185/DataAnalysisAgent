@@ -232,8 +232,13 @@ class TestReportRunnerDatasourceFanout:
     # 方法作用：验证单元执行显式声明报表能力，关闭旧的自主补查回环。
     # Args: self - pytest 测试类实例；monkeypatch - pytest 补丁工具。
     # Returns: 无返回值，断言失败时由 pytest 报告。
-    async def test_execute_unit_declares_report_capability(self, monkeypatch) -> None:
-        """不声明 capability 会让单元问句被判为 sql_analysis，从而进入无配额控制的旧回环。"""
+    async def test_execute_unit_suppresses_supplemental_loop(self, monkeypatch) -> None:
+        """单元执行必须显式关闭旧的自主补查回环。
+
+        不能用 capability="report" 实现：_infer_capability 只按问题文本推断、
+        会覆盖预置值；而且它真生效时 after_analyze_result 会把单元路由到
+        report_subgraph（生成报告而不是取数），后果比原问题更严重。
+        """
         # Arrange
         import src.graph.workflow as workflow_module
         from src.reporting.models import AnalysisUnit, ReportPlan
@@ -256,7 +261,42 @@ class TestReportRunnerDatasourceFanout:
         await runner._default_execute_unit(unit, state)
 
         # Assert
-        assert captured[0]["capability"] == "report"
+        assert captured[0]["suppress_supplemental_query"] is True
+        # 不能再用无效的 capability 注入
+        assert "capability" not in captured[0]
+
+    # 方法作用：验证抑制标志真的拦住补查回环，而不是只写进 state。
+    # Args: self - 测试实例；monkeypatch - pytest 补丁工具。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    async def test_suppress_flag_blocks_supplemental_loop(self, monkeypatch) -> None:
+        """把回环的全部前置条件都造齐，验证标志是唯一的拦阻点。
+
+        只断言 state 里有这个键是空洞的——上一版测试就是这样漏掉了能力注入被
+        覆盖的问题；这里让补查请求本会产出非空问题，缺标志时会路由到
+        supplemental_query。
+        """
+        # Arrange：读取优先扁平字段，缺失才回退分组（见 graph/context._read_value）
+        import src.graph.nodes.supplemental_query as supplemental_module
+        from src.graph.workflow import after_analyze_result
+
+        monkeypatch.setattr(
+            supplemental_module,
+            "build_supplemental_request",
+            lambda *args, **kwargs: {"question": "补充查询问题", "source_questions": ["x"], "table_names": ["t"]},
+        )
+        base_state = {
+            "task_plan": {"capability": "sql_analysis"},
+            "intent": "trend",
+            "selected_datasources": ["oracle"],
+            "analysis_result": {"evidence_status": "supplementable", "summary": "证据不足"},
+        }
+
+        # Act：先确认不带标志时确实会进入回环，否则本用例是空洞的
+        without_flag = after_analyze_result(dict(base_state))
+
+        # Assert
+        assert without_flag == "supplemental_query"
+        assert after_analyze_result({**base_state, "suppress_supplemental_query": True}) == "generate_chart"
 
     # 方法作用：验证执行器透传旧工作流已有的截断信号。
     # Args: self - pytest 测试类实例；monkeypatch - pytest 补丁工具。

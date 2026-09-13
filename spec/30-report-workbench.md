@@ -262,7 +262,7 @@ ReportWorkbenchSubgraph（每次运行独立 thread_id）
 
 ### 6.3 补查策略
 
-报表路径**不进入旧的单轮自主补查回环**（`src/graph/workflow.py:237-281`，由 `src/reporting/runner.py` 在单元执行时注入 `capability="report"` 关闭）。缺失证据由 `report_plan_queries` 一次性生成有界查询计划：
+报表路径**不进入旧的单轮自主补查回环**（`src/graph/workflow.py:237-281`，由 `src/reporting/runner.py` 在单元执行时注入 `suppress_supplemental_query` 标志 关闭）。缺失证据由 `report_plan_queries` 一次性生成有界查询计划：
 
 - 每个单元最多 `primary_query_limit=2` 条主查询和 `evidence_query_limit=2` 条证据查询；
 - 同一表、同一粒度、同一筛选条件的缺口合并为一条查询；

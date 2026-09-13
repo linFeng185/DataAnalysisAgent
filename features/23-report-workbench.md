@@ -55,8 +55,18 @@
 | 待开发项 | 不开发原因 | 可开发条件 | 预计开发时机 |
 |---|---|---|---|
 | 23.18 跨源分布级关联与影响判定 | 同 23.16；设计见 `spec/42` 第 7 节 | 无外部依赖；真实跨源样本可用测试数据构造 | Phase 3 |
-| （阶段 A 前置修复）**已完成** | 未单列功能点，属 23.16/23.17 的实施前置，四项均已落地：① `runner._default_execute_unit` 注入 `capability="report"` 关闭旧补查回环；② 修 `processors.yoy` 既有 bug（原先与 `mom` 逐字相同、算的是环比却输出同比，现改为按年平移对齐去年同期）；③ `UnitResult.truncated` 透传旧工作流已有信号（**未新增 `total_rows`**：原始行数在现有链路不可得，为拿不到的分母下钻 `sql_execution.py` 与 `execute_sql.py` 不划算，且这两个文件正被另一条并行开发线修改）；④ `EstimatedResources.query_count` 上限 16→64（18 个单元 × 平均 4 源） | — | Phase 3，已完成 |
+| （阶段 A 前置修复）**已完成** | 未单列功能点，属 23.16/23.17 的实施前置，四项均已落地：① `runner._default_execute_unit` 注入 `suppress_supplemental_query=True`，并在 `after_analyze_result` 条件上追加同名否定项关闭旧补查回环；② 修 `processors.yoy` 既有 bug（原先与 `mom` 逐字相同、算的是环比却输出同比，现改为按年平移对齐去年同期）；③ `UnitResult.truncated` 透传旧工作流已有信号（**未新增 `total_rows`**：原始行数在现有链路不可得，为拿不到的分母下钻 `sql_execution.py` 与 `execute_sql.py` 不划算，且这两个文件正被另一条并行开发线修改）；④ `EstimatedResources.query_count` 上限 16→64（18 个单元 × 平均 4 源） | — | Phase 3，已完成 |
 | （其余项） | 本轮编号范围内均已实现 | 生产验收见下文，不另伪造开发完成状态 | — |
+
+### 2026-09-13 首次真实运行修复批次
+
+首次在真实环境跑通报表后暴露两个缺陷，均已修复并补上能真正抓住它们的回归：
+
+- **`report.diverge` 模板变量缺失**：模板里有 `{limit}` 占位符，但调用方把它当 `PromptSection` 传，而 `PromptDefinition.render()` 走的是 `template.format(**values)`——变量必须经 `system_values` 传入。结果是每次计划期发散都在 render 阶段抛 `ValueError: 提示词 report.diverge 缺少变量: limit`，被降级捕获后只留一条 warning，**发散功能实际从未生效**。修复为传 `system_values={"limit": str(limit)}`，并新增 `TestPromptVariableContract`：用调用方实传的 `system_values` 真的渲染一次模板，缺变量即断言失败。
+- **阶段 A 的旧回环修复是空操作**：原方案注入 `capability="report"`，但 `_infer_capability`（`contracts.py:262-292`）只按问题文本推断、不读预置值，注入当场被覆盖（真实日志仍是 `capability=sql_analysis`）。而它若真生效后果更严重——`after_analyze_result` 会把单元路由到 `report_subgraph`（生成报告而非取数）。已改为 `suppress_supplemental_query=True` + `after_analyze_result` 条件追加同名否定项。原测试只断言 state 字典的值，通过却无行为保证；现改为造齐回环全部前置条件、先断言不带标志时确实进入回环，再断言带标志被拦下。
+- 同时把 `spec/30:265`、`spec/42` §11.1 与 §18、本文件阶段 A 行里"注入 capability 关闭回环"的失实描述改为真实机制。
+
+**未修复、属设计范畴的观察**：本次报表全部分析失败的直接原因是**计划问题超出所选数据源的 Schema 能力**——单元问的是归因触点、发票差额、地区/渠道维度，而 oracle 数据源（143 张表，多为 `workforce_*`）没有这些字段。SQL 生成节点正确地返回 `needs_input` 并说明缺口，**系统没有幻觉造 SQL**，这是预期行为。但用户拿到的是"5 个空单元 + 状态 partial"的报表，计划阶段没有任何反馈。若要改善，需要在计划期做一次 Schema 可行性预检——属新功能，不在本批次范围。
 
 ### 2026-09-12 运行计数批次
 

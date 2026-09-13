@@ -572,4 +572,4 @@ migrations/
 
 1. **报表智能发散分析**（已与用户确认的四项能力）：主动扩单元、深挖已有数据（同环比 / 趋势 / 异常 / 贡献度 / 分布）、跨单元关联与影响判定、业务基准对照。**已出设计文档：`spec/42-report-divergent-analysis.md`**。
 2. `document.navigation`、`document.sources`、`permissions.download` 三个字段已下发但前端未消费，可作为独立小批次处理。
-3. 既有规格落差（本设计不处理，已在 `spec/42` 第 18 节处理）：`spec/30:217` 的 `report_analyze_units` 节点在代码中不存在；`spec/30:215` 的 `report_profile_results` 实际只统计行数；`spec/30:264` 声称报表路径不进入补查回环，但 `runner.py:207-219` 未注入 `capability="report"`，回环实际可达。`spec/30:264` 已由 `spec/42` 第 18.1 节同步修订。
+3. 既有规格落差（本设计不处理，已在 `spec/42` 第 18 节处理）：`spec/30:217` 的 `report_analyze_units` 节点在代码中不存在；`spec/30:215` 的 `report_profile_results` 实际只统计行数；`spec/30:264` 声称报表路径不进入补查回环，但 `runner.py:207-219` 未注入 `suppress_supplemental_query` 标志，回环实际可达。`spec/30:264` 已由 `spec/42` 第 18.1 节同步修订。

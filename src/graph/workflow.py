@@ -262,6 +262,9 @@ def after_analyze_result(state: AnalysisState) -> str:
         and capability not in {"forecast", "report"}
         and not state.get("previous_result_restored")
         and not state.get("execution_error")
+        # 报表单元显式关闭本回环：它没有配额预占与档位控制，
+        # 与报表自身的受控发散回路叠加会让成本失控。
+        and not state.get("suppress_supplemental_query")
     )
     if can_supplement:
         logger.info(

@@ -488,3 +488,41 @@ class TestReservation:
         # Assert
         assert reserved_standard.estimated.query_count > reserved_conservative.estimated.query_count
         assert reserved_conservative.estimated.query_count == 1
+
+
+class TestPromptVariableContract:
+    """验证 23.17：调用方必须提供模板所需的全部变量。
+
+    这是上线后第一次真实运行报出的错：report.diverge 的模板里有 {limit}，
+    但调用方把它当 section 传，render 时抛 KeyError 导致整批发散降级。
+    只断言「传了哪个 section」抓不到这类问题，必须真的渲染一次。
+    """
+
+    # 方法作用：验证发散调用提供的变量足以渲染模板。
+    # Args: self - 测试实例；monkeypatch - pytest 补丁工具。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    async def test_diverge_passes_template_variables(self, monkeypatch) -> None:
+        """用调用方实传的 system_values 渲染模板，缺变量会在断言处暴露。"""
+        # Arrange
+        import src.llm.client as llm_client
+        import src.llm.invocation as llm_invocation
+        from src.llm.output_contracts import ReportDivergeOutput
+        from src.llm.prompts import get_prompt_definition
+        from src.reporting.planner import ReportPlanner
+
+        monkeypatch.setattr(llm_client, "is_task_llm_available", lambda task: True)
+        captured: dict = {}
+
+        async def fake_invoke(prompt_id, sections, **kwargs):
+            captured["prompt_id"] = prompt_id
+            captured["system_values"] = dict(kwargs.get("system_values") or {})
+            return ReportDivergeOutput(proposed_units=[])
+
+        monkeypatch.setattr(llm_invocation, "invoke_structured", fake_invoke)
+
+        # Act
+        await ReportPlanner().diverge(_plan("standard"), datasources=["sales"])
+
+        # Assert：渲染必须成功（缺变量会在这里抛 ValueError），且额度出现在正文里
+        body = get_prompt_definition(captured["prompt_id"]).render(**captured["system_values"])
+        assert "3" in body
