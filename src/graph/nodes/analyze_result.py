@@ -7,7 +7,11 @@ import json
 import time
 from datetime import date, datetime
 from decimal import Decimal
+from itertools import zip_longest
 from typing import Any
+
+from langchain_core.messages import HumanMessage
+from pydantic import ValidationError
 
 from src.graph.state import AnalysisState
 from src.llm.prompt_budget import PromptSection
@@ -495,27 +499,60 @@ async def _llm_polish(summary: str, insights: list[str], data_sample: str) -> di
         return None
 
 
+# 方法作用：按来源分别均匀采样并交错展示，避免字符裁剪只保留首个来源。
+# Args: rows - 已授权的查询结果样本。
+# Returns: 各来源均有代表行的紧凑 JSON；单源保持原顺序。
 def _to_compact(rows: list[dict]) -> str:
-    """全量数据转紧凑 JSON，超限按比例均匀抽取。上限通过 ANALYSIS_DATA_MAX_CHARS 环境变量配置。"""
+    """全量数据转紧凑 JSON，超限按来源均匀抽取。"""
     if not rows:
         return "[]"
     from src.config import get_settings
     limit = get_settings().analysis_data_max_chars
     text = json.dumps(rows, ensure_ascii=False, default=_json_default,
                       separators=(",", ":"))
-    if len(text) <= limit:
-        return text
-    # 超限：按比例均匀取点，保证覆盖面
-    row_size = len(text) / len(rows)
-    max_rows = max(10, int(limit / row_size))
-    step = max(1, len(rows) // max_rows)
-    sampled = rows[::step]
-    if rows[0] not in sampled:
-        sampled.insert(0, rows[0])
-    if rows[-1] not in sampled:
-        sampled.append(rows[-1])
+    groups: dict[str, list[dict]] = {}
+    for row in rows:
+        groups.setdefault(str(row.get("_datasource", "")), []).append(row)
+    max_rows = len(rows) if len(text) <= limit else max(10, int(limit / (len(text) / len(rows))))
+    per_source = max(1, max_rows // len(groups))
+    batches = []
+    for source_rows in groups.values():
+        if len(text) <= limit or len(source_rows) <= per_source:
+            batches.append(source_rows)
+        else:
+            indices = [index * (len(source_rows) - 1) // max(1, per_source - 1) for index in range(per_source)]
+            batches.append([source_rows[index] for index in indices])
+    sampled = [row for group in zip_longest(*batches) for row in group if row is not None]
     return json.dumps(sampled, ensure_ascii=False, default=_json_default,
                       separators=(",", ":"))
+
+
+# 方法作用：确定性汇总各来源样本时间边界，避免模型将可见头部误当全量。
+# Args: rows - 进入分析器的已授权样本。
+# Returns: 仅描述样本范围和来源行数的说明，不推断数据库完整覆盖。
+def _format_sample_scope(rows: list[dict]) -> str:
+    groups: dict[str, list[dict]] = {}
+    for row in rows:
+        groups.setdefault(str(row.get("_datasource", "当前来源")), []).append(row)
+    parts = ["以下边界按进入分析器的样本确定性计算，不代表数据库完整范围；模型可见代表行更少不能改变这些边界。"]
+    for source, source_rows in groups.items():
+        boundaries = []
+        for column in dict.fromkeys(key for row in source_rows for key in row):
+            if not any(token in column.lower() for token in ("date", "time", "day", "month", "year", "日期", "年月")):
+                continue
+            values = []
+            for row in source_rows:
+                value = row.get(column)
+                text = value.isoformat() if isinstance(value, (date, datetime)) else str(value or "")
+                try:
+                    datetime.fromisoformat(f"{text}-01" if len(text) == 7 else text)
+                except ValueError:
+                    continue
+                values.append(text)
+            if values:
+                boundaries.append(f"{column}={min(values)} 至 {max(values)}")
+        parts.append(f"{source}：{len(source_rows)} 行样本；" + "；".join(boundaries[:4]))
+    return "\n".join(parts)
 
 
 # 方法作用：把当前授权 Schema 压缩成证据充分性评估可用的字段摘要。
@@ -843,7 +880,7 @@ async def _llm_analyze(
         context_text = await build_llm_context(history, node_name="analyze_result")
     history_block = f"## 对话历史\n{context_text}" if context_text else ""
 
-    input_label = f"输入全量 {total_rows} 行" if is_full else f"输入均匀采样 {sample_row_count}/{total_rows} 行"
+    input_label = f"输入全量 {total_rows} 行" if is_full else f"输入分源均匀采样 {sample_row_count}/{total_rows} 行"
     database_count = result_full_count if result_full_count is not None else total_rows
     completeness = (
         f"数据库查询返回 {database_count} 行；{input_label}；"
@@ -865,6 +902,13 @@ async def _llm_analyze(
                 priority=99,
                 min_chars=150,
                 max_chars=500,
+            ),
+            PromptSection(
+                "sample_scope",
+                f"## 确定性样本边界\n{_format_sample_scope(rows)}",
+                priority=98,
+                min_chars=600,
+                max_chars=1500,
             ),
             PromptSection(
                 "sql",
@@ -949,19 +993,29 @@ async def _llm_analyze(
             metadata={"node": "analyze_result", "intent": intent},
             model=llm,
         )
-        resp = await asyncio.wait_for(
-            prepared.model.ainvoke(prepared.messages),
-            timeout=timeout_seconds,
-        )
         adapter = get_adapter(getattr(settings, "llm_model", ""))
-        parsed = adapter.parse_response(resp)
-        parsed_content = str(getattr(parsed, "content", "") or "").strip()
-        if not parsed_content:
-            logger.warning("适配器未返回正文，兼容原始响应", model=get_settings().llm_model)
-            parsed_content = str(getattr(resp, "content", "") or "").strip()
         from src.llm.output_contracts import AnalysisOutput, parse_json_model
 
-        result = parse_json_model(parsed_content, AnalysisOutput).model_dump()
+        deadline = time.monotonic() + timeout_seconds
+        messages = list(prepared.messages)
+        for attempt in range(2):
+            resp = await asyncio.wait_for(
+                prepared.model.ainvoke(messages),
+                timeout=max(0.01, deadline - time.monotonic()),
+            )
+            parsed = adapter.parse_response(resp)
+            parsed_content = str(getattr(parsed, "content", "") or "").strip()
+            if not parsed_content:
+                logger.warning("适配器未返回正文，兼容原始响应", model=get_settings().llm_model)
+                parsed_content = str(getattr(resp, "content", "") or "").strip()
+            try:
+                result = parse_json_model(parsed_content, AnalysisOutput).model_dump()
+                break
+            except (json.JSONDecodeError, ValidationError) as exc:
+                if attempt:
+                    raise
+                logger.warning("分析输出契约无效，限次重试", error_type=type(exc).__name__, retry_count=1)
+                messages.append(HumanMessage(content="上次输出未通过 JSON 契约校验。请重新分析同一份证据，只返回一个符合要求的完整 JSON 对象；禁止连续多个对象、尾随解释或省略限制字段。"))
         if parsed.reasoning_content:
             logger.debug(
                 "分析模型内部推理已抑制",
