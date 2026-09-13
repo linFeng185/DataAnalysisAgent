@@ -28,6 +28,17 @@ logger = get_logger(__name__)
 _COLLECTION = "data_agent_knowledge"
 _DIM = 384
 _QUERY_BATCH_SIZE = 1_000
+# 带 metadata 过滤时的 ANN 候选窗口。Milvus 的 metadata 是 VARCHAR，只能靠
+# `metadata like` 做后置过滤（先取 ANN 候选、再逐条匹配），因此窗口必须远大于
+# 最终条数，否则低占比类别会被过滤空。实测表级条目只占集合约 8%，旧实现把窗口
+# 写成 50，候选里经常一条表都没有，上游 schema_manager 据此「回退到全部表」，
+# 把整库 125 张表塞进每个分析单元的 Prompt。
+_FILTERED_CANDIDATE_LIMIT = 1_000
+# 索引是 FLAT（暴力精确检索），因此搜索参数不带 nprobe：集合只有万级实体、384 维，
+# 全扫描是毫秒级，而这个检索每个分析单元只调一次，延迟预算极宽松。
+# 反过来，IVF_* 的近似误差会让低占比类别整批漏扫——表级条目只占集合约 8% 且聚簇分布，
+# 实测 nprobe=16 时表级召回为 0，上游 schema_manager 据此「回退到全部表」，
+# 把整库塞进每个分析单元的 Prompt。若将来改回 IVF_*，必须先确认 nprobe 覆盖到目标类别的簇。
 _RPC_TIMEOUT_SECONDS = 10.0
 _ITERATION_TIMEOUT_SECONDS = 30.0
 # load 失败后的熔断窗口：集合不可用时让后续请求快速失败，而不是各等一次完整加载超时。
@@ -215,17 +226,13 @@ class MilvusVectorStore(VectorStore):
         # Args: 无，读取模型路径配置。
         # Returns: 模型编码函数。
         def load_model() -> Callable[..., Any]:
-            from sentence_transformers import SentenceTransformer
-            from transformers.utils import logging as transformers_logging
+            from src.memory.embedding_backend import load_embed_fn
 
             settings = get_settings()
             path = settings.embedding_model_path or "all-MiniLM-L6-v2"
-            stdlib_logging.getLogger("sentence_transformers").setLevel(stdlib_logging.WARNING)
-            stdlib_logging.getLogger("transformers").setLevel(stdlib_logging.WARNING)
-            transformers_logging.disable_progress_bar()
-            model = SentenceTransformer(path)
-            logger.info("嵌入模型加载完成", path=path, dim=_DIM)
-            return model.encode
+            encode = load_embed_fn(path)
+            logger.info("嵌入模型加载完成", path=path, dim=_DIM, backend="onnxruntime")
+            return encode
 
         async with self._embed_lock:
             if self._embed_fn is None:
@@ -237,8 +244,8 @@ class MilvusVectorStore(VectorStore):
     # Returns: 向量值列表。
     async def _embed(self, text: str) -> list[float]:
         encode = await self._get_embed_fn()
-        result = await asyncio.to_thread(encode, text, show_progress_bar=False)
-        return result.tolist()
+        vectors = await asyncio.to_thread(encode, [text])
+        return vectors[0]
 
     # 批量编码条目向量：逐条调用模型会让 1386 条的刷新把 30 秒预算吃满。
     # Args: self - 实例；entries - 待写入条目。
@@ -249,11 +256,10 @@ class MilvusVectorStore(VectorStore):
             return [entry.embedding for entry in entries]
         encode = await self._get_embed_fn()
         started = time.monotonic()
-        # sentence-transformers 的 encode 接受列表入参，一次前向即可编码整批。
-        vectors = await asyncio.to_thread(encode, pending, show_progress_bar=False)
+        # 一次前向编码整批，避免逐条调用把刷新预算吃满。
+        batch = await asyncio.to_thread(encode, pending)
         logger.info("向量批量编码完成", count=len(pending),
                     elapsed_ms=round((time.monotonic() - started) * 1000))
-        batch = [vector.tolist() for vector in vectors]
         result: list[list[float]] = []
         cursor = 0
         for entry in entries:
@@ -354,10 +360,10 @@ class MilvusVectorStore(VectorStore):
         logger.debug("Milvus search 入口", top_k=top_k, filter_count=len(filters or {}))
         _start = time.monotonic()
         emb = await self._embed(query)
-        candidate_limit = 50 if filters else min(top_k, 50)
+        candidate_limit = _FILTERED_CANDIDATE_LIMIT if filters else min(top_k, 50)
         results = await self._run_on_collection(lambda col: col.search(
             data=[emb], anns_field="embedding",
-            param={"metric_type": "COSINE", "params": {"nprobe": 16}},
+            param={"metric_type": "COSINE", "params": {}},
             limit=candidate_limit, expr=self._to_expr(filters),
             output_fields=["id", "content", "metadata"], timeout=_RPC_TIMEOUT_SECONDS))
         hits = []

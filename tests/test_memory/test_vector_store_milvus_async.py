@@ -22,22 +22,21 @@ class TestMilvusAsyncBoundary:
     # Args: self - 实例；monkeypatch - 补丁工具。
     # Returns: 无返回值。
     async def test_embedding_import_and_initialization_are_off_loop(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """防止只将构造器 to_thread，但先在主线程执行昂贵的 transformers 导入。"""
+        """防止在主线程执行昂贵的 onnxruntime / tokenizers 导入。"""
         import builtins
 
         # Arrange
         main_thread = threading.get_ident()
         original_import = builtins.__import__
-        model = SimpleNamespace(encode=MagicMock())
-        constructor = MagicMock(return_value=model)
+        encode_fn = MagicMock()
+        loader = MagicMock(return_value=encode_fn)
         modules = {
-            "sentence_transformers": SimpleNamespace(SentenceTransformer=constructor),
-            "transformers.utils": SimpleNamespace(logging=SimpleNamespace(disable_progress_bar=MagicMock())),
+            "src.memory.embedding_backend": SimpleNamespace(load_embed_fn=loader),
         }
 
-        # 在真实 import 边界检查线程，而非仅验证构造器调用。
+        # 在真实 import 边界检查线程，而非仅验证加载器调用。
         # Args: name - 导入名；args/kwargs - import 参数。
-        # Returns: 模型替身或原始导入结果。
+        # Returns: 加载器替身或原始导入结果。
         def import_probe(name: str, *args: Any, **kwargs: Any) -> Any:
             if name in modules:
                 assert threading.get_ident() != main_thread, name
@@ -49,8 +48,8 @@ class TestMilvusAsyncBoundary:
         # Act
         results = await asyncio.gather(store._get_embed_fn(), store._get_embed_fn())
         # Assert
-        assert results == [model.encode, model.encode]
-        constructor.assert_called_once()
+        assert results == [encode_fn, encode_fn]
+        loader.assert_called_once()
 
     # 验证每个公开操作的 SDK 调用在线程中并有有限超时。
     # Args: self - 实例；monkeypatch - 补丁工具；operation - 被测操作。

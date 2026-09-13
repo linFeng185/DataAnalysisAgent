@@ -235,48 +235,30 @@ class TestPgVectorStore:
     async def test_embedding_work_is_offloaded_from_event_loop(self, monkeypatch) -> None:
         """模型初始化和 CPU 推理不得阻塞 asyncio 事件循环。"""
         logger.debug("test_embedding_work_is_offloaded_from_event_loop 入口")
+        import src.memory.embedding_backend as embedding_backend
         import src.memory.vector_store_pg as module
 
         # Arrange
         thread_ids: list[int] = []
 
-        class EncodedVector:
-            """提供 SentenceTransformer encode 结果的最小 tolist 契约。"""
+        # 方法作用：记录模型初始化线程并返回批量编码函数替身。
+        # Args: path - 模型路径。
+        # Returns: 记录编码线程并返回固定向量的批量编码函数。
+        def fake_load_embed_fn(path: str):
+            logger.debug("fake_load_embed_fn 入口", extra={"path": path})
+            thread_ids.append(threading.get_ident())
 
-            # 方法作用：返回固定向量。
-            # Args: self - 当前模拟结果。
-            # Returns: 两维浮点列表。
-            def tolist(self) -> list[float]:
-                logger.debug("EncodedVector.tolist 入口")
-                result = [0.1, 0.2]
-                logger.info("EncodedVector.tolist 完成")
-                return result
-
-        class FakeSentenceTransformer:
-            """记录初始化和推理线程的模拟嵌入模型。"""
-
-            # 方法作用：记录模型初始化线程。
-            # Args: self - 模拟模型；path - 模型路径。
-            # Returns: 无返回值。
-            def __init__(self, path: str) -> None:
-                logger.debug("FakeSentenceTransformer.__init__ 入口", extra={"path": path})
+            # 方法作用：记录编码线程并返回固定向量。
+            # Args: texts - 待编码文本列表。
+            # Returns: 与输入等长的固定向量列表。
+            def encode(texts: list[str]) -> list[list[float]]:
+                logger.debug("fake encode 入口", extra={"count": len(texts)})
                 thread_ids.append(threading.get_ident())
-                logger.info("FakeSentenceTransformer.__init__ 完成")
+                return [[0.1, 0.2] for _ in texts]
 
-            # 方法作用：记录文本编码线程并返回固定向量。
-            # Args: self - 模拟模型；text - 待编码文本。
-            # Returns: 具有 tolist 方法的固定向量。
-            def encode(self, text: str) -> EncodedVector:
-                logger.debug("FakeSentenceTransformer.encode 入口", extra={"text": text})
-                thread_ids.append(threading.get_ident())
-                logger.info("FakeSentenceTransformer.encode 完成")
-                return EncodedVector()
+            return encode
 
-        monkeypatch.setitem(
-            sys.modules,
-            "sentence_transformers",
-            SimpleNamespace(SentenceTransformer=FakeSentenceTransformer),
-        )
+        monkeypatch.setattr(embedding_backend, "load_embed_fn", fake_load_embed_fn)
         monkeypatch.setattr(
             module,
             "get_settings",

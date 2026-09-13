@@ -306,15 +306,14 @@ class TestMilvusExpressionSafety:
     # Args: self - pytest 测试类实例；monkeypatch - pytest 补丁工具。
     # Returns: 无返回值，断言失败时由 pytest 报告。
     @pytest.mark.asyncio
-    async def test_embed_disables_progress_bar(self, monkeypatch) -> None:
-        """单条或批量编码均不得向服务控制台写入 tqdm 进度条。"""
-        logger.debug("test_embed_disables_progress_bar 入口")
+    async def test_embed_uses_batch_interface(self, monkeypatch) -> None:
+        """单条编码必须走批量接口并取回首元素，不再传递 tqdm 开关。"""
+        logger.debug("test_embed_uses_batch_interface 入口")
         try:
             # Arrange
             from src.memory.vector_store_milvus import MilvusVectorStore
 
-            encoded = SimpleNamespace(tolist=lambda: [0.1, 0.2])
-            encode = MagicMock(return_value=encoded)
+            encode = MagicMock(return_value=[[0.1, 0.2]])
             store = MilvusVectorStore()
             monkeypatch.setattr(store, "_get_embed_fn", AsyncMock(return_value=encode))
 
@@ -323,10 +322,10 @@ class TestMilvusExpressionSafety:
 
             # Assert
             assert result == [0.1, 0.2]
-            encode.assert_called_once_with("hello", show_progress_bar=False)
-            logger.info("test_embed_disables_progress_bar 完成")
+            encode.assert_called_once_with(["hello"])
+            logger.info("test_embed_uses_batch_interface 完成")
         except Exception as exc:
-            logger.error("test_embed_disables_progress_bar 异常: %s", exc, exc_info=True)
+            logger.error("test_embed_uses_batch_interface 异常: %s", exc, exc_info=True)
             raise
 
 
@@ -547,12 +546,10 @@ class TestMilvusCollectionLoadResilience:
         logger.debug("test_upsert_embeds_missing_vectors_in_one_batch 入口")
         try:
             # Arrange
-            import numpy as np
-
             from src.memory.vector_store import VectorEntry
             from src.memory.vector_store_milvus import MilvusVectorStore
 
-            encode = MagicMock(return_value=np.array([[0.1, 0.2], [0.3, 0.4]]))
+            encode = MagicMock(return_value=[[0.1, 0.2], [0.3, 0.4]])
             store = MilvusVectorStore()
             monkeypatch.setattr(store, "_get_embed_fn", AsyncMock(return_value=encode))
             monkeypatch.setattr(store, "_run_on_collection", AsyncMock(return_value=None))
@@ -565,7 +562,6 @@ class TestMilvusCollectionLoadResilience:
             assert result == 2
             encode.assert_called_once()
             assert encode.call_args.args[0] == ["first", "second"]
-            assert encode.call_args.kwargs["show_progress_bar"] is False
             logger.info("test_upsert_embeds_missing_vectors_in_one_batch 完成")
         except Exception as exc:
             logger.error("test_upsert_embeds_missing_vectors_in_one_batch 异常: %s", exc, exc_info=True)
@@ -597,3 +593,34 @@ class TestMilvusCollectionLoadResilience:
         except Exception as exc:
             logger.error("test_empty_upsert_skips_collection 异常: %s", exc, exc_info=True)
             raise
+
+
+class TestMilvusFilteredSearchCoverage:
+    """覆盖带 metadata 过滤的检索覆盖度：表级条目只占集合约 8%，漏扫即静默空结果。
+
+    回归 2026-09-13 报表故障：IVF_FLAT 下 nprobe=16（nlist=128 的 12.5%）时实测
+    过滤后召回 0 条，上游 schema_manager 据此「回退到全部表」，把整库 125 张表
+    塞进每个分析单元的 Prompt。索引已改为 FLAT（暴力精确检索），从机制上消除漏扫。
+    """
+
+    # 方法作用：搜索参数不得带 nprobe——它是 IVF 专属的簇探测开关。
+    # Args: self - 测试实例。
+    # Returns: 断言通过时无返回值。
+    def test_search_does_not_pass_ivf_nprobe(self) -> None:
+        import inspect
+
+        from src.memory import vector_store_milvus as module
+
+        source = inspect.getsource(module.MilvusVectorStore.search)
+
+        assert "nprobe" not in source, "FLAT 索引下传 nprobe 会误导后来者，改回 IVF 前必须重算簇覆盖"
+        assert "_SEARCH_NPROBE" not in dir(module)
+
+    # 方法作用：带过滤时的候选窗口必须远大于最终条数（过滤是后置的）。
+    # Args: self - 测试实例。
+    # Returns: 断言通过时无返回值。
+    def test_filtered_candidate_window_far_exceeds_return_limit(self) -> None:
+        from src.memory.vector_store_milvus import _FILTERED_CANDIDATE_LIMIT
+
+        # 旧实现写死 50，与最终条数同量级，后置过滤后经常为空。
+        assert _FILTERED_CANDIDATE_LIMIT >= 1_000

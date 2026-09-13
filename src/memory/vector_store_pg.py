@@ -102,13 +102,12 @@ class PgVectorStore(VectorStore):
         Returns: callable(text) → list[float]
         """
         if self._embed_fn is None:
-            from sentence_transformers import SentenceTransformer
+            from src.memory.embedding_backend import load_embed_fn
             s = get_settings()
             path = s.embedding_model_path or "all-MiniLM-L6-v2"
             logger.debug("嵌入模型线程池加载入口", path=path)
-            model = await asyncio.to_thread(SentenceTransformer, path)
-            self._embed_fn = model.encode
-            logger.info("嵌入模型加载完成", path=path, dim=384)
+            self._embed_fn = await asyncio.to_thread(load_embed_fn, path)
+            logger.info("嵌入模型加载完成", path=path, dim=384, backend="onnxruntime")
         return self._embed_fn
 
     # 方法作用：在线程池中把文本编码为浮点向量。
@@ -125,8 +124,8 @@ class PgVectorStore(VectorStore):
         fn = await self._get_embed_fn()
         logger.debug("PgVectorStore 文本编码入口", text_length=len(text))
         try:
-            encoded = await asyncio.to_thread(fn, text)
-            result = encoded.tolist()
+            encoded = await asyncio.to_thread(fn, [text])
+            result = encoded[0]
         except Exception as exc:
             logger.error("PgVectorStore 文本编码失败", error=str(exc), exc_info=True)
             raise

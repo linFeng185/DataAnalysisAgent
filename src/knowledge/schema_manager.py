@@ -29,6 +29,51 @@ from src.logging_config import get_logger
 
 logger = get_logger(__name__)
 
+# 中文业务词到表名标识符片段的映射，用作语义检索之外的确定性兜底通道。
+# 向量模型是英文句子相似度模型（all-MiniLM-L6-v2），对中文 query 的排序接近噪声：
+# 实测「广告归因收入与订单净销售额的对比」的语义 top-20 全是 weather / tourism /
+# consumer_trends 类表，真正相关的 insight_order_attribution 连前 50 都进不去，
+# 模型据此判定「白名单中不存在广告归因事实表」而拒绝生成 SQL。
+# 只匹配表名：列名匹配会让 125 张带 region_code 的表被一次全捞回来，反而失效。
+_TABLE_LEXICAL_HINTS: dict[str, tuple[str, ...]] = {
+    "归因": ("attribut",),
+    "广告": ("ad_", "ads", "campaign", "creative", "placement", "impression"),
+    "订单": ("order",),
+    "销售": ("sale", "revenue", "spending"),
+    "地区": ("region",),
+    "区域": ("region",),
+    "渠道": ("channel",),
+    "情景": ("scenario",),
+    "配送": ("delivery", "shipment", "freight"),
+    "履约": ("fulfillment", "delivery"),
+    "运输": ("transport", "carrier", "trip", "vehicle"),
+    "库存": ("inventory", "stock"),
+    "仓储": ("warehouse", "bin_location", "putaway"),
+    "采购": ("purchase", "sourcing", "supplier"),
+    "成本": ("cost",),
+    "发票": ("invoice",),
+    "退款": ("refund",),
+    "退货": ("return",),
+    "预算": ("budget",),
+    "费用": ("expense", "charge"),
+    "财务": ("finance",),
+    "客户": ("customer",),
+    "会员": ("member", "loyalty"),
+    "促销": ("promotion", "discount", "markdown", "coupon"),
+    "价格": ("price",),
+    "气温": ("weather", "temperature"),
+    "景气": ("market_indices", "economic_indicator", "confidence"),
+    "缺货": ("stock", "replenish", "safety_stock"),
+    "支付": ("payment",),
+    "时效": ("delivery_slot", "shipment"),
+    "品类": ("category", "assortment"),
+    "供应商": ("supplier", "vendor"),
+    "活动": ("campaign", "promotion", "event"),
+    "点击": ("click", "search"),
+    "转化": ("conversion", "funnel"),
+    "实验": ("experiment", "variant"),
+}
+
 
 class SchemaManager:
     """
@@ -1014,6 +1059,9 @@ class SchemaManager:
                         "is_primary_key": col.is_primary_key,
                         "is_indexed": getattr(col, "is_indexed", False),
                         "enum_values": list(col.enum_values or []),
+                        # 文本日期列的值格式（内省采样识别）：随缓存往返，
+                        # 供 schema 提示标注，避免 TO_DATE 格式串不匹配（ORA-01830/01840）
+                        "value_format": getattr(col, "value_format", "") or "",
                         "datasource": datasource_name,
                         "tenant_id": tenant_id,
                         "owner_user_id": owner_user_id,
@@ -1151,6 +1199,8 @@ class SchemaManager:
                     is_primary_key=c.metadata.get("is_primary_key", False),
                     is_indexed=c.metadata.get("is_indexed", False),
                     enum_values=list(c.metadata.get("enum_values", []) or []),
+                    # 旧缓存无此字段时回退空串（不标注格式，行为与从前一致）
+                    value_format=c.metadata.get("value_format", "") or "",
                 )
                 for c in cols
             ]
@@ -1180,6 +1230,11 @@ class SchemaManager:
     _FILTER_THRESHOLD: int = 30
     # 语义搜索返回的候选表数量
     _SEMANTIC_TOP_K: int = 20
+    # 词面通道最多补入的表数，避免宽泛词（如「订单」）一次捞回整个数据源。
+    _LEXICAL_TOP_K: int = 20
+    # 单个片段最多贡献几张文，防止 supplier 这类宽泛片段把配额吃光、
+    # 挤掉 shipment / inventory 等同样命中但数量少的片段。
+    _LEXICAL_PER_FRAGMENT: int = 3
 
     # 方法作用：按查询语义和外键关系筛选大规模 Schema，并保持租户过滤。
     # Args: self - SchemaManager 实例；snapshot - 完整 Schema；user_query - 用户问题；datasource_name - 数据源名称；tenant_id - 可选显式租户 ID。
@@ -1219,6 +1274,15 @@ class SchemaManager:
             logger.debug("FK 扩张", added_tables=sorted(added),
                         added_count=len(added))
 
+        # ③.5 词面通道：英文 embedding 对中文 query 的语义排序接近噪声，
+        # 用中文业务词直连表名把明显相关的表补回候选。
+        lexical = self._lexical_hit_tables(user_query, tables)
+        added_lexical = lexical - expanded
+        if added_lexical:
+            logger.debug("词面命中扩张", added_tables=sorted(added_lexical),
+                        added_count=len(added_lexical))
+        expanded |= lexical
+
         # ④ 构建筛选后的快照
         all_selected = {t.lower() for t in expanded}
         filtered_tables = [t for t in tables if t.name.lower() in all_selected]
@@ -1226,6 +1290,45 @@ class SchemaManager:
         logger.debug("表筛选完成", total=len(tables), selected=len(filtered_tables),
                     filtered_out=len(tables) - len(filtered_tables))
         return SchemaSnapshot(tables=filtered_tables)
+
+    # 方法作用：按中文业务词映射到表名片段，确定性补回语义检索漏掉的表。
+    # Args: user_query - 用户问题；tables - 完整授权表列表。
+    # Returns: 命中的表名集合（小写），最多 _LEXICAL_TOP_K 张。
+    @staticmethod
+    def _lexical_hit_tables(user_query: str, tables: list) -> set[str]:
+        logger.debug("词面命中通道入口", query=user_query[:60], table_count=len(tables))
+        fragments = [
+            fragment
+            for chinese, english in _TABLE_LEXICAL_HINTS.items()
+            if chinese in user_query
+            for fragment in english
+        ]
+        if not fragments:
+            logger.debug("词面命中通道跳过", reason="query 未命中任何业务词")
+            return set()
+        per_fragment: dict[str, set[str]] = {}
+        for fragment in fragments:
+            hit = {
+                str(getattr(table, "name", "") or "").strip().lower()
+                for table in tables
+                if fragment in str(getattr(table, "name", "") or "").lower()
+            }
+            hit.discard("")
+            if hit:
+                # 同片段内按表名长度升序：主表名通常更短
+                # （finance_budgets < finance_budget_actuals），避免明细表挤掉主表。
+                ranked = sorted(hit, key=lambda name: (len(name), name))
+                per_fragment[fragment] = set(ranked[:SchemaManager._LEXICAL_PER_FRAGMENT])
+        selected = set(sorted({name for names in per_fragment.values() for name in names})[
+            :SchemaManager._LEXICAL_TOP_K
+        ])
+        logger.debug(
+            "词面命中通道完成",
+            fragment_count=len(fragments),
+            hit_fragment_count=len(per_fragment),
+            selected=len(selected),
+        )
+        return selected
 
     @staticmethod
     def _build_fk_graph(tables: list) -> dict[str, set[str]]:
@@ -1274,8 +1377,8 @@ class SchemaManager:
             table_count=len(tables),
         )
         try:
-            from src.app_context import get_tenant_policy
             from src.memory.vector_store import get_vector_store
+
             store = await get_vector_store()
             effective_tenant_id = (
                 self._current_tenant_id() if tenant_id is None else int(tenant_id)
@@ -1287,18 +1390,23 @@ class SchemaManager:
                     "category": "table",
                     "datasource": datasource_name,
                     "visibility": "tenant",
-                    **(
-                        {"tenant_id": effective_tenant_id}
-                        if get_tenant_policy().knowledge_isolation_enabled
-                        else {}
-                    ),
+                    # 无条件带租户：条目 metadata 的 tenant_id 由写入侧无条件写入，
+                    # 读取侧必须对称，不能挂在 knowledge_isolation_enabled 上——
+                    # 该开关等于 multi_tenant，其默认值是 False，一旦部署漏配，
+                    # 同一向量库里多租户的表条目会互相可见。
+                    "tenant_id": effective_tenant_id,
                 },
             )
             if not results:
                 logger.warning("语义搜索无结果，回退到全部表")
                 return {t.name.lower() for t in tables}
 
-            prefix = self._scoped_entry_id("table", datasource_name, "")
+            # 前缀必须与过滤条件用同一个租户：_scoped_entry_id 默认读
+            # _current_tenant_id()，显式传 tenant_id 调用时会与 filters 里的
+            # effective_tenant_id 不一致，导致已检索到的候选被整批丢弃（表现为筛出 0 张表）。
+            prefix = self._scoped_entry_id(
+                "table", datasource_name, "", tenant_id=effective_tenant_id,
+            )
             matched: list[tuple[str, float]] = []
             for r in results:
                 if r.id.startswith(prefix):
