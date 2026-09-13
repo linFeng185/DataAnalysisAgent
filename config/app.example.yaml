@@ -64,7 +64,7 @@ report_workbench_enabled: true
 report_default_ttl_days: 7
 report_max_ttl_days: 90
 report_default_timezone: Asia/Shanghai
-report_max_units_per_run: 12
+report_max_units_per_run: 36
 # 多源扇出下单次运行的查询数 = 单元数 × 命中源数，需要能容纳整库扇出
 report_max_queries_per_run: 100
 report_max_concurrency: 4

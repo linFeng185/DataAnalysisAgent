@@ -318,7 +318,9 @@ class Settings(BaseSettings):
     report_default_ttl_days: int = Field(default=7, ge=1, le=90)
     report_max_ttl_days: int = Field(default=90, ge=1, le=3650)
     report_default_timezone: str = "Asia/Shanghai"
-    report_max_units_per_run: int = Field(default=12, ge=1, le=12)
+    # 上界放开到 200：该值由超级管理员按租户成本承受力设定，12 只是默认值。
+    # 真实成本另受 report_max_queries_per_run 与 Token 预算约束。
+    report_max_units_per_run: int = Field(default=12, ge=1, le=200)
     # 上界原为 16，但多源扇出让单个单元在 N 个源上各跑一次查询，
     # 12 个单元 × 5 个源就会超出，上限必须能容纳真实扇出。
     report_max_queries_per_run: int = Field(default=16, ge=1, le=1000)
