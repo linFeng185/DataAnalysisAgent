@@ -183,6 +183,24 @@ def sanitize_value(value: Any, depth: int = 0) -> Any:
     return str(value)[:500]
 
 
+# 方法作用：把带符号的相关系数解读为方向与强度分档。
+# Args: correlation - 皮尔逊或斯皮尔曼相关系数，可能为空。
+# Returns: 含 direction 与 strength 的字典；无有效系数时两者都是 unknown。
+def correlation_reading(correlation: float | None) -> dict[str, str]:
+    if correlation is None:
+        return {"direction": "unknown", "strength": "unknown"}
+    magnitude = abs(float(correlation))
+    # 绝对值小于 0.05 视为无方向，避免把随机噪声写成"正相关"。
+    direction = "positive" if correlation > 0.05 else "negative" if correlation < -0.05 else "unknown"
+    if magnitude < 0.3:
+        strength = "weak"
+    elif magnitude <= 0.6:
+        strength = "moderate"
+    else:
+        strength = "strong"
+    return {"direction": direction, "strength": strength}
+
+
 # 方法作用：为结果列生成带说明的显示标题。
 # Args: columns - 结果列名；comments - 数据源列备注；descriptions - 分析模型给出的字段说明。
 # Returns: 列名到显示标题的映射。取到说明时写成「列名（说明）」，否则保持原列名。
@@ -361,6 +379,9 @@ def build_report_document(
                     "match_rate": relation.match_rate,
                     "evidence_level": relation.evidence_level,
                     "limitations": relation.limitations,
+                    # 方向与强度在文档层派生：证据层只存带符号的 correlation，不存冗余字段。
+                    **correlation_reading(relation.correlation),
+                    "cross_source": relation.evidence_level == "cross_source_statistical",
                 },
                 layout=layout_for_block("relationship"),
             )

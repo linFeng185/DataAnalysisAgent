@@ -406,16 +406,26 @@ class UnitFinding(BaseModel):
 
 ## 7. 跨源分布级关联
 
-### 7.1 现状缺口
+### 7.1 现状缺口与**两级证据**的确定
 
-`analyze_same_source`（`relations.py:279-373`）在跨源且仅有结构信息时返回 `unsupported_cross_source`（`:309-316`）。用户选择了"允许跨源扩单元"，若跨源单元之间无法分析关联，扩源就只能多拿几个孤立结论。
+> **实现修正（2026-09-12 落地时）**：本节原写"跨源不做键匹配"，并据此把跨源整体改为只做分布级对比。落地时回归测试证明**这个判断是错的**：`analyze_same_source`（`relations.py:279-373`）在跨源**且两侧都有样本行**时本来就会做受控键匹配，能给出 `verified_relation` 与 `match_rate`；只有"仅有结构信息没有样本行"时才走 `unsupported_cross_source`（`:309-316`）。把跨源整体降级为分布级，等于**用弱证据替换强证据**——5 个既有用例当场失败。
+
+因此跨源改为**两级证据**，键匹配优先：
+
+| 优先级 | 条件 | 产出 |
+|---|---|---|
+| 1 | `analyze_same_source` 给出 `verified_relation` / `statistical_association` / `blocked` | **直接采用**：它给出匹配率、基数与时间对齐，证据强于纯分布对比 |
+| 2 | 上一级降级为 `no_relation` / `unsupported_cross_source` **且两侧都有样本行** | 退回**分布级秩相关**（本节新增） |
+| 3 | 两侧有一侧没有样本行 | 保留原有跨源结构证据（`unsupported_cross_source`），不改写成 `insufficient`——没有样本时分布级也无从计算，原结论更准确 |
+
+**关键认知**：分布级对比覆盖的是**"有共同指标但没有可用连接键"**的场景（例如两侧的时间列名不同，共同列只剩指标列），而不是"所有跨源场景"。
 
 ### 7.2 新增 `analyze_cross_source`
 
 ```python
-# 方法作用：在不做行级连接的前提下，对跨数据源的两个单元做分布级秩相关分析。
-# Args: left - 左侧单元数据集；right - 右侧单元数据集。
-# Returns: 标注为 cross_source_statistical 的关系证据，无法支撑时返回 insufficient。
+# 方法作用：跨源关系分析。优先走受控键匹配，键不可用时退回分布级对比。
+# Args: left - 左侧单元描述和脱敏结果；right - 右侧单元描述和脱敏结果。
+# Returns: 跨源关系证据；无法支撑时如实返回 insufficient 或原有结构证据。
 def analyze_cross_source(
     self,
     left: dict[str, Any] | RelationDataset,
@@ -425,9 +435,10 @@ def analyze_cross_source(
 
 **算法（严格受限）**：
 
-1. 两侧 `status` 必须为 `success`，否则返回 `blocked`（沿用 `analyze_same_source` 的处理）。
-2. 找**共同指标列**（不是 join key —— 跨源不做键匹配）。无共同指标 → `insufficient`，说明"无共同可比指标"。
-3. **时间对齐**：两侧都有可识别时间列（复用 5.2 的识别规则）且粒度可归一 → 按时间做**内连接**对齐。对齐后观测点 < 8 → `insufficient`，说明"两侧时间点重合不足"。
+1. 先调 `analyze_same_source`；结果为 `verified_relation` / `statistical_association` / `blocked` 时直接返回。
+2. 两侧有一侧没有样本行 → 直接返回上一级结果。
+3. 找**共同指标列**：优先双方都声明为指标的列，其次任意共同数值列。无共同数值列 → `insufficient`，说明"无共同可比指标"。
+4. **时间对齐**：两侧都有可识别时间列（复用 5.2 的识别规则）时，**按周期标签文本精确匹配**对齐——跨源同一周期通常用同样的标签写法，文本匹配比日期运算更保守。对齐后观测点 < 8 → 落到第 5 步。
 4. 无时间列 → 对两侧各自的数值序列做秩相关，并在 `limitations` 注明"未按时间对齐，仅分布形态相关"。
 5. 对数值序列做 **Spearman 秩相关**（`pandas.DataFrame.corr(method="spearman")`）。
 6. 结果写进既有 `RelationEvidence`：

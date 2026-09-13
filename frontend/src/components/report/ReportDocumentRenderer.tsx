@@ -130,9 +130,11 @@ function renderBlock(
     case 'relationship':
       body = <div className="report-relationship-content">
         <Tag color={content.evidence_level === 'verified_relation' ? 'green' : 'gold'}>{displayText(content.evidence_level)}</Tag>
+        {content.cross_source ? <Tag color="blue">{t("跨源分布级")}</Tag> : null}
         <Typography.Paragraph>{t("关系类型：")}{displayText(content.relation_type)}</Typography.Paragraph>
         <Typography.Paragraph>{t("连接字段：")}{displayText(content.join_keys)}</Typography.Paragraph>
         <Typography.Paragraph>{t("匹配率：")}{content.match_rate === null || content.match_rate === undefined ? '—' : `${(Number(content.match_rate) * 100).toFixed(1)}%`}</Typography.Paragraph>
+        <Typography.Paragraph>{t("方向与强度：")}{displayText(content.direction)} / {displayText(content.strength)}</Typography.Paragraph>
         <Typography.Paragraph type="secondary">{t("限制：")}{displayText(content.limitations)}</Typography.Paragraph>
       </div>;
       break;

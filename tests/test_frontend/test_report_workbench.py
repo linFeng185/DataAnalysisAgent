@@ -165,3 +165,17 @@ class TestReportWorkbenchFrontend:
         assert "column_labels" in renderer
         # dataIndex 必须保持原列名，否则取不到行数据
         assert "dataIndex: name" in renderer
+
+    # 方法作用：验证关系块展示影响方向与强度，并标注跨源证据。
+    # Args: self - pytest 测试类实例。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    def test_relationship_shows_direction_strength_and_cross_source(self) -> None:
+        """影响判定要显示方向与强度；跨源结论需有独立标记。"""
+        # Arrange
+        renderer = Path("frontend/src/components/report/ReportDocumentRenderer.tsx").read_text(encoding="utf-8")
+
+        # Act / Assert
+        assert "content.direction" in renderer
+        assert "content.strength" in renderer
+        assert "content.cross_source" in renderer
+        assert "跨源分布级" in renderer
