@@ -55,6 +55,7 @@ class TestTrimValidation:
         """没有这条校验，客户端就能凭空构造执行范围。"""
         # Arrange
         from fastapi import HTTPException
+
         from src.api.routes.report_workbench import _apply_unit_trimming
 
         # Act / Assert
@@ -69,6 +70,7 @@ class TestTrimValidation:
         """空数组是「全部取消」，与不传该字段语义必须区分开。"""
         # Arrange
         from fastapi import HTTPException
+
         from src.api.routes.report_workbench import _apply_unit_trimming
 
         # Act / Assert

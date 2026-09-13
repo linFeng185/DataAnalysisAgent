@@ -186,8 +186,9 @@ class TestLLMCallbackRunStats:
     def test_llm_callback_records_to_captured_stats(self) -> None:
         """回调必须把终态写入挂载时捕获的 RunStats，不依赖 contextvar 传播。"""
         # Arrange
-        from prometheus_client import CollectorRegistry
         from uuid import uuid4
+
+        from prometheus_client import CollectorRegistry
 
         from src.observability import LLMMetricsCallback, MetricsRegistry
 
@@ -209,8 +210,9 @@ class TestLLMCallbackRunStats:
     def test_llm_callback_records_failure(self) -> None:
         """失败是真实发生的调用，必须计入总次数与失败数。"""
         # Arrange
-        from prometheus_client import CollectorRegistry
         from uuid import uuid4
+
+        from prometheus_client import CollectorRegistry
 
         from src.observability import LLMMetricsCallback, MetricsRegistry
 
@@ -232,8 +234,9 @@ class TestLLMCallbackRunStats:
     def test_llm_callback_is_noop_without_stats(self) -> None:
         """聊天等非报表路径共用同一回调，必须零影响。"""
         # Arrange
-        from prometheus_client import CollectorRegistry
         from uuid import uuid4
+
+        from prometheus_client import CollectorRegistry
 
         from src.observability import LLMMetricsCallback, MetricsRegistry
 
@@ -251,8 +254,9 @@ class TestLLMCallbackRunStats:
     def test_attach_llm_metrics_captures_active_run_stats(self) -> None:
         """模型在报表运行上下文内创建时，回调必须拿到该次运行的计数器。"""
         # Arrange
-        from src.observability import attach_llm_metrics
         from uuid import uuid4
+
+        from src.observability import attach_llm_metrics
 
         class _FakeModel:
             def __init__(self) -> None:

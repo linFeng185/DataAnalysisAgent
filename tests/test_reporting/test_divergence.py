@@ -41,7 +41,11 @@ class TestBudgetTables:
     def test_budget_tables_match_design(self) -> None:
         """总额度 0/3/6、轮数 0/1/2、单轮 0/2/3。"""
         # Arrange
-        from src.reporting.models import divergence_max_rounds, divergence_unit_budget, divergence_units_per_round
+        from src.reporting.models import (
+            divergence_max_rounds,
+            divergence_unit_budget,
+            divergence_units_per_round,
+        )
 
         # Act / Assert
         assert [divergence_unit_budget(item) for item in ("conservative", "standard", "deep")] == [0, 3, 6]
