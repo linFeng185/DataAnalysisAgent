@@ -102,3 +102,101 @@ class TestTagPicker:
         # Act / Assert
         assert 'role="button"' in SOURCE
         assert "event.key === 'Enter'" in SOURCE
+
+
+class TestUploadModalStateReset:
+    """验证重新打开上传弹窗时表单状态被完整重置，不残留上一次的输入。"""
+
+    # 方法作用：验证默认配置工厂清空标签、数据源与分类。
+    # Args: self - 测试实例。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    def test_default_cfg_clears_tag_datasource_and_category(self) -> None:
+        """默认配置必须清空标签多选、数据源与知识类别。"""
+        # Act
+        segment = SOURCE.split("const createDefaultUploadCfg")[1].split("});")[0]
+
+        # Assert
+        assert "tagIds: []" in segment
+        assert "datasource: ''" in segment
+        assert "category: ''" in segment
+        assert "strategy: 'auto'" in segment and "chunkSize: 800" in segment
+
+    # 方法作用：验证重置助手覆盖弹窗内的全部状态。
+    # Args: self - 测试实例。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    def test_reset_helper_clears_all_modal_state(self) -> None:
+        """重置助手必须清空配置、待上传文件、个人标签输入与下拉展开态。"""
+        # Act
+        segment = SOURCE.split("const resetUploadForm")[1].split("};")[0]
+
+        # Assert
+        assert "setUploadCfg(createDefaultUploadCfg(role))" in segment
+        assert "setPendingFiles([])" in segment
+        assert "setPersonalTagName('')" in segment
+        assert "setTagPanelOpen(false)" in segment
+
+    # 方法作用：验证打开弹窗前先重置，而非关闭时重置。
+    # Args: self - 测试实例。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    def test_reset_runs_before_dialog_open(self) -> None:
+        """handleFileSelect 必须先调用重置再打开弹窗。"""
+        # Act
+        segment = SOURCE.split("const handleFileSelect")[1].split("};")[0]
+
+        # Assert
+        assert "resetUploadForm();" in segment
+        assert segment.index("resetUploadForm();") < segment.index("setCfgOpen(true)")
+
+    # 方法作用：验证上传配置 state 由工厂函数初始化而非字面量。
+    # Args: self - 测试实例。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    def test_state_initialized_from_factory(self) -> None:
+        """上传配置 state 复用同一工厂，避免默认值两处漂移。"""
+        # Act / Assert
+        assert "useState<UploadCfg>(() => createDefaultUploadCfg(role))" in SOURCE
+
+
+class TestSliderWidth:
+    """验证切块滑块有显式宽度约束，不会在 flex 布局中被压成零宽。"""
+
+    # 方法作用：验证两个滑块都放在 flex 子项包裹层中。
+    # Args: self - 测试实例。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    def test_sliders_wrapped_by_flex_item(self) -> None:
+        """滑块外层需要 flex:1 与 minWidth:0，轴条才有可见宽度。"""
+        # Act / Assert
+        assert SOURCE.count("flex: '1 1 0'") >= 2
+        assert SOURCE.count("minWidth: 0") >= 2
+        assert SOURCE.count("<Slider style={{ width: '100%' }}") >= 2
+
+    # 方法作用：验证滑块不再使用 antd Space 包裹。
+    # Args: self - 测试实例。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    def test_space_no_longer_wraps_sliders(self) -> None:
+        """Space 会额外包一层 div，加在 Slider 上的 flex 对布局无效，必须移除。"""
+        # Act / Assert
+        assert "Space style={{ width: '100%' }}" not in SOURCE
+
+    # 方法作用：验证数字输入框不会被滑块挤压。
+    # Args: self - 测试实例。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    def test_input_number_keeps_fixed_width(self) -> None:
+        """手动输入框保持 96px 且不收缩。"""
+        # Act / Assert
+        assert SOURCE.count("style={{ width: 96, flexShrink: 0 }}") >= 2
+
+
+class TestRepeatedFilePick:
+    """验证取消后重选同一个文件仍能打开上传弹窗。"""
+
+    # 方法作用：验证选择文件后清空了隐藏 input 的 value。
+    # Args: self - 测试实例。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    def test_file_input_value_reset_after_pick(self) -> None:
+        """浏览器只在 value 变化时派发 change，不清空就选不了同一个文件。"""
+        # Arrange
+        handler = SOURCE.split("const handleFileSelect", 1)[1].split("};", 1)[0]
+        # Act / Assert
+        assert "fileRef.current.value = ''" in handler
+        # 清空必须发生在提前返回之前，否则取消选择时不会复位。
+        assert handler.index("fileRef.current.value = ''") < handler.index("return;")

@@ -32,6 +32,20 @@ const TAG_GROUP_OPTIONS = [
   { value: 'custom', get label() { return t("其他"); } },
 ];
 
+/** 上传配置弹窗的表单状态结构。 */
+type UploadCfg = {
+  strategy: string; chunkSize: number; chunkOverlap: number; category: string;
+  scope: KnowledgeScope; tagIds: number[]; datasource: string;
+};
+
+// 方法作用：构造上传配置表单的默认值，首次挂载与每次打开弹窗都据此重置
+// Args: role - 当前用户角色，用于决定默认知识范围
+// Returns: 全新的上传配置对象，保证多次打开弹窗之间不共享残留状态
+const createDefaultUploadCfg = (role: string): UploadCfg => ({
+  strategy: 'auto', chunkSize: 800, chunkOverlap: 100, category: '',
+  scope: role === 'super_admin' ? 'system' : 'private', tagIds: [], datasource: '',
+});
+
 export default function KnowledgePage() {
   const language = useLanguage();
   const { user, authRequired } = useAuth();
@@ -51,10 +65,7 @@ export default function KnowledgePage() {
   const [pageSize, setPageSize] = useState(20);
   const [total, setTotal] = useState(0);
   const [uploading, setUploading] = useState(false);
-  const [uploadCfg, setUploadCfg] = useState<{
-    strategy: string; chunkSize: number; chunkOverlap: number; category: string;
-    scope: KnowledgeScope; tagIds: number[]; datasource: string;
-  }>({ strategy: 'auto', chunkSize: 800, chunkOverlap: 100, category: '', scope: role === 'super_admin' ? 'system' : 'private', tagIds: [], datasource: '' });
+  const [uploadCfg, setUploadCfg] = useState<UploadCfg>(() => createDefaultUploadCfg(role));
   const [cfgOpen, setCfgOpen] = useState(false);
   const [datasourceOptions, setDatasourceOptions] = useState<{ value: string; label: string }[]>([]);
   const [tagPanelOpen, setTagPanelOpen] = useState(false);
@@ -253,9 +264,28 @@ export default function KnowledgePage() {
     setUploading(false);
   };
 
+  // 方法作用：重置上传弹窗的全部表单状态，保证每次打开都是干净状态
+  // Args: 无
+  // Returns: 无返回值，直接写回各 useState
+  const resetUploadForm = () => {
+    // 打开时重置而非关闭时重置，避免关闭动画期间字段闪变
+    setUploadCfg(createDefaultUploadCfg(role));
+    setPendingFiles([]);
+    setPersonalTagName('');
+    setTagPanelOpen(false);
+  };
+
+  // 方法作用：用户选择文件后先重置表单再打开上传配置弹窗
+  // Args: files - 浏览器文件选择框返回的文件列表，可能为 null
+  // Returns: 无返回值，直接更新弹窗与待上传文件状态
   const handleFileSelect = (files: FileList | null) => {
+    // 无论本次是否真的选到文件都先清空 input.value：浏览器只在 value 变化时派发
+    // change，取消后重选同一个文件本来不会触发，弹窗就再也不会打开。
+    if (fileRef.current) fileRef.current.value = '';
     if (!files || files.length === 0) return;
-    setPendingFiles(Array.from(files)); setCfgOpen(true);
+    resetUploadForm();
+    setPendingFiles(Array.from(files));
+    setCfgOpen(true);
   };
 
   const handleScopeFilterChange = (value: string | number) => {
@@ -662,26 +692,33 @@ export default function KnowledgePage() {
               )}
             /></div>
           <div><Typography.Text strong>{t("块大小")}</Typography.Text>
-            <Space style={{ width: '100%' }}>
-              <Slider style={{ flex: 1 }} min={200} max={4000} step={100} value={uploadCfg.chunkSize}
-                onChange={value => setUploadCfg(p => {
-                  const maxOverlap = Math.min(500, value - 1);
-                  return { ...p, chunkSize: value, chunkOverlap: Math.min(p.chunkOverlap, maxOverlap) };
-                })} />
-              <InputNumber min={200} max={4000} step={100} style={{ width: 96 }} value={uploadCfg.chunkSize}
+            {/* antd Slider 根节点没有宽度声明，轴条与手柄均为绝对定位不贡献内容宽度；
+                若直接放进 flex 容器，flex 项按内容宽度计算会被压成 0（只剩一个圆点），
+                因此必须由 flex:1 + minWidth:0 的包裹层承担宽度，Slider 自身再撑满 100%。 */}
+            <div style={{ display: 'flex', alignItems: 'center', gap: 12, width: '100%' }}>
+              <div style={{ flex: '1 1 0', minWidth: 0 }}>
+                <Slider style={{ width: '100%' }} min={200} max={4000} step={100} value={uploadCfg.chunkSize}
+                  onChange={value => setUploadCfg(p => {
+                    const maxOverlap = Math.min(500, value - 1);
+                    return { ...p, chunkSize: value, chunkOverlap: Math.min(p.chunkOverlap, maxOverlap) };
+                  })} />
+              </div>
+              <InputNumber min={200} max={4000} step={100} style={{ width: 96, flexShrink: 0 }} value={uploadCfg.chunkSize}
                 onChange={value => setUploadCfg(p => {
                   const chunkSize = value || 800;
                   const maxOverlap = Math.min(500, chunkSize - 1);
                   return { ...p, chunkSize, chunkOverlap: Math.min(p.chunkOverlap, maxOverlap) };
-                })} /></Space></div>
+                })} /></div></div>
           <div><Typography.Text strong>{t("重叠")}</Typography.Text>
-            <Space style={{ width: '100%' }}>
-              <Slider style={{ flex: 1 }} min={0} max={Math.min(500, uploadCfg.chunkSize - 1)} step={10}
+            <div style={{ display: 'flex', alignItems: 'center', gap: 12, width: '100%' }}>
+              <div style={{ flex: '1 1 0', minWidth: 0 }}>
+                <Slider style={{ width: '100%' }} min={0} max={Math.min(500, uploadCfg.chunkSize - 1)} step={10}
+                  value={uploadCfg.chunkOverlap}
+                  onChange={value => setUploadCfg(p => ({ ...p, chunkOverlap: value }))} />
+              </div>
+              <InputNumber min={0} max={Math.min(500, uploadCfg.chunkSize - 1)} step={10} style={{ width: 96, flexShrink: 0 }}
                 value={uploadCfg.chunkOverlap}
-                onChange={value => setUploadCfg(p => ({ ...p, chunkOverlap: value }))} />
-              <InputNumber min={0} max={Math.min(500, uploadCfg.chunkSize - 1)} step={10} style={{ width: 96 }}
-                value={uploadCfg.chunkOverlap}
-                onChange={value => setUploadCfg(p => ({ ...p, chunkOverlap: value || 0 }))} /></Space></div>
+                onChange={value => setUploadCfg(p => ({ ...p, chunkOverlap: value || 0 }))} /></div></div>
         </Space>
       </Modal>
     </div>
