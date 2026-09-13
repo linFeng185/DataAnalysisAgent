@@ -1183,5 +1183,8 @@ const en: Record<string, string> = {
   "标记已读失败": "Failed to mark as read",
   "全部标记已读失败": "Failed to mark all as read",
   "删除通知失败": "Failed to delete notification",
+  "创建报表页": "Create report page",
+  "报表信息页": "Report list page",
+  "链接管理页": "Link management page",
 };
 export default en;

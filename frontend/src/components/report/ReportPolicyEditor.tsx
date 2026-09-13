@@ -18,8 +18,13 @@ const fields = [
   ['max_share_links', t("每月分享链接上限"), 0, 100000],
 ] as const;
 
+// 能力清单必须覆盖后端 _ROLE_CAPABILITIES 里的全部 report.* 键：
+// 保存额度是「整体替换」语义，清单里缺哪个键，保存一次就会把该权限从用户身上抹掉。
+// 三个子页键分别对应报表工作台的三个子菜单（创建报表 / 报表信息 / 链接管理）。
 const capabilities = [
-  ['report.menu', t("工作台菜单")], ['report.create', t("创建报表")], ['report.schedule', t("定时任务")],
+  ['report.menu', t("工作台菜单")],
+  ['report.create_page', t("创建报表页")], ['report.list', t("报表信息页")], ['report.link_manage', t("链接管理页")],
+  ['report.create', t("创建报表")], ['report.schedule', t("定时任务")],
   ['report.share', t("分享报表")], ['report.extend', t("页面延期")], ['report.permanent', t("永久保存")],
   ['report.live_drilldown', t("实时钻取")], ['report.view_all', t("查看租户报表")], ['report.download', t("下载")],
 ].map(([value, label]) => ({ value, label }));
