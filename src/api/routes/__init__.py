@@ -10,7 +10,6 @@ from src.api.routes.admin import router as admin_router
 from src.api.routes.automation import (
     create_automation_schedule,
     delete_automation_schedule,
-    list_automation_notifications,
     list_automation_schedules,
     run_automation_schedule,
 )
@@ -94,6 +93,7 @@ from src.api.routes.mcp import (
     router as mcp_router,
 )
 from src.api.routes.metric_catalog import router as metric_catalog_router
+from src.api.routes.notifications import router as notifications_router
 from src.api.routes.optimization import advice
 from src.api.routes.optimization import router as optimization_router
 from src.api.routes.query_quota import router as query_quota_router
@@ -160,6 +160,7 @@ for domain_router in (
     optimization_router,
     report_workbench_router,
     metric_catalog_router,
+    notifications_router,
     query_quota_router,
     runtime_controls_router,
     emergency_access_router,
@@ -174,7 +175,6 @@ __all__ = [
     "list_automation_schedules",
     "delete_automation_schedule",
     "run_automation_schedule",
-    "list_automation_notifications",
     "chat",
     "chat_stream",
     "list_tables",
@@ -231,4 +231,5 @@ __all__ = [
     "tag_values",
     "advice",
     "report_workbench_router",
+    "notifications_router",
 ]

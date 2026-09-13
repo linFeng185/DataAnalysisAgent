@@ -258,14 +258,13 @@ class AutomationStore:
             )
         return dict(value) if value else None
 
-    # 方法作用：同事务写入成功运行和可选站内通知。
-    # Args: self - Store；schedule - 任务；payload - 运行结果；notification - 可选通知。
+    # 方法作用：同事务写入成功运行记录并刷新任务时间戳。
+    # Args: self - Store；schedule - 任务；payload - 运行结果。
     # Returns: 无返回值。
     async def record_success(
         self,
         schedule: ScheduleDefinition,
         payload: dict[str, Any],
-        notification: dict[str, Any] | None,
     ) -> None:
         pool = await self._pool()
         from src.memory.pg_pool import pg_pool_connection
@@ -287,15 +286,6 @@ class AutomationStore:
                     schedule.id,
                     schedule.tenant_id,
                 )
-                if notification is not None:
-                    await connection.execute(
-                        "INSERT INTO analysis_notifications "
-                        "(id,schedule_id,run_id,tenant_id,user_id,kind,title,body) "
-                        "VALUES ($1::uuid,$2::uuid,$3::uuid,$4,$5,$6,$7,$8)",
-                        str(uuid4()), schedule.id, run_id, schedule.tenant_id,
-                        schedule.user_id, notification["kind"],
-                        notification["title"], notification["body"],
-                    )
 
     # 方法作用：写入失败运行摘要，不保存底层连接串或凭证。
     # Args: self - Store；schedule - 任务；error - 截断后的错误摘要。
@@ -318,24 +308,6 @@ class AutomationStore:
                 schedule.id,
                 schedule.tenant_id,
             )
-
-    # 方法作用：分页列出当前用户站内通知。
-    # Args: self - Store；identity - 请求身份；limit - 数量上限。
-    # Returns: 最新通知字典列表。
-    async def list_notifications(self, identity: Any, limit: int = 50) -> list[dict[str, Any]]:
-        pool = await self._pool()
-        from src.memory.pg_pool import pg_pool_connection
-
-        async with pg_pool_connection(
-            pool, identity.tenant_id, identity.user_id, identity.role,
-        ) as connection:
-            rows = await connection.fetch(
-                "SELECT id::text,schedule_id::text,kind,title,body,is_read,created_at "
-                "FROM analysis_notifications WHERE tenant_id=$1 AND user_id=$2 "
-                "ORDER BY created_at DESC LIMIT $3",
-                identity.tenant_id, identity.user_id, max(1, min(int(limit), 100)),
-            )
-        return [dict(row) for row in rows]
 
     # 方法作用：惰性获取共享 PostgreSQL Pool。
     # Args: self - Store。

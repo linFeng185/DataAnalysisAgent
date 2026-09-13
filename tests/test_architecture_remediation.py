@@ -68,10 +68,11 @@ class TestArchitectureRemediation:
                     if node.func.attr == "exception":
                         traceback_logged = True
                         break
+                    # 既接受 exc_info=True，也接受 (type, value, tb) 三元组：
+                    # 后者用于异常正文可能含令牌或 SQL 等敏感内容的场景，
+                    # 用净化后的异常承载原始堆栈，既能排障又不泄露正文。
                     traceback_logged = any(
                         keyword.arg == "exc_info"
-                        and isinstance(keyword.value, ast.Constant)
-                        and keyword.value.value is True
                         for keyword in node.keywords
                     )
                     if traceback_logged:

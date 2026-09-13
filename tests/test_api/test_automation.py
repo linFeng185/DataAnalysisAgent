@@ -182,27 +182,6 @@ class TestAutomationApi:
         store.get_for_identity.assert_awaited_once_with(schedule.id, identity)
         runner.run.assert_awaited_once_with(schedule)
 
-    # 方法作用：验证站内通知 API 只返回当前用户的有界结果。
-    # Args: self - pytest 测试类实例；monkeypatch - pytest 补丁工具。
-    # Returns: 无返回值，断言失败时由 pytest 报告。
-    async def test_list_notifications_uses_current_identity(self, monkeypatch) -> None:
-        """limit 应由 Store 二次限制且响应包含总数。"""
-        # Arrange
-        import src.api.routes.automation as route
-
-        identity = SimpleNamespace(tenant_id=3, user_id=7, role="analyst")
-        notifications = [{"id": "n1", "title": "日报"}]
-        store = SimpleNamespace(list_notifications=AsyncMock(return_value=notifications))
-        monkeypatch.setattr(route, "get_current_identity", lambda: identity)
-        monkeypatch.setattr(route, "get_automation_store", lambda: store)
-
-        # Act
-        result = await route.list_automation_notifications(limit=25)
-
-        # Assert
-        assert result == {"notifications": notifications, "total": 1}
-        store.list_notifications.assert_awaited_once_with(identity, 25)
-
     # 方法作用：验证暂停或恢复任务只更新当前身份可管理的任务。
     # Args: self - pytest 测试类实例；monkeypatch - pytest 补丁工具。
     # Returns: 无返回值。

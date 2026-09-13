@@ -119,7 +119,8 @@ Registry 未配置时列表返回 `configured=false`，安装返回 503；下载
 | GET | `/api/v1/automation/schedules` | 列出本人任务；租户管理员可见本租户任务 |
 | DELETE | `/api/v1/automation/schedules/{schedule_id}` | 删除当前身份可管理的任务 |
 | POST | `/api/v1/automation/schedules/{schedule_id}/run` | 重新授权并立即运行任务 |
-| GET | `/api/v1/automation/notifications?limit=50` | 列出当前用户最近的站内通知 |
+
+站内通知已由通用通知模块取代：旧 `GET /api/v1/automation/notifications` 接口与 `analysis_notifications` 表已删除，通知统一走 `/api/v1/notifications/*` 与 WebSocket 推送，详见 `48-experience-and-workbench-remediation.md` 第 7.5 节。本节其余自动化契约不变。
 
 创建请求固定包含 `name/kind/datasource/sql/frequency/threshold_pct/channels/recipient_email`。
 `kind` 仅允许 `insight/report`，频率仅允许 `hourly/daily/weekly/monthly`，渠道仅允许

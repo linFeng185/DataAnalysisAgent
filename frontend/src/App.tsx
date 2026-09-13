@@ -15,6 +15,7 @@ import { AuthProvider } from './hooks/AuthContext';
 import { useAuth } from './hooks/AuthContext';
 import { ChatProvider } from './hooks/useChat';
 import ErrorBoundary from './components/ErrorBoundary';
+import NotificationBell from './components/notifications/NotificationBell';
 import { get } from './api/client';
 import { fetchReportPermissions } from './api/reportWorkbench';
 import type { HealthResponse } from './types';
@@ -45,6 +46,7 @@ const LinkManagementPage = lazy(() => import('./pages/LinkManagementPage'));
 const ReportViewerPage = lazy(() => import('./pages/ReportViewerPage'));
 const SharedReportPage = lazy(() => import('./pages/SharedReportPage'));
 const LoginPage = lazy(() => import('./pages/LoginPage'));
+const NotificationsPage = lazy(() => import('./pages/NotificationsPage'));
 
 const pageFallback = (
   <div style={{ minHeight: 240, display: 'grid', placeItems: 'center' }}>
@@ -228,6 +230,8 @@ function AppContent() {
           )}
           <Tag icon={<UserOutlined />}>{user?.tenant_code ? `${user.tenant_code} / ` : ''}{user?.username || t("用户 {value0}", { value0: user?.user_id ?? '' })}</Tag>
           <Tag className="role-tag" color={user?.role === 'super_admin' ? 'red' : 'default'}>{user?.role || '-'}</Tag>
+          {/* 通知铃铛走顶栏而非菜单：收件箱能力已由抽屉覆盖，避免继续挤压侧栏菜单项 */}
+          <NotificationBell enabled={Boolean(user)} viewAllPath="/notifications" />
           <Button type="text" icon={<LogoutOutlined />} onClick={() => void logout()}
             style={{ color: '#fff' }}><span className="logout-label">{t("退出")}</span></Button>
         </div>
@@ -270,6 +274,7 @@ function AppContent() {
                 <Route path="/reports/:reportId" element={<ReportViewerPage />} />
                 <Route path="/mcp" element={<McpPage />} />
                 <Route path="/admin" element={<AdminRoute />} />
+                <Route path="/notifications" element={<NotificationsPage />} />
               </Routes>
             </Suspense>
           </ErrorBoundary>

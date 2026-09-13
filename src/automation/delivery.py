@@ -1,4 +1,12 @@
-"""定时报告与主动洞察的受控通知渠道。"""
+"""定时报告与主动洞察的受控通知渠道（保留兼容，服务器级配置已废弃）。
+
+废弃说明（需求 1.9 / spec/48 第 7.5 节）：
+    本模块读取的 automation_smtp_* / automation_*_webhook_url 是**服务器级**
+    配置，已不再作为新通知能力的配置面。通用通知模块改用**租户级**渠道配置
+    （migrations/033_notification_channels.sql + src/notifications/dispatch.py）。
+    本文件保留是为了不影响既有自动化任务链路；请勿在新功能中引用这里的
+    服务器级设置。
+"""
 
 from __future__ import annotations
 

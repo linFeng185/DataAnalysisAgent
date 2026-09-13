@@ -14,7 +14,11 @@ logger = get_logger(__name__)
 
 # 先删叶子表，再删用户和租户，避免外键残留或半删除状态。
 _TENANT_DELETE_STATEMENTS: tuple[tuple[str, str], ...] = (
-    ("analysis_notifications", "DELETE FROM analysis_notifications WHERE tenant_id=$1"),
+    # 通知模块（迁移 033）：先删收件人行，再删通知主体与租户渠道配置；
+    # 旧表 analysis_notifications 已由迁移 034 删除。
+    ("notification_recipients", "DELETE FROM notification_recipients WHERE tenant_id=$1"),
+    ("notifications", "DELETE FROM notifications WHERE tenant_id=$1"),
+    ("notification_channels", "DELETE FROM notification_channels WHERE tenant_id=$1"),
     ("analysis_schedule_runs", "DELETE FROM analysis_schedule_runs WHERE tenant_id=$1"),
     ("analysis_schedules", "DELETE FROM analysis_schedules WHERE tenant_id=$1"),
     ("tenant_llm_defaults", "DELETE FROM tenant_llm_defaults WHERE tenant_id=$1"),

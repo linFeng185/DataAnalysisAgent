@@ -3,7 +3,8 @@ import react from '@vitejs/plugin-react';
 
 export default defineConfig({
   plugins: [react()],
-  server: { port: 5173, proxy: { '/api': 'http://localhost:8000' } },
+  // ws: true 让 /api/v1/notifications/stream 的 WebSocket 握手在开发环境也能代理到后端。
+  server: { port: 5173, proxy: { '/api': { target: 'http://localhost:8000', changeOrigin: true, ws: true } } },
   build: {
     rollupOptions: {
       output: {

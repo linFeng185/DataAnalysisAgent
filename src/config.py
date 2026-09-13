@@ -157,6 +157,14 @@ def _default_api_access_policies() -> list[ApiAccessRouteConfig]:
             id="memory_delete", path="/api/v1/memory/{memory_id}", path_type="template",
             methods=["DELETE"], auth="jwt", access_log="audit", description="删除长期记忆",
         ),
+        # HTTP 中间件只处理 http 作用域，WS 握手不会经过 AuthMiddleware；
+        # 这里取最贴近的 optional，真正的强制鉴权在 handler 内完成
+        # （见 src/api/routes/notifications.py 的 authenticate_websocket）。
+        ApiAccessRouteConfig(
+            id="notifications_stream", path="/api/v1/notifications/stream",
+            methods=["WEBSOCKET"], auth="optional", access_log="standard",
+            description="通知 WebSocket 推送（握手内强制校验身份）",
+        ),
     ]
 
 
@@ -317,6 +325,10 @@ class Settings(BaseSettings):
     automation_enabled: bool = True
     report_scheduler_enabled: bool = True
     automation_poll_interval_seconds: int = Field(default=60, ge=10, le=3600)
+    # 以下 automation_smtp_* / automation_*_webhook_url 是服务器级外发配置，
+    # 已废弃（需求 1.9）：通知渠道配置改为租户级 notification_channels，
+    # 新代码请使用 src/notifications 的 get_channels / save_channels。
+    # 保留字段只为兼容 src/automation/delivery.py 的既有读取路径，勿在新功能中引用。
     automation_smtp_host: str = ""
     automation_smtp_port: int = Field(default=587, ge=1, le=65535)
     automation_smtp_starttls: bool = True

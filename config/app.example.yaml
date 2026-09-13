@@ -103,21 +103,23 @@ automation_enabled: true
 report_scheduler_enabled: true
 # 用途：调度轮询间隔秒数（允许 10-3600）| 默认值：60 | 生效范围：需重启
 automation_poll_interval_seconds: 60
-# 用途：报告外发 SMTP 服务器地址 | 默认值：空（不启用邮件外发）| 生效范围：需重启
+# ⚠️ 以下服务器级外发配置已废弃，通知渠道改为租户级配置
+# （见 /api/v1/notifications/admin/channels）；保留仅为兼容既有自动化任务链路。
+# 用途：报告外发 SMTP 服务器地址（已废弃，改用租户级通知渠道）| 默认值：空（不启用邮件外发）| 生效范围：需重启
 automation_smtp_host: ""
-# 用途：SMTP 端口 | 默认值：587 | 生效范围：需重启
+# 用途：SMTP 端口（已废弃）| 默认值：587 | 生效范围：需重启
 automation_smtp_port: 587
-# 用途：SMTP 是否启用 STARTTLS | 默认值：true | 生效范围：需重启
+# 用途：SMTP 是否启用 STARTTLS（已废弃）| 默认值：true | 生效范围：需重启
 automation_smtp_starttls: true
-# 用途：SMTP 登录用户名 | 默认值：空 | 生效范围：需重启
+# 用途：SMTP 登录用户名（已废弃）| 默认值：空 | 生效范围：需重启
 automation_smtp_username: ""
-# 用途：SMTP 登录密码（仅服务端读取，任务请求不能提交）| 默认值：空 | 生效范围：需重启
+# 用途：SMTP 登录密码（已废弃；租户级密码加密入库）| 默认值：空 | 生效范围：需重启
 automation_smtp_password: ""
-# 用途：邮件发件人地址 | 默认值：空 | 生效范围：需重启
+# 用途：邮件发件人地址（已废弃）| 默认值：空 | 生效范围：需重启
 automation_email_from: ""
-# 用途：飞书群机器人 Webhook 地址 | 默认值：空（不推送）| 生效范围：需重启
+# 用途：飞书群机器人 Webhook 地址（已废弃）| 默认值：空（不推送）| 生效范围：需重启
 automation_feishu_webhook_url: ""
-# 用途：Slack Incoming Webhook 地址 | 默认值：空（不推送）| 生效范围：需重启
+# 用途：Slack Incoming Webhook 地址（已废弃）| 默认值：空（不推送）| 生效范围：需重启
 automation_slack_webhook_url: ""
 
 # 用途：报表工作台总开关 | 默认值：true | 生效范围：需重启

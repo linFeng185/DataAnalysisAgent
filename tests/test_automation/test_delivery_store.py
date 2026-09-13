@@ -223,37 +223,6 @@ class TestAutomationStore:
         # Assert
         assert schedule.channels == ["in_app", "email"]
 
-    # 方法作用：验证站内通知列表始终限定当前用户并限制分页上限。
-    # Args: self - pytest 测试类实例；monkeypatch - pytest 补丁工具。
-    # Returns: 无返回值，断言失败时由 pytest 报告。
-    async def test_list_notifications_is_user_scoped(self, monkeypatch) -> None:
-        """租户管理员也不能读取同租户其他用户的个人通知。"""
-        # Arrange
-        import src.memory.pg_pool as pg_pool_module
-        from src.automation.store import AutomationStore
-
-        connection = SimpleNamespace(fetch=AsyncMock(return_value=[]))
-
-        @asynccontextmanager
-        # 方法作用：为通知查询测试提供 Fake PostgreSQL 连接。
-        # Args: pool - 测试 Pool；tenant_id/user_id/role - RLS 身份。
-        # Returns: Fake connection 异步上下文。
-        async def fake_connection(pool, tenant_id, user_id, role):
-            del pool
-            assert (tenant_id, user_id, role) == (3, 7, "tenant_admin")
-            yield connection
-
-        monkeypatch.setattr(pg_pool_module, "pg_pool_connection", fake_connection)
-        identity = SimpleNamespace(tenant_id=3, user_id=7, role="tenant_admin")
-
-        # Act
-        await AutomationStore(pg_pool=object()).list_notifications(identity, limit=999)
-
-        # Assert
-        args = connection.fetch.await_args.args
-        assert "tenant_id=$1 AND user_id=$2" in args[0]
-        assert args[1:] == (3, 7, 100)
-
     # 方法作用：验证任务列表、单项读取和删除都把当前身份传入 RLS 连接。
     # Args: self - pytest 测试类实例；monkeypatch - pytest 补丁工具。
     # Returns: 无返回值，断言失败时由 pytest 报告。
@@ -295,11 +264,11 @@ class TestAutomationStore:
         assert identities == [(3, 7, "analyst")] * 3
         assert "u.is_active=TRUE" in connection.fetchrow.await_args.args[0]
 
-    # 方法作用：验证成功基线、成功运行/通知和失败运行都写入系统级 Store 边界。
+    # 方法作用：验证成功基线、成功运行记录和失败运行都写入系统级 Store 边界。
     # Args: self - pytest 测试类实例；monkeypatch - pytest 补丁工具。
     # Returns: 无返回值，断言失败时由 pytest 报告。
     async def test_run_payload_methods_persist_success_and_failure(self, monkeypatch) -> None:
-        """运行记录方法应覆盖基线读取、通知事务和失败摘要。"""
+        """运行记录方法应覆盖基线读取、成功事务和失败摘要；站内通知已迁出本模块。"""
         # Arrange
         import src.memory.pg_pool as pg_pool_module
         from src.automation.models import ScheduleDefinition
@@ -338,17 +307,19 @@ class TestAutomationStore:
 
         # Act
         baseline = await store.latest_success_payload(schedule.id)
-        await store.record_success(
-            schedule,
-            {"success": True, "metrics": {"sales": 120}},
-            {"kind": "report", "title": "销售日报", "body": "正文"},
-        )
+        await store.record_success(schedule, {"success": True, "metrics": {"sales": 120}})
         await store.record_failure(schedule, "database unavailable")
 
         # Assert
         assert baseline == {"metrics": {"sales": 100}}
         assert connection.transaction.call_count == 1
-        assert connection.execute.await_count == 5
+        # 事务内 2 条（写运行记录 + 刷新任务时间戳）+ 失败路径 2 条 = 4 条；
+        # 旧 analysis_notifications 写入已随迁移 034 删除。
+        assert connection.execute.await_count == 4
+        assert not [
+            call for call in connection.execute.await_args_list
+            if call.args and "analysis_notifications" in call.args[0]
+        ]
         update_queries = [
             call.args[0] for call in connection.execute.await_args_list
             if call.args and "analysis_schedules SET last_run_at" in call.args[0]
@@ -366,11 +337,15 @@ class TestAutomationStore:
 class TestAutomationMigration:
     """覆盖功能 19.1、19.2 的 PostgreSQL RLS 迁移契约。"""
 
-    # 方法作用：验证自动化三张租户表对表所有者也强制执行 RLS。
+    # 方法作用：验证自动化现存租户表对表所有者也强制执行 RLS。
     # Args: self - pytest 测试类实例。
     # Returns: 无返回值，断言失败时由 pytest 报告。
     def test_automation_tables_force_row_level_security(self) -> None:
-        """仅 ENABLE RLS 不能阻止表所有者绕过租户策略。"""
+        """仅 ENABLE RLS 不能阻止表所有者绕过租户策略。
+
+        旧表 analysis_notifications 已由 migrations/034 删除（通知能力迁至
+        src/notifications 与 migrations/033），因此不再纳入本断言。
+        """
         # Arrange
         migration = "\n".join(
             Path(path).read_text(encoding="utf-8")
@@ -382,6 +357,6 @@ class TestAutomationMigration:
 
         # Act / Assert
         for table in (
-            "analysis_schedules", "analysis_schedule_runs", "analysis_notifications",
+            "analysis_schedules", "analysis_schedule_runs",
         ):
             assert f"ALTER TABLE {table} FORCE ROW LEVEL SECURITY;" in migration

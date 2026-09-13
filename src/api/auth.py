@@ -312,6 +312,59 @@ def create_access_token(
     return token
 
 
+# 方法作用：解码并校验 JWT access token，抽出 HTTP 中间件与 WebSocket 握手的公共逻辑。
+# Args: token - 已签名的 JWT 字符串。
+# Returns: (user_id, tenant_id, role, tenant_code, username) 五元组身份。
+def decode_access_token(token: str) -> AuthIdentity:
+    """校验失败时抛出 jwt.PyJWTError 及其子类，由调用方决定拒绝方式。"""
+    logger.debug("访问令牌解码入口", token_length=len(token or ""))
+    payload = jwt.decode(token, _secret(), algorithms=["HS256"])
+    identity: AuthIdentity = (
+        int(payload["user_id"]),
+        int(payload["tenant_id"]),
+        str(payload["role"]).strip().lower(),
+        str(payload.get("tenant_code", "default")).strip().lower(),
+        str(payload.get("username", "")),
+    )
+    logger.debug("访问令牌解码完成", user_id=identity[0], tenant_id=identity[1], role=identity[2])
+    return identity
+
+
+# 方法作用：从数据库读取用户和租户当前状态并组装可比较身份。
+# Args: user_id - JWT 声明的用户 ID。
+# Returns: 当前启用身份；用户或租户停用、用户不存在时返回 None。
+async def load_current_identity(user_id: int) -> AuthIdentity | None:
+    """HTTP 中间件与 WebSocket 握手共用，保证停用账号的长连接也失效。"""
+    logger.debug("当前身份查询入口", user_id=user_id)
+    pool = await get_pg_pool()
+    async with pool.acquire() as connection:
+        row = await connection.fetchrow(
+            "SELECT u.id, u.tenant_id, u.username, u.role, u.is_active, "
+            "t.code AS tenant_code, t.is_active AS tenant_active "
+            "FROM users u JOIN tenants t ON t.id=u.tenant_id WHERE u.id=$1",
+            user_id,
+        )
+    if not row or not bool(row.get("is_active", True)) or not bool(
+        row.get("tenant_active", True)
+    ):
+        logger.warning("当前身份不可用", user_id=user_id)
+        return None
+    result: AuthIdentity = (
+        int(row["id"]),
+        int(row["tenant_id"]),
+        str(row["role"]).strip().lower(),
+        str(row["tenant_code"]).strip().lower(),
+        str(row["username"]),
+    )
+    logger.debug(
+        "当前身份查询完成",
+        user_id=result[0],
+        tenant_id=result[1],
+        role=result[2],
+    )
+    return result
+
+
 def _set_access_cookie(response: Response, token: str) -> None:
     """把访问令牌写入安全 Cookie。
 
@@ -799,14 +852,7 @@ class AuthMiddleware:
         )
         try:
             if token:
-                payload = jwt.decode(token, _secret(), algorithms=["HS256"])
-                identity = (
-                    int(payload["user_id"]),
-                    int(payload["tenant_id"]),
-                    str(payload["role"]).strip().lower(),
-                    str(payload.get("tenant_code", "default")).strip().lower(),
-                    str(payload.get("username", "")),
-                )
+                identity = decode_access_token(token)
         except jwt.ExpiredSignatureError:
             logger.info("JWT 已过期")
             return None, _unauthorized("令牌已过期")
@@ -872,34 +918,8 @@ class AuthMiddleware:
     # Args: user_id - JWT 声明的用户 ID。
     # Returns: 当前启用身份；用户或租户停用、用户不存在时返回 None。
     async def _load_current_identity(self, user_id: int) -> AuthIdentity | None:
-        logger.debug("JWT 当前身份查询入口", user_id=user_id)
-        pool = await get_pg_pool()
-        async with pool.acquire() as connection:
-            row = await connection.fetchrow(
-                "SELECT u.id, u.tenant_id, u.username, u.role, u.is_active, "
-                "t.code AS tenant_code, t.is_active AS tenant_active "
-                "FROM users u JOIN tenants t ON t.id=u.tenant_id WHERE u.id=$1",
-                user_id,
-            )
-        if not row or not bool(row.get("is_active", True)) or not bool(
-            row.get("tenant_active", True)
-        ):
-            logger.warning("JWT 当前身份不可用", user_id=user_id)
-            return None
-        result: AuthIdentity = (
-            int(row["id"]),
-            int(row["tenant_id"]),
-            str(row["role"]).strip().lower(),
-            str(row["tenant_code"]).strip().lower(),
-            str(row["username"]),
-        )
-        logger.debug(
-            "JWT 当前身份查询完成",
-            user_id=result[0],
-            tenant_id=result[1],
-            role=result[2],
-        )
-        return result
+        """薄封装模块级实现，保证 WS 握手与 HTTP 中间件复核口径一致。"""
+        return await load_current_identity(user_id)
 
     # 方法作用：把认证身份写入当前协程 ContextVar。
     # Args: identity - user_id、tenant_id、role、tenant_code、username 身份元组。

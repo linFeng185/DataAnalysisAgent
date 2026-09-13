@@ -194,7 +194,7 @@ class ScheduledAnalysisRunner:
                         failed_channels=failed_channels,
                     )
                     return payload
-            await self._store.record_success(schedule, payload, payload["notification"])
+            await self._store.record_success(schedule, payload)
             logger.info(
                 "自动化任务执行完成",
                 schedule_id=schedule.id,
