@@ -191,21 +191,78 @@ export function parseNotificationPush(raw: unknown): NotificationPushMessage | n
   }
 }
 
+// 心跳间隔与存活判定：
+// 反向代理（frontend/nginx.conf 的 proxy_read_timeout / proxy_send_timeout 均为 600s）按
+// 「读空闲」掐连接，而通知链路平时没有数据流动，空闲十分钟必被断开。客户端每 25 秒发一次
+// 文本 ping，服务端（src/api/routes/notifications.py 的 notifications_stream）收到即回
+// {"type":"pong"}，双向都有流量，读空闲计时被持续重置。取 25 秒是因为浏览器会限制后台
+// 标签页的定时器（Chrome 约每分钟一次），即使被节流到 60 秒也远小于 600 秒。
+export const NOTIFICATION_PING_INTERVAL_MS = 25000;
+// 连续两个心跳周期收不到任何消息就认为链路已死（半开连接不会触发 onclose），
+// 主动关闭以复用既有的指数退避重连；预留一个周期的余量给网络抖动。
+export const NOTIFICATION_PONG_TIMEOUT_MS = 70000;
+// 看门狗检查频率：只需比存活阈值精细，不必与心跳同频。
+const NOTIFICATION_LIVENESS_CHECK_MS = 10000;
+
 // 方法作用：建立一条通知 WebSocket 并把推送解析成消息，重连与降级由调用方负责。
 // Args: handlers - 打开、收到推送、断开与错误回调。
-// Returns: 连接句柄；close() 会先摘掉回调，主动关闭不再触发断开回调。
+// Returns: 连接句柄；close() 会先摘掉回调与心跳定时器，主动关闭不再触发断开回调。
 export function openNotificationStream(handlers: NotificationStreamHandlers): NotificationStreamHandle {
   const socket = new WebSocket(buildNotificationStreamUrl());
-  socket.onopen = () => handlers.onOpen();
+  // 最近一次收到任何消息（含 pong）的时刻；半开连接只能靠它判定，不能只看 onclose。
+  let lastSeenAt = Date.now();
+  let pingTimer: number | null = null;
+  let watchdogTimer: number | null = null;
+
+  // 方法作用：清掉心跳与看门狗定时器，避免连接结束后留下空转的 interval。
+  // Args: 无。
+  // Returns: 无返回值。
+  const stopTimers = (): void => {
+    if (pingTimer !== null) { window.clearInterval(pingTimer); pingTimer = null; }
+    if (watchdogTimer !== null) { window.clearInterval(watchdogTimer); watchdogTimer = null; }
+  };
+
+  // 方法作用：在已打开的连接上发送一次心跳，未打开时静默跳过。
+  // Args: 无。
+  // Returns: 无返回值；发送异常只写调试日志，交由看门狗与重连兜底。
+  const sendPing = (): void => {
+    if (socket.readyState !== WebSocket.OPEN) return;
+    try {
+      socket.send('ping');
+    } catch (error) {
+      console.debug('通知心跳发送失败', error);
+    }
+  };
+
+  socket.onopen = () => {
+    // 立刻打一次心跳，避免刚建立的连接在首个周期内完全静默。
+    lastSeenAt = Date.now();
+    stopTimers();
+    sendPing();
+    pingTimer = window.setInterval(sendPing, NOTIFICATION_PING_INTERVAL_MS);
+    watchdogTimer = window.setInterval(() => {
+      if (Date.now() - lastSeenAt <= NOTIFICATION_PONG_TIMEOUT_MS) return;
+      console.debug('通知长连接心跳超时，主动触发重连');
+      // 关闭会触发 onclose，由调用方按既有指数退避重连，这里不另做重连。
+      socket.close();
+    }, NOTIFICATION_LIVENESS_CHECK_MS);
+    handlers.onOpen();
+  };
   socket.onmessage = (event: MessageEvent) => {
+    // 任何消息都算链路存活，因此必须在解析之前刷新时刻——pong 会被解析层丢弃。
+    lastSeenAt = Date.now();
     const message = parseNotificationPush(event.data);
     if (message) handlers.onMessage(message);
   };
-  socket.onclose = () => handlers.onClose();
+  socket.onclose = () => {
+    stopTimers();
+    handlers.onClose();
+  };
   socket.onerror = () => { handlers.onError?.(); };
   return {
     close: () => {
       // 先摘掉回调：主动关闭不算断线，避免被当成需要重连的失败。
+      stopTimers();
       socket.onopen = null;
       socket.onmessage = null;
       socket.onclose = null;

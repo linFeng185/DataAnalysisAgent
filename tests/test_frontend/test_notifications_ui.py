@@ -1,5 +1,6 @@
 """通知中心前端契约测试：铃铛角标、收件箱、发布界面、渠道配置与 WebSocket 实时推送。"""
 
+import re
 from pathlib import Path
 
 API = "frontend/src/api/notifications.ts"
@@ -404,3 +405,94 @@ class TestNotificationChannels:
         assert 'type="warning"' in channels
         assert 't("通知渠道配置")' in channels
         assert "canManage ?? user?.role === 'tenant_admin'" in channels
+
+
+class TestNotificationStreamHeartbeat:
+    """验证长连接有心跳，不会被反向代理的空闲超时掐断。
+
+    背景：frontend/nginx.conf 对 /api/ 设了 proxy_read_timeout / proxy_send_timeout 各 600s，
+    这是「读空闲」超时；通知链路平时没有数据流动，十分钟必然断连。心跳必须由客户端发起，
+    因为服务端只在收到 ping 时才回 pong（不主动推送），只有单向流量无法重置读空闲计时。
+    """
+
+    # 方法作用：验证心跳间隔小于 nginx 的读空闲超时并留足余量。
+    # Args: self - pytest 测试类实例。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    def test_ping_interval_is_below_proxy_idle_timeout(self) -> None:
+        """间隔必须显著小于代理超时，否则仍会被掐断。"""
+        # Arrange
+        api = Path(API).read_text(encoding="utf-8")
+        nginx = Path("frontend/nginx.conf").read_text(encoding="utf-8")
+        idle = int(re.search(r"proxy_read_timeout\s+(\d+)s", nginx).group(1))
+
+        # Act / Assert
+        ping_ms = int(re.search(r"NOTIFICATION_PING_INTERVAL_MS\s*=\s*(\d+)", api).group(1))
+        # 至少留 5 倍余量：后台标签页的定时器会被浏览器节流（Chrome 约每分钟一次）。
+        assert idle * 1000 >= ping_ms * 5, f"心跳 {ping_ms}ms 相对代理空闲超时 {idle}s 余量不足"
+
+    # 方法作用：验证心跳发的是服务端认识的那个令牌。
+    # Args: self - pytest 测试类实例。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    def test_ping_token_matches_server_contract(self) -> None:
+        """跨端契约：前端发什么，服务端就得认什么。"""
+        # Arrange
+        api = Path(API).read_text(encoding="utf-8")
+        server = Path("src/api/routes/notifications.py").read_text(encoding="utf-8")
+
+        # Act / Assert
+        # 服务端把消息转小写后与 "ping" 比较，前端发送的文本必须是同一个词。
+        assert "socket.send('ping')" in api
+        assert 'str(message).strip().lower() == "ping"' in server
+        assert '"type": "pong"' in server
+
+    # 方法作用：验证未打开的连接不会尝试发送心跳。
+    # Args: self - pytest 测试类实例。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    def test_ping_skips_when_socket_not_open(self) -> None:
+        """CONNECTING/CLOSING 状态下 send 会抛异常，必须先用 readyState 挡住。"""
+        # Arrange
+        api = Path(API).read_text(encoding="utf-8")
+
+        # Act / Assert
+        assert "socket.readyState !== WebSocket.OPEN" in api
+
+    # 方法作用：验证收到任何消息都刷新存活时刻（pong 会被解析层丢弃）。
+    # Args: self - pytest 测试类实例。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    def test_any_message_refreshes_liveness(self) -> None:
+        """只认通知消息会把 pong 当成超时证据，造成假断线重连。"""
+        # Arrange
+        api = Path(API).read_text(encoding="utf-8")
+        onmessage = source_between(api, "socket.onmessage =", "socket.onclose =")
+
+        # Act / Assert
+        assert "lastSeenAt = Date.now()" in onmessage
+        # 刷新必须发生在解析之前：解析对 pong 返回 null。
+        assert onmessage.index("lastSeenAt = Date.now()") < onmessage.index("parseNotificationPush")
+
+    # 方法作用：验证收不到消息时主动关闭以复用既有重连。
+    # Args: self - pytest 测试类实例。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    def test_watchdog_forces_reconnect_when_silent(self) -> None:
+        """半开连接不会触发 onclose，只能靠心跳超时主动断开。"""
+        # Arrange
+        api = Path(API).read_text(encoding="utf-8")
+        onopen = source_between(api, "socket.onopen =", "socket.onmessage =")
+
+        # Act / Assert
+        assert "NOTIFICATION_PONG_TIMEOUT_MS" in onopen
+        assert "socket.close()" in onopen
+
+    # 方法作用：验证定时器在关闭与断线时都被清理。
+    # Args: self - pytest 测试类实例。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    def test_timers_are_cleared_on_close_and_disconnect(self) -> None:
+        """漏清 interval 会在重连后累积多条心跳与看门狗。"""
+        # Arrange
+        api = Path(API).read_text(encoding="utf-8")
+        onclose = source_between(api, "socket.onclose =", "socket.onerror =")
+
+        # Act / Assert
+        assert "stopTimers()" in onclose
+        assert "stopTimers()" in api.split("return {")[-1]
+        assert "window.clearInterval" in api
