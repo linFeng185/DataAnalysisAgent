@@ -664,11 +664,21 @@ ALTER TABLE report_jobs ADD COLUMN IF NOT EXISTS preview_hash VARCHAR(80);
 
 `runner._reserve_plan` 已按真实扇出修正，因此保守预占不会超扣；实际用量更少则在 `finally`（`runner.py:157-161`）释放。
 
-### 11.4 `query_count` 上限必须提高
+### 11.4 `query_count` 上限必须由配置推导，不能写死
 
-`EstimatedResources.query_count` 当前是 `Field(default=1, ge=0, le=16)`（`models.py:95`），而用户单元 12 + 档位额度 6 = 18 个单元，每个单元还可能命中多个数据源（`ReportUnitRoute.datasources` 上限 20，`output_contracts.py:171`），**现有上限必然被击穿**。
+`EstimatedResources.query_count` 曾两次因写死常量被击穿：先是 `le=16`，后按本条设计决定改为 `le=64`（18 个单元 × 平均命中 4 个源的估算）。
 
-设计决定：提高到 `le=64`（18 个单元 × 平均命中 4 个源的保守估计）。这不影响实际扣费 —— 预占与扣费都按真实扇出修正，估算值只决定预占的保守程度。
+**第二次仍然不够**，2026-09-14 实测复现：`report_max_units_per_run` 已由超级管理员放开到 36、`report_max_queries_per_run` 可配到 1000，而选满 5 个数据源时 `(22 单元 + deep 档 6 个发散额度) × 5 = 140` 直接击穿 64。`planner.parse()` 构造 `EstimatedResources` 时抛 ValidationError，冒泡成 `plan_failed`；参数完全确定，**重试必然复现**。同源缺陷还在 `runner._reserve_plan`（两处各自写死 `min(1000, ...)`，与字段契约脱钩）。
+
+设计决定（修订）：
+
+- 字段静态上界取 `_QUERY_COUNT_STATIC_MAX = 1000`，与 `report_max_queries_per_run` 可配的最大值一致，只做契约兜底 —— 与单元数用 `_UNIT_COUNT_STATIC_MAX = 200` + `max_plan_units()` 的既有模式对齐；
+- 真实钳位一律通过 `max_plan_queries()` 读配置，**planner 与 runner 共用同一函数**，禁止再出现两处各自写死的钳位；
+- 若真实扇出仍超过配置上限，应由配额检查给出可读的 `QUOTA_EXCEEDED` 提示，而不是在 Pydantic 构造处崩成 `plan_failed`。
+
+该值不影响实际扣费 —— 预占与扣费都按真实扇出修正，估算值只决定预占的保守程度。
+
+**同源缺陷：输出契约也写死过单元数。** `ReportPlanUnitsOutput.analysis_units` 曾是 `max_length=12`，而配置允许 36：用户在需求里明确要求 16 个单元时，模型**正确拆出了 16 个**，却在契约校验处被 `too_long` 拒收，异常被降级捕获成"模型规划不可用，已按规则拆分"，用户看到的是规则切出来的标题残渣。修法与上同：契约只留"模型失控"的理智上限（`_MAX_PLAN_UNITS_SANITY`，有测试守住 `>= _UNIT_COUNT_STATIC_MAX`），业务上限一律由调用方 `max_plan_units()` 裁剪；`report.plan` 模板里的单元数也改为 `{max_units}` 变量，由 planner 经 `system_values` 从配置下发。
 
 ---
 

@@ -6,10 +6,15 @@ import hashlib
 import json
 import re
 from datetime import datetime
+from datetime import timezone as datetime_timezone
 from typing import Any, Literal
 from uuid import uuid4
 
 from pydantic import BaseModel, Field, field_validator, model_validator
+
+from src.logging_config import get_logger
+
+logger = get_logger(__name__)
 
 _IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
 _TIMEZONE_RE = re.compile(r"^[A-Za-z0-9_./+-]{1,64}$")
@@ -25,6 +30,12 @@ _DIVERGENCE_UNITS_PER_ROUND: dict[str, int] = {"conservative": 0, "standard": 2,
 # 设定（report_max_units_per_run），运行时一律通过 max_plan_units() 读取——
 # 散落的硬编码会导致"配置改了但某处仍卡在 12"。
 _UNIT_COUNT_STATIC_MAX = 200
+# 预估查询数的静态上界，同样只做契约兜底，必须与 report_max_queries_per_run
+# 的可配最大值保持一致。上一版写死 64（按 18 单元 + 档位额度 6 再乘平均 4 个源
+# 估算），而配置已放开到 36 单元：22 个规则单元 + deep 档 6 个发散额度命中 5 个
+# 源即 (22+6)×5 = 140，直接击穿字段校验，parse() 抛 ValidationError，
+# 报表落 plan_failed 且参数确定、重试必复现。
+_QUERY_COUNT_STATIC_MAX = 1000
 
 
 # 方法作用：读取超级管理员配置的计划单元数上限。
@@ -34,6 +45,58 @@ def max_plan_units() -> int:
     from src.config import get_settings
 
     return max(1, int(get_settings().report_max_units_per_run))
+
+
+# 方法作用：读取超级管理员配置的单次运行查询数上限。
+# Args: 无。
+# Returns: 当前允许的单次运行查询数上限，至少为 1。
+def max_plan_queries() -> int:
+    from src.config import get_settings
+
+    return max(1, int(get_settings().report_max_queries_per_run))
+
+
+# 方法作用：判断报表展示的行集是否相对查询全量被截断。
+# Args: displayed - 报表实际展示的行数；full_count - 查询返回的全量行数，未知传 0。
+# Returns: 展示的行数少于全量时返回 True。
+def display_truncated(displayed: int, full_count: int) -> bool:
+    """只按报表自己的展示行集判断截断。
+
+    上游的 `query_result_truncated` 还包含"给模型的样本被裁到 50/30 行"这类与用户
+    可见行集无关的标记，直接透传会把"共 60 行、全部展示"的单元判成"样本被截断"——
+    实机页面上 106 条发现条目逐条刷屏"样本被截断"，就是这么来的。
+    全量未知（0）时不臆断为截断。
+    """
+    if full_count <= 0:
+        return False
+    return int(full_count) > int(displayed)
+
+
+# 「计划生成中」的卡死阈值：后台规划任务活在进程内，服务重启后记录会永远停在
+# planning——既不能重试（接口只允许 plan_failed）也不能删除，用户无路可走。
+# 超过该时长即视为卡死，允许中断并重新生成。
+# 取 5 分钟：含模型拆解与计划期发散的正常规划远快于此，因此不会误伤在途任务。
+PLAN_STUCK_SECONDS = 300
+
+
+# 方法作用：判断一条 planning 记录是否已经卡死到可以中断重来。
+# Args: updated_at - 记录最后更新时间（datetime 或 ISO 字符串）；now - 可注入当前时间。
+# Returns: 无法判定或未超阈值时返回 False，只有确认超时才返回 True。
+def plan_is_stuck(updated_at: Any, *, now: datetime | None = None) -> bool:
+    moment = updated_at
+    if isinstance(moment, str):
+        try:
+            moment = datetime.fromisoformat(moment.replace("Z", "+00:00"))
+        except ValueError:
+            # 时间不可解析时按"未卡死"处理：宁可让用户多等，也不要误中断在途任务。
+            logger.warning("报表更新时间不可解析，按未卡死处理", updated_at=str(updated_at)[:40])
+            return False
+    if not isinstance(moment, datetime):
+        return False
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=datetime_timezone.utc)
+    reference = now or datetime.now(datetime_timezone.utc)
+    return (reference - moment).total_seconds() >= PLAN_STUCK_SECONDS
 
 
 # 单个分析单元在页面上的块预算：kpi / chart / table / narrative / quality 五块，
@@ -174,9 +237,10 @@ class SharePlan(BaseModel):
 class EstimatedResources(BaseModel):
     """计划阶段的有界资源估算。"""
 
-    # 上限 64 = 18 个单元（用户 12 + 档位额度 6）× 单单元平均命中 4 个源的保守估计。
-    # 该值只影响预占的保守程度，实际扣费仍由 runner 按真实扇出修正。
-    query_count: int = Field(default=1, ge=0, le=64)
+    # 静态上界只做契约兜底，真实钳位由 max_plan_queries() 读配置完成：写死一个
+    # 与配置脱钩的常量，会变成"配置允许 1000、这里仍卡在 64"的埋雷。该值只影响
+    # 预占的保守程度，实际扣费仍由 runner 按真实扇出修正。
+    query_count: int = Field(default=1, ge=0, le=_QUERY_COUNT_STATIC_MAX)
     llm_tokens: int = Field(default=1000, ge=0, le=2_000_000)
     estimated_seconds: int = Field(default=5, ge=0, le=3600)
 

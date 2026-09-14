@@ -30,13 +30,11 @@ class TestMultisourceEvidence:
         # Act
         restored = UnitResult.model_validate_json(result.model_dump_json())
         artifact = build_report_document(ReportPlan(analysis_units=[AnalysisUnit(unit_id="marketing", question="广告归因对比")]), [restored])
-        table = next(block for section in artifact.document.sections for block in section.blocks if block.type == "table")
 
-        # Assert
+        # Assert：明细表格已移除，列契约由钻取定义承载（原始列名，前端按名取数）
         assert restored.columns == ["_datasource", "net_sales", "attributed_revenue"]
-        assert table.content["columns"] == restored.columns
-        assert "attributed_revenue" not in table.content["rows"][0]
         assert artifact.document.drilldowns[0]["columns"] == restored.columns
+        assert not [block for section in artifact.document.sections for block in section.blocks if block.type == "table"]
 
     # 方法作用：验证数值统计不漏掉第二来源的指标，同时排除混合类型和布尔值。
     # Args: self - 测试实例。

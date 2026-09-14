@@ -523,15 +523,17 @@ async def delete_tenant(tenant_id: int, request: TenantDeleteRequest) -> dict:
 async def list_users(
     role: str | None = None,
     is_active: bool | None = None,
+    search: str | None = None,
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=20, ge=1, le=100),
 ) -> dict:
-    """返回管理页面所需的最小账号信息。"""
+    """返回管理页面所需的最小账号信息；search 按用户名模糊匹配。"""
     from src.api.auth import get_current_tenant_id, require_tenant_user_admin
     from src.memory.pg_pool import get_pg_pool
 
     tenant_id = get_current_tenant_id()
-    logger.debug("租户用户列表入口", tenant_id=tenant_id, role=role or "", page=page)
+    keyword = (search or "").strip()
+    logger.debug("租户用户列表入口", tenant_id=tenant_id, role=role or "", page=page, search=keyword)
     require_tenant_user_admin()
     pool = await get_pg_pool()
     try:
@@ -539,16 +541,18 @@ async def list_users(
         async with pool.acquire() as connection:
             total = int(await connection.fetchval(
                 "SELECT COUNT(*) FROM users WHERE tenant_id=$1 "
-                "AND ($2::text IS NULL OR role=$2) AND ($3::bool IS NULL OR is_active=$3)",
-                tenant_id, role, is_active,
+                "AND ($2::text IS NULL OR role=$2) AND ($3::bool IS NULL OR is_active=$3) "
+                "AND ($4::text = '' OR username ILIKE '%' || $4 || '%')",
+                tenant_id, role, is_active, keyword,
             ) or 0)
             rows = await connection.fetch(
                 "SELECT id, username, tenant_id, role, is_active, failed_login_attempts, "
                 "locked_until, last_login_at, created_at FROM users "
                 "WHERE tenant_id=$1 "
                 "AND ($2::text IS NULL OR role=$2) AND ($3::bool IS NULL OR is_active=$3) "
-                "ORDER BY id LIMIT $4 OFFSET $5",
-                tenant_id, role, is_active, page_size, offset,
+                "AND ($4::text = '' OR username ILIKE '%' || $4 || '%') "
+                "ORDER BY id LIMIT $5 OFFSET $6",
+                tenant_id, role, is_active, keyword, page_size, offset,
             )
         users = [dict(row) for row in rows]
         result = {"users": users, "total": total, "page": page, "page_size": page_size}

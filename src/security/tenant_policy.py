@@ -22,6 +22,8 @@ class RequestIdentity:
     tenant_id: int
     user_id: int
     role: str
+    # 登录名随身份一起带上：报表列表要显示创建者名字，内存分支拿不到数据库 JOIN。
+    username: str = ""
 
     # 方法作用：构造单租户兼容的匿名身份。
     # Args: 无。

@@ -5,6 +5,7 @@ from __future__ import annotations
 import sys
 import types
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, Mock
@@ -714,6 +715,38 @@ class TestReportRunApi:
         assert response.status_code == 409
 
 
+class TestReportListUsername:
+    """覆盖报表列表返回创建者用户名。"""
+
+    # 方法作用：验证列表项带出创建者用户名。
+    # Args: self - 测试实例。
+    # Returns: 无返回值。
+    async def test_list_returns_creator_username(self) -> None:
+        """列表只带 user_id 时，管理员认不出哪条报表是谁的。"""
+        # Arrange
+        store = ReportStore(memory=True)
+        owner = SimpleNamespace(tenant_id=3, user_id=7, role="analyst", username="张三")
+        await _make_report(store, owner, "draft")
+
+        # Act
+        rows, _total = await store.list_reports(owner, view_all=True)
+
+        # Assert
+        assert rows[0]["username"] == "张三"
+
+    # 方法作用：验证 PostgreSQL 分支真的 JOIN 了 users 表。
+    # Args: self - 测试实例。
+    # Returns: 无返回值。
+    def test_pg_list_query_joins_users(self) -> None:
+        """只改内存分支会让两种部署方式表现不一致，SQL 必须带出用户名。"""
+        # Arrange
+        source = Path("src/reporting/store.py").read_text(encoding="utf-8")
+
+        # Act / Assert
+        assert "LEFT JOIN users u ON u.id=j.user_id" in source
+        assert "u.username AS username" in source
+
+
 class TestRetryAndDeleteApi:
     """覆盖 retry-plan 与删除的状态约束。"""
 
@@ -739,6 +772,50 @@ class TestRetryAndDeleteApi:
         assert store._jobs[failed]["status"] == "planning" and store._jobs[failed]["plan_error"] == ""
         assert rejected.status_code == 409
         assert [item["report_id"] for item in worker.enqueued] == [failed]
+
+    # 方法作用：验证卡死的「计划生成中」可以中断并重新生成。
+    # Args: self - 测试实例；monkeypatch - 补丁工具。
+    # Returns: 无返回值。
+    async def test_retry_plan_allows_stuck_planning(self, monkeypatch) -> None:
+        """服务重启会丢掉进程内的后台任务，记录却停在 planning——既不能重试也不能删除。"""
+        # Arrange
+        from datetime import datetime, timedelta, timezone
+
+        from src.reporting.models import PLAN_STUCK_SECONDS
+
+        store = ReportStore(memory=True)
+        owner = SimpleNamespace(tenant_id=3, user_id=7, role="analyst")
+        stuck = await _make_report(store, owner, "planning")
+        store._jobs[stuck]["updated_at"] = datetime.now(timezone.utc) - timedelta(seconds=PLAN_STUCK_SECONDS + 60)
+        worker = _bind(monkeypatch, store, owner)
+
+        # Act
+        async with _client() as client:
+            response = await client.post(f"{PREFIX}/reports/{stuck}/retry-plan")
+
+        # Assert
+        assert response.status_code == 202 and response.json()["status"] == "planning"
+        assert store._jobs[stuck]["plan_error"] == ""
+        assert [item["report_id"] for item in worker.enqueued] == [stuck]
+
+    # 方法作用：验证仍在正常生成的 planning 不会被打断。
+    # Args: self - 测试实例；monkeypatch - 补丁工具。
+    # Returns: 无返回值。
+    async def test_retry_plan_rejects_fresh_planning(self, monkeypatch) -> None:
+        """刚入队还在生成的任务若被误重试，会打断正常的模型拆解。"""
+        # Arrange
+        store = ReportStore(memory=True)
+        owner = SimpleNamespace(tenant_id=3, user_id=7, role="analyst")
+        fresh = await _make_report(store, owner, "planning")
+        worker = _bind(monkeypatch, store, owner)
+
+        # Act
+        async with _client() as client:
+            response = await client.post(f"{PREFIX}/reports/{fresh}/retry-plan")
+
+        # Assert
+        assert response.status_code == 409
+        assert worker.enqueued == []
 
     # 方法作用：验证运行中的报表不可删除，草稿可删除。
     # Args: self - 测试实例；monkeypatch - 补丁工具。

@@ -18,6 +18,7 @@ from src.reporting.models import (
     SharePlan,
     TimeRange,
     divergence_unit_budget,
+    max_plan_queries,
     max_plan_units,
 )
 
@@ -148,7 +149,8 @@ class ReportPlanner:
                 # 多源扇出：未绑定数据源的单元会在每个已选数据源上各跑一次查询，
                 # 估算按 单元数 × 源数 的上界计算。只数单元数会低报约 N 倍，
                 # 既误导预览，也让配额预占失真。实际命中数由执行期路由收窄。
-                query_count=min(1000, max(1, fanout)),
+                # 钳位必须读系统配置：写死常量会与 report_max_queries_per_run 脱钩。
+                query_count=min(max_plan_queries(), max(1, fanout)),
                 llm_tokens=min(2_000_000, max(1000, fanout * 1200)),
                 estimated_seconds=min(3600, max(5, fanout * 8)),
             ),
@@ -424,6 +426,10 @@ class ReportPlanner:
                 output_model=ReportPlanUnitsOutput,
                 task=_PLAN_LLM_TASK,
                 temperature=0.0,
+                # 模板里的 {max_units} 是 System Prompt 变量，必须走 system_values；
+                # 放进 sections 会在 render 时抛 KeyError 并整批降级（report.diverge 踩过）。
+                # 值取自配置，避免提示词里再写死一个与 report_max_units_per_run 脱钩的数字。
+                system_values={"max_units": str(max_plan_units())},
                 metadata={"node": "report_planner"},
             )
             proposed = self._coerce_llm_units(

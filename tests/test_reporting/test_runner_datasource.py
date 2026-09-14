@@ -339,7 +339,11 @@ class TestReportRunnerDatasourceFanout:
     # Args: self - pytest 测试类实例；monkeypatch - pytest 补丁工具。
     # Returns: 无返回值，断言失败时由 pytest 报告。
     async def test_execute_unit_passes_through_truncation_signal(self, monkeypatch) -> None:
-        """丢弃截断信号会让统计结论无从披露样本局限。"""
+        """丢弃截断信号会让统计结论无从披露样本局限。
+
+        口径：只看报表自己展示的行集。上游"给模型的样本被裁到 50 行"与用户可见行集
+        无关，透传会把"全量展示"的单元误判成截断（实机页面上逐条刷屏）。
+        """
         # Arrange
         import src.graph.workflow as workflow_module
         from src.reporting.models import AnalysisUnit, ReportPlan
@@ -347,13 +351,13 @@ class TestReportRunnerDatasourceFanout:
         from src.reporting.store import ReportStore
 
         class TruncatingApp:
-            # 方法作用：返回带截断标记的成功结果。
+            # 方法作用：返回"展示 1 行、全量 9 行"的成功结果。
             # Args: payload - 工作流状态；config - 线程配置。
-            # Returns: 含 query_result_statistics 的固定结果。
+            # Returns: 含全量计数的固定结果。
             async def ainvoke(self, payload, config):
                 return {
                     "final_response": {"success": True, "data": [{"v": 1}]},
-                    "query_result_statistics": {"row_count": 1, "truncated": True},
+                    "query_result_full_count": 9,
                 }
 
         monkeypatch.setattr(workflow_module, "app", TruncatingApp())

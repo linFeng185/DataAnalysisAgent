@@ -7,6 +7,11 @@ from typing import Annotated, Any, Literal, TypeVar
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+# 报表拆解单元数的理智上限：只拦模型失控输出，不承担业务限额。
+# 业务限额由调用方 max_plan_units() 读配置后裁剪；该值不得小于
+# reporting/models.py 的 _UNIT_COUNT_STATIC_MAX（有测试守住这条不变式）。
+_MAX_PLAN_UNITS_SANITY = 200
+
 
 class StrictOutputModel(BaseModel):
     """允许模型扩展字段，但只把契约字段暴露给业务节点。"""
@@ -163,7 +168,10 @@ class ReportPlanUnit(StrictOutputModel):
 class ReportPlanUnitsOutput(StrictOutputModel):
     """报表需求拆解输出，只承载业务语义，不承载调度与权限字段。"""
 
-    analysis_units: list[ReportPlanUnit] = Field(default_factory=list, max_length=12)
+    # 上一版在这里写死 12，而配置允许到 36：模型按用户要求正确拆出的 16 个单元
+    # 在契约处被 too_long 拒收，异常降级成"模型规划不可用，已按规则拆分"，
+    # 用户看到的是规则切出来的标题残渣。上限必须留给调用方按配置裁剪。
+    analysis_units: list[ReportPlanUnit] = Field(default_factory=list, max_length=_MAX_PLAN_UNITS_SANITY)
 
 
 class ReportUnitRoute(StrictOutputModel):

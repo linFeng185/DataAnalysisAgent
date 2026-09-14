@@ -1,6 +1,6 @@
 import { t, useLanguage } from '../i18n';
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { Alert, Button, Card, Checkbox, Drawer, Empty, Input, List, message, Segmented, Select, Space, Statistic, Table, Tag, Typography } from 'antd';
+import { Alert, Button, Card, Drawer, Empty, Input, List, message, Segmented, Select, Space, Statistic, Table, Tag, Typography } from 'antd';
 import {
   ClockCircleOutlined,
   BarsOutlined,
@@ -12,6 +12,7 @@ import {
 } from '@ant-design/icons';
 import { useNavigate } from 'react-router-dom';
 import { get } from '../api/client';
+import { randomId } from '../utils/randomId';
 import { DEFAULT_TEMPLATE_ID, reportTemplates, resolveTemplate } from '../report/templates';
 import {
   createReportJob,
@@ -24,6 +25,7 @@ import {
   setReportJobPaused,
 } from '../api/reportWorkbench';
 import type { DatasourceConfig } from '../types';
+import ReportPlanUnitRow from '../components/report/ReportPlanUnitRow';
 import type {
   ReportDivergenceLevel,
   ReportJob,
@@ -207,7 +209,7 @@ export default function ReportWorkbenchPage() {
       setPreview(result);
       // 新预览意味着单元集合可能变化，旧的取消勾选不再适用。
       setExcludedUnitIds([]);
-      creationKey.current = crypto.randomUUID();
+      creationKey.current = randomId();
     } catch (error) {
       message.error(error instanceof Error ? error.message : t("计划解析失败"));
     } finally {
@@ -246,7 +248,7 @@ export default function ReportWorkbenchPage() {
         preview.plan_hash,
         null,
         true,
-        creationKey.current || (creationKey.current = crypto.randomUUID()),
+        creationKey.current || (creationKey.current = randomId()),
         acceptedUnitIds,
         templateId,
       );
@@ -263,6 +265,20 @@ export default function ReportWorkbenchPage() {
       setCreating(false);
     }
   };
+
+  // 方法作用：切换单个分析单元的采纳状态，供共享单元行组件回调。
+  // Args: unitId - 单元标识；checked - 是否采纳。
+  // Returns: 无返回值。
+  const toggleUnit = (unitId: string, checked: boolean): void => {
+    setExcludedUnitIds(current => checked
+      ? current.filter(id => id !== unitId)
+      : [...current, unitId]);
+  };
+
+  // 方法作用：统计被用户接受的单元数，供提交前保护使用。
+  // Args: 无，读取当前预览与取消勾选状态。
+  // Returns: 被接受的单元数量。
+  const acceptedUnitCount = preview ? preview.plan.analysis_units.length - excludedUnitIds.length : 0;
 
   // 方法作用：读取指定运行的节点级步骤日志，供日志抽屉展示。
   // Args: runId - 报表运行 ID。
@@ -441,32 +457,28 @@ export default function ReportWorkbenchPage() {
               size="small"
               header={t("你要求的分析")}
               dataSource={preview.plan.analysis_units.filter(unit => (unit.origin ?? 'user') === 'user')}
-              renderItem={unit => <List.Item className="report-plan-unit">
-                <Typography.Text strong>{unit.unit_id}</Typography.Text>
-                <Typography.Text>{unit.question}</Typography.Text>
-                <Typography.Text type="secondary">{t("数据源：")}{unit.datasource || preview.plan.requested_datasources[0] || t("待绑定")}</Typography.Text>
-              </List.Item>}
+              renderItem={unit => <ReportPlanUnitRow
+                unit={unit}
+                editable
+                excludedUnitIds={excludedUnitIds}
+                onToggle={toggleUnit}
+                fallbackDatasource={preview.plan.requested_datasources[0]}
+              />}
             />
             {preview.plan.analysis_units.some(unit => unit.origin === 'diverged') && <List
               size="small"
               header={t("建议补充的分析")}
               dataSource={preview.plan.analysis_units.filter(unit => unit.origin === 'diverged')}
-              renderItem={unit => <List.Item className="report-plan-unit">
-                <Checkbox
-                  checked={!excludedUnitIds.includes(unit.unit_id)}
-                  onChange={event => setExcludedUnitIds(current => event.target.checked
-                    ? current.filter(id => id !== unit.unit_id)
-                    : [...current, unit.unit_id])}
-                >
-                  {t("纳入本次报表")}
-                </Checkbox>
-                <Typography.Text strong>{unit.unit_id}</Typography.Text>
-                <Typography.Text>{unit.question}</Typography.Text>
-                <Typography.Text type="secondary">{t("建议理由：")}{unit.rationale || t("未说明")}</Typography.Text>
-                <Typography.Text type="secondary">{t("数据源：")}{unit.datasource || t("待绑定")}</Typography.Text>
-              </List.Item>}
+              renderItem={unit => <ReportPlanUnitRow
+                unit={unit}
+                editable
+                excludedUnitIds={excludedUnitIds}
+                onToggle={toggleUnit}
+                fallbackDatasource={preview.plan.requested_datasources[0]}
+              />}
             />}
-            <Button type="primary" icon={<PlayCircleOutlined />} loading={creating} disabled={preview.plan.execution_mode === 'scheduled' && !preview.plan.frequency} onClick={() => void createJob()} style={{ marginTop: 12 }}>
+            {acceptedUnitCount === 0 && <Alert type="warning" showIcon message={t("至少保留一个分析单元才能生成报表")} style={{ marginTop: 12 }} />}
+            <Button type="primary" icon={<PlayCircleOutlined />} loading={creating} disabled={(preview.plan.execution_mode === 'scheduled' && !preview.plan.frequency) || acceptedUnitCount === 0} onClick={() => void createJob()} style={{ marginTop: 12 }}>
               {preview.plan.execution_mode === 'scheduled' ? t("确认定时任务") : t("确认并立即生成")}
             </Button>
           </Card>}

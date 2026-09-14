@@ -261,6 +261,9 @@ function AppContent() {
                 <Route path="/mcp" element={<McpPage />} />
                 <Route path="/admin" element={<AdminRoute />} />
                 <Route path="/notifications" element={<NotificationsPage />} />
+                {/* 兜底：任何失效链接（通知 link、旧书签、手输地址）都回到首页，
+                    而不是让 <Routes> 匹配为空、内容区一片空白 */}
+                <Route path="*" element={<Navigate to="/" replace />} />
               </Routes>
             </Suspense>
           </ErrorBoundary>

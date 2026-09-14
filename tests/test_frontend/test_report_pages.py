@@ -11,6 +11,8 @@ API = "frontend/src/api/reportWorkbench.ts"
 TYPES = "frontend/src/types/report.ts"
 # 报表能力的唯一拉取点：菜单、路由守卫与报表页都从这里读。
 PROVIDER = "frontend/src/hooks/useReportPermissions.tsx"
+# 计划单元行的唯一实现：两个报表页只传状态与回调，不各自写勾选框。
+UNIT_ROW = "frontend/src/components/report/ReportPlanUnitRow.tsx"
 
 
 class TestReportSubmenu:
@@ -187,19 +189,65 @@ class TestReportListPage:
         assert "加载报表列表失败" in page
         assert "当前账号没有查看报表信息的权限" in page
 
+    # 方法作用：验证悬停摘要被截断且描述在详情里完整展示。
+    # Args: self - pytest 测试类实例。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    def test_title_tooltip_is_truncated_and_prompt_shown_in_detail(self) -> None:
+        """列表悬停曾直接渲染需求原文（可达数千字），读不动也不该当标题用。
+
+        标题用大模型生成的结果，需求原文截断后作悬停摘要，完整描述放详情里看。
+        """
+        # Arrange
+        page = Path(LIST_PAGE).read_text(encoding="utf-8")
+
+        # Act / Assert
+        # 单元格标题优先用大模型标题，无标题时才回退需求摘要
+        assert "if (item.title) return item.title;" in page
+        # 悬停提示走截断函数，不再直接渲染 item.prompt
+        assert "<Tooltip title={item.prompt}>" not in page
+        assert "promptSummary(item.prompt)" in page
+        assert "PROMPT_TOOLTIP_MAX = 100" in page
+        # 完整需求原文在详情里展示
+        assert "计划需求" in page and "report.prompt" in page
+
+    # 方法作用：验证卡死的计划可被中断并重新生成。
+    # Args: self - pytest 测试类实例。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    def test_stuck_planning_can_be_interrupted(self) -> None:
+        """后台规划任务活在进程内，服务重启后记录会永远停在「计划生成中」。
+
+        此前重试接口只认 plan_failed、删除接口拒绝 planning，用户完全无路可走。
+        卡死判定与阈值由服务端下发（plan_stuck），前端不得自己比较时间——两处各写一份必然漂移。
+        """
+        # Arrange
+        page = Path(LIST_PAGE).read_text(encoding="utf-8")
+        types = Path(TYPES).read_text(encoding="utf-8")
+
+        # Act / Assert
+        assert "plan_stuck" in types
+        assert "report.plan_stuck" in page
+        assert "中断并重新生成" in page
+
     # 方法作用：验证状态映射含新语义，且非终态轮询、终态停表。
     # Args: self - pytest 测试类实例。
     # Returns: 无返回值，断言失败时由 pytest 报告。
     def test_status_mapping_and_polling(self) -> None:
-        """生成中/未生成/计划失败必须能显示；非终态 2.5 秒轮询，全部终态时停表。"""
+        """计划生成中/报表未生成/计划失败必须能显示；非终态 2.5 秒轮询，终态停表。
+
+        文案曾分别写「生成中」「未生成」：前者看不出在生成计划还是报表，
+        后者容易被读成"这条报表没有生成出来"，实际语义是"计划已就绪、报表待生成"。
+        """
         # Arrange
         page = Path(LIST_PAGE).read_text(encoding="utf-8")
         status = Path(STATUS_MODULE).read_text(encoding="utf-8")
 
         # Act / Assert：状态映射
-        assert "planning: t(\"生成中\")" in status
-        assert "draft: t(\"未生成\")" in status
+        assert "planning: t(\"计划生成中\")" in status
+        assert "draft: t(\"报表未生成\")" in status
         assert "plan_failed: t(\"计划失败\")" in status
+        # 旧的含糊说法不得残留
+        assert "planning: t(\"生成中\")" not in status
+        assert "draft: t(\"未生成\")" not in status
         assert "reportStatusLabel" in page and "reportStatusColor" in page
         # 轮询：仅非终态启动，终态停表
         assert "POLL_INTERVAL_MS = 2500" in page
@@ -215,7 +263,7 @@ class TestReportListPage:
     # Args: self - pytest 测试类实例。
     # Returns: 无返回值，断言失败时由 pytest 报告。
     def test_run_and_retry_actions_follow_status(self) -> None:
-        """点「生成」才预占额度；计划失败的报表只能重试计划。"""
+        """点「生成」才预占额度；计划失败或卡死的报表可以重试计划。"""
         # Arrange
         page = Path(LIST_PAGE).read_text(encoding="utf-8")
         api = Path(API).read_text(encoding="utf-8")
@@ -226,7 +274,8 @@ class TestReportListPage:
         assert "{canRun && <Button type=\"primary\"" in page
         assert "runReport(detail.report.id)" in page
         assert "`${REPORT_BASE}/reports/${encodeURIComponent(reportId)}/run`" in api
-        assert "status === 'plan_failed' && <Button" in page
+        # 卡死的「计划生成中」同样要给出重试入口，否则用户没有任何出路
+        assert "(status === 'plan_failed' || planStuck) && <Button" in page
         assert "retryReportPlan" in page
         assert "`${REPORT_BASE}/reports/${encodeURIComponent(reportId)}/retry-plan`" in api
         # 重试接口只回传状态：页面必须重新拉取详情，不能把响应当成详情用
@@ -261,14 +310,35 @@ class TestReportListPage:
         """只读态不显示勾选框：计划已锁定，勾选没有可提交的落点。"""
         # Arrange
         page = Path(LIST_PAGE).read_text(encoding="utf-8")
+        row = Path(UNIT_ROW).read_text(encoding="utf-8")
 
-        # Act / Assert
-        assert "{isEditable && <Checkbox" in page
-        assert "纳入本次报表" in page
-        assert "仅「未生成」状态的报表可以修改计划与调度。" in page
+        # Act / Assert：勾选框由共享行按 editable 门控，页面负责把 isEditable 传下去
+        assert "{editable && <Checkbox" in row
+        assert "纳入本次报表" in row
+        assert "editable={isEditable}" in page
+        assert "仅「报表未生成」状态的报表可以修改计划与调度。" in page
         # 只读态下调度表单与保存按钮同样不可用
         assert "disabled={!isEditable}" in page
         assert "disabled={!isEditable || !canPermanent}" in page
+
+    # 方法作用：验证用户筛选是可搜索的下拉选择而不是裸数字输入框。
+    # Args: self - pytest 测试类实例。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    def test_user_filter_uses_searchable_select(self) -> None:
+        """让人手填「用户 ID」等于要求管理员先背下 id，必须按用户名搜。"""
+        # Arrange
+        page = Path(LIST_PAGE).read_text(encoding="utf-8")
+        api = Path(API).read_text(encoding="utf-8")
+        admin = Path("src/api/routes/admin.py").read_text(encoding="utf-8")
+
+        # Act / Assert
+        # 后端支持按用户名模糊匹配
+        assert "search" in admin and "username ILIKE" in admin
+        # 前端换成可搜索下拉，并且不再出现裸「用户 ID」输入框
+        assert "fetchReportUsers" in api
+        assert "showSearch" in page
+        assert 'placeholder={t("用户 ID")}' not in page
+        assert 'placeholder={t("按用户名搜索")}' in page
 
     # 方法作用：验证用户筛选只对租户管理员显示并下推 user_id。
     # Args: self - pytest 测试类实例。
@@ -281,7 +351,7 @@ class TestReportListPage:
 
         # Act / Assert
         assert "const isTenantAdmin = user?.role === 'tenant_admin';" in page
-        assert "{isTenantAdmin && <InputNumber" in page
+        assert "{isTenantAdmin && <Select<number>" in page
         assert "user_id: isTenantAdmin && userFilter ? userFilter : undefined" in page
         assert "按用户 ID 精确筛选" in page
         # 仅租户管理员可用的参数由接口层原样下发，其他角色不下发该键
@@ -300,9 +370,9 @@ class TestReportListPage:
         # Act / Assert：计划详情
         assert "计划详情" in page
         assert "page_ttl_days" in page and "estimated?.query_count" in page and "estimated?.llm_tokens" in page
-        # 分析单元分组：用户要求 / 系统建议
+        # 分析单元分组：用户要求 / 系统建议；行渲染（含建议理由）在共享组件里
         assert "你要求的分析" in page and "建议补充的分析" in page
-        assert "unit.rationale" in page
+        assert "unit.rationale" in Path(UNIT_ROW).read_text(encoding="utf-8")
         # 调度编辑
         assert "调度编辑" in page
         assert "Radio.Button value=\"immediate\"" in page and "Radio.Button value=\"scheduled\"" in page

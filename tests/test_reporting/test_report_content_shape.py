@@ -1,0 +1,181 @@
+"""报表内容构成契约：只呈现图表与分析，不承担明细。
+
+2026-09-14 实机反馈（分享页）：
+* 19 个单元的「明细样本」表格块 —— 5~18 列 × 最多 100 行，单元格被 `ellipsis` 挤成
+  "每格几个字加省略号"，用户的原话是"列表丑死了，可读性也差"；明细本应由使用方
+  自己去数据源看，报表只需结论。
+* 22/24 个区段标题就是英文 unit_id（`sales_base_overview`、`three_way_reconciliation`）。
+* relations 区段 20 块里多数是"未发现共同字段"的 `no_relation`，占版面不提供信息。
+"""
+
+from __future__ import annotations
+
+from typing import Any
+
+from src.reporting.document import build_report_document
+from src.reporting.models import AnalysisUnit, ReportPlan, UnitResult
+from src.reporting.relations import RelationEvidence
+
+_QUESTION = "销售基盘：按年月、地区、渠道以及历史模拟/当年/未来情景分组，统计订单净销售额与订单数"
+
+
+# 方法作用：构造含指定单元问题的计划。
+# Args: questions - 单元问题文本。
+# Returns: 已校验的报表计划。
+def _plan(*questions: str) -> ReportPlan:
+    return ReportPlan(
+        requested_datasources=["sales"],
+        analysis_units=[
+            AnalysisUnit(unit_id=f"unit_{index}", question=text)
+            for index, text in enumerate(questions, start=1)
+        ],
+    )
+
+
+# 方法作用：构造带数据行的单元结果。
+# Args: unit_id - 单元标识；rows - 结果行。
+# Returns: 单元结果。
+def _result(unit_id: str, rows: list[dict[str, Any]] | None = None) -> UnitResult:
+    return UnitResult(
+        unit_id=unit_id,
+        datasource="sales",
+        rows=rows if rows is not None else [{"year_month": "2026-06", "net_sales": 200.0}],
+        columns=["year_month", "net_sales"],
+    )
+
+
+# 方法作用：收集整份页面里的块类型。
+# Args: artifact - 页面产物。
+# Returns: 块类型列表。
+def _block_types(artifact) -> list[str]:
+    return [str(block.type) for section in artifact.document.sections for block in section.blocks]
+
+
+class TestReportContentShape:
+    """覆盖报表页面的内容构成。"""
+
+    # 方法作用：验证报表不再产出明细表格块。
+    # Args: self - 测试实例。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    def test_no_detail_table_blocks(self) -> None:
+        """明细表既难读又不该由报表承担；明细走数据源或既有钻取。"""
+        # Arrange / Act
+        artifact = build_report_document(_plan(_QUESTION), [_result("unit_1")])
+
+        # Assert
+        assert "table" not in _block_types(artifact)
+        # 图表与分析仍在：去掉明细不等于去掉内容
+        types = _block_types(artifact)
+        assert "chart" in types and "kpi" in types
+
+    # 方法作用：验证区段标题使用业务短标题而不是英文标识。
+    # Args: self - 测试实例。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    def test_section_title_is_business_text(self) -> None:
+        """标题曾等于 unit_id，页面上整片英文。"""
+        # Arrange / Act
+        artifact = build_report_document(_plan(_QUESTION), [_result("unit_1")])
+
+        # Assert
+        section = next(item for item in artifact.document.sections if item.id == "unit_1")
+        assert section.title == "销售基盘"
+        assert section.title != "unit_1"
+
+    # 方法作用：验证没有业务前缀的问题回退为截断文本而不是标识。
+    # Args: self - 测试实例。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    def test_title_falls_back_to_truncated_question(self) -> None:
+        """问题没有「小标题：」结构时也不能拿 unit_id 充当标题。"""
+        # Arrange / Act
+        artifact = build_report_document(_plan("按门店和年月对比销售目标与实际净销售额并给出达成率分布"), [_result("unit_1")])
+
+        # Assert
+        section = next(item for item in artifact.document.sections if item.id == "unit_1")
+        assert section.title.endswith("…")
+        assert section.title != "unit_1"
+        assert len(section.title) <= 21
+
+    # 方法作用：验证未建立关系的证据不单独占块。
+    # Args: self - 测试实例。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    def test_no_relation_blocks_are_dropped(self) -> None:
+        """20 块里多数是"未发现共同字段"，占版面却不提供信息。"""
+        # Arrange
+        relations = [
+            RelationEvidence(left_unit_id="unit_1", right_unit_id="unit_2", relation_type="entity_time_join", join_keys=["年月"], evidence_level="verified_relation", match_rate=1.0),
+            RelationEvidence(left_unit_id="unit_1", right_unit_id="unit_3", relation_type="none", evidence_level="no_relation"),
+        ]
+
+        # Act
+        artifact = build_report_document(_plan(_QUESTION, _QUESTION, _QUESTION), [_result("unit_1"), _result("unit_2"), _result("unit_3")], relations=relations)
+        titles = [block.title for section in artifact.document.sections if section.id == "relations" for block in section.blocks]
+
+        # Assert
+        assert len(titles) == 1
+        assert "unit_1 与 unit_2" in titles[0]
+
+    # 方法作用：验证分位数一类的统计量不再当作"发现"。
+    # Args: self - 测试实例。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    def test_distribution_stats_are_not_findings(self) -> None:
+        """P25/P50/偏度是统计过程输出，不是可行动的业务发现。"""
+        # Arrange
+        from src.reporting.profiling import profile_unit
+
+        rows = [{"year_month": f"2026-{month:02d}", "net_sales": month * 100 + month % 3} for month in range(1, 13)]
+
+        # Act
+        findings = profile_unit(unit_id="u1", rows=rows, columns=["year_month", "net_sales"], metrics=["net_sales"])
+
+        # Assert
+        assert not [item for item in findings if item.category == "distribution"]
+
+    # 方法作用：验证异常点用业务标签定位而不是行号。
+    # Args: self - 测试实例。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    def test_anomaly_uses_business_label(self) -> None:
+        """「第 32 行 / z-score=3.25」对用户没有意义，必须落到时间或维度取值上。"""
+        # Arrange
+        from src.reporting.profiling import profile_unit
+
+        rows = [{"year_month": f"2026-{month:02d}", "net_sales": 100 + month} for month in range(1, 12)]
+        rows.append({"year_month": "2026-12", "net_sales": 90000})
+
+        # Act
+        findings = profile_unit(unit_id="u1", rows=rows, columns=["year_month", "net_sales"], metrics=["net_sales"])
+        anomalies = [item for item in findings if item.category == "anomaly"]
+
+        # Assert：必须检出，否则本用例空洞
+        assert anomalies, "构造的极值未被检出，用例失去意义"
+        labels = [item.label for item in anomalies[0].items]
+        assert "2026-12" in labels
+        for item in anomalies[0].items:
+            assert "行" not in item.label
+            assert "z-score" not in (item.baseline or "")
+
+    # 方法作用：验证截断判定只看报表展示的行集。
+    # Args: self - 测试实例。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    def test_truncation_reflects_displayed_rows_only(self) -> None:
+        """上游"给模型的样本被裁到 50 行"与用户可见行集无关，不能拿来报截断。"""
+        # Arrange
+        from src.reporting.models import display_truncated
+
+        # Act / Assert
+        assert display_truncated(60, 60) is False      # 60 行全量展示：实机误报的就是这种
+        assert display_truncated(50, 90) is True       # 展示 50 / 全量 90：确实被裁
+        assert display_truncated(60, 0) is False       # 全量未知时不臆断
+
+    # 方法作用：验证全部关系都未建立时不产出关系区段。
+    # Args: self - 测试实例。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    def test_relations_section_absent_without_evidence(self) -> None:
+        """整段都是"没关系"时，区段本身就不该出现在页面上。"""
+        # Arrange
+        relations = [RelationEvidence(left_unit_id="unit_1", right_unit_id="unit_2", relation_type="none", evidence_level="no_relation")]
+
+        # Act
+        artifact = build_report_document(_plan(_QUESTION, _QUESTION), [_result("unit_1"), _result("unit_2")], relations=relations)
+
+        # Assert
+        assert not [section for section in artifact.document.sections if section.id == "relations"]

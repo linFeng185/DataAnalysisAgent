@@ -378,12 +378,12 @@ class ReportRunner:
 
             owner = RequestIdentity(tenant_id=int(identity.get("tenant_id", 0)), user_id=int(identity.get("user_id", 0)), role=str(identity.get("role", "")))
             live_query_id = await self.store.save_live_query(run_id, owner, datasource, str(result.get("dialect", "") or access.get("dialect", "")), sql)
-        # 透传旧工作流已有的截断信号，供确定性深挖披露样本局限。
-        statistics = result.get("query_result_statistics")
-        truncated = bool(
-            (statistics.get("truncated") if isinstance(statistics, dict) else False)
-            or result.get("query_result_truncated")
-        )
+        # 只看报表自己展示的行集是否被截断：上游的 query_result_truncated 还包含
+        # "给模型的样本被裁到 50/30 行"这类与用户可见行集无关的标记，透传会让
+        # "共 60 行、全部展示"的单元被判成"样本被截断"（实机页面上逐条刷屏）。
+        from src.reporting.models import display_truncated
+
+        truncated = display_truncated(len(rows), int(result.get("query_result_full_count") or 0))
         analysis = final.get("analysis") or {}
         # 直答类单元（元数据说明、知识直答等）产出的是文字结论，没有数据行是正常形态；
         # 标成 text 后，成功单元判据才不会把它们误算成部分完成。
@@ -495,7 +495,7 @@ class ReportRunner:
             actual += len(matched) if matched is not None else fallback
         # 运行期发散回路是数据驱动的，预占时无法知道会不会发生、会加几个单元，
         # 因此按额度上限预留。禁止"先跑再按实际补扣"，那会绕过配额。
-        from src.reporting.models import divergence_unit_budget
+        from src.reporting.models import divergence_unit_budget, max_plan_queries
 
         level = str(getattr(plan, "divergence", "standard") or "standard")
         # 档位是计划期与运行期**共享**的总授权：计划期已经追加的发散单元必须扣减，
@@ -504,11 +504,19 @@ class ReportRunner:
         runtime_budget = max(0, divergence_unit_budget(level) - plan_diverged)
         actual += runtime_budget * fallback
         actual = max(1, actual)
+        # 与计划期同源读配置：两处各自写死的钳位一旦脱钩，预占就会越过字段契约。
+        reserved_query_count = min(max_plan_queries(), actual)
         estimated = plan.estimated.model_copy(update={
-            "query_count": min(1000, actual),
+            "query_count": reserved_query_count,
             "llm_tokens": min(2_000_000, max(1000, actual * 1200)),
         })
-        logger.info("报表配额按路由扇出修正", query_count=actual, unit_count=len(plan.analysis_units))
+        # 两个数都要打：只打 actual 会让日志里的数字与实际预占不一致（本次事故的排查坑）。
+        logger.info(
+            "报表配额按路由扇出修正",
+            actual_query_count=actual,
+            reserved_query_count=reserved_query_count,
+            unit_count=len(plan.analysis_units),
+        )
         return plan.model_copy(update={"estimated": estimated})
 
 

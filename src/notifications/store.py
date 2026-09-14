@@ -8,6 +8,7 @@ tenant_id / user_id 隔离的最后一道防线（迁移 033）。
 from __future__ import annotations
 
 import asyncio
+import json
 from datetime import datetime, timezone
 from typing import Any
 from uuid import uuid4
@@ -31,6 +32,25 @@ def _iso(value: Any) -> str | None:
         normalized = value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
         return normalized.astimezone(timezone.utc).isoformat()
     return str(value)
+
+
+# 方法作用：把库里读到的 config_json 归一成字典，兼容驱动按文本返回 jsonb。
+# Args: value - 数据库返回的原始值：本环境 asyncpg 实测返回 JSON 文本。
+# Returns: 配置字典；无法解析时返回空字典。
+def _as_config_dict(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return dict(value)
+    if isinstance(value, str):
+        # 本环境的 asyncpg 把 jsonb 按文本解码（'{}'::jsonb 也返回 str），
+        # 直接 dict() 会逐字符迭代并抛 ValueError 把整条渠道读取打哑；
+        # 若换成会解成对象的驱动，上面的 dict 分支照常可用。
+        try:
+            decoded = json.loads(value)
+        except (TypeError, ValueError):
+            logger.warning("渠道配置反序列化失败，按空配置处理", value_preview=value[:80])
+            return {}
+        return dict(decoded) if isinstance(decoded, dict) else {}
+    return {}
 
 
 # 方法作用：返回渠道配置的默认状态，站内信默认启用、外发渠道默认关闭。
@@ -557,7 +577,7 @@ class NotificationStore:
                 str(row["channel"]): {
                     "channel": str(row["channel"]),
                     "enabled": bool(row["enabled"]),
-                    "config": dict(row["config_json"] or {}),
+                    "config": _as_config_dict(row["config_json"]),
                     "updated_by": int(row["updated_by"] or 0),
                     "updated_at": row["updated_at"],
                 }
@@ -611,8 +631,6 @@ class NotificationStore:
                     "updated_at": now,
                 }
         elif targets:
-            import json
-
             pool = await self._pool()
             from src.memory.pg_pool import pg_pool_connection
 
@@ -629,6 +647,9 @@ class NotificationStore:
                             tenant_id,
                             channel,
                             bool(setting.get("enabled", False)),
+                            # 本环境的 asyncpg 对 jsonb 参数只接受字符串（传 dict 会报
+                            # "expected str, got dict"），因此写入侧必须自己序列化；
+                            # 服务端仍会存成真正的 jsonb 对象，不是双重编码。
                             json.dumps(dict(setting.get("config") or {}), ensure_ascii=False),
                             int(updated_by),
                         )

@@ -27,6 +27,7 @@ from src.reporting.models import (
     ReportPlanRequest,
     ReportSchedulePatchRequest,
     ReportShareCreateRequest,
+    plan_is_stuck,
 )
 from src.reporting.plan_worker import get_report_plan_worker
 from src.reporting.planner import ReportPlanner
@@ -188,7 +189,10 @@ async def _load_report(identity: Any, report_id: str) -> dict[str, Any]:
 # Args: report - 报表记录字典。
 # Returns: 不含内部计划对象的报表摘要。
 def _public_report(report: dict[str, Any]) -> dict[str, Any]:
-    return {key: value for key, value in report.items() if key not in {"plan", "tenant_id"}}
+    payload = {key: value for key, value in report.items() if key not in {"plan", "tenant_id"}}
+    # 卡死标记由服务端判定下发，前端不再自己比较时间——两处各写一个阈值必然漂移。
+    payload["plan_stuck"] = str(report.get("status", "")) == "planning" and plan_is_stuck(report.get("updated_at"))
+    return payload
 
 
 # 方法作用：校验报表写操作必须由创建者本人发起。
@@ -673,7 +677,7 @@ async def list_reports(
         page_size=bounded_size,
         view_all=await _has_view_all(identity),
     )
-    logger.info("报表信息列表完成", tenant_id=identity.tenant_id, user_id=identity.user_id, total=total, returned=len(items))
+    logger.debug("报表信息列表完成", tenant_id=identity.tenant_id, user_id=identity.user_id, total=total, returned=len(items))
     return {"reports": [_public_report(item) for item in items], "total": total, "page": page, "page_size": bounded_size}
 
 
@@ -795,8 +799,12 @@ async def retry_report_plan(report_id: str) -> dict[str, Any]:
     store = get_report_store()
     report = await _load_report(identity, report_id)
     _require_report_owner(identity, report)
-    if report["status"] != "plan_failed":
-        raise HTTPException(409, "仅计划失败的报表可以重试生成计划")
+    status = str(report["status"])
+    if status == "planning" and plan_is_stuck(report.get("updated_at")):
+        # 服务重启后后台任务已丢失，记录却停在 planning：这里把它当作"中断并重新生成"。
+        logger.info("报表计划已卡死，按中断重试处理", report_id=report_id, updated_at=str(report.get("updated_at"))[:40])
+    elif status != "plan_failed":
+        raise HTTPException(409, "计划仍在生成中，请稍候；若长时间无变化可中断并重新生成")
     if not await store.reset_plan_status(report_id, identity):
         raise HTTPException(404, "报表不存在或无权访问")
     get_report_plan_worker().enqueue(report_id, identity)

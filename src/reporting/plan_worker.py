@@ -207,7 +207,9 @@ class ReportPlanWorker:
                 kind,
                 title,
                 body,
-                f"/report-workbench/reports/{report_id}",
+                # 路由必须真实存在：这里曾写 /report-workbench/reports/{id}，
+                # 而路由表里只有 /report-workbench/jobs，点击通知落到空匹配直接白屏。
+                f"/report-workbench/jobs?report={report_id}",
             )
             logger.info("报表计划通知已发送", kind=kind, report_id=report_id)
         except Exception:

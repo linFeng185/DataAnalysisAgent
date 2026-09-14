@@ -31,11 +31,13 @@ export function reportStatusColor(status: string): string {
 
 // 方法作用：把报表任务状态转换为用户可读文本。
 // Args: status - 后端任务状态值。
-// Returns: 中文状态文本；planning=生成中、draft=未生成、plan_failed=计划失败。
+// Returns: 中文状态文本；planning=计划生成中、draft=报表未生成、plan_failed=计划失败。
+// 文案要点：planning 与 draft 都牵扯"计划"和"报表"两件事，必须说清是哪一件——
+// 「生成中」看不出在生成什么，「未生成」会被读成"报表没生成出来"。
 export function reportStatusLabel(status: string): string {
   const labels: Record<string, string> = {
-    planning: t("生成中"),
-    draft: t("未生成"),
+    planning: t("计划生成中"),
+    draft: t("报表未生成"),
     plan_failed: t("计划失败"),
     queued: t("排队中"),
     running: t("运行中"),

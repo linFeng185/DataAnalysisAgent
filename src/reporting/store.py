@@ -270,6 +270,8 @@ class ReportStore:
             "id": str(row["id"]),
             "tenant_id": int(row.get("tenant_id", 0) or 0),
             "user_id": int(row.get("user_id", 0) or 0),
+            # 创建者登录名：列表要让人认得出是谁的报表；旧记录没有该列时留空。
+            "username": str(row.get("username", "") or ""),
             "title": str(row.get("title", "") or ""),
             "prompt": str(row.get("prompt", "") or ""),
             "datasources": datasources,
@@ -314,6 +316,8 @@ class ReportStore:
                 now = datetime.now(timezone.utc)
                 row = {
                     "id": job_id, "tenant_id": tenant_id, "user_id": user_id, "prompt": prompt,
+                    # 创建者登录名随行保存：PG 分支靠 JOIN users 取，内存分支只能自己带。
+                    "username": str(getattr(identity, "username", "") or ""),
                     # plan_json 必须非空才能满足列约束；空对象表示计划尚未生成。
                     "plan_json": {}, "plan_hash": "", "preview_hash": "",
                     "template_id": template_id, "execution_mode": "immediate", "frequency": None,
@@ -485,7 +489,7 @@ class ReportStore:
             total = len(rows)
             start = (bounded_page - 1) * bounded_size
             items = [self._report_row_dict(row, self._latest_report_id(str(row["id"]))) for row in rows[start:start + bounded_size]]
-            logger.info("报表信息列表查询完成", tenant_id=tenant_id, total=total, returned=len(items))
+            logger.debug("报表信息列表查询完成", tenant_id=tenant_id, total=total, returned=len(items))
             return items, total
         pool = await self._pool()
         from src.memory.pg_pool import pg_pool_connection
@@ -497,8 +501,10 @@ class ReportStore:
                 "SELECT j.id::text AS id, j.tenant_id, j.user_id, j.prompt, j.title, j.divergence, j.datasources_json, j.status, "
                 "j.runs_started, j.next_run_at, j.created_at, j.updated_at, j.execution_mode, j.frequency, j.max_runs, "
                 "j.schedule_end_at, j.page_ttl_days, j.permanent, j.timezone, j.template_id, j.plan_hash, j.plan_error, j.is_paused, "
+                "u.username AS username, "
                 "lv.id::text AS latest_report_id, COUNT(*) OVER () AS total_count "
                 "FROM report_jobs j "
+                "LEFT JOIN users u ON u.id=j.user_id "
                 "LEFT JOIN LATERAL (SELECT v.id FROM report_versions v WHERE v.job_id=j.id AND v.tenant_id=j.tenant_id AND v.deleted_at IS NULL ORDER BY v.is_latest DESC,v.version DESC LIMIT 1) lv ON TRUE "
                 "WHERE j.tenant_id=$1 AND j.status<>'deleted' "
                 "AND ($2<>'super_admin' AND ($3::boolean OR $2='tenant_admin' OR j.user_id=$4)) "
@@ -509,7 +515,7 @@ class ReportStore:
             )
         total = int(rows[0]["total_count"]) if rows else 0
         items = [self._report_row_dict(row, str(row["latest_report_id"]) if row.get("latest_report_id") else None) for row in rows]
-        logger.info("报表信息列表查询完成", tenant_id=tenant_id, total=total, returned=len(items))
+        logger.debug("报表信息列表查询完成", tenant_id=tenant_id, total=total, returned=len(items))
         return items, total
 
     # 方法作用：读取单条报表记录的原始字段与计划对象，供详情、编辑、运行和删除共用。

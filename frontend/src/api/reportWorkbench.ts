@@ -396,6 +396,22 @@ export function fetchReportList(query: ReportListQuery = {}): Promise<ReportList
   return get<ReportListResponse>(`${REPORT_BASE}/reports?${params.toString()}`);
 }
 
+/** 报表用户筛选的下拉项。 */
+export interface ReportUserOption {
+  value: number;
+  label: string;
+}
+
+// 方法作用：按用户名搜索租户内用户，供报表列表的创建者筛选下拉使用。
+// Args: search - 可选用户名关键字；pageSize - 最多取多少条。
+// Returns: 下拉选项数组；接口不可用时返回空数组，筛选框退化为可输入。
+export async function fetchReportUsers(search = '', pageSize = 50): Promise<ReportUserOption[]> {
+  const params = new URLSearchParams({ page: '1', page_size: String(pageSize) });
+  if (search.trim()) params.set('search', search.trim());
+  const result = await get<{ users?: Array<{ id: number; username?: string }> }>(`/admin/users?${params.toString()}`);
+  return (result.users || []).map(item => ({ value: item.id, label: item.username || String(item.id) }));
+}
+
 // 方法作用：读取单条报表的计划、最近运行、页面版本与历史运行。
 // Args: reportId - 报表标识。
 // Returns: 报表详情。

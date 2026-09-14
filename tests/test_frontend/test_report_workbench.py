@@ -2,6 +2,9 @@
 
 from pathlib import Path
 
+# 计划单元行的唯一实现：勾选框与建议理由都在这里，两个页面只负责调用。
+UNIT_ROW = "frontend/src/components/report/ReportPlanUnitRow.tsx"
+
 
 class TestReportWorkbenchFrontend:
     """覆盖功能 23.9：工作台、动态页面、权限守卫和公开查看器。"""
@@ -204,7 +207,7 @@ class TestReportWorkbenchFrontend:
         # 用户单元与建议单元分组展示，建议单元带理由
         assert "你要求的分析" in page
         assert "建议补充的分析" in page
-        assert "unit.rationale" in page
+        assert "unit.rationale" in Path(UNIT_ROW).read_text(encoding="utf-8")
         assert "ReportDivergenceLevel" in types
         assert "divergence" in api
 
@@ -236,9 +239,11 @@ class TestReportWorkbenchFrontend:
         api = Path("frontend/src/api/reportWorkbench.ts").read_text(encoding="utf-8")
 
         # Act / Assert
-        assert "Checkbox" in page
+        # 勾选框与文案在共享单元行里定义一次，页面只负责传状态与回调
+        row = Path(UNIT_ROW).read_text(encoding="utf-8")
+        assert "Checkbox" in row
+        assert "纳入本次报表" in row
         assert "excludedUnitIds" in page
         assert "acceptedUnitIds" in page
-        assert "纳入本次报表" in page
         # 接口层字段名必须与后端契约一致
         assert "accepted_unit_ids" in api

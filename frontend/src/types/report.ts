@@ -386,6 +386,8 @@ export interface ReportListItem {
   latest_report_id: string | null;
   /** 计划失败时的可读原因；后端随记录一并返回。 */
   plan_error?: string | null;
+  /** 计划卡死：planning 超过服务端阈值，后台任务多半已随重启丢失，可中断重来。 */
+  plan_stuck?: boolean;
   /** 创建者；后端只允许创建者点「生成」，界面据此避免给出必然 403 的按钮。 */
   user_id?: number;
 }

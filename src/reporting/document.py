@@ -285,6 +285,24 @@ def layout_for_block(block_type: str, has_data: bool = True) -> ReportLayout:
     )
 
 
+# 区段标题的字数上限：标题要能一眼读完，超长问题截断而不是撑满一行。
+_SECTION_TITLE_MAX = 20
+
+
+# 方法作用：把单元问题压成区段标题。
+# Args: question - 单元问题文本；unit_id - 问题为空时的兜底标识。
+# Returns: 短标题；问题形如「销售基盘：按年月…」时取冒号前的业务名。
+def unit_short_title(question: str, unit_id: str = "") -> str:
+    text = " ".join(str(question or "").split())
+    if not text:
+        return unit_id
+    # 用户书写习惯是「小标题：详细要求」，冒号前那截就是要展示的名字。
+    head = re.split(r"[：:]", text, maxsplit=1)[0].strip()
+    if head and len(head) <= _SECTION_TITLE_MAX:
+        return head
+    return f"{text[:_SECTION_TITLE_MAX]}…"
+
+
 # 方法作用：按分析单元构建可读页面、脱敏数据清单和快照 Drilldown 定义。
 # Args: plan - 已确认报表计划；results - 各分析单元结果；report_id - 可选报表 ID。
 # Returns: 可持久化的 ReportArtifact。
@@ -302,6 +320,8 @@ def build_report_document(
     drilldowns: list[dict[str, Any]] = []
     sections: list[ReportSection] = []
     navigation: list[str] = ["overview"]
+    # 区段标题取单元问题的业务名，不再拿 unit_id 充当标题——页面上整片英文。
+    unit_titles = {str(unit.unit_id): unit_short_title(unit.question, str(unit.unit_id)) for unit in plan.analysis_units}
     for result in results[:max_plan_units()]:
         section_id = result.unit_id
         navigation.append(section_id)
@@ -360,20 +380,9 @@ def build_report_document(
                 echarts_option=chart_option,
                 layout=layout_for_block("chart"),
             ))
-            blocks.append(ReportBlock(
-                section_id=section_id,
-                type="table",
-                priority=70,
-                data_ref=data_ref,
-                title="明细样本",
-                content={
-                    "columns": columns[:50],
-                    "rows": safe_rows[:100],
-                    "page_size": 100,
-                    "column_labels": column_labels(columns[:50], getattr(result, "column_comments", None), getattr(result, "field_descriptions", None)),
-                },
-                layout=layout_for_block("table"),
-            ))
+            # 明细表格块已按实机反馈移除：5~18 列挤在页面里只会被 ellipsis 切成
+            # "每格几个字加省略号"，既占版面又读不出信息。明细由使用方回数据源查，
+            # 页面只保留结论；图表下方的受控钻取（drilldowns）仍可用。
         else:
             # 直答类单元（元数据说明等）的结论在摘要文字里，没有数据表是正常形态；
             # 用「暂无数据」会让整份报表看起来每个单元都缺数据。
@@ -407,14 +416,16 @@ def build_report_document(
                 content={"limitations": result.warnings[:20]},
                 layout=layout_for_block("quality"),
             ))
-        sections.append(ReportSection(id=section_id, title=section_id, blocks=blocks))
+        sections.append(ReportSection(id=section_id, title=unit_titles.get(section_id, section_id), blocks=blocks))
     if not sections:
         sections.append(ReportSection(
             id="overview",
             title="总览",
             blocks=[ReportBlock(section_id="overview", type="callout", title="暂无分析单元", content={"status": "empty"}, layout=layout_for_block("callout"))],
         ))
-    relation_items = list(relations or [])[:20]
+    # 只保留真正建立了关系的证据：实机页面上 20 块里多数是"未发现共同字段"，
+    # 占版面却不提供任何信息；整段都没有有效证据时，区段本身也不出现。
+    relation_items = [item for item in list(relations or []) if item.evidence_level != "no_relation"][:20]
     if relation_items:
         relation_blocks = [
             ReportBlock(

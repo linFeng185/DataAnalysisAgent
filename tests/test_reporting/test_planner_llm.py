@@ -255,3 +255,97 @@ class TestReportPlannerTaskRouting:
         assert calls and calls[0]["prompt_id"] == "report.plan"
         assert calls[0]["task"] == "report_plan"
         assert not any("模型规划不可用" in warning for warning in plan.warnings)
+
+
+class TestPlanUnitLimitContract:
+    """覆盖报表规划输出的单元数上限：必须由配置决定，不能写死。
+
+    2026-09-14 实测事故：`ReportPlanUnitsOutput.analysis_units` 写死 `max_length=12`，
+    用户明确要求 16 个单元时模型**正确拆出了 16 个**，却在契约校验处被拒收：
+        List should have at most 12 items after validation, not 16
+    异常被降级捕获 → 回退规则拆分 → 产出「经营总览】」这类标题残渣与 `unit_1`
+    这类无语义标识。模型那条链路从未生效，与 `query_count le=64` 是同一个坑换字段。
+    """
+
+    # 方法作用：验证契约接受与配置上限同量级的单元数。
+    # Args: self - 测试实例。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    def test_output_contract_accepts_units_within_static_ceiling(self) -> None:
+        """16 个单元必须能通过契约校验——这正是被 too_long 拒收的量。"""
+        # Arrange
+        from src.llm.output_contracts import ReportPlanUnitsOutput
+
+        units = [
+            {"unit_id": f"unit_{index}", "question": f"第 {index} 个业务问题"}
+            for index in range(1, 17)
+        ]
+
+        # Act
+        output = ReportPlanUnitsOutput(analysis_units=units)
+
+        # Assert
+        assert len(output.analysis_units) == 16
+
+    # 方法作用：验证契约上界不低于全局单元数静态上界。
+    # Args: self - 测试实例。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    def test_output_contract_ceiling_covers_static_unit_ceiling(self) -> None:
+        """业务上限由调用方 max_plan_units() 裁剪；契约只做理智兜底，不能更窄。"""
+        # Arrange
+        from annotated_types import MaxLen
+
+        from src.llm.output_contracts import ReportPlanUnitsOutput
+        from src.reporting.models import _UNIT_COUNT_STATIC_MAX
+
+        # Act
+        ceilings = [
+            meta.max_length
+            for meta in ReportPlanUnitsOutput.model_fields["analysis_units"].metadata
+            if isinstance(meta, MaxLen)
+        ]
+
+        # Assert
+        assert ceilings, "analysis_units 缺少 max_length 约束"
+        assert ceilings[0] >= _UNIT_COUNT_STATIC_MAX, (
+            f"契约上界 {ceilings[0]} 小于全局静态上界 {_UNIT_COUNT_STATIC_MAX}，"
+            "配置允许的单元数会被契约提前拒收并静默回退规则拆分"
+        )
+
+    # 方法作用：验证模型拆出 16 个单元时不再降级为规则拆分。
+    # Args: self - 测试实例；monkeypatch - pytest 补丁工具。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    async def test_sixteen_units_from_model_do_not_fall_back(self, monkeypatch) -> None:
+        """复现事故：模型给出 16 个单元却因契约拒收而整批降级。"""
+        # Arrange
+        import src.llm.client as llm_client
+        import src.llm.invocation as llm_invocation
+        from src.llm.output_contracts import ReportPlanUnitsOutput
+        from src.reporting.models import max_plan_units
+        from src.reporting.planner import ReportPlanner
+
+        monkeypatch.setattr(llm_client, "is_task_llm_available", lambda task: True)
+        calls: list[dict[str, object]] = []
+
+        # 方法作用：返回 16 个单元，并把调用参数记录下来。
+        # Args: prompt_id - 注册 Prompt 标识；sections - 提示段落；kwargs - 透传参数。
+        # Returns: 含 16 个分析单元的输出契约实例。
+        async def fake_invoke_structured(prompt_id, sections, **kwargs):
+            calls.append({"prompt_id": prompt_id, **kwargs})
+            return ReportPlanUnitsOutput(
+                analysis_units=[
+                    {"unit_id": f"unit_{index}", "question": f"第 {index} 个业务问题"}
+                    for index in range(1, 17)
+                ]
+            )
+
+        monkeypatch.setattr(llm_invocation, "invoke_structured", fake_invoke_structured)
+
+        # Act
+        plan = await ReportPlanner().parse("生成经营全景报表", datasources=["sales"])
+
+        # Assert
+        assert len(plan.analysis_units) == 16, "模型拆出的单元被契约或调用方截断"
+        assert not any("模型规划不可用" in warning for warning in plan.warnings)
+        assert [unit.unit_id for unit in plan.analysis_units][0] == "unit_1"
+        # 提示词的单元上限随配置下发，不能在模板里写死
+        assert calls and calls[0]["system_values"]["max_units"] == str(max_plan_units())

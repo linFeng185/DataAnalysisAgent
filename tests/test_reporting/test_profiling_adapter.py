@@ -292,25 +292,22 @@ class TestContributionAndDistribution:
         # Assert
         assert not [item for item in findings if item.category == "contribution"]
 
-    # 方法作用：验证分布形态给分位数与偏度而不是集中度。
+    # 方法作用：验证纯数值列既不冒充集中度，也不再产出统计量"发现"。
     # Args: self - 测试实例。
     # Returns: 无返回值，断言失败时由 pytest 报告。
-    def test_distribution_reports_shape_not_concentration(self) -> None:
-        """纯数值列算不出份额，集中度指标不适用于本类别。"""
+    def test_distribution_stats_are_dropped_not_misread_as_concentration(self) -> None:
+        """分位数/偏度已按实机反馈移出报表；集中度指标更不适用于纯数值列。"""
         # Arrange
         from src.reporting.profiling import profile_unit
 
         # Act
         findings = profile_unit(unit_id="u1", rows=_monthly(12), columns=["月份", "销售额"], metrics=["销售额"])
 
-        # Assert
-        distribution = next(item for item in findings if item.category == "distribution")
-        labels = [item.label for item in distribution.items]
-        assert any("P25" in label for label in labels)
-        assert any("P50" in label for label in labels)
-        assert any("P75" in label for label in labels)
-        assert any("偏度" in label for label in labels)
+        # Assert：既没有集中度，也没有分布统计量
+        assert not [item for item in findings if item.category == "distribution"]
+        labels = [item_label for finding in findings for item_label in (finding_item.label for finding_item in finding.items)]
         assert not any("CR3" in label or "HHI" in label for label in labels)
+        assert not any("P25" in label or "P50" in label or "P75" in label for label in labels)
 
 
 class TestDegradation:

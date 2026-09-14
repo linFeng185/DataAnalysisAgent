@@ -128,6 +128,7 @@ def get_current_identity() -> RequestIdentity:
         tenant_id=get_current_tenant_id(),
         user_id=get_current_user_id(),
         role=get_current_role(),
+        username=get_current_username(),
     )
     logger.debug(
         "获取当前请求身份完成",

@@ -553,12 +553,13 @@ async def report_analyze_units(state: ReportWorkbenchState) -> dict[str, Any]:
 def _append_findings(artifact: ReportArtifact, findings: list[Any], units: list[dict[str, Any]]) -> None:
     if not findings:
         return
-    from src.reporting.document import ReportBlock, ReportSection, layout_for_block
+    from src.reporting.document import ReportBlock, ReportSection, layout_for_block, unit_short_title
 
     questions = {str(item.get("unit_id", "")): str(item.get("question", "") or "") for item in units}
     blocks: list[ReportBlock] = []
     for index, finding in enumerate(findings):
-        by_unit = questions.get(finding.unit_id, "") or finding.unit_id
+        # 标题用业务短标题：整段 question（60+ 字）铺在每条发现上又长又难读。
+        by_unit = unit_short_title(questions.get(finding.unit_id, ""), finding.unit_id)
         blocks.append(ReportBlock(
             id=f"finding-{index}-{finding.category}",
             section_id="findings",

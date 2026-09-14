@@ -105,7 +105,7 @@ class TestExtraction:
 
 
 class TestDocumentIntegration:
-    """验证 23.22：表格与 KPI 块带上字段标题。"""
+    """验证 23.22：页面块带上字段标题（明细表格已移除，能力落在 KPI 与钻取上）。"""
 
     # 方法作用：构造带备注与字段说明的单元结果。
     # Args: self - 测试实例。
@@ -124,29 +124,26 @@ class TestDocumentIntegration:
         )
         return build_report_document(plan, [result])
 
-    # 方法作用：验证表格块的列标题带说明。
+    # 方法作用：验证页面不再产出明细表格，列标签能力落在 KPI 块与钻取定义上。
     # Args: self - 测试实例。
     # Returns: 无返回值，断言失败时由 pytest 报告。
-    def test_table_block_carries_column_labels(self) -> None:
-        """表格列标题要能显示备注，同时保留原列名作为数据键。"""
+    def test_detail_table_removed_but_column_labels_survive(self) -> None:
+        """明细表格已按实机反馈移除；列备注仍要能显示在留下的块上。"""
         # Arrange
         artifact = self._artifact()
 
         # Act
-        tables = [
-            block
-            for section in artifact.document.sections
-            for block in section.blocks
-            if block.type == "table"
-        ]
+        blocks = [block for section in artifact.document.sections for block in section.blocks]
 
-        # Assert
-        assert tables
-        labels = tables[0].content["column_labels"]
-        assert labels["amount"] == "amount（含税金额）"
-        assert labels["月份"] == "月份（统计月份）"
-        # 数据键必须保持原列名，否则前端 dataIndex 取不到值。
-        assert tables[0].content["columns"] == ["月份", "amount"]
+        # Assert：不再有表格块
+        assert not [block for block in blocks if block.type == "table"]
+        # 列标签能力保留在 KPI 块上（带备注的展示名 + 原始列名做数据键）
+        kpi = next(block for block in blocks if block.type == "kpi")
+        assert kpi.content["column_labels"]["amount"] == "amount（含税金额）"
+        # KPI 取首行值：列标签带备注的同时，取值口径不变
+        assert kpi.content["value"] == 10
+        # 钻取定义保留原始列名，否则前端按列取数会落空
+        assert artifact.document.drilldowns[0]["columns"] == ["月份", "amount"]
 
     # 方法作用：验证 KPI 块标题带说明。
     # Args: self - 测试实例。

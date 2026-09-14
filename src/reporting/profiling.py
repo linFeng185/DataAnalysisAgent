@@ -30,7 +30,7 @@ FindingCategory = Literal["period_over_period", "trend", "anomaly", "contributio
 # 率/比/单价类指标按均值聚合，其余按求和。这是启发式规则，必须写进 method 披露。
 _RATE_LIKE_HINTS = ("率", "比", "单价", "均值", "平均", "avg", "rate", "ratio", "price", "pct", "percent")
 # 各加工的观测点下限：低于此值不给结论，避免用一两个点编故事。
-_MIN_OBSERVATIONS: dict[str, int] = {"period_over_period": 3, "trend": 5, "anomaly": 8, "distribution": 10}
+_MIN_OBSERVATIONS: dict[str, int] = {"period_over_period": 3, "trend": 5, "anomaly": 8}
 # 贡献度对高基维度无意义，超过此基数不产出。
 _MAX_CONTRIBUTION_CARDINALITY = 50
 # 趋势拟合优度门槛：低于此值只报"不显著"，不给方向性措辞。
@@ -317,25 +317,6 @@ def _trend_fit(values: list[float]) -> tuple[float | None, float | None]:
         return None, None
 
 
-# 方法作用：计算分位数与偏度，刻画数值分布形态。
-# Args: values - 数值序列。
-# Returns: 含 p25/p50/p75/skew 的字典；计算失败时返回空字典。
-def _distribution_shape(values: list[float]) -> dict[str, float]:
-    if len(values) < 4:
-        return {}
-    try:
-        import numpy as np
-
-        array = np.asarray(values, dtype=float)
-        p25, p50, p75 = (float(item) for item in np.percentile(array, [25, 50, 75]))
-        std = float(array.std())
-        skew = float(((array - array.mean()) ** 3).mean() / (std**3)) if std > 0 else 0.0
-        return {"p25": p25, "p50": p50, "p75": p75, "skew": round(skew, 3)}
-    except Exception:
-        logger.warning("分布形态计算失败", obs=len(values), exc_info=True)
-        return {}
-
-
 # 方法作用：构建同环比发现，按 processors 的既有出口判断数据是否足够。
 # Args: unit_id - 单元标识；rows - 结果行；time_column - 时间列；value_column - 数值列；sample_caveat - 样本披露文本；truncated - 是否截断。
 # Returns: 环比与（时间跨度足够时的）同比发现。
@@ -452,7 +433,12 @@ def _trend_findings(
 # Args: unit_id - 单元标识；rows - 结果行；value_column - 数值列；sample_caveat - 样本披露文本；truncated - 是否截断。
 # Returns: 异常发现列表。
 def _anomaly_findings(
-    unit_id: str, rows: list[dict[str, Any]], value_column: str, sample_caveat: str, truncated: bool
+    unit_id: str,
+    rows: list[dict[str, Any]],
+    value_column: str,
+    sample_caveat: str,
+    truncated: bool,
+    label_column: str | None = None,
 ) -> list[UnitFinding]:
     from src.tools.processors import AnomalyProcessor
 
@@ -473,6 +459,23 @@ def _anomaly_findings(
     ]
     if not confirmed or len(confirmed) > len(series) * _MAX_OUTLIER_RATIO:
         return []
+    items: list[FindingItem] = []
+    for item in confirmed[:10]:
+        index = int(item.get("index", -1))
+        row = rows[index] if 0 <= index < len(rows) else {}
+        # 用业务取值定位（时间列或维度列）；拿不到就跳过——行号不是业务概念。
+        label = str(row.get(label_column, "") or "").strip() if label_column else ""
+        if not label:
+            continue
+        items.append(FindingItem(
+            label=label,
+            value=_to_float(item.get("value")),
+            baseline=f"高于正常区间上界 {round(iqr_bound, 2)}",
+            significance="high",
+            caveats=[sample_caveat] if sample_caveat else [],
+        ))
+    if not items:
+        return []
     return [UnitFinding(
         unit_id=unit_id,
         category="anomaly",
@@ -484,16 +487,7 @@ def _anomaly_findings(
             f"（Q3+{_IQR_FACTOR}×IQR={round(iqr_bound, 2)}）与 MAD 上界"
             f"（中位数+{_MAD_Z_THRESHOLD}×{_MAD_SCALE}×MAD={round(mad_bound, 2)}）"
         ),
-        items=[
-            FindingItem(
-                label=f"第 {int(item.get('index', 0)) + 1} 行",
-                value=_to_float(item.get("value")),
-                baseline=f"z-score={item.get('z_score')}",
-                significance="high",
-                caveats=[sample_caveat] if sample_caveat else [],
-            )
-            for item in confirmed[:10]
-        ],
+        items=items,
     )]
 
 
@@ -540,43 +534,6 @@ def _contribution_findings(
 # 方法作用：构建分布形态发现，给出分位数与偏度。
 # Args: unit_id - 单元标识；rows - 结果行；value_column - 数值列；sample_caveat - 样本披露文本；truncated - 是否截断。
 # Returns: 分布发现列表。
-def _distribution_findings(
-    unit_id: str, rows: list[dict[str, Any]], value_column: str, sample_caveat: str, truncated: bool
-) -> list[UnitFinding]:
-    from src.tools.processors import DistributionProcessor
-
-    values = [_to_float(row.get(value_column)) for row in rows]
-    series = [value for value in values if value is not None]
-    if len(series) < _MIN_OBSERVATIONS["distribution"]:
-        return []
-    result = DistributionProcessor().process(rows, {"value_col": value_column})
-    if result.confidence == "low":
-        return []
-    shape = _distribution_shape(series)
-    if not shape:
-        return []
-    return [UnitFinding(
-        unit_id=unit_id,
-        category="distribution",
-        title="数值分布形态",
-        chart_type=result.chart_type,
-        truncated=truncated,
-        method=f"对{value_column}求分位数与偏度；取值区间与中位数取自处理器（{result.summary}）",
-        items=[
-            FindingItem(label="P25", value=round(shape["p25"], 2), significance="low", caveats=[sample_caveat] if sample_caveat else []),
-            FindingItem(label="中位数 P50", value=round(shape["p50"], 2), significance="low", caveats=[sample_caveat] if sample_caveat else []),
-            FindingItem(label="P75", value=round(shape["p75"], 2), significance="low", caveats=[sample_caveat] if sample_caveat else []),
-            FindingItem(
-                label="偏度",
-                value=shape["skew"],
-                baseline="正为右偏、负为左偏、0 为对称",
-                significance="moderate",
-                caveats=[sample_caveat] if sample_caveat else [],
-            ),
-        ],
-    )]
-
-
 # 方法作用：对单个分析单元做确定性深挖，产出可披露的发现条目。
 # Args: unit_id - 单元标识；rows - 结果行；columns - 授权列名；metrics - 单元声明的指标列；truncated - 样本是否被截断。
 # Returns: 发现条目列表；数据不足或语义不成立时返回空列表而不是猜测。
@@ -597,10 +554,12 @@ def profile_unit(
     if value_column:
         findings.extend(_period_findings(unit_id, rows, time_column, value_column, sample_caveat, truncated))
         findings.extend(_trend_findings(unit_id, rows, value_column, sample_caveat, truncated))
-        findings.extend(_anomaly_findings(unit_id, rows, value_column, sample_caveat, truncated))
-        findings.extend(_distribution_findings(unit_id, rows, value_column, sample_caveat, truncated))
         excluded = {value_column} | ({time_column} if time_column else set())
         dimension_column = detect_dimension_column(rows, columns, excluded)
+        # 异常点必须能落到业务标签（时间或维度取值）上；"第 32 行 / z-score=3.25"
+        # 对用户没有意义，定位不到标签时宁可不产出这条发现。
+        findings.extend(_anomaly_findings(unit_id, rows, value_column, sample_caveat, truncated, label_column=time_column or dimension_column))
+        # 分位数与偏度是统计过程输出，不作为"发现"呈现。
         findings.extend(_contribution_findings(unit_id, rows, dimension_column, value_column, sample_caveat, truncated))
     logger.info(
         "报表确定性深挖完成",

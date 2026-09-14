@@ -7,7 +7,7 @@ import {
 } from 'antd';
 import type { TableColumnsType } from 'antd';
 import { ClockCircleOutlined, EyeOutlined, PlayCircleOutlined, ReloadOutlined } from '@ant-design/icons';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import dayjs from 'dayjs';
 import type { Dayjs } from 'dayjs';
 import { ApiError } from '../api/client';
@@ -18,11 +18,14 @@ import {
   fetchReportList,
   fetchReportPages,
   fetchReportQuota,
+  fetchReportUsers,
   makeReportPagePermanent,
   retryReportPlan,
   runReport,
   updateReportPlan,
 } from '../api/reportWorkbench';
+import type { ReportUserOption } from '../api/reportWorkbench';
+import ReportPlanUnitRow from '../components/report/ReportPlanUnitRow';
 import { useAuth } from '../hooks/AuthContext';
 import { useReportPermissions } from '../hooks/useReportPermissions';
 import {
@@ -94,6 +97,9 @@ function lifecycleErrorText(error: unknown, fallback: string): string {
   return error instanceof Error && error.message ? error.message : fallback;
 }
 
+// 悬停摘要的最大字符数：需求原文可达数千字，全量塞进 tooltip 根本读不动。
+const PROMPT_TOOLTIP_MAX = 100;
+
 // 方法作用：把报表标题回退为提示词摘要，避免标题为空时整列空白。
 // Args: item - 报表摘要；maxLength - 摘要最大字符数。
 // Returns: 展示用标题文本。
@@ -102,6 +108,15 @@ function summaryTitle(item: ReportListItem, maxLength = 40): string {
   const prompt = (item.prompt || '').trim();
   if (!prompt) return t("未命名报表");
   return prompt.length > maxLength ? `${prompt.slice(0, maxLength)}…` : prompt;
+}
+
+// 方法作用：把需求原文截断成悬停摘要。
+// Args: prompt - 需求原文；maxLength - 截断长度。
+// Returns: 截断后的文本；原文为空时给出占位说明。
+function promptSummary(prompt: string, maxLength = PROMPT_TOOLTIP_MAX): string {
+  const text = (prompt || '').trim();
+  if (!text) return t("未填写报表需求");
+  return text.length > maxLength ? `${text.slice(0, maxLength)}…` : text;
 }
 
 // 方法作用：把接口错误转换为用户可读文案，403 单独说明权限不足。
@@ -153,6 +168,26 @@ export default function ReportListPage() {
   const [maxRuns, setMaxRuns] = useState<number | null>(null);
   const [pageTtlDays, setPageTtlDays] = useState<number>(7);
   const [permanent, setPermanent] = useState(false);
+
+  const [userOptions, setUserOptions] = useState<ReportUserOption[]>([]);
+
+  // 方法作用：按关键字拉取用户下拉选项，供租户管理员按创建者筛选。
+  // Args: search - 用户名关键字。
+  // Returns: 异步加载完成后无返回值。
+  const loadUserOptions = useCallback(async (search = ''): Promise<void> => {
+    try {
+      setUserOptions(await fetchReportUsers(search));
+    } catch (userError) {
+      // 下拉不可用不阻塞列表：筛选框按空选项降级，列表仍可正常浏览。
+      console.debug('报表用户下拉加载失败', userError instanceof Error ? userError.message : userError);
+    }
+  }, []);
+
+  // 已选用户必须在选项里，否则搜索换词后选中项会退化成裸数字。
+  const userSelectOptions = useMemo(() => {
+    if (!userFilter || userOptions.some(item => item.value === userFilter)) return userOptions;
+    return [...userOptions, { value: userFilter, label: `#${userFilter}` }];
+  }, [userOptions, userFilter]);
 
   // 用户筛选只对租户管理员开放：其他角色传 user_id 会被服务端拒绝。
   const isTenantAdmin = user?.role === 'tenant_admin';
@@ -313,6 +348,18 @@ export default function ReportListPage() {
     await Promise.all([loadDetail(reportId), loadPages(reportId)]);
   };
 
+  // 带 ?report=<id> 进来时直接打开那条报表的详情，供通知等入口直达；
+  // 参数消费后立刻从地址栏移除，避免关闭抽屉或刷新时被反复拉起。
+  const [searchParams, setSearchParams] = useSearchParams();
+  useEffect(() => {
+    const target = searchParams.get('report');
+    if (!target) return;
+    const next = new URLSearchParams(searchParams);
+    next.delete('report');
+    setSearchParams(next, { replace: true });
+    void openDetail(target);
+  }, [searchParams, setSearchParams, openDetail]);
+
   // 列表或详情仍在变化时按固定间隔刷新；全部落到终态后停表，不再空转请求。
   const needsPolling = useMemo(() => reports.some(item => isReportActiveStatus(item.status)), [reports]);
   const detailActive = Boolean(detail && isReportActiveStatus(detail.report.status));
@@ -446,7 +493,7 @@ export default function ReportListPage() {
       title: t("报表摘要标题"),
       dataIndex: 'title',
       key: 'title',
-      render: (_, item) => <Tooltip title={item.prompt}>{summaryTitle(item)}</Tooltip>,
+      render: (_, item) => <Tooltip title={promptSummary(item.prompt)}>{summaryTitle(item)}</Tooltip>,
     },
     {
       title: t("选择的数据源"),
@@ -577,14 +624,27 @@ export default function ReportListPage() {
 
   const plan = detail?.plan ?? null;
   const status = detail?.report.status;
-  // 只有「未生成」可以改计划与调度：其他状态服务端会返回 409。
+  // 只有「报表未生成」可以改计划与调度：其他状态服务端会返回 409。
   const isEditable = status === 'draft';
+  // 卡死判定（含阈值）由服务端下发，前端不自算，避免两处阈值漂移。
+  const planStuck = Boolean(detail?.report.plan_stuck);
   // 后端只允许报表创建者执行：租户管理员看别人的报表时不给出必然 403 的按钮。
   const isOwner = !detail?.report.user_id || detail.report.user_id === user?.user_id;
   const canRun = status === 'draft' && isOwner;
   const scheduledPlan = plan?.execution_mode === 'scheduled';
   const userUnits = (plan?.analysis_units || []).filter(unit => (unit.origin ?? 'user') === 'user');
   const divergedUnits = (plan?.analysis_units || []).filter(unit => unit.origin === 'diverged');
+  // 被采纳的单元数：两个分组都能取消勾选后，空选集成为可能，服务端会 422 拒绝空数组。
+  const acceptedUnitCount = (plan?.analysis_units || []).length - excludedUnitIds.length;
+
+  // 方法作用：切换单个分析单元的采纳状态，供共享单元行组件回调。
+  // Args: unitId - 单元标识；checked - 是否采纳。
+  // Returns: 无返回值。
+  const toggleUnit = (unitId: string, checked: boolean): void => {
+    setExcludedUnitIds(current => checked
+      ? current.filter(id => id !== unitId)
+      : [...current, unitId]);
+  };
 
   return <Space direction="vertical" size={16} className="app-page" style={{ width: '100%' }}>
     <Card>
@@ -612,11 +672,16 @@ export default function ReportListPage() {
           options={STATUS_OPTIONS.map(value => ({ value, label: reportStatusLabel(value) }))}
           onChange={next => { setStatusFilter(next); setPage(1); }}
         />
-        {isTenantAdmin && <InputNumber
+        {isTenantAdmin && <Select<number>
           style={{ width: 180 }}
-          min={1}
+          showSearch
+          allowClear
           value={userFilter ?? undefined}
-          placeholder={t("用户 ID")}
+          placeholder={t("按用户名搜索")}
+          options={userSelectOptions}
+          // 关键字交给服务端模糊匹配，避免只在已加载的前 50 条里筛
+          filterOption={false}
+          onSearch={value => void loadUserOptions(value)}
           onChange={value => { setUserFilter(typeof value === 'number' ? value : null); setPage(1); }}
         />}
         <Select<number>
@@ -691,6 +756,13 @@ export default function ReportListPage() {
               description={detail.report.plan_error || detail.plan_error || detail.latest_run?.user_error_message || t("未提供失败原因，可点「重试计划」重新生成")}
             />}
 
+            {planStuck && <Alert
+              type="warning"
+              showIcon
+              message={t("计划生成已中断")}
+              description={t("后台规划任务多半已随服务重启丢失，计划不会再自行完成。可中断并重新生成。")}
+            />}
+
             {status === 'draft' && !isOwner && <Alert
               type="info"
               showIcon
@@ -699,7 +771,9 @@ export default function ReportListPage() {
 
             <Space wrap>
               {canRun && <Button type="primary" icon={<PlayCircleOutlined />} loading={running} onClick={() => void submitRun()}>{t("生成")}</Button>}
-              {status === 'plan_failed' && <Button icon={<ReloadOutlined />} loading={retrying} onClick={() => void retryPlan()}>{t("重试计划")}</Button>}
+              {(status === 'plan_failed' || planStuck) && <Button icon={<ReloadOutlined />} loading={retrying} onClick={() => void retryPlan()}>
+                {status === 'plan_failed' ? t("重试计划") : t("中断并重新生成")}
+              </Button>}
               {['draft', 'plan_failed'].includes(status || '') && <Popconfirm
                 title={t("确认删除该报表？")}
                 description={t("删除后计划与页面列表都无法恢复。")}
@@ -726,40 +800,40 @@ export default function ReportListPage() {
                 { key: 'query_count', label: t("预计查询"), children: plan.estimated?.query_count ?? '—' },
                 { key: 'llm_tokens', label: t("预计 token"), children: plan.estimated?.llm_tokens ?? '—' },
               ]} /> : <Empty description={t("计划尚未就绪")} />}
+              {/* 需求原文只在这里完整展示：列表列宽装不下，悬停摘要也只截 100 字 */}
+              <Typography.Title level={5} style={{ marginTop: 16 }}>{t("计划需求")}</Typography.Title>
+              <Typography.Paragraph type="secondary" style={{ whiteSpace: 'pre-wrap', marginBottom: 0 }}>
+                {detail.report.prompt || t("未填写报表需求")}
+              </Typography.Paragraph>
             </div>
 
             {plan && <div>
               <Typography.Title level={5}>{t("你要求的分析")}</Typography.Title>
               {userUnits.length === 0
                 ? <Typography.Text type="secondary">{t("计划里没有用户显式要求的单元")}</Typography.Text>
-                : <List size="small" dataSource={userUnits} renderItem={unit => <List.Item className="report-plan-unit">
-                  <Typography.Text strong>{unit.unit_id}</Typography.Text>
-                  <Typography.Text>{unit.question}</Typography.Text>
-                  <Typography.Text type="secondary">{t("数据源：")}{unit.datasource || t("待绑定")}</Typography.Text>
-                </List.Item>} />}
+                : <List size="small" dataSource={userUnits} renderItem={unit => <ReportPlanUnitRow
+                  unit={unit}
+                  editable={isEditable}
+                  excludedUnitIds={excludedUnitIds}
+                  onToggle={toggleUnit}
+                />} />}
 
               <Typography.Title level={5}>{t("建议补充的分析")}</Typography.Title>
               {divergedUnits.length === 0
                 ? <Typography.Text type="secondary">{t("本计划没有系统补充的单元")}</Typography.Text>
-                : <List size="small" dataSource={divergedUnits} renderItem={unit => <List.Item className="report-plan-unit">
-                  {/* 只读态（非 draft）不显示勾选框：计划已锁定，勾选没有可提交的落点 */}
-                  {isEditable && <Checkbox
-                    checked={!excludedUnitIds.includes(unit.unit_id)}
-                    onChange={event => setExcludedUnitIds(current => event.target.checked
-                      ? current.filter(id => id !== unit.unit_id)
-                      : [...current, unit.unit_id])}
-                  >{t("纳入本次报表")}</Checkbox>}
-                  <Typography.Text strong>{unit.unit_id}</Typography.Text>
-                  <Typography.Text>{unit.question}</Typography.Text>
-                  <Typography.Text type="secondary">{t("建议理由：")}{unit.rationale || t("未说明")}</Typography.Text>
-                  <Typography.Text type="secondary">{t("数据源：")}{unit.datasource || t("待绑定")}</Typography.Text>
-                </List.Item>} />}
-              {isEditable && <Button type="primary" loading={savingPlan} disabled={divergedUnits.length === 0} onClick={() => void savePlan()} style={{ marginTop: 12 }}>{t("保存计划")}</Button>}
+                : <List size="small" dataSource={divergedUnits} renderItem={unit => <ReportPlanUnitRow
+                  unit={unit}
+                  editable={isEditable}
+                  excludedUnitIds={excludedUnitIds}
+                  onToggle={toggleUnit}
+                />} />}
+              {isEditable && acceptedUnitCount === 0 && <Alert type="warning" showIcon message={t("至少保留一个分析单元才能生成报表")} style={{ marginTop: 12 }} />}
+              {isEditable && <Button type="primary" loading={savingPlan} disabled={acceptedUnitCount === 0} onClick={() => void savePlan()} style={{ marginTop: 12 }}>{t("保存计划")}</Button>}
             </div>}
 
             <div>
               <Typography.Title level={5}>{t("调度编辑")}</Typography.Title>
-              {!isEditable && <Typography.Text type="secondary">{t("仅「未生成」状态的报表可以修改计划与调度。")}</Typography.Text>}
+              {!isEditable && <Typography.Text type="secondary">{t("仅「报表未生成」状态的报表可以修改计划与调度。")}</Typography.Text>}
               <Space direction="vertical" size={10} style={{ width: '100%', marginTop: 8 }}>
                 <Radio.Group value={scheduleMode} disabled={!isEditable} onChange={event => setScheduleMode(event.target.value as 'immediate' | 'scheduled')}>
                   <Radio.Button value="immediate">{t("立即一次")}</Radio.Button>
