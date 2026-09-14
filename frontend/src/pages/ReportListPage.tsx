@@ -17,7 +17,6 @@ import {
   fetchReportDetail,
   fetchReportList,
   fetchReportPages,
-  fetchReportPermissions,
   fetchReportQuota,
   makeReportPagePermanent,
   retryReportPlan,
@@ -25,6 +24,7 @@ import {
   updateReportPlan,
 } from '../api/reportWorkbench';
 import { useAuth } from '../hooks/AuthContext';
+import { useReportPermissions } from '../hooks/useReportPermissions';
 import {
   formatReportTime,
   isReportActiveStatus,
@@ -127,7 +127,8 @@ export default function ReportListPage() {
   const [userFilter, setUserFilter] = useState<number | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
-  const [capabilities, setCapabilities] = useState<string[]>([]);
+  // 能力来自共享上下文（应用挂载时拉取一次），本页不再自己查 permissions/me。
+  const { capabilities } = useReportPermissions();
   const [quota, setQuota] = useState<ReportQuotaResponse | null>(null);
   const [detailOpen, setDetailOpen] = useState(false);
   const [detail, setDetail] = useState<ReportDetailResponse | null>(null);
@@ -191,13 +192,12 @@ export default function ReportListPage() {
 
   useEffect(() => { void loadReports(); }, [loadReports]);
 
-  // 配额与能力各自独立加载：任一失败都不阻断列表本身。
+  // 配额独立加载：失败不阻断列表本身。能力改从共享上下文读取——此前本页也自己查一次
+  // permissions/me，加上应用挂载与路由守卫，一次进入报表页要打三次同一个接口。
   useEffect(() => {
     let active = true;
     fetchReportQuota().then(result => { if (active) setQuota(result); })
       .catch(() => { if (active) setQuota(null); });
-    fetchReportPermissions().then(result => { if (active) setCapabilities(result.capabilities || []); })
-      .catch(() => { if (active) setCapabilities([]); });
     return () => { active = false; };
   }, [user?.role]);
 

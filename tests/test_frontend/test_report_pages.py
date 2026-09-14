@@ -9,6 +9,8 @@ STATUS_MODULE = "frontend/src/report/status.ts"
 EXAMPLES = "frontend/src/report/promptExamples.ts"
 API = "frontend/src/api/reportWorkbench.ts"
 TYPES = "frontend/src/types/report.ts"
+# 报表能力的唯一拉取点：菜单、路由守卫与报表页都从这里读。
+PROVIDER = "frontend/src/hooks/useReportPermissions.tsx"
 
 
 class TestReportSubmenu:
@@ -31,9 +33,12 @@ class TestReportSubmenu:
         assert "reportCapabilities.includes('report.create_page')" in app
         assert "reportCapabilities.includes('report.list')" in app
         assert "reportCapabilities.includes('report.link_manage')" in app
-        # 能力探针失败必须按无能力处理，不能把子项全量放行
-        assert "setReportCapabilities([])" in app
-        assert "setReportCapabilities(result.capabilities || [])" in app
+        # 能力探针失败必须按无能力处理，不能把子项全量放行。
+        # 写入点在共享上下文（应用挂载时拉取一次，菜单/守卫/页面共用），App.tsx 只读。
+        provider = Path(PROVIDER).read_text(encoding="utf-8")
+        assert "setCapabilities([])" in provider
+        assert "setCapabilities(result.capabilities || [])" in provider
+        assert "useReportPermissions()" in app
 
     # 方法作用：验证三个子页路径都注册在报表能力守卫之下。
     # Args: self - pytest 测试类实例。

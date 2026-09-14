@@ -68,8 +68,9 @@ class TestReportWorkbenchFrontend:
         # Arrange
         app = Path("frontend/src/App.tsx").read_text(encoding="utf-8")
 
-        # Act / Assert
-        assert "fetchReportPermissions" in app
+        # Act / Assert：能力由共享上下文在应用挂载时拉一次，App.tsx 不再自己查
+        assert "ReportPermissionsProvider" in app
+        assert "useReportPermissions" in app
         assert "ReportRoute" in app
         assert 'path="/report-workbench"' in app
         assert 'path="/reports/:reportId"' in app
@@ -82,11 +83,16 @@ class TestReportWorkbenchFrontend:
         """权限接口失败不能按用户角色放行菜单或路由。"""
         # Arrange
         app = Path("frontend/src/App.tsx").read_text(encoding="utf-8")
+        provider = Path("frontend/src/hooks/useReportPermissions.tsx").read_text(encoding="utf-8")
 
-        # Act / Assert
-        assert "setAllowed(false)" in app
-        assert "setReportMenuAllowed(false)" in app
+        # Act / Assert：探针失败在共享上下文里落成「无能力 + 菜单不可见」
+        assert "setMenuAllowed(false)" in provider
+        assert "setCapabilities([])" in provider
+        # 菜单只在明确为真时出现
         assert "reportMenuAllowed === true" in app
+        # 守卫在明确无权限时重定向；加载中直接渲染子页（服务端仍按能力键逐接口鉴权）
+        assert ': <Navigate to="/" replace />' in app
+        assert "if (loading) return <>{children ?? <ReportWorkbenchPage />}</>;" in app
 
     # 方法作用：验证报表布局在桌面、平板和移动端使用稳定 Grid 断点。
     # Args: self - pytest 测试类实例。

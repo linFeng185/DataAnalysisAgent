@@ -17,7 +17,7 @@ import { ChatProvider } from './hooks/useChat';
 import ErrorBoundary from './components/ErrorBoundary';
 import NotificationBell from './components/notifications/NotificationBell';
 import { get } from './api/client';
-import { fetchReportPermissions } from './api/reportWorkbench';
+import { ReportPermissionsProvider, useReportPermissions } from './hooks/useReportPermissions';
 import type { HealthResponse } from './types';
 import zhCN from 'antd/locale/zh_CN';
 import enUS from 'antd/locale/en_US';
@@ -59,14 +59,19 @@ const pageFallback = (
 // Returns: 工作台、登录重定向或加载占位。
 function ProtectedApp() {
   useLanguage();
-  const { loading, authRequired, isAuthenticated, error, retryAuth } = useAuth();
+  const { loading, authRequired, isAuthenticated, error, retryAuth, user } = useAuth();
   if (loading) return <Layout style={{ minHeight: '100vh', display: 'grid', placeItems: 'center' }}><div role="status"><LoadingOutlined /> {t("页面加载中...")}</div></Layout>;
   if (error) return <Layout style={{ minHeight: '100vh', display: 'grid', placeItems: 'center' }}>
     <Result status="warning" title={t("暂时无法确认登录状态")} subTitle={error}
       extra={<Button type="primary" onClick={retryAuth}>{t("重试验证")}</Button>} />
   </Layout>;
   if (authRequired && !isAuthenticated) return <Navigate to="/login" replace />;
-  return <ChatProvider><AppContent /></ChatProvider>;
+  return <ChatProvider>
+    {/* 报表能力在整个受保护区域共享：菜单、路由守卫与报表页读同一份，避免各自重复查询 */}
+    <ReportPermissionsProvider role={user?.role}>
+      <AppContent />
+    </ReportPermissionsProvider>
+  </ChatProvider>;
 }
 
 // 方法作用：允许平台超级管理员或当前租户管理员进入角色化管理工作区。
@@ -86,19 +91,13 @@ function AdminRoute() {
 function ReportRoute({ children }: { children?: ReactNode }) {
   useLanguage();
   const { user } = useAuth();
-  const [allowed, setAllowed] = useState<boolean | null>(null);
-
-  useEffect(() => {
-    let active = true;
-    fetchReportPermissions()
-      .then(result => { if (active) setAllowed(result.menu_allowed); })
-      .catch(() => { if (active) setAllowed(false); });
-    return () => { active = false; };
-  }, [user?.role]);
+  const { menuAllowed, loading } = useReportPermissions();
 
   if (user?.role === 'super_admin') return <Navigate to="/admin" replace />;
-  if (allowed === null) return pageFallback;
-  return allowed ? <>{children ?? <ReportWorkbenchPage />}</> : <Navigate to="/" replace />;
+  // 结果未就绪时**直接渲染子页**，不再阻塞：能力未到不等于无权限，而所有报表接口
+  // 都在服务端按能力键鉴权，前端早渲染一会儿不会放大权限（无权限时下面这一条会立刻重定向）。
+  if (loading) return <>{children ?? <ReportWorkbenchPage />}</>;
+  return menuAllowed ? <>{children ?? <ReportWorkbenchPage />}</> : <Navigate to="/" replace />;
 }
 
 // 方法作用：渲染桌面侧栏或移动抽屉导航及当前业务路由。
@@ -114,9 +113,8 @@ function AppContent() {
   const screens = Grid.useBreakpoint();
   const isCompact = screens.md === false;
   const { user, logout } = useAuth();
-  const [reportMenuAllowed, setReportMenuAllowed] = useState<boolean | null>(null);
-  // 三个报表子页各配一个能力键：父菜单控制整体可见性，子项按能力键分别显示。
-  const [reportCapabilities, setReportCapabilities] = useState<string[]>([]);
+  // 报表能力由 ReportPermissionsProvider 统一拉取一次，这里与路由守卫、报表信息页共用。
+  const { menuAllowed: reportMenuAllowed, capabilities: reportCapabilities } = useReportPermissions();
 
   useEffect(() => {
     get<HealthResponse>('/health')
@@ -124,18 +122,6 @@ function AppContent() {
       .catch(() => setHealth(null))
       .finally(() => setHealthChecked(true));
   }, []);
-
-  useEffect(() => {
-    let active = true;
-    fetchReportPermissions()
-      .then(result => {
-        if (!active) return;
-        setReportMenuAllowed(result.menu_allowed);
-        setReportCapabilities(result.capabilities || []);
-      })
-      .catch(() => { if (active) { setReportMenuAllowed(false); setReportCapabilities([]); } });
-    return () => { active = false; };
-  }, [user?.role]);
 
   const menuKey = location.pathname === '/' ? 'chat' : location.pathname.replace('/', '') || 'chat';
   const navigationItems: MenuProps['items'] = [

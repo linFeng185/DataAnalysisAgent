@@ -147,6 +147,9 @@ class ReportPermissionService:
         if override is None:
             # 兼容旧测试和未迁移的进程内覆盖项，生产配置优先使用租户键。
             override = self._user_capabilities.get((0, user_id))
+        # 持久化 Store 存在时每次都查库：管理员可能在别的实例撤权，进程内缓存不能盖过它
+        # （见 tests/test_reporting/test_reliability.py 的撤权契约）。这是刻意的取舍，
+        # 不要为了省一次查询改成缓存优先。
         if self._store is not None and hasattr(self._store, "get_user_capabilities") and (override is None or not bool(getattr(self._store, "_memory", True))):
             override = await self._store.get_user_capabilities(tenant_id, user_id)
         allowed = capability in (override if override is not None else _ROLE_CAPABILITIES.get(role, frozenset()))
@@ -166,6 +169,7 @@ class ReportPermissionService:
         override = self._user_capabilities.get((tenant_id, user_id))
         if override is None:
             override = self._user_capabilities.get((0, user_id))
+        # 与 has() 同一条撤权契约：持久化分支每次都查库，保证别的实例撤权立即生效。
         if self._store is not None and hasattr(self._store, "get_user_capabilities") and (override is None or not bool(getattr(self._store, "_memory", True))):
             override = await self._store.get_user_capabilities(tenant_id, user_id)
         result = sorted(str(item) for item in (override if override is not None else _ROLE_CAPABILITIES.get(role, frozenset())))
