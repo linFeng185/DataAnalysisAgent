@@ -69,6 +69,8 @@ class ReportStore:
         self._steps: dict[str, list[dict[str, Any]]] = {}
         self._versions: dict[str, dict[str, Any]] = {}
         self._live_queries: dict[str, dict[str, Any]] = {}
+        # 单元快照按 (run_id, unit_id) 唯一：重跑覆盖同一条，与 PG 唯一约束对齐。
+        self._unit_snapshots: dict[tuple[str, str], dict[str, Any]] = {}
         self._shares: dict[str, dict[str, Any]] = {}
         self._share_by_token: dict[str, str] = {}
         self._share_visits: dict[str, dict[str, Any]] = {}
@@ -906,6 +908,64 @@ class ReportStore:
         async with pg_pool_connection(pool, identity.tenant_id, identity.user_id, identity.role) as connection:
             row = await connection.fetchrow("SELECT id,run_id,datasource,dialect,sql_text AS sql FROM report_live_queries WHERE id=$1::uuid AND run_id=$2::uuid AND tenant_id=$3", query_id, version.run_id, identity.tenant_id)
         return dict(row) if row else None
+
+    # 方法作用：保存或覆盖一条单元执行快照，重跑按 (run_id, unit_id) 覆盖且快照标识保持稳定。
+    # Args: snapshot - UnitSnapshot 或同构字典；identity - 实际执行身份，归属字段以其为准。
+    # Returns: 无返回值；缺少运行或单元标识时抛出 ValueError。
+    async def save_unit_snapshot(self, snapshot: Any, identity: Any) -> None:
+        """归属取执行身份而不是快照载荷，防止调用方伪造查看范围；重跑覆盖旧快照。"""
+        run_id = str(getattr(snapshot, "run_id", "") or "")
+        unit_id = str(getattr(snapshot, "unit_id", "") or "")
+        logger.debug("单元快照保存入口", run_id=run_id, unit_id=unit_id, tenant_id=int(getattr(identity, "tenant_id", 0) or 0))
+        if not run_id or not unit_id:
+            raise ValueError("单元快照缺少 run_id 或 unit_id")
+        row = snapshot.model_dump() if hasattr(snapshot, "model_dump") else dict(snapshot)
+        row["tenant_id"] = int(getattr(identity, "tenant_id", 0) or 0)
+        row["user_id"] = int(getattr(identity, "user_id", 0) or 0)
+        row["created_at"] = datetime.now(timezone.utc)
+        if self._memory:
+            existing = self._unit_snapshots.get((run_id, unit_id))
+            # 覆盖时沿用首次写入的快照标识，与 PG 的 ON CONFLICT DO UPDATE 语义一致。
+            row["id"] = str((existing.get("id") if existing else "") or row.get("id") or uuid4())
+            self._unit_snapshots[(run_id, unit_id)] = row
+        else:
+            from src.memory.pg_pool import pg_pool_connection
+
+            row["id"] = str(row.get("id") or uuid4())
+            pool = await self._pool()
+            async with pg_pool_connection(pool, row["tenant_id"], row["user_id"], str(getattr(identity, "role", "") or "")) as connection:
+                await connection.execute(
+                    "INSERT INTO report_unit_snapshots (id,run_id,report_id,tenant_id,user_id,unit_id,status,datasource,dialect,sql_text,prompt_text,prompt_id,model_id,params_json,row_count,full_count,truncated,truncated_reason,elapsed_ms,error_code,error_message) "
+                    "VALUES ($1::uuid,$2::uuid,$3::uuid,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14::jsonb,$15,$16,$17,$18,$19,$20,$21) "
+                    "ON CONFLICT (run_id, unit_id) DO UPDATE SET report_id=EXCLUDED.report_id,status=EXCLUDED.status,datasource=EXCLUDED.datasource,dialect=EXCLUDED.dialect,sql_text=EXCLUDED.sql_text,prompt_text=EXCLUDED.prompt_text,prompt_id=EXCLUDED.prompt_id,model_id=EXCLUDED.model_id,params_json=EXCLUDED.params_json,row_count=EXCLUDED.row_count,full_count=EXCLUDED.full_count,truncated=EXCLUDED.truncated,truncated_reason=EXCLUDED.truncated_reason,elapsed_ms=EXCLUDED.elapsed_ms,error_code=EXCLUDED.error_code,error_message=EXCLUDED.error_message,created_at=NOW()",
+                    row["id"], run_id, str(row.get("report_id") or ""), row["tenant_id"], row["user_id"], unit_id,
+                    str(row.get("status") or "success"), str(row.get("datasource") or ""), str(row.get("dialect") or ""),
+                    str(row.get("sql_text") or ""), str(row.get("prompt_text") or ""), str(row.get("prompt_id") or ""),
+                    str(row.get("model_id") or ""), json.dumps(dict(row.get("params") or {}), ensure_ascii=False),
+                    int(row.get("row_count") or 0), int(row.get("full_count") or 0), bool(row.get("truncated")),
+                    str(row.get("truncated_reason") or ""), int(row.get("elapsed_ms") or 0),
+                    str(row.get("error_code") or ""), str(row.get("error_message") or ""),
+                )
+        logger.info("单元快照保存完成", run_id=run_id, unit_id=unit_id, status=str(row.get("status") or ""))
+
+    # 方法作用：列出一次运行的全部单元快照，按单元标识排序返回。
+    # Args: run_id - 运行标识；identity - 当前身份。
+    # Returns: 快照字典列表；内存分支按可见性过滤，PG 分支由 RLS 过滤。
+    async def list_unit_snapshots(self, run_id: str, identity: Any) -> list[dict[str, Any]]:
+        logger.debug("单元快照列表入口", run_id=str(run_id), tenant_id=int(getattr(identity, "tenant_id", 0) or 0))
+        if self._memory:
+            rows = [dict(row) for (rid, _unit), row in self._unit_snapshots.items() if rid == str(run_id) and self._visible(row, identity)]
+            rows.sort(key=lambda item: str(item.get("unit_id", "")))
+        else:
+            from src.memory.pg_pool import pg_pool_connection
+
+            pool = await self._pool()
+            async with pg_pool_connection(pool, int(getattr(identity, "tenant_id", 0) or 0), int(getattr(identity, "user_id", 0) or 0), str(getattr(identity, "role", "") or "")) as connection:
+                fetched = await connection.fetch("SELECT * FROM report_unit_snapshots WHERE run_id=$1::uuid ORDER BY unit_id", str(run_id))
+            rows = [dict(item) for item in fetched]
+        result = [self._snapshot_dict(row) for row in rows]
+        logger.info("单元快照列表完成", run_id=str(run_id), count=len(result))
+        return result
 
     # 方法作用：读取当前身份可访问的页面版本，页面版本 id 优先、任务 id 回退取最新页。
     # Args: report_id - 页面版本 id 或任务 id；identity - 当前身份。
@@ -2019,6 +2079,19 @@ class ReportStore:
             except (TypeError, ValueError):
                 return {}
         return {}
+
+    # 方法作用：把内存或数据库行归一成对外快照字典，统一 params 与时间格式。
+    # Args: row - 内存字典或 asyncpg Record。
+    # Returns: 字段名与迁移列一致的字典，params_json 改写为 params。
+    @staticmethod
+    def _snapshot_dict(row: Any) -> dict[str, Any]:
+        data = dict(row)
+        data["params"] = ReportStore._json_dict(data.get("params_json", data.get("params", {})))
+        data.pop("params_json", None)
+        created = data.get("created_at")
+        if isinstance(created, datetime):
+            data["created_at"] = created.isoformat()
+        return data
 
     # 方法作用：把数据库行转换为安全的任务模型。
     # Args: row - asyncpg Record 或内存字典。

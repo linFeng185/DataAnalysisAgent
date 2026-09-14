@@ -22,6 +22,7 @@ import type {
   ReportQuotaUsageResetResponse,
   ReportRun,
   ReportRunStep,
+  ReportUnitSnapshot,
   ReportShareRequest,
   ReportShareResponse,
   ReportShareSummary,
@@ -434,6 +435,32 @@ export function updateReportPlan(reportId: string, request: ReportPlanUpdateRequ
 // Returns: 排队结果与剩余额度；额度不足时服务端返回 429。
 export function runReport(reportId: string): Promise<ReportRunResponse> {
   return post<ReportRunResponse>(`${REPORT_BASE}/reports/${encodeURIComponent(reportId)}/run`, {});
+}
+
+/** 单单元重跑结果：覆盖该单元最近一次快照，不重生成页面。 */
+export interface ReportUnitRerunResponse {
+  unit_id: string;
+  status: string;
+  snapshot_id: string;
+}
+
+// 方法作用：重跑报表中的单个分析单元，只覆盖该单元的执行快照。
+// Args: reportId - 报表标识；unitId - 分析单元标识。
+// Returns: 单元标识、执行状态与最新快照 ID。
+export function rerunReportUnit(reportId: string, unitId: string): Promise<ReportUnitRerunResponse> {
+  return post<ReportUnitRerunResponse>(
+    `${REPORT_BASE}/reports/${encodeURIComponent(reportId)}/units/${encodeURIComponent(unitId)}/rerun`,
+    {},
+  );
+}
+
+// 方法作用：读取单个分析单元最近一次执行的快照，没有执行记录时 snapshot 为 null。
+// Args: reportId - 报表标识；unitId - 分析单元标识。
+// Returns: 快照对象或 null。
+export function fetchReportUnitSnapshot(reportId: string, unitId: string): Promise<{ snapshot: ReportUnitSnapshot | null }> {
+  return get<{ snapshot: ReportUnitSnapshot | null }>(
+    `${REPORT_BASE}/reports/${encodeURIComponent(reportId)}/units/${encodeURIComponent(unitId)}/snapshot`,
+  );
 }
 
 // 方法作用：对计划生成失败的报表重试后台规划（仅 plan_failed 可重试）。

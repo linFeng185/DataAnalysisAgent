@@ -788,6 +788,74 @@ async def run_report(report_id: str) -> dict[str, Any]:
     return {"report_id": report_id, "status": "queued", "execution_mode": plan.execution_mode, "run_id": None, "quota": asdict(quota)}
 
 
+@router.post("/reports/{report_id}/units/{unit_id}/rerun")
+# 方法作用：重跑单个分析单元并用新结果覆盖该单元在最新运行下的快照。
+# Args: report_id - 报表标识；unit_id - 分析单元标识。
+# Returns: 单元状态与快照标识。
+async def rerun_report_unit(report_id: str, unit_id: str) -> dict[str, Any]:
+    """只重跑点名单元、只覆盖快照，不自动重生成页面，避免副作用。"""
+    identity = get_current_identity()
+    await _require_capability(identity, "report.create_page")
+    store = get_report_store()
+    report = await _load_report(identity, report_id)
+    _require_report_owner(identity, report)
+    if str(report.get("status", "")) in {"queued", "running"}:
+        # 后台运行进行中时重跑会与其并发写同一份页面数据，必须先等待结束。
+        raise HTTPException(409, "报表正在运行中，请等待结束后再重跑单元")
+    plan = report.get("plan")
+    if plan is None:
+        raise HTTPException(409, "该报表计划不可用，请重试生成计划")
+    unit = next((item for item in plan.analysis_units if str(item.unit_id) == str(unit_id)), None)
+    if unit is None:
+        raise HTTPException(404, "该分析单元不存在或已被移除")
+    runs = await store.list_runs(report_id, identity, limit=1)
+    if not runs:
+        raise HTTPException(409, "该报表还没有运行记录，请先生成报表")
+    access = await _resolve_plan_access(identity, plan)
+    from src.reporting.runner import get_report_runner
+
+    runner = get_report_runner()
+    # 只把点名单元交给路由：单单元 Prompt 更短，也不会重新路由其它单元产生额外模型调用。
+    single_plan = plan.model_copy(update={"analysis_units": [unit]})
+    routed = await runner._route_units(single_plan, [str(item) for item in (plan.requested_datasources or [])], int(getattr(identity, "tenant_id", 0) or 0))
+    state: dict[str, Any] = {
+        "plan": single_plan,
+        "run_id": runs[0].id,
+        "report_id": report_id,
+        "identity": {"tenant_id": int(getattr(identity, "tenant_id", 0) or 0), "user_id": int(getattr(identity, "user_id", 0) or 0), "role": str(getattr(identity, "role", "") or "")},
+        "authorized_datasources": access,
+    }
+    if routed:
+        state["unit_datasources"] = routed
+    result = await runner._default_execute_unit(unit, state)
+    snapshot_id = ""
+    for item in await store.list_unit_snapshots(runs[0].id, identity):
+        if str(item.get("unit_id", "")) == str(unit.unit_id):
+            snapshot_id = str(item.get("id", "") or "")
+            break
+    logger.info("报表单元重跑完成", report_id=report_id, unit_id=str(unit.unit_id), tenant_id=identity.tenant_id, status=result.status, snapshot_id=snapshot_id)
+    return {"unit_id": str(unit.unit_id), "status": result.status, "snapshot_id": snapshot_id}
+
+
+@router.get("/reports/{report_id}/units/{unit_id}/snapshot")
+# 方法作用：返回指定单元最近一次执行的快照，供排查取数问题。
+# Args: report_id - 报表标识；unit_id - 分析单元标识。
+# Returns: 含快照或 null 的响应。
+async def get_unit_snapshot(report_id: str, unit_id: str) -> dict[str, Any]:
+    """按最新运行向前回溯，命中的第一条即最近一次执行；全未命中返回 null。"""
+    identity = get_current_identity()
+    await _require_capability(identity, "report.list")
+    await _load_report(identity, report_id)
+    store = get_report_store()
+    for run in await store.list_runs(report_id, identity, limit=10):
+        for item in await store.list_unit_snapshots(run.id, identity):
+            if str(item.get("unit_id", "")) == str(unit_id):
+                logger.info("报表单元快照读取完成", report_id=report_id, unit_id=str(unit_id), run_id=str(run.id))
+                return {"snapshot": item}
+    logger.info("报表单元快照读取完成", report_id=report_id, unit_id=str(unit_id), run_id="")
+    return {"snapshot": None}
+
+
 @router.post("/reports/{report_id}/retry-plan", status_code=202)
 # 方法作用：重试失败的计划生成，清空失败原因后重新入队后台规划。
 # Args: report_id - 报表标识。

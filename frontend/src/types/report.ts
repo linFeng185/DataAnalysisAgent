@@ -126,6 +126,31 @@ export interface ReportRunStep {
   duration_ms?: number | null;
 }
 
+/** 单个分析单元最近一次执行的完整调试快照，字段与后端 report_unit_snapshots 表对应。 */
+export interface ReportUnitSnapshot {
+  id: string;
+  run_id: string;
+  report_id: string;
+  unit_id: string;
+  /** 单元执行结果：success / partial / failed。 */
+  status: 'success' | 'partial' | 'failed';
+  datasource: string;
+  dialect: string;
+  sql_text: string;
+  prompt_text: string;
+  prompt_id: string;
+  model_id: string;
+  params: Record<string, unknown>;
+  row_count: number;
+  full_count: number;
+  truncated: boolean;
+  truncated_reason: string;
+  elapsed_ms: number;
+  error_code: string;
+  error_message: string;
+  created_at: string;
+}
+
 export interface ReportVersionSummary {
   id: string;
   report_id: string;

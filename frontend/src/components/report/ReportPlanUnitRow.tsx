@@ -1,4 +1,4 @@
-import { Checkbox, List, Typography } from 'antd';
+import { Button, Checkbox, List, Space, Typography } from 'antd';
 import { t } from '../../i18n';
 import type { ReportAnalysisUnit } from '../../types/report';
 
@@ -14,6 +14,12 @@ export interface ReportPlanUnitRowProps {
   onToggle: (unitId: string, checked: boolean) => void;
   /** 单元尚未绑定数据源时的兜底展示名。 */
   fallbackDatasource?: string;
+  /** 重跑本单元回调；未提供时不渲染按钮（例如从未运行过的报表）。 */
+  onRerun?: (unitId: string) => void;
+  /** 查看最近一次执行快照回调；未提供时不渲染按钮。 */
+  onViewSnapshot?: (unitId: string) => void;
+  /** 正在重跑的单元标识，用于对应按钮的 loading 态。 */
+  rerunningUnitId?: string;
 }
 
 /**
@@ -33,6 +39,9 @@ export default function ReportPlanUnitRow({
   excludedUnitIds,
   onToggle,
   fallbackDatasource = '',
+  onRerun,
+  onViewSnapshot,
+  rerunningUnitId = '',
 }: ReportPlanUnitRowProps) {
   return <List.Item className="report-plan-unit">
     {editable && <Checkbox
@@ -42,5 +51,13 @@ export default function ReportPlanUnitRow({
     <Typography.Text strong>{unit.question}</Typography.Text>
     {unit.origin === 'diverged' && <Typography.Text type="secondary">{t("建议理由：")}{unit.rationale || t("未说明")}</Typography.Text>}
     <Typography.Text type="secondary">{t("数据源：")}{unit.datasource || fallbackDatasource || t("待绑定")}</Typography.Text>
+    {(onRerun || onViewSnapshot) && <Space size="small">
+      {onRerun && <Button
+        size="small"
+        loading={rerunningUnitId === unit.unit_id}
+        onClick={() => onRerun(unit.unit_id)}
+      >{t("重跑本单元")}</Button>}
+      {onViewSnapshot && <Button size="small" onClick={() => onViewSnapshot(unit.unit_id)}>{t("查看快照")}</Button>}
+    </Space>}
   </List.Item>;
 }

@@ -19,8 +19,10 @@ import {
   fetchReportPages,
   fetchReportQuota,
   fetchReportUsers,
+  fetchReportUnitSnapshot,
   makeReportPagePermanent,
   retryReportPlan,
+  rerunReportUnit,
   runReport,
   updateReportPlan,
 } from '../api/reportWorkbench';
@@ -44,6 +46,7 @@ import type {
   ReportPageSummary,
   ReportPlan,
   ReportQuotaResponse,
+  ReportUnitSnapshot,
 } from '../types/report';
 
 /** 轮询间隔：与工作台保持一致，非终态时定时刷新。 */
@@ -168,6 +171,14 @@ export default function ReportListPage() {
   const [maxRuns, setMaxRuns] = useState<number | null>(null);
   const [pageTtlDays, setPageTtlDays] = useState<number>(7);
   const [permanent, setPermanent] = useState(false);
+  // 单单元重跑：rerunUnitId 记录正在重跑的单元，用于对应按钮的 loading 态。
+  const [rerunUnitId, setRerunUnitId] = useState('');
+  // 单元执行快照抽屉：打开时按需拉取，不随详情轮询自动刷新。
+  const [snapshotOpen, setSnapshotOpen] = useState(false);
+  const [snapshotLoading, setSnapshotLoading] = useState(false);
+  const [snapshotError, setSnapshotError] = useState('');
+  const [snapshotUnitId, setSnapshotUnitId] = useState('');
+  const [snapshotUnit, setSnapshotUnit] = useState<ReportUnitSnapshot | null>(null);
 
   const [userOptions, setUserOptions] = useState<ReportUserOption[]>([]);
 
@@ -346,6 +357,52 @@ export default function ReportListPage() {
     setExcludedUnitIds([]);
     // 详情与页面列表并行读取：最新页面过期时详情 410，页面列表仍要能支撑延期操作。
     await Promise.all([loadDetail(reportId), loadPages(reportId)]);
+  };
+
+  // 方法作用：把单元执行状态映射成界面文案。
+  // Args: value - 后端返回的单元状态（success / partial / failed）。
+  // Returns: 本地化后的状态文案。
+  const unitStatusLabel = (value: string): string => {
+    if (value === 'partial') return t("部分成功");
+    if (value === 'failed') return t("失败");
+    return t("成功");
+  };
+
+  // 方法作用：重跑单个分析单元，成功后就地刷新已打开的快照抽屉；不自动重新生成页面。
+  // Args: unitId - 分析单元标识。
+  // Returns: 异步执行完成后无返回值。
+  const rerunUnit = async (unitId: string): Promise<void> => {
+    if (!detailReportId) return;
+    setRerunUnitId(unitId);
+    try {
+      const result = await rerunReportUnit(detailReportId, unitId);
+      message.success(t("单元重跑结束，状态：{value0}", { value0: unitStatusLabel(result.status) }));
+      // 抽屉正开着这个单元时同步刷新，让用户直接看到重跑后的新现场。
+      if (snapshotOpen && snapshotUnitId === unitId) await openUnitSnapshot(unitId);
+    } catch (unitError) {
+      message.error(errorText(unitError, t("单元重跑失败")));
+    } finally {
+      setRerunUnitId('');
+    }
+  };
+
+  // 方法作用：打开单个分析单元的执行快照抽屉，没有执行记录时展示空状态。
+  // Args: unitId - 分析单元标识。
+  // Returns: 异步读取完成后无返回值。
+  const openUnitSnapshot = async (unitId: string): Promise<void> => {
+    setSnapshotUnitId(unitId);
+    setSnapshotOpen(true);
+    setSnapshotUnit(null);
+    setSnapshotError('');
+    setSnapshotLoading(true);
+    try {
+      const snapshotResult = await fetchReportUnitSnapshot(detailReportId, unitId);
+      setSnapshotUnit(snapshotResult.snapshot);
+    } catch (snapshotLoadError) {
+      setSnapshotError(errorText(snapshotLoadError, t("快照读取失败")));
+    } finally {
+      setSnapshotLoading(false);
+    }
   };
 
   // 带 ?report=<id> 进来时直接打开那条报表的详情，供通知等入口直达；
@@ -631,6 +688,9 @@ export default function ReportListPage() {
   // 后端只允许报表创建者执行：租户管理员看别人的报表时不给出必然 403 的按钮。
   const isOwner = !detail?.report.user_id || detail.report.user_id === user?.user_id;
   const canRun = status === 'draft' && isOwner;
+  // 单单元重跑与快照只在报表产生过运行记录后可用；重跑仍只允许创建者，避免必然 403。
+  const hasRun = ['succeeded', 'partial', 'failed', 'cancelled', 'expired'].includes(status || '');
+  const canRerunUnit = hasRun && isOwner;
   const scheduledPlan = plan?.execution_mode === 'scheduled';
   const userUnits = (plan?.analysis_units || []).filter(unit => (unit.origin ?? 'user') === 'user');
   const divergedUnits = (plan?.analysis_units || []).filter(unit => unit.origin === 'diverged');
@@ -816,6 +876,9 @@ export default function ReportListPage() {
                   editable={isEditable}
                   excludedUnitIds={excludedUnitIds}
                   onToggle={toggleUnit}
+                  onRerun={canRerunUnit ? rerunUnit : undefined}
+                  onViewSnapshot={hasRun ? openUnitSnapshot : undefined}
+                  rerunningUnitId={rerunUnitId}
                 />} />}
 
               <Typography.Title level={5}>{t("建议补充的分析")}</Typography.Title>
@@ -826,6 +889,9 @@ export default function ReportListPage() {
                   editable={isEditable}
                   excludedUnitIds={excludedUnitIds}
                   onToggle={toggleUnit}
+                  onRerun={canRerunUnit ? rerunUnit : undefined}
+                  onViewSnapshot={hasRun ? openUnitSnapshot : undefined}
+                  rerunningUnitId={rerunUnitId}
                 />} />}
               {isEditable && acceptedUnitCount === 0 && <Alert type="warning" showIcon message={t("至少保留一个分析单元才能生成报表")} style={{ marginTop: 12 }} />}
               {isEditable && <Button type="primary" loading={savingPlan} disabled={acceptedUnitCount === 0} onClick={() => void savePlan()} style={{ marginTop: 12 }}>{t("保存计划")}</Button>}
@@ -888,6 +954,48 @@ export default function ReportListPage() {
 
             {renderPageList()}
           </Space>}
+    </Drawer>
+
+    <Drawer
+      title={`${t("单元执行快照")} · ${snapshotUnitId}`}
+      open={snapshotOpen}
+      onClose={() => setSnapshotOpen(false)}
+      width={720}
+    >
+      {snapshotLoading
+        ? <Skeleton active />
+        : snapshotError
+          ? <Alert type="error" showIcon message={snapshotError} />
+          : !snapshotUnit
+            ? <Empty description={t("该单元还没有执行快照")} />
+            : <Space direction="vertical" size={16} style={{ width: '100%' }}>
+              <Descriptions size="small" column={2} bordered items={[
+                { key: 'unit', label: t("分析单元"), children: snapshotUnit.unit_id },
+                { key: 'status', label: t("状态"), children: <Tag color={snapshotUnit.status === 'success' ? 'green' : snapshotUnit.status === 'partial' ? 'orange' : 'red'}>{unitStatusLabel(snapshotUnit.status)}</Tag> },
+                { key: 'datasource', label: t("数据源"), children: snapshotUnit.datasource || '—' },
+                { key: 'dialect', label: t("数据库类型"), children: snapshotUnit.dialect || '—' },
+                { key: 'model', label: t("模型"), children: snapshotUnit.model_id || '—' },
+                { key: 'elapsed', label: t("耗时："), children: `${snapshotUnit.elapsed_ms} ms` },
+                { key: 'rows', label: t("展示行数"), children: snapshotUnit.row_count },
+                { key: 'full_rows', label: t("全量行数"), children: snapshotUnit.full_count },
+                { key: 'truncated', label: t("是否截断"), children: snapshotUnit.truncated ? t("是") : t("否") },
+                { key: 'created_at', label: t("执行时间"), children: formatReportTime(snapshotUnit.created_at) },
+              ]} />
+              {snapshotUnit.truncated && snapshotUnit.truncated_reason && <Alert type="warning" showIcon message={snapshotUnit.truncated_reason} />}
+              {snapshotUnit.error_message && <Alert type="error" showIcon message={t("失败原因")} description={snapshotUnit.error_message} />}
+              <div>
+                <Typography.Title level={5}>{t("执行的 SQL")}</Typography.Title>
+                {snapshotUnit.sql_text
+                  ? <pre style={{ whiteSpace: 'pre-wrap', margin: 0, maxHeight: 320, overflow: 'auto' }}>{snapshotUnit.sql_text}</pre>
+                  : <Typography.Text type="secondary">{t("未生成 SQL")}</Typography.Text>}
+              </div>
+              <div>
+                <Typography.Title level={5}>{t("提示词")}</Typography.Title>
+                {snapshotUnit.prompt_text
+                  ? <Typography.Paragraph style={{ whiteSpace: 'pre-wrap', marginBottom: 0 }}>{snapshotUnit.prompt_text}</Typography.Paragraph>
+                  : <Typography.Text type="secondary">{t("无提示词记录")}</Typography.Text>}
+              </div>
+            </Space>}
     </Drawer>
   </Space>;
 }

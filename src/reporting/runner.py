@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+import time
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -313,10 +314,27 @@ class ReportRunner:
         await asyncio.gather(*tasks, return_exceptions=True)
         logger.info("报表运行器已关闭", task_count=len(tasks))
 
-    # 方法作用：通过现有 Chat LangGraph 执行单个分析单元，保持 SQL/ACL 链路复用。
+    # 方法作用：通过现有 Chat LangGraph 执行单个分析单元，并为其落执行快照。
     # Args: unit - 分析单元；state - 报表子图状态和身份摘要。
     # Returns: UnitResult 或失败结果。
     async def _default_execute_unit(self, unit: Any, state: dict[str, Any]) -> UnitResult:
+        started = time.monotonic()
+        # 提示词现场只组装一次：工作流入参与快照共用同一文本，避免两次日志与两处漂移。
+        trace: dict[str, Any] = {"prompt_text": _compose_unit_query(unit)}
+        try:
+            result = await self._execute_unit_workflow(unit, state, trace)
+        except Exception as exc:
+            # 异常路径也留快照：单元崩在半路时现场比堆栈更直接。
+            await self._persist_unit_snapshot(unit, state, trace, status="failed", error_code="EXECUTION_ERROR", error_message=str(exc), elapsed_ms=round((time.monotonic() - started) * 1000))
+            raise
+        status = str(result.status or "success")
+        await self._persist_unit_snapshot(unit, state, trace, status=status, error_code=result.error_code, error_message=result.user_error_message if status != "success" else "", elapsed_ms=round((time.monotonic() - started) * 1000))
+        return result
+
+    # 方法作用：执行单元工作流并把调试现场写入 trace，供外层组装快照。
+    # Args: unit - 分析单元；state - 报表子图状态；trace - 过程采集字典（prompt_text/sql/dialect/行数等）。
+    # Returns: UnitResult 或失败结果。
+    async def _execute_unit_workflow(self, unit: Any, state: dict[str, Any], trace: dict[str, Any]) -> UnitResult:
         plan = state.get("plan")
         requested = [str(item) for item in (getattr(plan, "requested_datasources", []) or [])]
         routed = (state.get("unit_datasources") or {}).get(str(unit.unit_id))
@@ -332,8 +350,12 @@ class ReportRunner:
         if not selected_sources:
             # “没有源能支撑这个问题”是可解释的结论，不是失败，不计入失败单元。
             logger.info("报表分析单元无命中数据源", unit_id=unit.unit_id)
+            trace["datasource"] = ""
+            trace["params"] = {"selected_datasources": []}
             return UnitResult(unit_id=unit.unit_id, datasource="", status="partial", warnings=["已选数据源中没有与该问题匹配的表，未执行查询"], user_error_message="该分析单元在已选数据源中未找到相关数据")
         datasource = str(unit.datasource or selected_sources[0])
+        trace["datasource"] = datasource
+        trace["params"] = {"selected_datasources": selected_sources}
         from src.graph.workflow import app
 
         if app is None:
@@ -347,7 +369,7 @@ class ReportRunner:
         session_id = f"report-{run_id}-{unit.unit_id}"
         thread_id = f"tenant:{int(identity.get('tenant_id', 0))}:user:{int(identity.get('user_id', 0))}:session:{session_id}"
         result = await app.ainvoke({
-            "user_query": _compose_unit_query(unit),
+            "user_query": str(trace.get("prompt_text", "") or ""),
             "datasource": datasource,
             "selected_datasources": selected_sources,
             "datasource_access": authorized,
@@ -369,21 +391,33 @@ class ReportRunner:
         rows = final.get("data", result.get("query_result_sample", []))
         if not isinstance(rows, list):
             rows = []
+        # SQL、方言与行数在成功和失败路径都先进快照：失败单元的现场同样要靠它反推。
+        sql = str(result.get("generated_sql", "") or "").strip()
+        dialect = str(result.get("dialect", "") or access.get("dialect", ""))
+        full_count = int(result.get("query_result_full_count") or 0)
+        trace["sql"] = sql
+        trace["dialect"] = dialect
+        trace["row_count"] = len(rows)
+        trace["full_count"] = full_count
         if final.get("success", result.get("sql_valid", True)) is False:
             return UnitResult(unit_id=unit.unit_id, datasource=datasource, status="failed", user_error_message=str(final.get("error_message", "查询失败")), error_code=str(final.get("error_code", "QUERY_FAILED")))
         live_query_id = ""
-        sql = str(result.get("generated_sql", "") or "").strip()
         if sql and rows:
             from src.security.tenant_policy import RequestIdentity
 
             owner = RequestIdentity(tenant_id=int(identity.get("tenant_id", 0)), user_id=int(identity.get("user_id", 0)), role=str(identity.get("role", "")))
-            live_query_id = await self.store.save_live_query(run_id, owner, datasource, str(result.get("dialect", "") or access.get("dialect", "")), sql)
+            live_query_id = await self.store.save_live_query(run_id, owner, datasource, dialect, sql)
         # 只看报表自己展示的行集是否被截断：上游的 query_result_truncated 还包含
         # "给模型的样本被裁到 50/30 行"这类与用户可见行集无关的标记，透传会让
         # "共 60 行、全部展示"的单元被判成"样本被截断"（实机页面上逐条刷屏）。
         from src.reporting.models import display_truncated
 
-        truncated = display_truncated(len(rows), int(result.get("query_result_full_count") or 0))
+        truncated = display_truncated(len(rows), full_count)
+        from src.reporting.snapshots import DISPLAY_ROW_LIMIT, describe_truncation
+
+        trace["truncated"] = truncated
+        # 截断原因只由本层生成：上游的 query_result_truncated 口径与页面展示行集无关。
+        trace["truncated_reason"] = describe_truncation(len(rows), full_count, DISPLAY_ROW_LIMIT) if truncated else ""
         analysis = final.get("analysis") or {}
         # 直答类单元（元数据说明、知识直答等）产出的是文字结论，没有数据行是正常形态；
         # 标成 text 后，成功单元判据才不会把它们误算成部分完成。
@@ -406,6 +440,49 @@ class ReportRunner:
                 if isinstance(item, str) and item.strip()
             ))[:20],
         )
+
+    # 方法作用：把单元执行现场组装成快照并落库，失败只记告警不影响报表生成。
+    # Args: unit - 分析单元；state - 报表子图状态；trace - 执行过程采集字段；status - 单元状态；error_code/error_message - 失败现场；elapsed_ms - 执行耗时毫秒。
+    # Returns: 无返回值。
+    async def _persist_unit_snapshot(self, unit: Any, state: dict[str, Any], trace: dict[str, Any], *, status: str, error_code: str = "", error_message: str = "", elapsed_ms: int = 0) -> None:
+        unit_id = str(getattr(unit, "unit_id", "") or "")
+        run_id = str(state.get("run_id", "") or "")
+        if not run_id:
+            # 没有运行归属的快照无法与页面版本关联，写进去只会成为孤儿记录。
+            logger.debug("报表单元快照跳过：缺少运行标识", unit_id=unit_id)
+            return
+        try:
+            from src.reporting.snapshots import build_snapshot, resolve_model_id
+            from src.security.tenant_policy import RequestIdentity
+
+            identity = dict(state.get("identity", {}) or {})
+            owner = RequestIdentity(tenant_id=int(identity.get("tenant_id", 0) or 0), user_id=int(identity.get("user_id", 0) or 0), role=str(identity.get("role", "") or ""))
+            snapshot = build_snapshot(
+                run_id=run_id,
+                report_id=str(state.get("report_id", "") or ""),
+                tenant_id=owner.tenant_id,
+                user_id=owner.user_id,
+                unit_id=unit_id,
+                status=status if status in {"success", "partial", "failed"} else "failed",
+                datasource=str(trace.get("datasource", "") or ""),
+                dialect=str(trace.get("dialect", "") or ""),
+                sql=str(trace.get("sql", "") or ""),
+                prompt_text=str(trace.get("prompt_text", "") or ""),
+                model_id=resolve_model_id(),
+                params=dict(trace.get("params", {}) or {}),
+                row_count=int(trace.get("row_count", 0) or 0),
+                full_count=int(trace.get("full_count", 0) or 0),
+                truncated=bool(trace.get("truncated", False)),
+                truncated_reason=str(trace.get("truncated_reason", "") or ""),
+                elapsed_ms=int(elapsed_ms),
+                error_code=error_code,
+                error_message=error_message,
+            )
+            await self.store.save_unit_snapshot(snapshot, owner)
+            logger.info("报表单元快照已保存", run_id=run_id, unit_id=unit_id, status=snapshot.status, snapshot_id=snapshot.id)
+        except Exception as exc:
+            # 快照是观测数据：落库失败不得影响报表生成（与运行计数落库同策略）。
+            logger.warning("报表单元快照保存失败", run_id=run_id, unit_id=unit_id, error_type=type(exc).__name__, error=str(exc), exc_info=True)
 
     # 方法作用：读取各数据源的表名清单，供路由模型与计划期发散判断命中关系。
     # Args: requested - 已授权数据源名称；tenant_id - 当前租户。
