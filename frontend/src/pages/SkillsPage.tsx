@@ -166,9 +166,10 @@ export default function SkillsPage() {
     : t("当前作用域暂无可见 Skill，系统 Skill 由平台管理员维护");
 
   return (
-    <div style={{ maxWidth: 1000, margin: '0 auto' }}>
+    <div className="app-page">
+      {/* extra 里的工具条在窄屏允许换行，否则卡片头部会被按钮行撑破 */}
       <Card title={t("Skills 管理")} extra={
-        <Space>
+        <Space wrap>
           <Typography.Text type="secondary">{t("共")} {skills.length} {t("个")}</Typography.Text>
           <Button icon={<AppstoreOutlined />} size="small" onClick={() => void openRegistry()}>
             Skill Registry
@@ -190,7 +191,6 @@ export default function SkillsPage() {
         </Space>
       }>
         <Table<SkillInfo> dataSource={skills} rowKey={r => `${r.scope}:${r.tenant_id}:${r.owner_user_id}:${r.name}`} loading={loading}
-          scroll={{ x: 860 }}
           locale={{ emptyText: <Empty description={emptySkillsDescription} /> }}
           size="small"
           onRow={r => ({ onClick: () => openDetail(r), style: { cursor: 'pointer' } })}
@@ -289,7 +289,7 @@ export default function SkillsPage() {
             dataSource={registrySkills}
             loading={registryLoading}
             pagination={false}
-            scroll={{ x: 640 }}
+            scroll={{ x: 'max-content' }}
             columns={[
               { title: t("名称"), dataIndex: 'name', width: 150 },
               { title: t("版本"), dataIndex: 'version', width: 90 },

@@ -371,7 +371,9 @@ export default function KnowledgePage() {
             <Input.Search placeholder={t("搜索内容")} value={search}
               onChange={e => setSearch(e.target.value)} onSearch={() => { setPage(1); loadEntries(1); }} style={{ width: 200 }} />
           </Space>
+          {/* 窄屏下表格在容器内横向滚动，避免整页被列宽撑破 */}
           <Table<KnowledgeEntry> dataSource={entries} rowKey="id" loading={loading}
+            scroll={{ x: 'max-content' }}
             locale={{ emptyText: <Empty description={t("暂无知识条目")} /> }}
             size="small" onRow={r => ({ onClick: () => setEntryDetail(r), style: { cursor: 'pointer' } })}
             pagination={{ current: page, pageSize, total, showSizeChanger: true, showTotal: count => t("共 {value0} 条", { value0: count }),
@@ -444,6 +446,7 @@ export default function KnowledgePage() {
             </Space>
           </div>
           <Table<KnowledgeDoc> dataSource={visibleDocs} rowKey={record => `${record.scope}:${record.name}`} size="small"
+            scroll={{ x: 'max-content' }}
             locale={{ emptyText: <Empty description={t("文档目录为空")} /> }}
             onRow={r => ({ onClick: () => openDocDetail(r), style: { cursor: 'pointer' } })}
             columns={[
@@ -503,6 +506,7 @@ export default function KnowledgePage() {
               style={{ width: 200 }} allowClear />
           </Space>
           <Table<KnowledgeTag> dataSource={tags} rowKey="id" size="small" loading={tagLoading}
+            scroll={{ x: 'max-content' }}
             locale={{ emptyText: <Empty description={t("暂无标签")} /> }} pagination={{ pageSize: 20 }}
             columns={[
               { title: t("名称"), dataIndex: 'name', width: 180,
@@ -527,7 +531,7 @@ export default function KnowledgePage() {
   ];
 
   return (
-    <div style={{ maxWidth: 1000, margin: '0 auto' }}>
+    <div className="app-page">
       <Card title={<Space><DatabaseOutlined />{t("知识库")}</Space>}
         extra={<Typography.Text type="secondary">{total} {t("条,")} {docs.length} {t("份文档")}</Typography.Text>}>
         <Tabs items={[...tabItems, { key: 'emergency', label: t("应急授权"), children: <EmergencyKnowledgePanel docs={docs} platform={role === 'super_admin'} /> }]} />

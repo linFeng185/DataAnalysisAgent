@@ -230,11 +230,12 @@ class TestReportPageShell:
             assert "toolbar=" in page
             assert "report-viewer-toolbar" not in page
 
-    # 方法作用：验证整页底色取模板变量、内容限宽居中，且窄屏断点同步收窄内边距。
+    # 方法作用：验证整页底色取模板变量、内容占满可用宽度，且窄屏断点同步收窄内边距。
     # Args: self - 测试实例。
     # Returns: 无返回值，断言失败时由 pytest 报告。
     def test_page_shell_takes_template_background_and_centered_column(self) -> None:
-        """页面级背景必须消费 --report-bg，不能写死白色；嵌在应用 Layout 内要扣掉顶栏高度。"""
+        """页面级背景必须消费 --report-bg，不能写死白色；嵌在应用 Layout 内要扣掉顶栏高度。
+        正文占满可用宽度（对齐菜单页 .app-page），不再写死 1440 上限在宽屏留白。"""
         # Arrange
         styles = Path("frontend/src/index.css").read_text(encoding="utf-8")
         shell = Path("frontend/src/components/report/ReportPageShell.tsx").read_text(encoding="utf-8")
@@ -251,6 +252,7 @@ class TestReportPageShell:
         assert page_rule and "var(--report-bg" in page_rule.group(0)
         # 私有查看页高度扣掉 64px 应用顶栏，避免多出一条滚动条
         assert ".app-content .report-page" in styles
-        assert body_rule and "min(1440px, 100%)" in body_rule.group(0)
+        assert body_rule and "width: 100%" in body_rule.group(0)
+        assert body_rule and "1440" not in body_rule.group(0)
         # 移动端断点必须覆盖新外壳的容器类，否则窄屏沿用桌面内边距
         assert mobile_rule and ".report-page-body" in mobile_rule.group(0)

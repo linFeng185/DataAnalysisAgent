@@ -559,6 +559,7 @@ export default function ReportListPage() {
         size="small"
         rowKey="id"
         pagination={false}
+        scroll={{ x: 'max-content' }}
         dataSource={pageList}
         columns={pageColumns}
       />}
@@ -585,7 +586,7 @@ export default function ReportListPage() {
   const userUnits = (plan?.analysis_units || []).filter(unit => (unit.origin ?? 'user') === 'user');
   const divergedUnits = (plan?.analysis_units || []).filter(unit => unit.origin === 'diverged');
 
-  return <Space direction="vertical" size={16} style={{ width: '100%' }}>
+  return <Space direction="vertical" size={16} className="app-page" style={{ width: '100%' }}>
     <Card>
       <Space style={{ width: '100%', justifyContent: 'space-between' }} align="start" wrap>
         <Space direction="vertical" size={4}>

@@ -206,7 +206,7 @@ export default function LinkManagementPage() {
     { title: t("停留时长"), dataIndex: 'duration_seconds', render: value => formatDuration(Number(value) || 0) },
   ];
 
-  return <Space direction="vertical" size={16} style={{ width: '100%' }}>
+  return <Space direction="vertical" size={16} className="app-page" style={{ width: '100%' }}>
     <Card>
       <Space style={{ width: '100%', justifyContent: 'space-between' }} align="start" wrap>
         <Space direction="vertical" size={4}>
@@ -263,6 +263,7 @@ export default function LinkManagementPage() {
       size="small"
       rowKey="id"
       loading={loading}
+      scroll={{ x: 'max-content' }}
       dataSource={visibleShares}
       columns={columns}
       locale={{ emptyText: t("暂无分享链接") }}

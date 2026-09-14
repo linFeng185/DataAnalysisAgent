@@ -162,7 +162,7 @@ export default function MetricsPage() {
 
   if (!allowed) return <Alert type="warning" message={t("业务指标由租户管理，请使用租户账号访问")} />;
 
-  return <div style={{ padding: 24 }}>
+  return <div className="app-page">
     <Typography.Title level={3}>{t("指标目录")}</Typography.Title>
     <Alert type="info" showIcon message={t("每次编辑产生新版本；只有已批准且到达生效时间的口径才能用于查询。")} style={{ marginBottom: 16 }} />
     {error && <Alert type="error" message={error} style={{ marginBottom: 16 }} />}
@@ -172,7 +172,7 @@ export default function MetricsPage() {
         <Button onClick={() => setRefresh(value => value + 1)}>{t("刷新")}</Button>
         {canEdit && <Button type="primary" onClick={() => openEditor(null)}>{t("新建指标")}</Button>}
       </Space>
-      <Table<MetricRecord> rowKey="id" dataSource={items} loading={loading} scroll={{ x: 1000 }}
+      <Table<MetricRecord> rowKey="id" dataSource={items} loading={loading} scroll={{ x: 'max-content' }}
         pagination={{ current: page, total, pageSize: 20, showSizeChanger: false, onChange: setPage }} columns={[
           { title: t("名称"), render: (_, record) => record.definition.name },
           { title: t("编码"), dataIndex: 'code' },
@@ -209,7 +209,7 @@ export default function MetricsPage() {
       </Form>
     </Modal>
     <Modal title={t("指标版本历史")} open={history !== null} onCancel={() => setHistory(null)} footer={null} width={900}>
-      <Table<MetricRecord> rowKey="id" dataSource={history || []} pagination={false} scroll={{ x: 700 }} columns={[
+      <Table<MetricRecord> rowKey="id" dataSource={history || []} pagination={false} scroll={{ x: 'max-content' }} columns={[
         { title: t("版本"), dataIndex: 'version' },
         { title: t("状态"), render: (_, record) => statusLabels[record.status] },
         { title: t("公式"), render: (_, record) => record.definition.expression },

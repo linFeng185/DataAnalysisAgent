@@ -85,7 +85,7 @@ export default function MemoryPage() {
   };
 
   return (
-    <div style={{ maxWidth: 1000, margin: '0 auto' }}>
+    <div className="app-page">
       <Card
         title={<Space><BulbOutlined />{t("我的记忆")}</Space>}
         extra={<Typography.Text type="secondary">{t("共 {value0} 条", { value0: total })}</Typography.Text>}>

@@ -39,9 +39,9 @@ export default function McpPage() {
   const scopeColor: Record<KnowledgeScope, string> = { system: 'blue', tenant: 'green', private: 'default' };
 
   return (
-    <div style={{maxWidth:900,margin:'0 auto'}}>
+    <div className="app-page">
       <Card title={t("MCP Server 管理")} extra={<Button type="primary" icon={<PlusOutlined/>} onClick={()=>setOpen(true)}>{t("添加")}</Button>}>
-        <Table dataSource={servers} rowKey={r => `${r.scope}:${r.tenant_id}:${r.owner_user_id}:${r.name}`} loading={loading} columns={[
+        <Table dataSource={servers} rowKey={r => `${r.scope}:${r.tenant_id}:${r.owner_user_id}:${r.name}`} loading={loading} scroll={{ x: 'max-content' }} columns={[
           {title:t("名称"),dataIndex:'name',width:140},
           {title:t("范围"),dataIndex:'scope',width:76,render:(v:KnowledgeScope)=><Tag color={scopeColor[v]}>{v==='system'?t("系统"):v==='tenant'?t("租户"):t("个人")}</Tag>},
           {title:t("传输"),dataIndex:'transport',width:80,render:(v:string)=><Tag>{v}</Tag>},

@@ -224,7 +224,7 @@ export default function AutomationPage() {
                   rowKey="id"
                   loading={loading}
                   size="small"
-                  scroll={{ x: 980 }}
+                  scroll={{ x: 'max-content' }}
                   locale={{ emptyText: <Empty description={t("暂无自动化任务")} /> }}
                   columns={[
                     { title: t("名称"), dataIndex: 'name', width: 160, fixed: 'left', ellipsis: true },

@@ -867,6 +867,7 @@ export default function AdminPage() {
 
   const tenantWorkspace = (
     <Table<Tenant> rowKey="id" dataSource={tenants} loading={loading} pagination={{ pageSize: 20 }}
+      scroll={{ x: 'max-content' }}
       title={() => <Space><Button type="primary" icon={<PlusOutlined />} onClick={() => setTenantModal(true)}>{t("创建租户")}</Button>
         <Button icon={<ReloadOutlined />} onClick={() => void load()} aria-label={t("刷新租户")} /></Space>}
       expandable={{
@@ -884,6 +885,7 @@ export default function AdminPage() {
                 onClick={() => void loadTenantAdmins(tenant.id, true)}>{t("重试")}</Button>} />;
           }
           return <Table<ManagedUser> rowKey="id" size="small" pagination={false}
+            scroll={{ x: 'max-content' }}
             dataSource={state.admins} locale={{ emptyText: <Empty description={t("暂无租户管理员")} /> }}
             columns={[
               { title: t("管理员 ID"), dataIndex: 'id', width: 110 },
@@ -921,6 +923,7 @@ export default function AdminPage() {
 
   const userWorkspace = (
     <Table<ManagedUser> rowKey="id" dataSource={users} loading={loading} pagination={{ pageSize: 20 }}
+      scroll={{ x: 'max-content' }}
       rowSelection={isTenantAdmin ? {
         selectedRowKeys: selectedUserIds,
         onChange: keys => setSelectedUserIds(keys.map(Number)),
@@ -971,7 +974,7 @@ export default function AdminPage() {
 
   const accessPolicyWorkspace = <div style={{ width: '100%', minWidth: 0, maxWidth: 'calc(100vw - 48px)', overflow: 'hidden' }}>
     <Table<AccessPolicy> rowKey={policy => `${policy.source}:${policy.policy_key}`}
-      dataSource={accessPolicies} loading={loading} pagination={{ pageSize: 15 }} scroll={{ x: 1080 }}
+      dataSource={accessPolicies} loading={loading} pagination={{ pageSize: 15 }} scroll={{ x: 'max-content' }}
       title={() => <Space>
         <Button type="primary" icon={<PlusOutlined />} onClick={() => openPolicyEditor()}>{t("创建策略")}</Button>
         <Tooltip title={t("刷新访问策略")}><Button icon={<ReloadOutlined />} onClick={() => void load()} aria-label={t("刷新访问策略")} /></Tooltip>
@@ -996,7 +999,7 @@ export default function AdminPage() {
     <Divider style={{ margin: '4px 0' }} />
     <Typography.Title level={5} style={{ margin: 0 }}>{t("IP 黑白名单")}</Typography.Title>
     <Table<AccessIpRule> rowKey="id" dataSource={accessIpRules} loading={loading}
-      pagination={{ pageSize: 15 }} scroll={{ x: 760 }} columns={[
+      pagination={{ pageSize: 15 }} scroll={{ x: 'max-content' }} columns={[
         { title: t("策略"), dataIndex: 'policy_key', width: 180 },
         { title: t("动作"), dataIndex: 'action', width: 100, render: action => <Tag color={action === 'deny' ? 'red' : 'green'}>{action === 'deny' ? t("拒绝") : t("允许")}</Tag> },
         { title: 'CIDR', dataIndex: 'cidr', width: 220 },
@@ -1009,7 +1012,7 @@ export default function AdminPage() {
 
   const providerWorkspace = <Space direction="vertical" size={16} style={{ width: '100%' }}>
     <Table<LLMProvider> rowKey="id" dataSource={providers} loading={loading} pagination={{ pageSize: 10 }}
-      scroll={{ x: 990 }}
+      scroll={{ x: 'max-content' }}
       title={() => <Space>
         <Button type="primary" icon={<PlusOutlined />} onClick={() => openProviderEditor()}>{t("新增厂商")}</Button>
         <Button icon={<ReloadOutlined />} onClick={() => void load()} aria-label={t("刷新厂商")} />
@@ -1028,7 +1031,7 @@ export default function AdminPage() {
         </Space> },
       ]} />
     <Table<LLMModel> rowKey="id" dataSource={providerModels} pagination={{ pageSize: 10 }}
-      scroll={{ x: 990 }}
+      scroll={{ x: 'max-content' }}
       title={() => <Space><Typography.Text>{t("当前厂商模型目录")}</Typography.Text><Button type="primary" icon={<PlusOutlined />} disabled={!selectedProviderId} onClick={() => openModelEditor()}>{t("新增模型")}</Button></Space>}
       columns={[
         { title: t("模型 ID"), dataIndex: 'model_id', width: 180 },
@@ -1045,6 +1048,7 @@ export default function AdminPage() {
 
   const tenantLLMWorkspace = <Space direction="vertical" size={16} style={{ width: '100%' }}>
     <Table<TenantLLMConnection> rowKey="id" dataSource={connections} loading={loading} pagination={{ pageSize: 10 }}
+      scroll={{ x: 'max-content' }}
       title={() => <Space>
         <Button type="primary" icon={<PlusOutlined />} onClick={() => { setEditingConnection(null); connectionForm.resetFields(); setConnectionModal(true); }}>{t("新增命名连接")}</Button>
         <Button icon={<ReloadOutlined />} onClick={() => void load()} aria-label={t("刷新 LLM 连接")} />
@@ -1072,7 +1076,7 @@ export default function AdminPage() {
     </Form>
   </Space>;
 
-  return <div style={{ padding: 24, maxWidth: 1280, margin: '0 auto' }}>
+  return <div className="app-page">
     {reportPolicyUser && <ReportPolicyEditor user={reportPolicyUser} onClose={() => setReportPolicyUser(null)} />}
     <Typography.Title level={3} style={{ marginTop: 0 }}>{isTenantAdmin ? t("租户管理") : t("平台管理")}</Typography.Title>
     <Tabs items={isTenantAdmin ? [

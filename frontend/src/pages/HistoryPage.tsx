@@ -65,7 +65,7 @@ export default function HistoryPage() {
     : items;
 
   return (
-    <div style={{ maxWidth: 1000, margin: '0 auto' }}>
+    <div className="app-page">
       <Card
         title={t("查询历史")}
         extra={

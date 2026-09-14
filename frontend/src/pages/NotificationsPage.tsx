@@ -34,8 +34,8 @@ export default function NotificationsPage() {
   }, [navigate, notifications]);
 
   return (
-    <div className="notification-page" style={{ padding: 16 }}>
-      <div style={{ maxWidth: 1080, margin: '0 auto' }}>
+    <div className="notification-page">
+      <div className="app-page">
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12, flexWrap: 'wrap', marginBottom: 12 }}>
           <Space size={8} align="center">
             <BellOutlined />

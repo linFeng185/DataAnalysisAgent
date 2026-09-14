@@ -334,7 +334,7 @@ export default function DatasourcePage() {
   };
 
   return (
-    <div style={{ maxWidth: 1120, margin: '0 auto' }}>
+    <div className="app-page">
       <Card title={t("数据源管理")} extra={
         canManage
           ? <Space wrap>
@@ -358,7 +358,7 @@ export default function DatasourcePage() {
           dataSource={datasources}
           rowKey="name"
           loading={loading}
-          scroll={{ x: 1040 }}
+          scroll={{ x: 'max-content' }}
           rowSelection={{
             selectedRowKeys: selectedNames,
             onChange: keys => setSelectedNames(keys as string[]),

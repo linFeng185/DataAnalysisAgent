@@ -91,7 +91,7 @@ export default function SchemaPage() {
   ];
 
   return (
-    <div style={{ maxWidth: 1000, margin: '0 auto' }}>
+    <div className="app-page">
       <Card title={t("表结构浏览")} extra={
         <Space wrap>
           <Select style={{ width: 180 }} value={datasource}
@@ -104,6 +104,7 @@ export default function SchemaPage() {
       }>
         <Typography.Paragraph type="secondary">{t("请在数据源管理页面同步表结构，此处仅供查看")}</Typography.Paragraph>
         <Table<TableInfo> dataSource={tables} rowKey="name" loading={loading}
+          scroll={{ x: 'max-content' }}
           locale={{ emptyText: t("该数据源还没有可浏览的表结构，请先在数据源管理页面完成一次同步") }}
           pagination={{
             current: page, pageSize, total, showSizeChanger: true,
@@ -114,7 +115,7 @@ export default function SchemaPage() {
             onExpand: (expanded: boolean, record: TableInfo) => { if (expanded) void loadColumns(record); },
             expandedRowRender: (record: TableInfo) => (
               <Table<ColumnInfo> dataSource={expandedColumns[record.name] || []} rowKey="name" size="small"
-                pagination={false} columns={columns}
+                pagination={false} columns={columns} scroll={{ x: 'max-content' }}
                 locale={{ emptyText: t("正在加载字段…") }} />
             ),
           }} columns={[
@@ -131,7 +132,8 @@ export default function SchemaPage() {
           {(selectedTable.relations || []).map((relation, index) => <Tag key={index} color="purple">→ {relation.target_table} ON {relation.join_key}</Tag>)}
           <Typography.Title level={5}>{t("字段列表")}</Typography.Title>
           <Table<ColumnInfo> dataSource={expandedColumns[selectedTable.name] || []} rowKey="name" size="small"
-            pagination={false} columns={columns} locale={{ emptyText: t("正在加载字段…") }} />
+            pagination={false} columns={columns} scroll={{ x: 'max-content' }}
+            locale={{ emptyText: t("正在加载字段…") }} />
         </>}
       </Drawer>
     </div>

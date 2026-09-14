@@ -88,7 +88,8 @@ class TestLLMGovernanceFrontend:
         source = Path("frontend/src/pages/AdminPage.tsx").read_text(encoding="utf-8")
 
         # Act / Assert
-        assert source.count("scroll={{ x: 990 }}") >= 2
+        # 写死的 990 已换成 max-content（写死宽度与容器不匹配时 fixed 列会错位），契约不变：表格仍可在容器内横向滚动
+        assert source.count("scroll={{ x: 'max-content' }}") >= 2
         assert '''{ title: t("编码"), dataIndex: 'code', width: 130 }''' in source
         assert '''{ title: t("协议"), dataIndex: 'protocol', width: 180 }''' in source
         assert '''{ title: t("模型 ID"), dataIndex: 'model_id', width: 180 }''' in source
