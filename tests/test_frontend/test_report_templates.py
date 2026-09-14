@@ -159,3 +159,69 @@ class TestPageWiring:
         assert "reportTemplates" in page
         assert "templateId" in page
         assert "template_id" in api
+
+
+class TestChartLegendLayout:
+    """验证图表基线不会造出压住数据的图例，并为已声明的图例预留网格空间。
+
+    事实依据（2026-09-14 浏览器实测）：后端下发的报表 option 只有
+    `{xAxis, yAxis, series, tooltip}`，**没有 legend**；基线原先用
+    `isPlainObject(legend) ? legend : {}` 补样式，等于给每个图表凭空加了一个 legend，
+    ECharts 把它渲染在 `top:null / bottom:15`，而 `grid.bottom` 只有 8，
+    于是图例压在柱状图与横轴标签上（用户报的「柱状图的按钮和数据重叠」）。
+    """
+
+    # 方法作用：验证基线不再把缺失或 false 的 legend 变成空对象。
+    # Args: self - 测试实例。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    def test_baseline_never_invents_a_legend(self) -> None:
+        """凭空补出 legend 键就等于强行让 ECharts 画图例。"""
+        # Arrange
+        source = Path("frontend/src/components/report/chartBase.ts").read_text(encoding="utf-8")
+
+        # Act / Assert
+        assert "isPlainObject(merged.legend) ? merged.legend : {}" not in source
+        assert "isPlainObject(merged.legend) && merged.legend.show !== false" in source
+
+    # 方法作用：验证为图例预留网格空间的能力存在。
+    # Args: self - 测试实例。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    def test_legend_space_is_reserved_in_grid(self) -> None:
+        """ECharts 不会自动为图例让位，必须自己算边距。"""
+        # Arrange
+        source = Path("frontend/src/components/report/chartBase.ts").read_text(encoding="utf-8")
+
+        # Act / Assert
+        assert "reserveLegendSpace" in source
+        assert "LEGEND_BAND_PX" in source
+        # 横向图例按锚定方向预留：贴底改 grid.bottom、贴顶改 grid.top；纵向占横向空间
+        assert "grid.bottom = Math.max(" in source
+        assert "grid.top = Math.max(" in source
+        assert "grid.right = Math.max(" in source
+
+    # 方法作用：验证预留值足以容纳一行图例。
+    # Args: self - 测试实例。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    def test_legend_band_covers_one_line(self) -> None:
+        """一行图例约 20px，加外边距与留白不应少于 40px。"""
+        # Arrange
+        source = Path("frontend/src/components/report/chartBase.ts").read_text(encoding="utf-8")
+        match = re.search(r"LEGEND_BAND_PX\s*=\s*(\d+)", source)
+
+        # Act / Assert
+        assert match, "未找到 LEGEND_BAND_PX 定义"
+        assert int(match.group(1)) >= 40
+
+    # 方法作用：验证没有 grid 的图表不会被塞进一个 grid。
+    # Args: self - 测试实例。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    def test_reserve_skips_when_grid_absent(self) -> None:
+        """饼图等无坐标轴图表不该被强加网格。"""
+        # Arrange
+        source = Path("frontend/src/components/report/chartBase.ts").read_text(encoding="utf-8")
+        start = source.index("function reserveLegendSpace")
+        body = source[start:source.index("\n}", start)]
+
+        # Act / Assert
+        assert "isPlainObject(grid)" in body
+        assert "return;" in body
