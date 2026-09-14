@@ -154,6 +154,13 @@ class ImageAnalysisOutput(StrictOutputModel):
     limitations: list[Annotated[str, Field(max_length=500)]] = Field(default_factory=list, max_length=10)
 
 
+class ReportPlanUnitTimeRange(StrictOutputModel):
+    """单元的时间范围建议；模型无法判断时留空，由服务端补默认值。"""
+
+    kind: Literal["relative", "absolute", "all"] = "relative"
+    value: str = Field(default="", max_length=64)
+
+
 class ReportPlanUnit(StrictOutputModel):
     """大模型对报表需求拆解出的单个分析单元建议。"""
 
@@ -163,6 +170,7 @@ class ReportPlanUnit(StrictOutputModel):
     priority: Literal["primary", "secondary", "evidence"] = "primary"
     dimensions: list[str] = Field(default_factory=list, max_length=30)
     metrics: list[str] = Field(default_factory=list, max_length=30)
+    time_range: ReportPlanUnitTimeRange | None = None
 
 
 class ReportPlanUnitsOutput(StrictOutputModel):

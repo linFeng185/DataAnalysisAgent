@@ -38,9 +38,13 @@ def _describe_time_range(time_range: Any) -> str:
         logger.debug("时间范围渲染完成", text="全部数据", kind=kind)
         return "全部数据"
     if kind == "absolute":
-        # 绝对范围保留原始日期串，并补一个中文单位词，使主图「问题里是否已含
-        # 时间范围」的规则能识别到，不会被再问一次时间范围。
-        text = f"{value}（绝对日期范围）" if value else ""
+        # 绝对范围改写为「起 至 止」并对下游声明取数要求：主图「问题里是否已含
+        # 时间范围」的规则靠「日」字等时间标记识别，必须同时保留原始串与中文说明；
+        # 90 天窗口只落回一个月时同比/环比基期取不到（2026-09-14 事故），
+        # 必须显式要求覆盖整段区间，不能只靠一段没有约束力的日期串。
+        parts = [part.strip() for part in re.split(r"[/:]", value) if part.strip()]
+        span = " 至 ".join(parts) if len(parts) == 2 else value
+        text = f"{span}（绝对日期范围 {value}；查询必须覆盖该区间，需要同比/环比时同时取到基期）" if value else ""
         logger.debug("时间范围渲染完成", text=text, kind=kind)
         return text
     match = re.fullmatch(r"(\d+)\s*([A-Za-z]?)", value)

@@ -53,6 +53,16 @@ _PIECE_TRIM_RE = re.compile(r"^[\s，,、；;。：:和及以及]+|[\s，,、；
 _UNIT_KEY_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
 # 时间范围单位换算，用于比较各单元跨度并让发散单元继承最长者。
 _SPAN_UNIT_DAYS: dict[str, int] = {"d": 1, "w": 7, "m": 30, "q": 90, "y": 365}
+# 绝对区间：2016-01-01 至 2036-12-31（兼容 到/~/-/—/起 等连接词）。
+_ABSOLUTE_RANGE_RE = re.compile(
+    r"((?:19|20)\d{2}[-/.]\d{1,2}[-/.]\d{1,2})\s*(?:至|到|~|-|—|起)\s*((?:19|20)\d{2}[-/.]\d{1,2}[-/.]\d{1,2})"
+)
+# 相对区间：最近/近/过去 3 个月、90 天、2 年。
+_RELATIVE_RANGE_RE = re.compile(r"(?:最近|近|过去|往前)\s*(\d{1,4})\s*(天|周|个月|月|年)")
+# 年度范围标题：XXXX年…报表/报告/分析（原 year_match 补丁的写法并入统一抽取）。
+_YEAR_HEADING_RE = re.compile(r"(?<!\d)((?:19|20)\d{2})\s*年(?:度)?[^，。；:：]{0,40}(?:报表|报告|分析)")
+# 相对区间的中文单位到存储码，与 TimeRange 默认值 90d 的单位体系保持一致。
+_RELATIVE_UNIT_CODES: dict[str, str] = {"天": "d", "周": "w", "个月": "m", "月": "m", "年": "y"}
 
 
 # 方法作用：把时间范围值换算成天数，用于比较跨度长短。
@@ -69,6 +79,48 @@ def _span_days(time_range: Any) -> int:
     if not match:
         return 0
     return int(match.group(1)) * _SPAN_UNIT_DAYS.get(match.group(2).lower(), 1)
+
+
+# 方法作用：把「年-月-日」的各种分隔符写法规范成 ISO 日期。
+# Args: token - 正则捕获到的日期串，如 2016-1-1、2016.01.01、2016/1/1。
+# Returns: YYYY-MM-DD 格式的日期串。
+def _normalize_date(token: str) -> str:
+    logger.debug("日期规范化入口", token=token)
+    parts = re.split(r"[-/.]", token)
+    normalized = f"{int(parts[0]):04d}-{int(parts[1]):02d}-{int(parts[2]):02d}"
+    logger.info("日期规范化完成", normalized=normalized)
+    return normalized
+
+
+# 方法作用：从需求文本里抽取时间范围，绝对区间优先，其次是年度标题与相对区间。
+# Args: text - 用户需求或单元问题原文。
+# Returns: 识别到的 TimeRange；三种写法都不含时返回 None，由调用方决定默认值。
+def extract_time_range(text: str) -> TimeRange | None:
+    logger.debug("时间范围抽取入口", text_chars=len(str(text or "")))
+    raw = str(text or "")
+    match = _ABSOLUTE_RANGE_RE.search(raw)
+    if match:
+        start = _normalize_date(match.group(1))
+        end = _normalize_date(match.group(2))
+        result = TimeRange(kind="absolute", value=f"{start}/{end}")
+        logger.info("时间范围抽取完成", kind=result.kind, value=result.value)
+        return result
+    match = _YEAR_HEADING_RE.search(raw)
+    if match:
+        # 年度标题代表全年，起止固定为该年 1 月 1 日至 12 月 31 日。
+        year = int(match.group(1))
+        result = TimeRange(kind="absolute", value=f"{year}-01-01/{year}-12-31")
+        logger.info("时间范围抽取完成", kind=result.kind, value=result.value)
+        return result
+    match = _RELATIVE_RANGE_RE.search(raw)
+    if match:
+        amount = int(match.group(1))
+        unit = _RELATIVE_UNIT_CODES.get(match.group(2), "d")
+        result = TimeRange(kind="relative", value=f"{amount}{unit}")
+        logger.info("时间范围抽取完成", kind=result.kind, value=result.value)
+        return result
+    logger.info("时间范围抽取完成", kind="", value="")
+    return None
 # 被否定的调度词，用户说“不要定时”时不能按定时意图处理；同样只认多字否定词。
 _NEGATED_SCHEDULE_RE = re.compile(
     r"(?:不要|不需要|无需|不用|禁止)\s*(?:定时|以后|之后|周期|每小时|每天|每周|每月)"
@@ -162,15 +214,14 @@ class ReportPlanner:
             plan = await self._merge_structured_llm(plan, normalized)
         else:
             plan = await self._plan_units_with_llm(plan, normalized)
-        # 年度标题属于全局分析范围，模型拆分后的问题不再含标题，必须显式保留。
-        heading = _SECTION_MARK_RE.split(normalized, maxsplit=1)[0]
-        year_match = re.search(r"(?<!\d)((?:19|20)\d{2})\s*年(?:度)?[^，。；:：]{0,40}(?:报表|报告|分析)", heading)
-        if year_match:
-            year = int(year_match.group(1))
-            time_range = TimeRange(kind="absolute", value=f"{year}-01-01/{year}-12-31")
+        # 时间范围属于全局分析范围，模型拆分后的问题不再含时间范围原文，必须显式保留：
+        # 把需求里的绝对区间/年度标题/相对区间统一抽取后，套给所有仍是默认 90d 的单元。
+        # 必须放在模型合并之后：模型没抽到时间范围时，规则层抽取才是最后的兜底。
+        extracted = extract_time_range(normalized)
+        if extracted is not None:
             for unit in plan.analysis_units:
                 if unit.time_range == TimeRange():
-                    unit.time_range = time_range.model_copy()
+                    unit.time_range = extracted.model_copy()
         logger.info(
             "报表计划解析完成",
             execution_mode=plan.execution_mode,
@@ -612,6 +663,13 @@ class ReportPlanner:
             seen.add(key)
             payload = {name: value for name, value in raw.items() if name != "unit_id"}
             payload.update({"unit_id": key, "question": question})
+            # 模型的时间范围建议可能缺失或残缺（None、空值、自然语言时长）：残缺值必须剔除，
+            # 让单元落到默认值再走服务端兜底；不能把非法值原样塞进契约，
+            # 否则一个空字符串会让整个单元连问题一起被拒收（与 max_length=12 同类的静默丢失）。
+            llm_time_range = ReportPlanner._normalize_llm_time_range(payload.get("time_range"))
+            payload.pop("time_range", None)
+            if llm_time_range is not None:
+                payload["time_range"] = llm_time_range
             # 模型没有 schema 依据：集合内的数据源若未在用户原文点名，只是猜测，清空后交给执行期定位；
             # 集合外的数据源保持原样，仍由授权校验拒绝，不能让清理动作绕过安全闸。
             datasource = str(payload.get("datasource") or "").strip()
@@ -622,6 +680,36 @@ class ReportPlanner:
             except ValueError:
                 logger.warning("报表规划模型给出的单元未通过校验，已跳过", unit_index=index)
         return units
+
+    # 方法作用：把模型给出的 time_range 建议规范化成 AnalysisUnit 契约可接受的形式。
+    # Args: raw - 模型输出的 time_range 字段值，可能是 dict、None 或其它类型。
+    # Returns: 含 kind/value 的字典；不可用时返回 None，表示交回服务端默认值。
+    @staticmethod
+    def _normalize_llm_time_range(raw: Any) -> dict[str, str] | None:
+        logger.debug("模型时间范围规范化入口", raw_type=type(raw).__name__)
+        if not isinstance(raw, dict):
+            logger.info("模型时间范围规范化完成", accepted=False, reason="非字典")
+            return None
+        kind = str(raw.get("kind") or "").strip()
+        value = str(raw.get("value") or "").strip()
+        result: dict[str, str] | None
+        if kind == "all":
+            # all 档也必须带非空值，否则过不了 TimeRange 的 min_length 校验。
+            result = {"kind": "all", "value": value or "all"}
+        elif kind == "absolute" and value:
+            # 模型可能把区间写成「起 至 止」等自然语言形态，先复用抽取器规范化；
+            # 抽不到时保留原值，由 TimeRange 自身的格式校验兜底。
+            extracted = extract_time_range(value)
+            if extracted is not None and extracted.kind == "absolute":
+                value = extracted.value
+            result = {"kind": "absolute", "value": value}
+        elif kind == "relative" and re.fullmatch(r"\d{1,4}\s*[A-Za-z]?", value):
+            # 只认「数字+单位」写法；「最近三个月」这类自然语言交回默认值，避免写入无效值。
+            result = {"kind": "relative", "value": re.sub(r"\s+", "", value)}
+        else:
+            result = None
+        logger.info("模型时间范围规范化完成", accepted=result is not None, kind=kind)
+        return result
 
     # 方法作用：在降级为规则拆分时补充可读提示，让用户知道当前单元来源。
     # Args: plan - 保留规则单元的计划。
