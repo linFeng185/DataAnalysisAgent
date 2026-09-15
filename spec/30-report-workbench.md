@@ -144,6 +144,17 @@ ReportWorkbenchSubgraph（每次运行独立 thread_id）
 
 默认值：`execution_mode=immediate`、`max_runs=1`、页面 `expires_in=7d`、`share.allow_drilldown=false`、`timezone=租户时区`、`max_concurrency=4`。定时任务若未指定次数，默认持续到被暂停或到 `schedule_end_at`，但仍受租户总配额和最长调度期限约束。
 
+#### 5.2.1 时间范围的传递链路（2026-09-15 修订）
+
+事故背景：需求原文写了「时间范围 2016-01-01 至 2036-12-31」，实测 22 个分析单元的 `time_range` 全部是默认的 `{"kind":"relative","value":"90d"}`——90 天窗口只落回一个月，同比/环比全部为 null。根因在契约层：`report.plan` 的输出契约与提示词里根本没有 `time_range` 字段，模型不知道要抽、也没有地方填。取数窗口必须从需求原文一路带到单元查询，任何一层丢掉都会让同环比基期取不到：
+
+| 层 | 规则 |
+|---|---|
+| 需求 → 单元 | `report.plan` 输出契约含 `ReportPlanUnitTimeRange`（取值 `relative`/`absolute`/`all`），提示词要求按需求原话抽取：绝对区间写 ISO 起止（`起/止`）、相对区间写 `90d` 形式、需求完全没写就留空不编造。模型不可用或未给出时由规则层 `planner.extract_time_range` 兜底，识别顺序为绝对区间 > 年度标题 > 相对区间；兜底在**模型合并之后**只对仍为默认值的单元套用（放在构造计划之前会被模型给出的单元整批替换，修复本身失效）。 |
+| 单元 → 查询 | `runner._compose_unit_query` 把确认后的窗口拼进单元查询文本：`absolute` 渲染为「起 至 止（绝对日期范围 起/止；查询必须覆盖该区间，需要同比/环比时同时取到基期）」，`relative` 渲染为「最近 N 天/周/个月/年」，`all` 渲染为「全部数据」。必须显式带上：主图 `classify_intent` 会按问题文本重判是否需要时间范围，不带会被拦成「请指定查询的时间范围」，白白丢掉一个参数早就确定的单元。 |
+
+模型给出的 `time_range` 在落入契约前先经 `_normalize_llm_time_range` 规范化，非法值（空串、非 ASCII 如「全部」「2016年1月1日」）一律丢弃并交回规则兜底，**不得让一个残缺值使整个单元被 `AnalysisUnit` 拒收、连同业务问题一起静默消失**——那比保留默认 90 天更糟。
+
 ### 5.3 计划契约
 
 ```json
@@ -272,11 +283,32 @@ ReportWorkbenchSubgraph（每次运行独立 thread_id）
 
 **报表自身的发散补充回路**（详见 `spec/42-report-divergent-analysis.md` 第 4、6 节）是独立机制，与上面被关闭的旧回环无关：
 
-- 它在**已取回数据**之后运行，基于确定性深挖产出的显著发现决定是否补充查询，因此属于"数据驱动"而非"证据不足驱动"；
+- 它在**已取回数据**之后运行，基于确定性深挖产出的显著发现**或单元缺少同环比基期**决定是否补充查询，因此属于"数据驱动"而非"证据不足驱动"；
 - 它受**档位额度**（保守 0 / 标准 3 / 深度 6 个自主追加单元，计划期与运行期共享同一份额度）、**轮数上限**（0/1/2）与**单轮上限**（0/2/3）三重约束；
-- 进入回路前必须先通过确定性前置筛选，无显著发现时**不消耗 LLM 调用**；
+- 进入回路前必须先通过确定性前置筛选：额度未用尽、轮次未到、单元数未达上限是三条硬前置；「至少一条 high/moderate 发现」与「单元缺同环比基期」是**或**关系的两条进入条件，两条都不满足时**不消耗 LLM 调用**；
+- 缺基期判定（`src/reporting/profiling.py::needs_baseline_supplement`）独立于发现：事故场景只拿回单月数据时恰好产不出任何发现，补查若挂在发现上则回路永不触发、同比永远为 null。判定与同环比产出侧（`_period_findings`）**共用同一处门槛谓词**（周期数 ≥ `_period_min_observations()`、同比首尾跨度 ≥ 13×30 天），两侧都不许自带数字，避免「判定说足够、产出方产不出」的死区；
 - 运行期追加单元无法在预占时确定，因此 `runner` 必须按**最坏情况**预占配额，不允许"先跑再按实际补扣"；
 - 页面 `limitations` 必须披露本次运行包含的自主追加单元数量。
+
+### 6.4 取样、截断与样本超限处置（2026-09-15 修订）
+
+**两种"样本被裁"必须分开**：`sample_capped` 表示**给模型的提示词样本**被裁（提示词预算问题，与用户可见行集无关）；`truncated` 只由真实执行截断决定。混用会让「共 60 行、全部展示」的单元被判成"样本被截断"，实机页面上因此逐条刷屏。
+
+| 标记 | 语义 | 来源 |
+|---|---|---|
+| `sample_capped` | 提示词样本被裁到固定行数 | `multi_source.py` 的 `_PROMPT_SAMPLE_ROWS=50`、单源合并贡献上限 `_MERGED_BATCH_ROWS=200`、合并回传上限 `report_max_sample_rows`；执行层经 `query_result_sample_capped` 上报 |
+| `truncated` | 用户可见行集被截断 | 执行层 `query_result_truncated`；报表侧最终由 `display_truncated(展示行数, 查询全量行数)` 判定，全量不可知时不臆断 |
+
+**阈值可配**：`report_max_sample_rows`（默认 5000，`ge=100 / le=100000`）替换原先 `execute_sql.py`（200）、`multi_source.py`（50/30/200）三处硬编码；`execute_sql`、`merge_results_node` 与合并上限统一读它，配置读取失败时回退历史默认值并记 warning。
+
+**取数要求前置**：`_compose_unit_query` 在单元查询文本末尾追加「优先在数据库侧完成聚合（GROUP BY 与聚合函数），只返回分析需要的结果行，不要把明细行带回上层统计」。行数超限的根因往往是 SQL 没聚合，在源头提出要求比事后在截断处补救更有效；该要求与时间范围提示是两段独立文本，不影响下游按「时间范围：」定位的解析。
+
+**超限交给模型判断**（`src/reporting/sample_guard.py`）：
+
+- 触发判据 `needs_sample_action`：`max(进入链路行数, 查询全量行数) > report_max_sample_rows`，或执行层已上报 `sample_capped`——执行层是按同一上限先裁再回传的，只拿裁完的行数去比上限永远比不出超限。外层快速闸门与内层决策**共用同一谓词**，"外层放行、内层卡死"的组合不存在。
+- 输出契约 `SampleDecision`（`action: aggregate|narrow_range|keep`、`reason`、`suggested_group_by`、`suggested_range`），由提示词 `report.sample_guard` 产出：模型在「补 GROUP BY 聚合」与「缩小时间范围」之间选一个并说明理由，都不必要时选 `keep`；`suggested_group_by` 只允许取自给定列清单。
+- **只登记，不自动重跑**：结论写入单元快照 `params.sample_decision`（结构化字段 + 可读文案同源）与页面 quality 块的 `limitations`（经 `UnitResult.warnings`）。重跑统一由 §6.3 的补查回路处理，避免两条自动回路叠加互相打架；建议文案排在 `warnings` 最前，防止被分析模型给出的限制挤掉。
+- **保守披露**：模型不可用、调用失败、或"被上游裁过但真实行数未超限"时不调模型，直接给 `keep` 并如实写明计数；进入分析链路行数与查询全量行数分别如实，不互相冒充。
 
 ## 7. 报表页面 DSL
 
@@ -633,6 +665,7 @@ report_max_ttl_days=90
 report_default_timezone=Asia/Shanghai
 report_max_units_per_run=12
 report_max_queries_per_run=16
+report_max_sample_rows=5000
 report_max_concurrency=4
 report_max_page_bytes=2097152
 report_max_public_share_days=30

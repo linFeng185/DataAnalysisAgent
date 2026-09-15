@@ -39,7 +39,7 @@
 | 2 | **`report_profile_results` 只做 `len(rows)` 计数**（`spec/30:215` 声称算数值列/时间粒度/缺失/异常/代表性） | `report_workbench.py:225-236` | 规格与代码不符 |
 | 3 | **报表路径未注入 `suppress_supplemental_query` 标志**，`classify_intent`（`contracts.py:275-282`）把单元问句判为 `sql_analysis`，旧的自主补查回环（`workflow.py:237-281`）**实际可达**（`spec/30:264` 声称不可达） | `runner.py:207-219` | 发散会让单元数上升，放大了这个未受控回环的代价 |
 | 4 | **`yoy` 与 `mom` 的 `process()` 实现完全相同**（都是 `v[i] vs v[i-1]`），但 `yoy` 输出被标为"同比均值" —— 它算的是**环比** | `processors.py:13` 与 `:26` | 复用 processors 会把错误标签带进 23.16 的"同比"数字 |
-| 5 | **`UnitResult` 不携带截断信号**，`rows` 上限 1000（`models.py:267`） | — | 无法判断样本是否被截断，统计结论的样本披露没有依据。**截断信号在旧工作流 state 里其实已经存在**（`query_result_statistics.truncated`、`query_result_truncated`，见 `execute_sql.py:182-183`），只是 `runner._default_execute_unit` 构造 `UnitResult` 时丢弃了它 |
+| 5 | **`UnitResult` 不携带截断信号**，`rows` 上限 1000（`models.py:267`）（↑ 设计期快照，两项均已在 2026-09-15 批次修复：单元已携带截断信号；静态上限改为 `_UNIT_ROWS_STATIC_MAX = 100000`） | — | 无法判断样本是否被截断，统计结论的样本披露没有依据。**截断信号在旧工作流 state 里其实已经存在**（`query_result_statistics.truncated`、`query_result_truncated`，见 `execute_sql.py:182-183`），只是 `runner._default_execute_unit` 构造 `UnitResult` 时丢弃了它 |
 | 6 | **图表硬编码 `bar`** | `document.py:256` | 时间序列与分布结果用柱状图表达不合理 |
 
 ### 1.4 关键约束（不可突破）
@@ -50,7 +50,7 @@
 | **SQL 不支持跨源 join** | 既有能力边界 | 跨源只能做分布级对比，不能做行级连接 |
 | **客户端不能自行签发执行范围** | `report_workbench.py:243-253`（`plan_override` 必须哈希完全相同） | 裁剪只能走"单调删减"，不允许客户端新增 |
 | **成本必须可预占** | 报表配额机制（`reporting/quota.py`，`runner.py:72` 预占 / `:157` 释放） | 运行期发散必须按**最坏情况**预占，不允许"先跑再按实际补扣" |
-| **样本有界** | `UnitResult.rows` 上限 1000（`models.py:267`）；下发页面的数据清单 ≤100 行（`document.py:230`） | 统计结论必须携带样本量披露 |
+| **样本有界** | `UnitResult.rows` 上限 `_UNIT_ROWS_STATIC_MAX = 100000`（`src/reporting/models.py`，与配置 `report_max_sample_rows` 的合法上限 `le=100000` 严格相等，由不变量测试锁死）；下发页面的数据清单 ≤100 行（`document.py:230`） | 统计结论必须携带样本量披露 |
 | **LLM 调用统一走工厂** | 项目 CLAUDE.md | 新增 prompt 必须注册进 `PROMPT_REGISTRY` 并经 `invoke_structured` |
 
 ---
@@ -293,9 +293,10 @@ class UnitFinding(BaseModel):
     truncated: bool = False
 ```
 
-**样本披露**：
+**样本披露**（2026-09-15 修订）：
 
-- `truncated = UnitResult.truncated`，直接取自旧工作流 state 的 `query_result_statistics.truncated`（`execute_sql.py:182`）。
+- `UnitResult.truncated` 由 `display_truncated(展示行数, 查询全量行数)` 判定：只看报表自己展示的行集是否少于全量，全量不可知（0）时不臆断。上游 `query_result_truncated` 混合了「给模型的提示词样本被裁到 50/30 行」这类与用户可见行集无关的标记，直接透传会把「共 60 行、全部展示」的单元判成样本被截断——实机页面逐条刷屏「样本被截断」正是这么来的。
+- 两种语义在契约层已分离：`sample_capped`（`SourceQueryResult.sample_capped`）表示**给模型的提示词样本**被裁，`truncated` 表示真实执行截断；样本上限 `report_max_sample_rows` 可配（默认 5000），超限的处置建议由 `report.sample_guard` 给出、**只登记不自动重跑**（详见 `spec/30-report-workbench.md` §6.4）。
 - **不新增 `total_rows` 字段**：原始行数在现有链路里不可得（`rows` 已被连接器上限截过），而截断信号本就存在，只是 `runner` 构造 `UnitResult` 时丢弃了它。为拿不到的精确分母去下钻 `sql_execution.py` 与 `execute_sql.py` 得不偿失，且这两个文件正被另一条并行开发线修改。
 - 若 `truncated=True`，**每个 finding 强制携带** `caveats: ["样本被截断：结论仅基于返回的 N 行计算"]`。沿用 `RelationEvidence.sampled`（`relations.py:35`）的既有做法。
 - 截断信号缺失时按 `False` 处理，`method` 里仍写明"基于 N 行"。
@@ -305,6 +306,8 @@ class UnitFinding(BaseModel):
 ---
 
 ## 6. 两个发散阶段
+
+> **通用约束段已抽成模块级常量（2026-09-15）**：`src/llm/prompts.py` 模块级定义了 `COMMON_EVIDENCE_ONLY`（证据约束：名称与关系必须来自证据）、`COMMON_NO_CAUSAL_CLAIM`（因果约束：无实验/对照/充分时间证据时只能描述相关性与共变）、`COMMON_NO_PADDING`（凑数约束）三个常量，由**对话侧**（`sql.generate`、`analysis.result`）与**报表侧**（`report.plan`、`report.route`、`report.diverge`、`report.supplement`）引用同一符号，而不是各自复制一份文本。本节下方代码块里的 `+ COMMON_*` 即为实际形态：同一条约束改一处两侧同时生效，不会再出现「改了对话侧忘了报表侧」的漂移。常量会被拼进模板本体并参与 `str.format` 渲染，**常量文本内不得出现花括号**。
 
 ### 6.1 阶段一：计划期发散 `report.diverge`
 
@@ -322,11 +325,13 @@ class UnitFinding(BaseModel):
         "提出最多 {limit} 个'用户没要求但会影响其结论'的补充分析单元。"
         "每个建议必须说明 rationale（为什么与已有需求相关）与 expected_signal（预期能看到什么信号）。"
         "datasource 只能从给定清单里选，不确定时留空字符串，禁止凭猜测填写。"
-        "禁止提出与已有单元语义重复的建议；禁止在 rationale 里使用'导致''造成''因为'等因果措辞，"
-        "只能描述相关性与共变关系。"
-        "只输出 JSON：{{\"proposed_units\": [{{\"question\": \"...\", \"datasource\": \"\", "
+        "禁止提出与已有单元语义重复的建议；"
+        # 因果约束与对话侧 analysis.result、报表侧 report.supplement 共用同一常量。
+        + COMMON_NO_CAUSAL_CLAIM
+        + "只输出 JSON：{{\"proposed_units\": [{{\"question\": \"...\", \"datasource\": \"\", "
         "\"rationale\": \"...\", \"expected_signal\": \"...\"}}]}}。"
-        "确实没有值得补充的方向时返回空数组，不要为凑数编造。"
+        "确实没有值得补充的方向时返回空数组，"
+        + COMMON_NO_PADDING
     ),
     output_model=ReportDivergeOutput,
     # 与 report.route（prompts.py:385）对齐：发散同样需要看全表名清单才能建议"还可以查什么"。
@@ -352,10 +357,12 @@ class UnitFinding(BaseModel):
         "只有当发现确实指向一个尚未覆盖的方向时才提出建议，每条必须说明 supports_finding"
         "（它解释或验证哪一条已有发现）。"
         "datasource 只能从给定清单里选，不确定时留空字符串。"
-        "禁止使用'导致''造成''因为'等因果措辞，只能描述相关性与共变关系。"
-        "只输出 JSON：{{\"proposed_units\": [{{\"question\": \"...\", \"datasource\": \"\", "
+        # 因果约束与对话侧 analysis.result、报表侧 report.diverge 共用同一常量。
+        + COMMON_NO_CAUSAL_CLAIM
+        + "只输出 JSON：{{\"proposed_units\": [{{\"question\": \"...\", \"datasource\": \"\", "
         "\"rationale\": \"...\", \"supports_finding\": \"...\"}}]}}。"
-        "没有需要补充的方向时返回空数组——这是最常见也最正确的结果，不要为凑数编造。"
+        "没有需要补充的方向时返回空数组——这是最常见也最正确的结果，"
+        + COMMON_NO_PADDING
     ),
     output_model=ReportSupplementOutput,
     context_budget=40000,
@@ -364,17 +371,23 @@ class UnitFinding(BaseModel):
 
 ### 6.3 回路决策：确定性前置筛选（省 LLM 调用）
 
-`report_decide_supplement` 是**条件边函数而非节点**（与 `after_analyze_result`，`workflow.py:237-281` 同构）。它先用确定性规则筛选，**四条全满足才调用 LLM**：
+`report_decide_supplement` 是**条件边函数而非节点**（与 `after_analyze_result`，`workflow.py:237-281` 同构）。它先用确定性规则筛选，**三条硬前置全满足、且两条进入条件满足任一条**才调用 LLM：
 
 ```text
+硬前置（全满足）：
 1. 已追加单元数 < 档位总额度
 2. 本轮次 < _DIVERGENCE_MAX_ROUNDS[level]
 3. 当前单元数 < 12（全局上限）
-4. 本轮深挖产出至少一条 significance ∈ {high, moderate} 的 finding
-   —— 若深挖什么都没发现，说明数据正常，无需补查
+进入条件（满足任一条）：
+4a. 本轮深挖产出至少一条 significance ∈ {high, moderate} 的 finding
+    —— 若深挖什么都没发现，说明数据正常，无需补查
+4b. 存在缺同环比基期的单元（needs_baseline_supplement 返回非空理由，2026-09-15 新增）
+    —— 只拿回单月数据时产不出任何发现，若把补查挂在发现上，回路永不触发、同比永远为 null
 ```
 
-任一不满足 → 直接返回 `"continue"`，**不消耗 LLM 调用**。
+任一硬前置不满足、或两条进入条件都不满足 → 直接返回 `"continue"`，**不消耗 LLM 调用**。
+
+**第 4b 条的门槛与产出侧同源**：`profiling.needs_baseline_supplement(unit, rows, findings)` 在单元问题命中「同比/去年同期/上年同期」或「环比/上月/上期」措辞时，按本轮实际取回的样本数出聚合周期数与首尾跨度，不足即返回可读理由（写明缺哪类基期、当前周期数与跨度）。门槛与同环比产出侧 `_period_findings` **共用同一处谓词**（`_period_min_observations()` / `_has_enough_yoy_span()`），两侧都不许自带数字——一旦分头定义，就会出现「判定说足够、产出方产不出」的死区。该判定全程确定性，不调用模型。
 
 满足时调用 `report.supplement`：
 
