@@ -14,6 +14,7 @@ from pydantic import BaseModel, Field, model_validator
 
 from src.logging_config import get_logger
 from src.reporting.models import (
+    _UNIT_TITLE_MAX_CHARS,
     ReportPlan,
     UnitResult,
     max_document_blocks,
@@ -286,20 +287,31 @@ def layout_for_block(block_type: str, has_data: bool = True) -> ReportLayout:
 
 
 # 区段标题的字数上限：标题要能一眼读完，超长问题截断而不是撑满一行。
-_SECTION_TITLE_MAX = 20
+# 取值复用单元标题的契约常量，避免展示层与解析层各写一个数字后互相脱钩。
+_SECTION_TITLE_MAX = _UNIT_TITLE_MAX_CHARS
 
 
 # 方法作用：把单元问题压成区段标题。
-# Args: question - 单元问题文本；unit_id - 问题为空时的兜底标识。
-# Returns: 短标题；问题形如「销售基盘：按年月…」时取冒号前的业务名。
-def unit_short_title(question: str, unit_id: str = "") -> str:
+# Args: question - 单元问题文本；unit_id - 问题为空时的兜底标识；title - 模型给出的精简标题，可为空。
+# Returns: 短标题；模型给了标题就直接用；否则问题形如「销售基盘：按年月…」时取冒号前的业务名，
+#          再否则截断问题文本。回退分支不是死代码：发散单元与模型降级时标题必然为空。
+def unit_short_title(question: str, unit_id: str = "", title: str = "") -> str:
+    logger.debug("单元标题生成入口", question_chars=len(str(question or "")), has_title=bool(str(title or "").strip()))
+    model_title = " ".join(str(title or "").split())
+    if model_title:
+        # 模型标题已是面向读者的业务名，不再做冒号切分或截断，长度由契约与单元字段各自把关。
+        logger.debug("单元标题生成完成", source="model", title_chars=len(model_title))
+        return model_title
     text = " ".join(str(question or "").split())
     if not text:
+        logger.debug("单元标题生成完成", source="unit_id", title_chars=len(unit_id))
         return unit_id
     # 用户书写习惯是「小标题：详细要求」，冒号前那截就是要展示的名字。
     head = re.split(r"[：:]", text, maxsplit=1)[0].strip()
     if head and len(head) <= _SECTION_TITLE_MAX:
+        logger.debug("单元标题生成完成", source="question_head", title_chars=len(head))
         return head
+    logger.debug("单元标题生成完成", source="question_truncated", title_chars=_SECTION_TITLE_MAX)
     return f"{text[:_SECTION_TITLE_MAX]}…"
 
 
@@ -320,8 +332,12 @@ def build_report_document(
     drilldowns: list[dict[str, Any]] = []
     sections: list[ReportSection] = []
     navigation: list[str] = ["overview"]
-    # 区段标题取单元问题的业务名，不再拿 unit_id 充当标题——页面上整片英文。
-    unit_titles = {str(unit.unit_id): unit_short_title(unit.question, str(unit.unit_id)) for unit in plan.analysis_units}
+    # 区段标题优先用模型在 report.plan 里顺带给出的 title（不额外起模型调用），
+    # 缺失时才退回单元问题的业务名——绝不再拿 unit_id 充当标题，页面上整片英文。
+    unit_titles = {
+        str(unit.unit_id): unit_short_title(unit.question, str(unit.unit_id), str(getattr(unit, "title", "") or ""))
+        for unit in plan.analysis_units
+    }
     for result in results[:max_plan_units()]:
         section_id = result.unit_id
         navigation.append(section_id)

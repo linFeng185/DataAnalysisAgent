@@ -12,6 +12,8 @@ from __future__ import annotations
 
 from typing import Any
 
+import pytest
+
 from src.reporting.document import build_report_document
 from src.reporting.models import AnalysisUnit, ReportPlan, UnitResult
 from src.reporting.relations import RelationEvidence
@@ -20,13 +22,14 @@ _QUESTION = "销售基盘：按年月、地区、渠道以及历史模拟/当年
 
 
 # 方法作用：构造含指定单元问题的计划。
-# Args: questions - 单元问题文本。
+# Args: questions - 单元问题文本；titles - 可选的单元标题列表，按位置对应问题，缺省全为空。
 # Returns: 已校验的报表计划。
-def _plan(*questions: str) -> ReportPlan:
+def _plan(*questions: str, titles: list[str] | None = None) -> ReportPlan:
+    title_list = list(titles or [])
     return ReportPlan(
         requested_datasources=["sales"],
         analysis_units=[
-            AnalysisUnit(unit_id=f"unit_{index}", question=text)
+            AnalysisUnit(unit_id=f"unit_{index}", question=text, title=title_list[index - 1] if index <= len(title_list) else "")
             for index, text in enumerate(questions, start=1)
         ],
     )
@@ -94,6 +97,120 @@ class TestReportContentShape:
         assert section.title.endswith("…")
         assert section.title != "unit_1"
         assert len(section.title) <= 21
+
+    # 方法作用：验证模型给出的精简标题直接成为区段标题。
+    # Args: self - 测试实例。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    def test_section_title_uses_model_title(self) -> None:
+        """标题由大模型生成后，页面标题必须等于它，而不是问题原文的硬截断。"""
+        # Arrange
+        plan = _plan(_QUESTION, titles=["销售基盘与情景对比"])
+
+        # Act
+        artifact = build_report_document(plan, [_result("unit_1")])
+
+        # Assert
+        section = next(item for item in artifact.document.sections if item.id == "unit_1")
+        assert section.title == "销售基盘与情景对比"
+        # 硬截断的痕迹（省略号）与模型标题并存说明有别的分支覆盖了 title
+        assert not section.title.endswith("…")
+        assert section.title != _QUESTION[:20]
+
+    # 方法作用：验证模型没给标题时区段标题仍走原有回退逻辑。
+    # Args: self - 测试实例。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    def test_section_title_falls_back_without_model_title(self) -> None:
+        """模型未给标题（发散单元或模型降级）时不能报错，也不能产出空标题。"""
+        # Arrange / Act
+        artifact = build_report_document(
+            _plan(_QUESTION, "按门店和年月对比销售目标与实际净销售额并给出达成率分布"),
+            [_result("unit_1"), _result("unit_2")],
+        )
+
+        # Assert
+        titles = {section.id: section.title for section in artifact.document.sections}
+        assert titles["unit_1"] == "销售基盘"       # 冒号前业务名仍生效
+        assert titles["unit_2"].endswith("…")       # 无冒号结构仍按截断回退
+        assert all(titles.values())                 # 任何单元都不出现空标题
+
+    # 方法作用：验证模型标题经 _coerce_llm_units 透传，且异常长度不会拖垮整个单元。
+    # Args: self - 测试实例。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    def test_llm_unit_title_is_passed_through(self) -> None:
+        """模型标题是单元的一部分；超长标题必须收窄，不能连问题一起被契约拒收。"""
+        # Arrange
+        from src.reporting.planner import ReportPlanner
+
+        raw_units = [
+            {"unit_id": "sales", "question": "销售基盘分析", "title": "销售基盘"},
+            {"unit_id": "risk", "question": "风险敞口分析", "title": "溢" * 200},
+            {"unit_id": "plain", "question": "无标题单元"},
+        ]
+
+        # Act
+        units = ReportPlanner._coerce_llm_units(raw_units)
+
+        # Assert
+        assert len(units) == 3, "过长标题不得导致单元被整体拒收"
+        assert units[0].title == "销售基盘"
+        assert units[1].title and len(units[1].title) <= 20
+        assert units[2].title == ""
+
+    # 方法作用：验证契约层把模型标题限制在 12 字。
+    # Args: self - 测试实例。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    def test_plan_unit_contract_caps_title_length(self) -> None:
+        """标题进契约才拦得住；只靠提示词约束会让长句直接灌进区段标题。"""
+        # Arrange
+        from pydantic import ValidationError
+
+        from src.llm.output_contracts import ReportPlanUnit
+
+        # Act / Assert
+        assert ReportPlanUnit(question="销售分析", title="销售基盘").title == "销售基盘"
+        assert ReportPlanUnit(question="销售分析").title == ""
+        with pytest.raises(ValidationError):
+            ReportPlanUnit(question="销售分析", title="超" * 13)
+
+    # 方法作用：验证模型标题从拆解输出一路走到页面区段标题。
+    # Args: self - 测试实例。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    async def test_model_title_reaches_section_title_end_to_end(self) -> None:
+        """标题必须并入既有拆解调用；这一条锁住"模型输出→计划→页面"的完整链路。"""
+        # Arrange
+        from src.reporting.planner import ReportPlanner
+
+        class FakePlanner:
+            # 方法作用：返回带标题的分析单元建议。
+            # Args: prompt - 规则解析传入的用户文本。
+            # Returns: 含一个带 title 单元的模型输出字典。
+            async def ainvoke(self, prompt: str) -> dict[str, object]:
+                return {"analysis_units": [{"unit_id": "sales", "question": _QUESTION, "title": "销售基盘"}]}
+
+        # Act
+        plan = await ReportPlanner(FakePlanner()).parse("生成销售报表", datasources=["sales"])
+        artifact = build_report_document(plan, [_result("sales")])
+
+        # Assert
+        assert plan.analysis_units[0].title == "销售基盘"
+        section = next(item for item in artifact.document.sections if item.id == "sales")
+        assert section.title == "销售基盘"
+
+    # 方法作用：验证 report.plan 提示词包含标题生成约束。
+    # Args: self - 测试实例。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    def test_plan_prompt_asks_for_unit_title(self) -> None:
+        """标题必须并入既有拆解调用，提示词里得明确要求，否则模型不会给。"""
+        # Arrange
+        from src.llm.prompts import get_prompt_definition
+
+        # Act
+        template = get_prompt_definition("report.plan").template
+
+        # Assert
+        assert "title" in template
+        assert "12" in template
+        assert "维度罗列" in template
 
     # 方法作用：验证未建立关系的证据不单独占块。
     # Args: self - 测试实例。

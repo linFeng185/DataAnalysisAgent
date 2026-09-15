@@ -31,13 +31,28 @@ class TestMultiSourceTruncation:
         assert aligned is None
         assert results[1]["data"] == [{right: 99}]
 
-    # 方法作用：验证来源截断与合并裁剪均写回状态并先交给分析节点。
-    # Args: self - 测试实例；monkeypatch - 补丁工具；row_count - 来源行数；source_truncated - 来源截断；expected - 预期截断。
+    # 方法作用：验证来源真实截断与每源贡献上限分别披露，不再混成一个 truncated。
+    # Args: self - 测试实例；monkeypatch - 补丁工具；row_count - 来源行数；source_truncated - 来源截断；
+    #       expected_truncated - 预期真实截断；expected_sample_capped - 预期样本受限。
     # Returns: 无返回值。
     @pytest.mark.asyncio
-    @pytest.mark.parametrize(("row_count", "source_truncated", "expected"), [(50, False, True), (2, True, True), (2, False, False)])
-    async def test_merge_preserves_truncation(self, monkeypatch: pytest.MonkeyPatch, row_count: int, source_truncated: bool, expected: bool) -> None:
-        """50→30 行以及来源已截断时，分析与最终出口都必须披露样本受限。"""
+    @pytest.mark.parametrize(
+        ("row_count", "source_truncated", "expected_truncated", "expected_sample_capped"),
+        [
+            (300, False, False, True),
+            (2, True, True, False),
+            (2, False, False, False),
+        ],
+    )
+    async def test_merge_preserves_truncation(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        row_count: int,
+        source_truncated: bool,
+        expected_truncated: bool,
+        expected_sample_capped: bool,
+    ) -> None:
+        """300 行超过每源贡献上限 200 只算样本受限；来源真实截断才写 truncated。"""
         # Arrange
         presenter = SimpleNamespace(ainvoke=AsyncMock(return_value={}))
         monkeypatch.setattr("src.graph.subgraphs.result_presentation.build_result_presentation_subgraph", Mock(return_value=presenter))
@@ -48,17 +63,18 @@ class TestMultiSourceTruncation:
         result = await merge_results_node(state)
 
         # Assert
-        assert result["query_result_truncated"] is expected
-        assert result["query_result_statistics"]["truncated"] is expected
-        assert presenter.ainvoke.call_args.args[0]["query_result_truncated"] is expected
+        assert result["query_result_truncated"] is expected_truncated
+        assert result["query_result_statistics"]["truncated"] is expected_truncated
+        assert result["query_result_sample_capped"] is expected_sample_capped
+        assert presenter.ainvoke.call_args.args[0]["query_result_truncated"] is expected_truncated
 
-    # 方法作用：验证单源 SQL 返回样本再裁到 50 行时保留截断标记与原始计数。
+    # 方法作用：验证单源 SQL 返回样本再裁到 50 行时，只标样本受限而不冒充真实截断。
     # Args: self - 测试实例；monkeypatch - 补丁工具；row_count - 单源返回行数；flag - 上游截断标记。
     # Returns: 无返回值。
     @pytest.mark.asyncio
     @pytest.mark.parametrize(("row_count", "flag"), [(90, False), (50, False), (2, True)])
     async def test_worker_preserves_sample_cut(self, monkeypatch: pytest.MonkeyPatch, row_count: int, flag: bool) -> None:
-        """重现日志中的 90→50 行，标记必须经 SourceQueryResult 序列化保留。"""
+        """重现日志中的 90→50 行：提示词样本被裁记 sample_capped，真实截断才记 truncated。"""
         # Arrange
         registry = SimpleNamespace(resolve_or_none=AsyncMock(return_value=SimpleNamespace(schema=None, dialect="oracle")))
         monkeypatch.setattr("src.datasource.registry.get_registry", Mock(return_value=registry))
@@ -70,7 +86,8 @@ class TestMultiSourceTruncation:
         # Assert
         assert len(result["data"]) == min(50, row_count)
         assert result["full_count"] == row_count
-        assert result.get("truncated", False) is (row_count > 50 or flag)
+        assert result.get("truncated", False) is flag
+        assert result.get("sample_capped", False) is (row_count > 50)
 
     # 方法作用：验证截断后有界结果的分析摘要不被之前仅看三行的合并摘要覆盖。
     # Args: self - 测试实例；monkeypatch - 补丁工具；truncated - 是否发生来源裁剪。

@@ -182,6 +182,9 @@ class SourceQueryResult(BaseModel):
     tables: int = Field(default=0, ge=0)
     full_count: int = Field(default=0, ge=0)
     truncated: bool = False
+    # 给模型的提示词样本被裁到固定行数，与"用户可见行集被截断"是两件事：
+    # 混用会让「共 60 行、全部展示」的结果被判成截断（实机页面上逐条刷屏的根因）。
+    sample_capped: bool = False
     masking: MaskingMetadata = Field(default_factory=MaskingMetadata)
     error: str = ""
     # 面向用户的失败说明：模型判定证据缺口时给出的具体原因（缺哪张表、缺哪个字段）。

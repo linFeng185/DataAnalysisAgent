@@ -16,8 +16,6 @@ logger = get_logger(__name__)
 
 # SQL 文本入库上限：迁移列是无界 TEXT，这里限幅保护单条记录体积。
 SQL_TEXT_LIMIT = 100_000
-# 报表页面单单元展示行数上限，与 execute_sql 的 query_result_sample[:200] 同源。
-DISPLAY_ROW_LIMIT = 200
 # 参数键命中这些片段即视为敏感：快照用于排查，不承担密钥存储职责。
 _SENSITIVE_PARAM_TOKENS = ("api_key", "token", "password", "secret")
 # 迁移中定长列的宽度上限，超长先裁剪再入库，避免写入被列宽拒绝。
@@ -82,19 +80,26 @@ class UnitSnapshot(BaseModel):
 
 
 # 方法作用：生成截断原因的可读文案，未截断时返回空串。
-# Args: displayed - 实际展示行数；full_count - 全量行数；limit - 展示行数上限。
-# Returns: 形如「查询返回 80000 行，页面展示 5000 行（上限 5000）」的说明文本。
-def describe_truncation(displayed: int, full_count: int, limit: int) -> str:
-    logger.debug("截断原因生成入口", displayed=displayed, full_count=full_count, limit=limit)
+# Args: sample_rows - 本次进入分析链路的样本行数；full_count - 查询返回的全量行数；
+#       limit - 本次失效的样本行数上限（即真实切割点），未知传 0。
+# Returns: 形如「进入分析链路 5000 行，查询全量 80000 行（生效样本上限 5000 行）」的说明文本。
+def describe_truncation(sample_rows: int, full_count: int, limit: int) -> str:
+    """措辞只描述真实发生的事：进入分析的样本、生效的上限、查询全量。
+
+    这里**不是**页面渲染的行数上限——页面另有自己的展示口径（见 document 层），
+    调用方必须传真实施加在样本上的那个切割点，否则会出现「展示 5000 行、上限 200」
+    这种自相矛盾的数字。
+    """
+    logger.debug("截断原因生成入口", sample_rows=sample_rows, full_count=full_count, limit=limit)
     full = int(full_count or 0)
-    shown = int(displayed or 0)
-    # 无全量信号或全量不超过展示数时都按未截断处理，不凭空制造截断说明。
-    if full <= 0 or full <= shown:
+    kept = int(sample_rows or 0)
+    # 无全量信号或全量不超过进入分析的行数时都按未截断处理，不凭空制造截断说明。
+    if full <= 0 or full <= kept:
         return ""
     if int(limit or 0) > 0:
-        text = f"查询返回 {full} 行，页面展示 {shown} 行（上限 {int(limit)}）"
+        text = f"进入分析链路 {kept} 行，查询全量 {full} 行（生效样本上限 {int(limit)} 行）"
     else:
-        text = f"查询返回 {full} 行，页面展示 {shown} 行"
+        text = f"进入分析链路 {kept} 行，查询全量 {full} 行"
     logger.info("截断原因生成完成", text=text)
     return text
 

@@ -19,10 +19,30 @@ from src.llm.output_contracts import (
     ReportSupplementOutput,
     ReportTitleOutput,
     ReportUnitRoutesOutput,
+    SampleDecision,
     SQLGenerationOutput,
     TaskPlanOutput,
     TextAnswerOutput,
 )
+
+# ---- 跨提示词共用的通用约束段 ----
+# 同一条约束在对话侧与报表侧各写一份，改一处漏一处就会互相漂移；
+# 这里集中定义，两侧模板共同引用。
+# 注意：常量会被拼进模板本体并参与 str.format 渲染，文本里不得出现花括号。
+# 证据约束：所有名称都必须取自给定证据，不得编造或猜测。
+COMMON_EVIDENCE_ONLY: str = (
+    "表名、字段名、枚举值、关联关系和数据源名称都必须来自提供的证据，"
+    "禁止编造、猜测或凭想象填写。"
+)
+
+# 因果约束：没有实验、对照或充分时间证据时只能描述相关性与共变关系。
+COMMON_NO_CAUSAL_CLAIM: str = (
+    "相关性不等于因果：没有实验、对照或充分时间证据时禁止声称因果；"
+    "禁止使用导致、造成、因为等因果措辞，只能描述相关性与共变关系。"
+)
+
+# 凑数约束：只产出有真实支撑的内容，不得为凑数编造或选择不相关的项。
+COMMON_NO_PADDING: str = "禁止为凑数编造内容，也禁止为凑数选择不相关的项。"
 
 # ---- 4.2 意图识别 ----
 
@@ -34,7 +54,8 @@ confidence 是 0 到 1 之间的数字。
 
 # ---- 4.4 SQL 生成 ----
 
-SQL_GENERATION_SYSTEM = """你是严谨的 {dialect} 只读 SQL 规划与生成专家。你的目标是生成语义正确、粒度正确、可执行且成本受控的单条查询。
+SQL_GENERATION_SYSTEM = (
+    """你是严谨的 {dialect} 只读 SQL 规划与生成专家。你的目标是生成语义正确、粒度正确、可执行且成本受控的单条查询。
 
 ## 证据优先级
 系统安全、租户权限与只读约束 > 用户当前明确要求 > 已声明业务规则/指标口径 > Schema 与枚举 > 已验证示例 > 对话历史。
@@ -50,7 +71,10 @@ SQL_GENERATION_SYSTEM = """你是严谨的 {dialect} 只读 SQL 规划与生成�
 
 ## 强制规则
 1. 只输出一条只读 SELECT 或 WITH ... SELECT；禁止 DDL、DML、事务、存储过程、多语句和 SQL 注释。
-2. 表名、字段名、枚举值和关联关系必须来自提供的证据，禁止编造、猜测或使用 SELECT *。
+2. """
+    # 证据约束与报表侧 report.plan 共用同一常量，改一处即可两侧同时生效。
+    + COMMON_EVIDENCE_ONLY
+    + """禁止使用 SELECT *。
 3. 聚合、窗口函数、日期和字符串函数必须符合 {dialect}；字段有歧义时始终使用表别名限定。
 4. 数值计算默认 ROUND(..., 2)；用户指定精度时服从用户要求。SUM/AVG 明确处理 NULL，比例明确分子和分母口径。
 5. 明细查询默认 LIMIT 1000；聚合结果按用户目标排序，避免无意义 LIMIT。优先利用过滤字段、索引和分区键。
@@ -63,14 +87,20 @@ SQL_GENERATION_SYSTEM = """你是严谨的 {dialect} 只读 SQL 规划与生成�
 
 {skill_instructions}
 """
+)
 
 # ---- 4.8 数据分析 ----
 
-DATA_ANALYSIS_SYSTEM = """你是资深数据分析师。根据用户原问题、实际执行 SQL、查询结果、确定性统计摘要和业务口径生成证据化中文报告。
+DATA_ANALYSIS_SYSTEM = (
+    """你是资深数据分析师。根据用户原问题、实际执行 SQL、查询结果、确定性统计摘要和业务口径生成证据化中文报告。
 
 ## 分析准则
 1. 先直接回答用户问题，再给证据；所有数字必须来自结果或统计摘要，禁止心算补数和编造背景。
-2. 区分“观测事实”“解释性假设”和“建议”。相关性不等于因果；没有实验、对照或充分时间证据时禁止声称因果。
+2. 区分“观测事实”“解释性假设”和“建议”。"""
+    # 因果约束与报表侧 report.diverge / report.supplement 共用同一常量；
+    # 「区分观测事实、解释性假设和建议」是对话侧独有的独立约束，不并入常量。
+    + COMMON_NO_CAUSAL_CLAIM
+    + """
 3. 明确数据范围、时间范围、样本/全量、截断、缺失值、异常值和口径限制。局部样本不得外推为总体结论。
 4. 比较必须给出基准、绝对差和相对变化；趋势至少说明方向、幅度和覆盖期；异常说明判定依据。
 5. 不止复述查询值：结合指标业务语义，补充与它直接相关的上游驱动指标、下游结果指标和建议联查维度；未查询到的指标只能列为“建议联查”，不得伪造其数值。
@@ -88,6 +118,7 @@ DATA_ANALYSIS_SYSTEM = """你是资深数据分析师。根据用户原问题、
 输出 JSON:
 {{"summary":"直接回答问题的1-3句结论","field_descriptions":{{"结果列名":"该列的中文说明与口径"}},"insights":["带证据的洞察"],"data_quality":["完整性或质量说明"],"limitations":["不能从当前数据推出的结论"],"confidence":"high|medium|low","related_metrics":["建议联查的指标及关联理由"],"business_impacts":["当前现象可能产生的业务影响"],"possible_causes":["明确标注待验证的原因假设及验证数据"],"recommended_actions":["有证据依据或带触发条件的下一步"],"evidence_status":"sufficient|supplementable|needs_user_input","evidence_gaps":["会实质影响结论的证据缺口"],"supplemental_questions":["可由当前授权数据库直接回答的补查问题"],"recommended_chart_type":"bar|line|pie|scatter|table","follow_up_questions":["可验证的追问"]}}
 """
+)
 
 ATTRIBUTION_MODEL_SELECTION_SYSTEM = """你是触点归因模型推荐器。用户未明确指定模型时，只根据业务目标推荐一个规则模型。
 
@@ -388,10 +419,15 @@ _INITIAL_PROMPTS: dict[str, PromptDefinition] = {
             "question 必须是一句自包含、可独立执行的业务问题，写清分析对象、口径与"
             "期望输出，不得只写分组名、标题或几个字的短语——取数阶段只看到 question，"
             "写不完整会让这个单元取不到数据。"
+            "title 是这个单元在页面上的精简标题，不超过 12 个字，概括业务主题；"
+            "不要照抄 question 原文，也不要以「按年月」「按地区」这类维度罗列开头。"
             "unit_id 只是程序内部标识，只影响日志与引用，不影响展示与阅读。"
-            "datasource 必须留空字符串：真实数据源要在执行期由知识库定位，禁止凭猜测填写；"
-            "只有用户原文明确写出某个数据源名称时才填写它。"
+            "datasource 必须留空字符串：真实数据源要在执行期由知识库定位；"
+            # 证据约束与对话侧 sql.generate 共用同一常量，不再各写一份。
+            + COMMON_EVIDENCE_ONLY
+            + "只有用户原文明确写出某个数据源名称时才填写它。"
             "只输出 JSON：{{\"analysis_units\": [{{\"unit_id\": \"英文小写下划线标识\", "
+            "\"title\": \"不超过 12 字的精简标题\", "
             "\"question\": \"完整保留用户原意的业务问题\", \"datasource\": \"\", "
             "\"priority\": \"primary\", \"dimensions\": [], \"metrics\": []}}]}}。"
             "最多 {max_units} 个单元；确实无法判断时给出一个覆盖整体需求的单元。"
@@ -419,8 +455,10 @@ _INITIAL_PROMPTS: dict[str, PromptDefinition] = {
             "你是报表数据源路由器。给定若干分析单元和每个数据源的表名清单，"
             "判断每个单元应该在哪几个数据源上执行。"
             "只有表名清单确实能支撑该问题的数据源才算命中；"
-            "没有任何数据源能支撑时必须返回空数组，禁止为凑数选择不相关的数据源。"
-            "只输出 JSON：{{\"routes\": [{{\"unit_id\": \"单元标识\", \"datasources\": [\"数据源名称\"]}}]}}。"
+            "没有任何数据源能支撑时必须返回空数组，"
+            # 凑数约束与 report.diverge / report.supplement 共用同一常量。
+            + COMMON_NO_PADDING
+            + "只输出 JSON：{{\"routes\": [{{\"unit_id\": \"单元标识\", \"datasources\": [\"数据源名称\"]}}]}}。"
         ),
         output_model=ReportUnitRoutesOutput,
         # 路由要看清每个候选源的表清单，5 个源上百张表需要更大的输入预算。
@@ -435,11 +473,13 @@ _INITIAL_PROMPTS: dict[str, PromptDefinition] = {
             "提出最多 {limit} 个用户没要求、但会影响其结论的补充分析单元。"
             "每个建议必须说明 rationale（为什么与已有需求相关）与 expected_signal（预期能看到什么信号）。"
             "datasource 只能从给定清单里选，不确定时留空字符串，禁止凭猜测填写。"
-            "禁止提出与已有单元语义重复的建议；禁止在 rationale 里使用导致、造成、因为等因果措辞，"
-            "只能描述相关性与共变关系。"
-            "只输出 JSON：{{\"proposed_units\": [{{\"question\": \"完整业务问题\", \"datasource\": \"\", "
+            "禁止提出与已有单元语义重复的建议；"
+            # 因果约束与对话侧 analysis.result、报表侧 report.supplement 共用同一常量。
+            + COMMON_NO_CAUSAL_CLAIM
+            + "只输出 JSON：{{\"proposed_units\": [{{\"question\": \"完整业务问题\", \"datasource\": \"\", "
             "\"rationale\": \"为什么相关\", \"expected_signal\": \"预期信号\"}}]}}。"
-            "确实没有值得补充的方向时返回空数组，不要为凑数编造。"
+            "确实没有值得补充的方向时返回空数组，"
+            + COMMON_NO_PADDING
         ),
         output_model=ReportDivergeOutput,
         # 与 report.route 对齐：发散同样需要看全表名清单才能建议"还可以查什么"。
@@ -447,7 +487,7 @@ _INITIAL_PROMPTS: dict[str, PromptDefinition] = {
     ),
     "report.supplement": PromptDefinition(
         prompt_id="report.supplement",
-        version="1.0.0",
+        version="1.1.0",
         task="report_supplement",
         template=(
             "你是报表分析补充助手。给定已有分析单元、这些单元实际取回数据后算出的显著发现"
@@ -455,14 +495,44 @@ _INITIAL_PROMPTS: dict[str, PromptDefinition] = {
             "判断是否存在为了解释或验证这些发现而需要补充查询的分析单元。"
             "只有当发现确实指向一个尚未覆盖的方向时才提出建议，每条必须说明 supports_finding"
             "（它解释或验证哪一条已有发现）。"
+            # 缺基期是确定性触发：零发现时如果还要求关联发现，这条路径永远产不出单元。
+            "动态上下文给出「缺基期理由」时，该理由本身就是补查依据：围绕补齐基期提出建议，"
+            "这类建议不要求关联已有发现，supports_finding 留空即可。"
             "datasource 只能从给定清单里选，不确定时留空字符串。"
-            "禁止使用导致、造成、因为等因果措辞，只能描述相关性与共变关系。"
-            "只输出 JSON：{{\"proposed_units\": [{{\"question\": \"完整业务问题\", \"datasource\": \"\", "
+            # 因果约束与对话侧 analysis.result、报表侧 report.diverge 共用同一常量。
+            + COMMON_NO_CAUSAL_CLAIM
+            + "只输出 JSON：{{\"proposed_units\": [{{\"question\": \"完整业务问题\", \"datasource\": \"\", "
             "\"rationale\": \"为什么需要补查\", \"supports_finding\": \"它解释哪条发现\"}}]}}。"
-            "没有需要补充的方向时返回空数组——这是最常见也最正确的结果，不要为凑数编造。"
+            "没有需要补充的方向时返回空数组——这是最常见也最正确的结果，"
+            + COMMON_NO_PADDING
         ),
         output_model=ReportSupplementOutput,
         context_budget=40000,
+    ),
+    "report.sample_guard": PromptDefinition(
+        prompt_id="report.sample_guard",
+        version="1.0.0",
+        task="report_sample_guard",
+        template=(
+            "你是报表取数质量守门人。某个分析单元返回的行数超过了样本上限，"
+            "你要在三个动作里三选一，判断怎样既保住分析结论、又不让上层统计被明细行淹没。"
+            "aggregate：结果明显是未聚合的明细（同一业务对象按多个维度或时间点反复出现）时，"
+            "建议在 SQL 层补 GROUP BY 聚合——suggested_group_by 只能从给定列清单里选，"
+            "禁止编造列名，也不要给出列清单之外的表达式；"
+            "narrow_range：取数窗口明显宽于问题所需时，建议缩小时间范围——"
+            "suggested_range 写清要收窄到哪一段，用日期区间或简洁中文描述；"
+            "keep：确实超限但结果是合理的聚合粒度、或数据本就该按此粒度呈现时，原样保留。"
+            "keep 是合法且常见的结果，不要为了有产出而硬凑动作；"
+            "只依据给定证据判断，不要臆造业务背景，也不要给出重跑指令。"
+            "reason 用不超过 300 字的中文说明判断依据。"
+            "只输出 JSON：{{\"action\": \"aggregate|narrow_range|keep\", \"reason\": \"判断依据\", "
+            "\"suggested_group_by\": [], \"suggested_range\": \"\"}}。"
+        ),
+        output_model=SampleDecision,
+        # 探针段（sample_guard.py）自报 max_chars=6000，且探针里还要装单元问题、行数、
+        # 列清单与样例行；预算低于探针上限会把最关键的样例行裁掉，决策依据反而不完整。
+        # 8000 = 探针上限 6000 + 模板与安全策略段的余量（模板本体约 500 字符）。
+        context_budget=8000,
     ),
     "sql.generate": PromptDefinition(
         prompt_id="sql.generate",

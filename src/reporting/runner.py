@@ -58,9 +58,154 @@ def _describe_time_range(time_range: Any) -> str:
     return text
 
 
-# 方法作用：把计划确定的时间范围并入单元查询文本。
+# 快照 params 里承载样本处置结论的键名；不新开数据库列，随既有 params_json 落库。
+_SAMPLE_DECISION_PARAM_KEY = "sample_decision"
+
+
+# 方法作用：从返回行里取列名并集，供样本处置决策判断可选分组键。
+# Args: rows - 进入分析链路的行。
+# Returns: 去重后的列名列表；非字典行跳过。
+def _collect_row_columns(rows: list[Any]) -> list[str]:
+    logger.debug("样本列清单收集入口", row_count=len(rows))
+    columns: dict[str, None] = {}
+    for row in rows:
+        if isinstance(row, dict):
+            for name in row:
+                columns.setdefault(str(name), None)
+    logger.info("样本列清单收集完成", row_count=len(rows), column_count=len(columns))
+    return list(columns)
+
+
+# 方法作用：读取生效的样本行数上限，供样本处置与截断原因共用同一处口径。
+# Args: 无。
+# Returns: 配置的样本上限；读取失败时抛出，由调用方决定降级方式。
+def _sample_row_limit() -> int:
+    """执行层（execute_sql 的 masked_rows[:sample_limit]）就是按这个上限先裁再回传的。"""
+    from src.config import get_settings
+
+    return int(getattr(get_settings(), "report_max_sample_rows", 0) or 0)
+
+
+# 方法作用：按真实切割点生成截断原因，调用方不再自带上限。
+# Args: sample_rows - 进入分析链路的样本行数；full_count - 查询返回的全量行数。
+# Returns: 可读的截断说明；上限读不到时按「未知上限」措辞，不编造数字。
+def _describe_sample_truncation(sample_rows: int, full_count: int) -> str:
+    """上限只从配置取：写死一个与执行层切割点无关的数字会让原因自相矛盾。"""
+    from src.reporting.snapshots import describe_truncation
+
+    try:
+        limit = _sample_row_limit()
+    except Exception:
+        # 配置读不到时宁可少写一个数字，也不要拿别的口径冒充切割点。
+        logger.error("样本上限读取失败，截断原因按未知上限措辞", exc_info=True)
+        limit = 0
+    text = describe_truncation(sample_rows, full_count, limit)
+    logger.info("报表单元截断原因生成完成", sample_rows=sample_rows, full_count=full_count, limit=limit, has_reason=bool(text))
+    return text
+
+
+# 方法作用：单元行数规模超限或上游裁剪过样本时产出处置建议，并把结论写进快照参数与单元披露文案。
+# Args: unit - 分析单元；trace - 快照采集字典（就地写入 params）；rows - 进入分析链路的行；
+#       full_count - 查询返回的全量行数；sample_capped - 执行层上报的样本裁剪标记。
+# Returns: 供单元 warnings 使用的披露文案列表；判据未触发或决策失败时返回空列表。
+async def _decide_sample_guidance(
+    unit: Any,
+    trace: dict[str, Any],
+    rows: list[Any],
+    full_count: int,
+    sample_capped: bool,
+) -> list[str]:
+    """只登记处置建议并如实披露，不触发任何自动重跑；重跑统一由补查回路负责。"""
+    unit_id = str(getattr(unit, "unit_id", "") or "")
+    entering = len(rows)
+    full = max(0, int(full_count or 0))
+    logger.debug("样本处置接线入口", unit_id=unit_id, entering_rows=entering, full_count=full, sample_capped=bool(sample_capped))
+    try:
+        limit = _sample_row_limit()
+    except Exception:
+        logger.error("样本上限读取失败，跳过处置决策", unit_id=unit_id, exc_info=True)
+        return []
+    try:
+        from src.reporting.sample_guard import decide_sample_action, describe_sample_decision, needs_sample_action
+
+        # 快速闸门与 sample_guard 内部判据共用同一个谓词，两处不可能脱钩：
+        # ① 真实行数规模 max(进入链路行数, 查询全量行数) 超过样本上限；② 执行层已上报
+        # query_result_sample_capped（上游裁过样本）。执行层是按同一个上限先裁再回传的，
+        # 只拿裁完的行数去比上限永远比不出超限，「样本被裁过」就再也没人披露。
+        # 外层放行、内层卡死的组合已被消除：闸门只负责省掉不必要的判据计算，
+        # 放行后 decide_sample_action 必然给出结论（含「上游裁过但未超限」的直接披露）。
+        if not needs_sample_action(row_count=entering, full_count=full, limit=limit, sample_capped=bool(sample_capped)):
+            logger.info(
+                "样本处置判据未触发，跳过决策",
+                unit_id=unit_id,
+                entering_rows=entering,
+                full_count=full,
+                limit=limit,
+                sample_capped=bool(sample_capped),
+            )
+            return []
+        decision = await decide_sample_action(
+            question=str(getattr(unit, "question", "") or ""),
+            columns=_collect_row_columns(rows),
+            rows=rows,
+            # 两个计数如实分开传：row_count 是进入分析链路的行数，full_count 是查询全量。
+            # 把 max() 的结果当 row_count 传下去，探针与披露会把全量行数冒充成进入链路的
+            # 行数（模型拿到假证据、用户看到错数字）。
+            row_count=entering,
+            full_count=full,
+            # 时间跨度用该单元已确认的取数窗口；取不到时留空串，不替模型编一个区间。
+            time_span=_describe_time_range(getattr(unit, "time_range", None)),
+            limit=limit,
+            # 上游裁剪标记下沉到 sample_guard：未超限但被裁过时只披露、不调用模型。
+            sample_capped=bool(sample_capped),
+        )
+        text = describe_sample_decision(decision, limit)
+    except Exception:
+        # 决策属观测与披露：失败不得影响单元产出，更不得让单元变 failed。
+        logger.error("样本处置决策失败，跳过披露", unit_id=unit_id, exc_info=True)
+        return []
+    if not text:
+        # 判据已放行却拿不到结论属异常形态（sample_guard 在放行分支必有返回），
+        # 保持单元产出不受影响，但记 info 便于与「确实没触发判据」区分。
+        logger.info(
+            "样本处置未产出披露文案",
+            unit_id=unit_id,
+            entering_rows=entering,
+            full_count=full,
+            limit=limit,
+        )
+        return []
+    params = trace.setdefault("params", {})
+    if isinstance(params, dict):
+        # 结构化字段供后续补查与重跑回路消费，text 供页面与人工阅读，两者同源。
+        params[_SAMPLE_DECISION_PARAM_KEY] = {
+            "action": str(getattr(decision, "action", "") or ""),
+            "reason": str(getattr(decision, "reason", "") or ""),
+            "suggested_group_by": [str(name) for name in list(getattr(decision, "suggested_group_by", []) or [])],
+            "suggested_range": str(getattr(decision, "suggested_range", "") or ""),
+            "text": text,
+        }
+    logger.info(
+        "样本处置建议已登记",
+        unit_id=unit_id,
+        action=str(getattr(decision, "action", "") or ""),
+        text_chars=len(text),
+    )
+    return [text]
+
+
+# 报表取数要求：明细不该进报表。行数超限的根因往往是 SQL 没聚合，
+# 把要求前置到查询文本里，比事后在截断处补救更靠近源头。
+_UNIT_AGGREGATION_REQUIREMENT = (
+    "报表取数要求：优先在数据库侧完成聚合（GROUP BY 与聚合函数），只返回分析需要的结果行，"
+    "不要把明细行带回上层统计；多个指标尽量一次查询取回。"
+    "确实需要明细核验时，也要限制在能说明问题的最小行数。"
+)
+
+
+# 方法作用：把计划确定的时间范围与取数要求并入单元查询文本。
 # Args: unit - 待执行的 AnalysisUnit。
-# Returns: 供主图执行的查询文本；无可用时间范围时返回原问题。
+# Returns: 供主图执行的查询文本；无可用时间范围时仍带上取数要求。
 def _compose_unit_query(unit: Any) -> str:
     unit_id = str(getattr(unit, "unit_id", "") or "")
     question = str(getattr(unit, "question", "") or "")
@@ -68,11 +213,13 @@ def _compose_unit_query(unit: Any) -> str:
     hint = _describe_time_range(getattr(unit, "time_range", None))
     if not hint:
         logger.info("报表单元无可用时间范围，按原问题执行", unit_id=unit_id)
-        return question
+        return f"{question}。{_UNIT_AGGREGATION_REQUIREMENT}"
     # 时间范围在预览阶段就已绑定，执行期必须显式带上：主图 classify_intent 会按
     # 问题文本重判 needs_time_range，不带就会被拦成「请指定查询的时间范围」，
     # 白白丢掉一个参数早就确定的单元。
-    query = f"{question}（时间范围：{hint}）"
+    # 取数要求追加成独立句子放在时间范围之后：括号串保持原样，下游按
+    # 「时间范围：」定位的解析不受影响。
+    query = f"{question}（时间范围：{hint}）。{_UNIT_AGGREGATION_REQUIREMENT}"
     logger.info("报表单元查询拼装完成", unit_id=unit_id, time_hint=hint, query_chars=len(query))
     return query
 
@@ -417,17 +564,33 @@ class ReportRunner:
         from src.reporting.models import display_truncated
 
         truncated = display_truncated(len(rows), full_count)
-        from src.reporting.snapshots import DISPLAY_ROW_LIMIT, describe_truncation
 
         trace["truncated"] = truncated
-        # 截断原因只由本层生成：上游的 query_result_truncated 口径与页面展示行集无关。
-        trace["truncated_reason"] = describe_truncation(len(rows), full_count, DISPLAY_ROW_LIMIT) if truncated else ""
+        # 截断原因只由本层生成，且上限取真实切割点（配置的样本上限）：上游的
+        # query_result_truncated 口径与本层无关，页面渲染另有自己的行数口径。
+        trace["truncated_reason"] = _describe_sample_truncation(len(rows), full_count) if truncated else ""
         analysis = final.get("analysis") or {}
         # 直答类单元（元数据说明、知识直答等）产出的是文字结论，没有数据行是正常形态；
         # 标成 text 后，成功单元判据才不会把它们误算成部分完成。
         from src.graph.contracts import DIRECT_ANSWER_SOURCES
 
         answer_kind = "text" if str(final.get("source", "") or "") in DIRECT_ANSWER_SOURCES else "data"
+        # 样本超限时的处置建议：只登记与披露，不做任何自动重跑。决策必须在单元返回前
+        # 完成，结论才会随本次 trace 一起进快照；失败的单元（上面已返回）不决策。
+        sample_guidance = await _decide_sample_guidance(
+            unit,
+            trace,
+            rows,
+            full_count,
+            bool(result.get("query_result_sample_capped", False)),
+        )
+        limitations = list(dict.fromkeys(
+            item for item in (analysis.get("limitations", []) or [])
+            if isinstance(item, str) and item.strip()
+        ))
+        # 处置结论排在最前：warnings 会被页面质量块按前 20 条裁剪，排在分析模型给出的
+        # 限制之后时，限制一多就把披露挤掉，等于没披露。
+        warnings = list(dict.fromkeys([*sample_guidance, *limitations]))[:20]
         return UnitResult(
             unit_id=unit.unit_id,
             datasource=datasource,
@@ -439,10 +602,7 @@ class ReportRunner:
             column_comments=_extract_column_comments(result.get("relevant_tables")),
             field_descriptions=_extract_field_descriptions(analysis),
             summary=str(analysis.get("summary", "") or ""),
-            warnings=list(dict.fromkeys(
-                item for item in (analysis.get("limitations", []) or [])
-                if isinstance(item, str) and item.strip()
-            ))[:20],
+            warnings=warnings,
         )
 
     # 方法作用：把单元执行现场组装成快照并落库，失败只记告警不影响报表生成。

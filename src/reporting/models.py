@@ -36,6 +36,15 @@ _UNIT_COUNT_STATIC_MAX = 200
 # 源即 (22+6)×5 = 140，直接击穿字段校验，parse() 抛 ValidationError，
 # 报表落 plan_failed 且参数确定、重试必复现。
 _QUERY_COUNT_STATIC_MAX = 1000
+# 单元结果行集的静态上界，只做契约兜底，必须与 report_max_sample_rows 的可配最大值
+# 保持一致（配置侧 le=100_000，静态上限与配置的 le 严格对齐是本文件的既有惯例）。
+# 上一版这里写死 1000，而执行层回传行数上限已改为可配（默认 5000）：单元返回 1001~5000
+# 行时构造 UnitResult 直接抛 ValidationError，单元被判 UNIT_EXECUTION_FAILED，且参数确定、
+# 重试必复现——改动前（硬编码 200）这些单元本来是正常的，等于把可用单元判成了失败。
+_UNIT_ROWS_STATIC_MAX = 100_000
+# 单元标题的字数上限。展示层（document._SECTION_TITLE_MAX）与解析层（planner 收窄模型标题）
+# 都引用它，避免"契约已放开、某处仍卡在旧值"的埋雷——模块内再写死一个 20 就是同一类脱钩。
+_UNIT_TITLE_MAX_CHARS = 20
 
 
 # 方法作用：读取超级管理员配置的计划单元数上限。
@@ -165,6 +174,9 @@ class AnalysisUnit(BaseModel):
 
     unit_id: str = Field(default_factory=lambda: f"unit_{uuid4().hex[:10]}", max_length=64)
     question: str = Field(..., min_length=1, max_length=4000)
+    # 页面区段标题。由 report.plan 拆解调用顺带生成（不额外起一次模型调用）；
+    # 为空表示模型没给（发散单元、规则回退、模型降级），由展示层按问题文本兜底。
+    title: str = Field(default="", max_length=_UNIT_TITLE_MAX_CHARS)
     datasource: str = Field(default="", max_length=64)
     priority: Literal["primary", "secondary", "evidence"] = "primary"
     time_range: TimeRange = Field(default_factory=TimeRange)
@@ -433,7 +445,7 @@ class UnitResult(BaseModel):
     # 无数据行是它的正常形态。成功单元的判据据此区分，否则直答单元会被判成
     # 部分完成，整份报表被拖成 partial。
     answer_kind: Literal["data", "text"] = "data"
-    rows: list[dict[str, Any]] = Field(default_factory=list, max_length=1000)
+    rows: list[dict[str, Any]] = Field(default_factory=list, max_length=_UNIT_ROWS_STATIC_MAX)
     # 旧工作流已给出截断信号，执行器必须透传：统计结论需要据此披露样本局限。
     truncated: bool = False
     columns: list[str] = Field(default_factory=list, max_length=100)

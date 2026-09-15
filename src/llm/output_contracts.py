@@ -166,6 +166,9 @@ class ReportPlanUnit(StrictOutputModel):
 
     unit_id: str = Field(default="", max_length=64)
     question: str = Field(min_length=1, max_length=2000)
+    # 单元精简标题，随同一次拆解调用产出，用于页面区段标题；
+    # 上限 12 字是契约硬约束，光靠提示词拦不住模型补一句（见 AnalysisUnit.title 的 20 字兜底）。
+    title: str = Field(default="", max_length=12)
     datasource: str = Field(default="", max_length=64)
     priority: Literal["primary", "secondary", "evidence"] = "primary"
     dimensions: list[str] = Field(default_factory=list, max_length=30)
@@ -229,6 +232,21 @@ class ReportTitleOutput(StrictOutputModel):
     """报表摘要标题输出。上限给到 40 字，服务端仍按 20 字截断后再落库。"""
 
     title: str = Field(min_length=1, max_length=40)
+
+
+class SampleDecision(BaseModel):
+    """样本超限时的处置建议：聚合、缩小范围或原样保留，三选一。"""
+
+    # 故意保留 extra="forbid"（不改成 StrictOutputModel 的 extra="ignore"）：
+    # 处置建议是控制面输入，模型多给一个动作键时宁可显式失败降级为保守保留，
+    # 也不能静默丢掉后按默认动作执行。契约放在本模块是为了让 prompts.py 注册
+    # report.sample_guard 时能直接引用同一个类（见 reporting/sample_guard.py）。
+    model_config = {"extra": "forbid"}
+
+    action: Literal["aggregate", "narrow_range", "keep"] = "keep"
+    reason: str = Field(default="", max_length=300)
+    suggested_group_by: list[str] = Field(default_factory=list, max_length=10)
+    suggested_range: str = Field(default="", max_length=64)
 
 
 T = TypeVar("T", bound=BaseModel)

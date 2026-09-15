@@ -174,13 +174,25 @@ async def execute_sql_node(state: AnalysisState) -> dict:
                 if collect_attribution_rows else []
             )
             logger.debug("节点完成", node="execute_sql", elapsed_ms=elapsed)
+            # 回传行集上限改为可配置（原硬编码 200）：超出即静默砍行会让报表
+            # 样本严重不足，且被裁掉的部分无从解释。超限由 sample_guard 交给模型决策。
+            sample_limit = int(getattr(settings, "report_max_sample_rows", 0) or len(masked_rows) or 1)
+            sample_capped = len(masked_rows) > sample_limit
+            if sample_capped:
+                logger.info(
+                    "执行结果超出样本上限",
+                    node="execute_sql",
+                    row_count=len(masked_rows),
+                    sample_limit=sample_limit,
+                )
             return complete({
                 "generated_sql": sql,  # 同步重写后的 SQL 到前端
-                "query_result_sample": masked_rows[:200],
+                "query_result_sample": masked_rows[:sample_limit],
                 "attribution_candidate_rows": attribution_rows,
                 "query_result_full_count": len(masked_rows),
                 "query_result_truncated": truncated,
-                "query_result_statistics": {"row_count": len(masked_rows), "truncated": truncated, "masking": masking},
+                "query_result_sample_capped": sample_capped,
+                "query_result_statistics": {"row_count": len(masked_rows), "truncated": truncated, "sample_capped": sample_capped, "masking": masking},
                 "execution_error": "",
                 "execution_error_type": "",
                 "execution_retry_count": 0,

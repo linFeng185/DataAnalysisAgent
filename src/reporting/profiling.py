@@ -6,7 +6,8 @@
 1. 参数推导 —— processors 要求调用方给出 `time_col` / `value_col` / `name_col`，
    报表侧必须从真实数据确定性推导，而不是靠列名瞎猜。
 2. 报表级严谨性补强 —— 双判据异常、R² 门槛、样本截断披露、`method` 必填、
-   时间跨度不足时不做同比。这些不进 processors 内部，避免影响聊天链路。
+   时间跨度不足时不做同比、缺同环比基期时判定需要补查。这些不进 processors 内部，
+   避免影响聊天链路。
 
 纯函数、无 LLM、无 IO。统计数字直接进页面块，不经过模型转述。
 """
@@ -30,6 +31,7 @@ FindingCategory = Literal["period_over_period", "trend", "anomaly", "contributio
 # 率/比/单价类指标按均值聚合，其余按求和。这是启发式规则，必须写进 method 披露。
 _RATE_LIKE_HINTS = ("率", "比", "单价", "均值", "平均", "avg", "rate", "ratio", "price", "pct", "percent")
 # 各加工的观测点下限：低于此值不给结论，避免用一两个点编故事。
+# period_over_period 同时是缺基期判定侧的环比门槛：两侧都只经 _period_min_observations 读取。
 _MIN_OBSERVATIONS: dict[str, int] = {"period_over_period": 3, "trend": 5, "anomaly": 8}
 # 贡献度对高基维度无意义，超过此基数不产出。
 _MAX_CONTRIBUTION_CARDINALITY = 50
@@ -41,10 +43,52 @@ _MAD_Z_THRESHOLD = 3.5
 _MAD_SCALE = 1.4826
 # 异常点占比超过此值时整体放弃：说明分布本身就这样，不是异常。
 _MAX_OUTLIER_RATIO = 0.2
-# 同比至少需要回看一个完整年度。
+# 同比至少需要回看一个完整年度（13 个月含基期）。
 _MIN_YOY_MONTHS = 13
+# 单元问题里要求同比的措辞；命中即要求回看一个完整年度。
+_YOY_QUESTION_HINTS = ("同比", "去年同期", "上年同期")
+# 单元问题里要求环比的措辞；命中即要求达到 _period_min_observations 的观测点数。
+_MOM_QUESTION_HINTS = ("环比", "上月", "上期")
 
 _DATE_FORMATS = ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d", "%Y/%m/%d", "%Y-%m", "%Y/%m", "%Y")
+
+# --- 同环比门槛的单一真源 ---------------------------------------------------
+# 缺基期判定侧（needs_baseline_supplement）与产出侧（_period_findings）**只许**从
+# 下面两个谓词取值，任何一侧都不得自带数字：两处口径一旦分头定义，就会出现
+# 「判定说足够、产出方产不出」的死区——用户拿到空同比，系统还不补查。
+
+
+# 方法作用：同环比产出所需的最小观测点数（聚合后的周期数）。
+# Args: 无。
+# Returns: 最小观测点数。
+def _period_min_observations() -> int:
+    """环比与同比都要求的最小观测点数。"""
+    return _MIN_OBSERVATIONS["period_over_period"]
+
+
+# 方法作用：同比产出所需的最小首尾跨度（天）。
+# Args: 无。
+# Returns: 最小跨度天数。
+def _yoy_min_span_days() -> int:
+    """同比的最小跨度天数：产出方一直按 13×30 天近似一个完整年度，判定侧共用同一口径。"""
+    return _MIN_YOY_MONTHS * 30
+
+
+# 方法作用：判断聚合后的周期数是否够产出同环比指标。
+# Args: period_count - 聚合后的周期数。
+# Returns: 达到门槛返回 True。
+def _has_enough_periods(period_count: int) -> bool:
+    return period_count >= _period_min_observations()
+
+
+# 方法作用：判断样本跨度是否够产出同比指标。
+# Args: span_days - 首尾周期日期之差（天）。
+# Returns: 达到门槛返回 True。
+def _has_enough_yoy_span(span_days: int) -> bool:
+    return span_days >= _yoy_min_span_days()
+
+
+# --- 同环比门槛的单一真源结束 -------------------------------------------------
 
 
 # 方法作用：识别同时要求多项运行证据的说明单元，不改变普通 Schema 或数据查询路由。
@@ -252,6 +296,129 @@ def sort_by_time(rows: list[dict[str, Any]], time_column: str) -> list[dict[str,
     return [row for _, row in resolvable]
 
 
+# 方法作用：兼容字典与对象两种形态读取单元问题文本。
+# Args: unit - 分析单元（AnalysisUnit 实例或含 question 的映射）。
+# Returns: 单元问题文本；缺失时返回空串。
+def _unit_question(unit: Any) -> str:
+    if isinstance(unit, dict):
+        return str(unit.get("question", "") or "")
+    return str(getattr(unit, "question", "") or "")
+
+
+# 方法作用：兼容字典与对象两种形态读取单元标识，仅用于日志与理由标注。
+# Args: unit - 分析单元（AnalysisUnit 实例或含 unit_id 的映射）。
+# Returns: 单元标识；缺失时返回空串。
+def _unit_id(unit: Any) -> str:
+    if isinstance(unit, dict):
+        return str(unit.get("unit_id", "") or "")
+    return str(getattr(unit, "unit_id", "") or "")
+
+
+# 方法作用：产出侧与判定侧共用的输入派生：列取结果自身的列集合，指标取已过授权过滤的那份。
+# Args: result - 单元结果（含 columns 与 rows）；metrics - 该单元已过授权过滤的指标列。
+# Returns: (列名列表, 指标列列表)。
+def profile_inputs(result: UnitResult, metrics: list[str]) -> tuple[list[str], list[str]]:
+    """两侧的列与指标只许从这里取。
+
+    判定侧曾用「行键出现顺序」当列集合、用 `unit.metrics`（未过授权过滤）当指标列，
+    而产出侧用 `result.columns` 与 `resolved_units` 里已过滤的 metrics：授权过滤掉
+    单元声明的某个指标列且样本有多个数值列时，两侧会选到不同的数值列
+    （`detect_value_column` 对列序敏感）→ 周期数不同 → 「判足够但产出方产不出」的单向死区。
+    """
+    rows = list(getattr(result, "rows", []) or [])
+    columns = [str(column) for column in list(getattr(result, "columns", []) or [])]
+    declared = [str(name) for name in list(metrics or [])]
+    if rows and not columns:
+        # UnitResult 会从行集补齐列集合，走到这里说明结果被绕过校验构造过。
+        logger.warning("单元结果缺少列集合，深挖输入将为空", unit_id=str(getattr(result, "unit_id", "") or ""), row_count=len(rows))
+    logger.debug(
+        "深挖输入派生完成",
+        unit_id=str(getattr(result, "unit_id", "") or ""),
+        column_count=len(columns),
+        metric_count=len(declared),
+    )
+    return columns, declared
+
+
+# 方法作用：判断单元是否因缺少同环比基期而需要补查。
+# Args: unit - 分析单元（至少含 question）；rows - 本轮实际取回的样本行；findings - 已有发现；
+#       columns - 结果自身的列集合；metrics - 该单元已过授权过滤的指标列（均由 profile_inputs 派生）。
+# Returns: 补查理由（可读中文）；无需补查返回 None。
+def needs_baseline_supplement(
+    unit: Any,
+    rows: list[dict[str, Any]],
+    findings: list[Any],
+    *,
+    columns: list[str],
+    metrics: list[str],
+) -> str | None:
+    """缺基期本身即构成补查理由，不依赖本轮是否已产出发现。
+
+    门槛与产出方（`_period_findings`）共用同一处判据（`_has_enough_periods` /
+    `_has_enough_yoy_span`），且周期数与跨度都按产出方的同一处聚合算法数出来：
+    判定为「足够」必然产得出对应指标，反之才补查，不存在两边都不管的死区。
+    事故报表只拿回单月数据时一条发现都产不出，若让判定依赖「已有发现」，
+    回路就永远不会触发。判定全程确定性、不调用模型。
+
+    columns / metrics 必须来自 `profile_inputs`：判定侧自带一套派生会与产出侧
+    选到不同数值列，重新打开单向死区（本次评审发现的第二处不同源）。
+    """
+    question = _unit_question(unit)
+    wants_yoy = any(hint in question for hint in _YOY_QUESTION_HINTS)
+    wants_mom = any(hint in question for hint in _MOM_QUESTION_HINTS)
+    logger.debug("报表缺基期判定入口", unit_id=_unit_id(unit), wants_yoy=wants_yoy, wants_mom=wants_mom, row_count=len(rows), finding_count=len(findings))
+    if not (wants_yoy or wants_mom):
+        return None
+    time_column = detect_time_column(rows, columns) if columns else None
+    if not time_column:
+        # 判断不了就不得误报：样本覆盖由页面披露，而不是凭空要求补查。
+        logger.info("报表缺基期判定跳过", unit_id=_unit_id(unit), reason="未识别到时间列")
+        return None
+    value_column = detect_value_column(rows, columns, metrics)
+    if not value_column:
+        # 产出方没有数值列就算不出同环比，判定同样无从谈起，仍按「判断不了」处理。
+        logger.info("报表缺基期判定跳过", unit_id=_unit_id(unit), reason="未识别到数值列")
+        return None
+    # 与产出方共用同一处聚合算法：这里数出的周期数与跨度就是产出方据以取舍的那两个量。
+    aggregated = _aggregate_periods(rows, time_column, value_column, aggregation_for(value_column))
+    if not aggregated:
+        logger.info("报表缺基期判定跳过", unit_id=_unit_id(unit), reason="时间列或数值列取值不可解析")
+        return None
+    period_count = len(aggregated)
+    span_days = _period_span_days(aggregated)
+    first_label = str(aggregated[0].get("period") or "")
+    last_label = str(aggregated[-1].get("period") or "")
+    reasons: list[str] = []
+    if wants_yoy and not (_has_enough_periods(period_count) and _has_enough_yoy_span(span_days)):
+        # 门槛一律说产出方的实际口径（周期数 + 天数），日历月数只用来把理由写得好读。
+        reasons.append(
+            f"要求同比但样本只有 {period_count} 个时间周期、首尾相隔 {span_days} 天"
+            f"（{first_label} 至 {last_label}，约 {_span_months(aggregated)} 个月），"
+            f"缺去年同期基期，产出同比至少需要 {_period_min_observations()} 个周期"
+            f"且首尾相隔不少于 {_yoy_min_span_days()} 天"
+        )
+    if wants_mom and not _has_enough_periods(period_count):
+        reasons.append(
+            f"要求环比但样本只有 {period_count} 个时间周期（{first_label} 至 {last_label}），"
+            f"缺上一期基期，至少需要 {_period_min_observations()} 个周期"
+        )
+    if not reasons:
+        return None
+    reason = "；".join(reasons)
+    if not findings:
+        reason = f"{reason}；本轮未产出任何发现，此项缺基期独立触发补查"
+    logger.info(
+        "报表单元缺少同环比基期",
+        unit_id=_unit_id(unit),
+        time_column=time_column,
+        value_column=value_column,
+        period_count=period_count,
+        span_days=span_days,
+        reason=reason,
+    )
+    return reason
+
+
 # 方法作用：按时间列归并重复周期，使每个周期只有一个观测值。
 # Args: rows - 已按时间排序的行；time_column - 时间列名；value_column - 数值列名；how - sum 或 mean。
 # Returns: 每周期一行的聚合结果。
@@ -274,6 +441,48 @@ def aggregate_by_period(
         }
         for _, (label, values) in sorted(grouped.items())
     ]
+
+
+# 方法作用：把样本按产出方口径聚合成周期行，判定侧与产出侧共用同一处算法。
+# Args: rows - 结果行；time_column - 时间列；value_column - 数值列；how - sum 或 mean。
+# Returns: 每周期一行的聚合结果；时间或数值不可解析时为空列表。
+def _aggregate_periods(
+    rows: list[dict[str, Any]], time_column: str, value_column: str, how: str
+) -> list[dict[str, Any]]:
+    aggregated = aggregate_by_period(sort_by_time(rows, time_column), time_column, value_column, how)
+    # 判定侧与产出侧都走这里，日志留一处就能复盘两处口径是否同源。
+    logger.debug(
+        "同环比周期聚合完成",
+        time_column=time_column,
+        value_column=value_column,
+        how=how,
+        period_count=len(aggregated),
+    )
+    return aggregated
+
+
+# 方法作用：按产出方口径算聚合周期首尾相隔的天数，判定侧与产出侧共用同一处算法。
+# Args: aggregated - _aggregate_periods 输出的周期行。
+# Returns: 首尾周期日期之差（天）；周期不足两个或日期不可解析时为 0。
+def _period_span_days(aggregated: list[dict[str, Any]]) -> int:
+    if len(aggregated) < 2:
+        return 0
+    first_date = _parse_date(aggregated[0].get("period"))
+    last_date = _parse_date(aggregated[-1].get("period"))
+    if first_date is None or last_date is None:
+        return 0
+    return (last_date - first_date).days
+
+
+# 方法作用：算聚合周期首尾相隔的含首尾日历月数，只用于把补查理由写得好读。
+# Args: aggregated - _aggregate_periods 输出的周期行。
+# Returns: 日历月数；日期不可解析时退化为周期数。
+def _span_months(aggregated: list[dict[str, Any]]) -> int:
+    first_date = _parse_date(aggregated[0].get("period"))
+    last_date = _parse_date(aggregated[-1].get("period"))
+    if first_date is None or last_date is None:
+        return len(aggregated)
+    return (last_date.year - first_date.year) * 12 + (last_date.month - first_date.month) + 1
 
 
 # 方法作用：计算 IQR 上界与 MAD 修正 z-score 上界，作为异常的双判据。
@@ -333,9 +542,9 @@ def _period_findings(
     from src.tools.processors import MoMProcessor, YoYProcessor
 
     how = aggregation_for(value_column)
-    ordered = sort_by_time(rows, time_column)
-    aggregated = aggregate_by_period(ordered, time_column, value_column, how)
-    if len(aggregated) < _MIN_OBSERVATIONS["period_over_period"]:
+    aggregated = _aggregate_periods(rows, time_column, value_column, how)
+    # 门槛取自单一真源，与缺基期判定侧（needs_baseline_supplement）共用同一处。
+    if not _has_enough_periods(len(aggregated)):
         return []
     params = {"value_col": value_column, "time_col": "period"}
     findings: list[UnitFinding] = []
@@ -363,9 +572,9 @@ def _period_findings(
                 if index < len(aggregated)
             ],
         ))
-    # 同比至少需要一个完整年度；跨度不足时不做，也不写同比数字。
-    span_days = (_parse_date(aggregated[-1]["period"]) - _parse_date(aggregated[0]["period"])).days if len(aggregated) > 1 else 0
-    if span_days < _MIN_YOY_MONTHS * 30:
+    # 同比至少需要一个完整年度；跨度门槛取自单一真源，与缺基期判定侧共用。
+    # 跨度不足时不做，也不写同比数字。
+    if not _has_enough_yoy_span(_period_span_days(aggregated)):
         return findings
     yoy = YoYProcessor().process(aggregated, params)
     if yoy.confidence != "low":

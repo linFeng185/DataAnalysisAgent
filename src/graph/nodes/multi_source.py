@@ -25,6 +25,28 @@ from src.security.data_masker import merge_masking_metadata
 logger = get_logger(__name__)
 
 _SOURCES_KEY = "multi_source_results"
+# 投喂给模型的提示词样本上限。这是**提示词预算**，不是数据截断：
+# 与用户可见行集无关，因此单独记 sample_capped，不得混入 truncated。
+_PROMPT_SAMPLE_ROWS = 50
+# 跨源合并时每个来源允许贡献的行数。原为硬编码 30，实测会把 50 行的来源
+# 直接砍到 30 行，属于静默丢数据；放宽为 200 并单独命名以便追溯。
+_MERGED_BATCH_ROWS = 200
+# 合并后回传分析链路的行集上限：原为硬编码 200，现取自 report_max_sample_rows。
+_MERGED_SAMPLE_ROWS_FALLBACK = 200
+
+
+# 方法作用：读取配置的合并样本上限，配置不可用时回退到历史默认值。
+# Args: 无。
+# Returns: 合并后允许回传的最大行数。
+def _merged_sample_limit() -> int:
+    try:
+        from src.config import get_settings
+
+        return int(get_settings().report_max_sample_rows)
+    except Exception:
+        # 配置读取失败不得影响查询链路，回退并留痕以便定位。
+        logger.warning("合并样本上限读取失败，回退默认值", fallback=_MERGED_SAMPLE_ROWS_FALLBACK, exc_info=True)
+        return _MERGED_SAMPLE_ROWS_FALLBACK
 _SOURCE_LABEL_COLUMNS = frozenset({
     "source", "datasource", "data_source", "database", "database_name",
 })
@@ -263,11 +285,14 @@ async def _analyze_one(
             datasource=datasource,
             success=True,
             sql=final_sql,
-            data=data[:50],
+            data=data[:_PROMPT_SAMPLE_ROWS],
             dialect=dialect,
             tables=len(result.get("relevant_tables", []) or []),
             full_count=int(result.get("query_result_full_count", len(data)) or len(data)),
-            truncated=bool(result.get("query_result_truncated", False) or (result.get("query_result_statistics", {}) or {}).get("truncated") or len(data) > 50),
+            # 提示词样本被裁与执行层真实截断必须分开上报：前者只影响喂给模型的
+            # 提示词长度，把它算进 truncated 会让「60 行全量展示」被判成被截断。
+            sample_capped=len(data) > _PROMPT_SAMPLE_ROWS,
+            truncated=bool(result.get("query_result_truncated", False) or (result.get("query_result_statistics", {}) or {}).get("truncated")),
             masking=(result.get("query_result_statistics", {}) or {}).get("masking", {}),
         )
         logger.info(
@@ -696,13 +721,13 @@ def _collect_merged_rows(
         for result, batch in zip(results, normalized_batches, strict=True):
             rows.extend(
                 {"_datasource": result["datasource"], **dict(row)}
-                for row in batch[:30]
+                for row in batch[:_MERGED_BATCH_ROWS]
             )
     else:
         rows = [
             {"_datasource": result["datasource"], **dict(row)}
             for result in results
-            for row in result.get("data", [])[:30]
+            for row in result.get("data", [])[:_MERGED_BATCH_ROWS]
         ]
     logger.debug("收集跨源结果行完成", rows=len(rows))
     return rows
@@ -849,13 +874,16 @@ async def merge_results_node(
     }
     chart = {"type": "table", "option": {}}
     all_data = _collect_merged_rows(ok, normalized_rows, normalized_batches)
-    # 来源上限、单源样本裁剪和合并上限都必须在分析前披露；精确聚合不是样本裁剪。
+    # 真实截断只由执行层上报的 truncated 决定；单源样本裁剪与合并上限属于
+    # 提示词预算（sample_capped），混在一起会让"全量展示"的结果被误报为截断。
     sampled_batches = normalized_batches if normalized_batches is not None else [result.get("data", []) for result in ok]
-    truncated = bool(
-        any(result.get("truncated", False) for result in ok)
-        or (normalized_rows is None and any(len(batch) > 30 for batch in sampled_batches))
-        or len(all_data) > 200
+    merged_limit = _merged_sample_limit()
+    sample_capped = bool(
+        (normalized_rows is None and any(len(batch) > _MERGED_BATCH_ROWS for batch in sampled_batches))
+        or len(all_data) > merged_limit
+        or any(result.get("sample_capped", False) for result in ok)
     )
+    truncated = bool(any(result.get("truncated", False) for result in ok))
 
     if all_data:
         try:
@@ -864,7 +892,7 @@ async def merge_results_node(
             )
 
             merged_state: AnalysisState = {
-                "query_result_sample": all_data[:200],
+                "query_result_sample": all_data[:merged_limit],
                 "query_result_full_count": sum(int(result.get("full_count", len(result.get("data", [])))) for result in ok),
                 "query_result_truncated": truncated,
                 "query_result_statistics": {"row_count": len(all_data), "truncated": truncated},
@@ -910,12 +938,14 @@ async def merge_results_node(
     return {
         "analysis_result": analysis,
         "chart_config": chart,
-        "query_result_sample": all_data[:200],
+        "query_result_sample": all_data[:merged_limit],
         "query_result_full_count": len(all_data),
         "query_result_truncated": truncated,
+        "query_result_sample_capped": sample_capped,
         "query_result_statistics": {
             "row_count": len(all_data),
             "truncated": truncated,
+            "sample_capped": sample_capped,
             "masking": merge_masking_metadata([result.get("masking", {}) for result in ok]),
         },
     }

@@ -141,6 +141,8 @@ report_max_concurrency: 4
 report_max_page_bytes: 2097152
 # 用途：公开分享链接的最长有效期天数 | 默认值：30 | 生效范围：需重启
 report_max_public_share_days: 30
+# 用途：单次查询回传给分析链路的行数上限，超出由样本处置模型判断聚合或缩小范围（允许 100-100000）| 默认值：5000 | 生效范围：需重启
+report_max_sample_rows: 5000
 # 用途：是否允许生成公开分享链接 | 默认值：true | 生效范围：需重启
 report_public_share_enabled: true
 # 用途：报表单元失败重试次数（允许 1-10）| 默认值：3 | 生效范围：需重启

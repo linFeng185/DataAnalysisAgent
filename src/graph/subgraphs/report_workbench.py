@@ -38,6 +38,9 @@ class ReportWorkbenchState(TypedDict, total=False):
     runtime_units: list[Any]
     # 运行期补查已走过的轮数，用于与档位轮数上限比较。
     divergence_round: int
+    # 本轮补查的确定性触发来源与理由（缺基期 / 显著发现），由补查节点写入状态，
+    # 供补查提示词与页面质量块消费：理由只进日志，用户和模型都看不到。
+    supplement_context: dict[str, Any]
     artifact: ReportArtifact
     run_status: str
     execute_unit: Any
@@ -390,7 +393,63 @@ def _remaining_budget(state: ReportWorkbenchState) -> tuple[str, int]:
     return level, max(0, divergence_unit_budget(level) - plan_used - runtime_used)
 
 
-# 方法作用：判断是否进入运行期补查回路。四条前置条件全满足才允许调用 LLM。
+# 方法作用：取本次运行里每个单元已过授权过滤的指标列，判定侧与产出侧共用这一份派生。
+# Args: state - 含 resolved_units 的状态。
+# Returns: unit_id 到指标列列表的映射。
+def _metrics_by_unit(state: ReportWorkbenchState) -> dict[str, list[str]]:
+    return {
+        str(item.get("unit_id", "")): [str(name) for name in (item.get("metrics", []) or [])]
+        for item in state.get("resolved_units", [])
+    }
+
+
+# 方法作用：在结果样本里找出因缺少同环比基期而必须补查的单元。
+# Args: state - 含计划、单元结果与发现的状态。
+# Returns: (单元标识, 补查理由)；没有缺基期的单元时返回 None。
+def _missing_baseline_reason(state: ReportWorkbenchState) -> tuple[str, str] | None:
+    from src.reporting.profiling import needs_baseline_supplement, profile_inputs
+
+    units = _units_by_id(state)
+    findings = list(state.get("unit_findings", []) or [])
+    metrics_by_unit = _metrics_by_unit(state)
+    for result in state.get("unit_results", []) or []:
+        unit_id = str(getattr(result, "unit_id", "") or "")
+        unit = units.get(unit_id)
+        if unit is None:
+            continue
+        # 与产出侧（report_analyze_units）走同一处派生：列取结果自身的列集合，
+        # 指标取已过授权过滤的那份。判定侧自带一套列/指标口径时会与产出侧选到
+        # 不同的数值列，重新打开「判足够但产出方产不出」的单向死区。
+        columns, metrics = profile_inputs(result, metrics_by_unit.get(unit_id, []))
+        reason = needs_baseline_supplement(
+            unit, list(getattr(result, "rows", []) or []), findings, columns=columns, metrics=metrics
+        )
+        if reason:
+            return unit_id, reason
+    return None
+
+
+# 方法作用：确定性判定本轮补查的触发来源与理由，供决策、提示词与页面共用同一份结论。
+# Args: state - 含计划、单元结果与发现的状态。
+# Returns: {"trigger", "unit_id", "reason"}；两个触发条件都不成立时返回 None。
+def _supplement_context(state: ReportWorkbenchState) -> dict[str, Any] | None:
+    """缺基期优先：它同时是「为什么补查」与「拿什么依据提建议」的唯一来源。"""
+    missing_baseline = _missing_baseline_reason(state)
+    if missing_baseline is not None:
+        return {"trigger": "missing_baseline", "unit_id": missing_baseline[0], "reason": missing_baseline[1]}
+    # 深挖没有显著发现说明数据正常，无需补查，且这条筛选不消耗 LLM 调用。
+    significant = any(
+        item.significance in {"high", "moderate"}
+        for finding in state.get("unit_findings", []) or []
+        for item in finding.items
+    )
+    if not significant:
+        return None
+    return {"trigger": "significant_finding", "unit_id": "", "reason": ""}
+
+
+# 方法作用：判断是否进入运行期补查回路。三条硬前置条件全满足，且两条进入条件
+# （显著发现 / 缺同环比基期）任一成立时，才允许调用 LLM。
 # Args: state - 含结果、发现与档位的状态。
 # Returns: "supplement" 表示进入回路，"continue" 表示继续后续节点。
 def report_decide_supplement(state: ReportWorkbenchState) -> str:
@@ -403,15 +462,40 @@ def report_decide_supplement(state: ReportWorkbenchState) -> str:
         return "continue"
     if len(state["plan"].analysis_units) + len(state.get("runtime_units", []) or []) >= max_plan_units():
         return "continue"
-    # 深挖没有显著发现说明数据正常，无需补查，且这条筛选不消耗 LLM 调用。
-    significant = any(
-        item.significance in {"high", "moderate"}
-        for finding in state.get("unit_findings", []) or []
-        for item in finding.items
-    )
-    if not significant:
+    # 缺同环比基期是与"已有发现"并列的独立触发条件：事故场景只拿回单月数据时
+    # 恰好产不出任何发现，若耦合在发现上，回路永不触发、同比永远为 null。
+    # 这条判定同样是确定性的，不消耗 LLM 调用。
+    context = _supplement_context(state)
+    if context is None:
         return "continue"
+    if context["trigger"] == "missing_baseline":
+        logger.info(
+            "报表运行期补查因缺少同环比基期触发",
+            unit_id=context["unit_id"],
+            reason=context["reason"],
+            level=level,
+            divergence_round=int(state.get("divergence_round", 0) or 0),
+        )
     return "supplement"
+
+
+# 方法作用：把缺基期理由写进触发单元的 warnings，页面 quality 块据此向用户披露。
+# Args: results - 当前单元结果列表；context - 补查上下文。
+# Returns: 追加了披露文案的单元结果列表；非缺基期触发时原样返回。
+def _disclose_supplement_reason(results: list[UnitResult], context: dict[str, Any] | None) -> list[UnitResult]:
+    if not context or str(context.get("trigger", "")) != "missing_baseline":
+        return results
+    unit_id = str(context.get("unit_id", "") or "")
+    text = f"数据不足以产出同环比：{context.get('reason', '')}；系统已据此追加补查单元"
+    annotated: list[UnitResult] = []
+    for result in results:
+        if result.unit_id != unit_id or text in result.warnings:
+            annotated.append(result)
+            continue
+        # warnings 上限与 UnitResult 契约一致，写在最后不挤掉前面的样本处置披露。
+        annotated.append(result.model_copy(update={"warnings": [*result.warnings, text][:20]}))
+    logger.info("报表缺基期理由已写入单元披露", unit_id=unit_id, matched=any(item.unit_id == unit_id for item in results))
+    return annotated
 
 
 # 方法作用：基于实际数据产出的发现提出补充单元，执行后并回状态。
@@ -429,14 +513,29 @@ async def report_plan_supplement(state: ReportWorkbenchState) -> dict[str, Any]:
         remaining,
         max_plan_units() - len(plan.analysis_units) - len(state.get("runtime_units", []) or []),
     )
+    # 条件边函数不能写状态，触发理由必须由本节点重算一次并落进 state：下游的补查
+    # 提示词与页面披露都从 supplement_context 取，保证同一份结论被两处复用。
+    context = _supplement_context(state)
+    update: dict[str, Any] = {
+        "divergence_round": round_index,
+        "unit_results": _disclose_supplement_reason(list(state.get("unit_results", []) or []), context),
+    }
+    if context is not None:
+        update["supplement_context"] = context
+        logger.info(
+            "报表运行期补查触发来源已登记",
+            trigger=context["trigger"],
+            unit_id=context["unit_id"],
+            round=round_index,
+        )
     if limit <= 0:
         await _log_step(state, "report_plan_supplement", "succeeded")
-        return {"divergence_round": round_index}
+        return update
     authorized = state.get("authorized_datasources", {}) or {}
-    new_units = await _propose_runtime_units(state, limit=limit, authorized=authorized)
+    new_units = await _propose_runtime_units(state, limit=limit, authorized=authorized, context=context)
     if not new_units:
         await _log_step(state, "report_plan_supplement", "succeeded")
-        return {"divergence_round": round_index}
+        return update
     resolved_entries: list[dict[str, Any]] = []
     results: list[UnitResult] = []
     executor = state.get("execute_unit")
@@ -459,17 +558,24 @@ async def report_plan_supplement(state: ReportWorkbenchState) -> dict[str, Any]:
     await _log_step(state, "report_plan_supplement", "succeeded")
     logger.info("报表运行期发散追加单元", round=round_index, added=len(new_units), level=level)
     return {
+        **update,
         "runtime_units": [*(state.get("runtime_units", []) or []), *new_units],
         "resolved_units": [*(state.get("resolved_units", []) or []), *resolved_entries],
-        "unit_results": [*(state.get("unit_results", []) or []), *results],
-        "divergence_round": round_index,
+        "unit_results": [*update["unit_results"], *results],
     }
 
 
 # 方法作用：调用补查模型提出运行期补充单元，失败时降级为空。
-# Args: state - 含 unit_findings 的状态；limit - 本轮采纳上限；authorized - 已授权数据源映射。
+# Args: state - 含 unit_findings 的状态；limit - 本轮采纳上限；authorized - 已授权数据源映射；
+#       context - 本轮补查的触发来源与理由（缺基期时作为模型的唯一依据）。
 # Returns: 通过契约校验的单元列表；模型不可用或无建议时返回空列表。
-async def _propose_runtime_units(state: ReportWorkbenchState, *, limit: int, authorized: dict[str, Any]) -> list[Any]:
+async def _propose_runtime_units(
+    state: ReportWorkbenchState,
+    *,
+    limit: int,
+    authorized: dict[str, Any],
+    context: dict[str, Any] | None = None,
+) -> list[Any]:
     from src.llm.client import is_task_llm_available
 
     if not is_task_llm_available(_SUPPLEMENT_LLM_TASK):
@@ -482,6 +588,8 @@ async def _propose_runtime_units(state: ReportWorkbenchState, *, limit: int, aut
         )
         for finding in findings[:12]
     )
+    baseline_triggered = str((context or {}).get("trigger", "") or "") == "missing_baseline"
+    reason = str((context or {}).get("reason", "") or "")
     try:
         from src.llm.invocation import invoke_structured
         from src.llm.output_contracts import ReportSupplementOutput
@@ -489,8 +597,22 @@ async def _propose_runtime_units(state: ReportWorkbenchState, *, limit: int, aut
 
         sections = [
             PromptSection("findings", f"实际数据算出的显著发现：\n{summary}", priority=100, min_chars=20, max_chars=6000),
-            PromptSection("limit", f"最多提出 {limit} 个建议。", priority=90, min_chars=10, max_chars=200),
         ]
+        if baseline_triggered:
+            # 零发现时 findings 段是空的，模型没有任何依据可提建议，只能按提示词
+            # 合规地返回空数组——回路进了、模型调了，却结构性地产不出补查单元。
+            # 缺基期理由是确定性判定，必须原样进提示词作为提建议的依据。
+            sections.append(PromptSection(
+                "baseline_reason",
+                "本轮补查由「缺少同环比基期」这一确定性判定触发（与上方的显著发现无关）：\n"
+                f"{reason}\n"
+                "请围绕补齐该基期提出建议；这类建议不需要关联某一条已有发现，"
+                "supports_finding 允许留空。",
+                priority=95,
+                min_chars=20,
+                max_chars=2000,
+            ))
+        sections.append(PromptSection("limit", f"最多提出 {limit} 个建议。", priority=90, min_chars=10, max_chars=200))
         output = await invoke_structured(
             "report.supplement",
             sections,
@@ -505,11 +627,17 @@ async def _propose_runtime_units(state: ReportWorkbenchState, *, limit: int, aut
         return []
     from src.reporting.planner import ReportPlanner
 
-    raw = [
-        {**item.model_dump(mode="python"), "rationale": item.rationale or f"解释已有发现：{item.supports_finding}"}
-        for item in output.proposed_units
-        if item.supports_finding.strip()
-    ]
+    raw: list[dict[str, Any]] = []
+    for item in output.proposed_units:
+        support = item.supports_finding.strip()
+        # 过滤强度按触发来源区分：由显著发现触发时必须说清解释哪条发现，否则属无依据
+        # 补查；由缺基期触发时「补齐基期」本身就是依据，再要求 supports_finding 非空
+        # 会把这条路径永远卡死（事故里的同比因此一直是 null）。
+        if not support and not baseline_triggered:
+            logger.info("报表运行期补查建议缺少 supports_finding，已丢弃", question=item.question[:60])
+            continue
+        rationale = item.rationale or (f"解释已有发现：{support}" if support else f"补齐缺失基期：{reason}")
+        raw.append({**item.model_dump(mode="python"), "rationale": rationale[:500]})
     return ReportPlanner._coerce_diverge_units(
         raw,
         allowed_datasources=set(authorized.keys()) if isinstance(authorized, dict) else set(),
@@ -524,22 +652,21 @@ async def _propose_runtime_units(state: ReportWorkbenchState, *, limit: int, aut
 # Returns: 全部单元的发现条目列表。
 async def report_analyze_units(state: ReportWorkbenchState) -> dict[str, Any]:
     await _log_step(state, "report_analyze_units", "running")
-    from src.reporting.profiling import profile_unit
+    from src.reporting.profiling import profile_inputs, profile_unit
 
-    metrics_by_unit = {
-        str(item.get("unit_id", "")): [str(name) for name in (item.get("metrics", []) or [])]
-        for item in state.get("resolved_units", [])
-    }
+    metrics_by_unit = _metrics_by_unit(state)
     collected: list[Any] = []
     for result in state.get("unit_results", []):
         # 失败单元没有数据可加工；无命中数据源的单元行集为空，自然不产出。
         if getattr(result, "status", "") == "failed":
             continue
+        # 与判定侧（_missing_baseline_reason）共用同一处输入派生，两侧不可能选到不同数值列。
+        columns, metrics = profile_inputs(result, metrics_by_unit.get(result.unit_id, []))
         collected.extend(profile_unit(
             unit_id=result.unit_id,
             rows=list(result.rows),
-            columns=list(result.columns),
-            metrics=metrics_by_unit.get(result.unit_id, []),
+            columns=columns,
+            metrics=metrics,
             truncated=bool(getattr(result, "truncated", False)),
         ))
     await _log_step(state, "report_analyze_units", "succeeded")

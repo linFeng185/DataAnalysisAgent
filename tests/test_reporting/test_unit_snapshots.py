@@ -91,11 +91,11 @@ class TestBuildSnapshotNormalization:
         assert len(snapshot.truncated_reason) == 200
         assert len(snapshot.error_code) == 64
 
-    # 方法作用：验证截断原因生成可读文案。
+    # 方法作用：验证截断原因生成可读文案，措辞描述真实发生的样本收敛。
     def test_describe_truncation_formats_readable_reason(self) -> None:
         from src.reporting.snapshots import describe_truncation
 
-        assert describe_truncation(5000, 80000, 5000) == "查询返回 80000 行，页面展示 5000 行（上限 5000）"
+        assert describe_truncation(5000, 80000, 5000) == "进入分析链路 5000 行，查询全量 80000 行（生效样本上限 5000 行）"
 
     # 方法作用：验证未发生截断时返回空串，不产生噪音文案。
     def test_describe_truncation_empty_when_not_truncated(self) -> None:
@@ -121,7 +121,7 @@ class TestUnitSnapshotStoreMemory:
             run_id="run-a", report_id="rep-a", tenant_id=3, user_id=7, unit_id="unit_1",
             status="success", datasource="oracle", dialect="mysql", sql="SELECT 1",
             prompt_text="销售趋势", model_id="qwen3", params={"selected_datasources": ["oracle"]},
-            row_count=5, full_count=9, truncated=True, truncated_reason="查询返回 9 行，页面展示 5 行",
+            row_count=5, full_count=9, truncated=True, truncated_reason="进入分析链路 5 行，查询全量 9 行（生效样本上限 5000 行）",
             elapsed_ms=120,
         )
 
@@ -139,7 +139,7 @@ class TestUnitSnapshotStoreMemory:
         assert row["row_count"] == 5
         assert row["full_count"] == 9
         assert row["truncated"] is True
-        assert row["truncated_reason"] == "查询返回 9 行，页面展示 5 行"
+        assert row["truncated_reason"] == "进入分析链路 5 行，查询全量 9 行（生效样本上限 5000 行）"
         assert row["elapsed_ms"] == 120
         assert row["datasource"] == "oracle"
         assert row["dialect"] == "mysql"
@@ -253,7 +253,7 @@ class TestRunnerUnitSnapshot:
         assert row["row_count"] == 1
         assert row["full_count"] == 9
         assert row["truncated"] is True
-        assert "查询返回 9 行" in row["truncated_reason"]
+        assert "查询全量 9 行" in row["truncated_reason"]
         assert row["elapsed_ms"] >= 0
         assert "销售明细" in row["prompt_text"]
 

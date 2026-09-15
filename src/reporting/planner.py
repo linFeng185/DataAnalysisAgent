@@ -12,6 +12,7 @@ from zoneinfo import ZoneInfo
 from src.logging_config import get_logger
 from src.reporting.models import (
     _CAUSAL_PHRASE_RE,
+    _UNIT_TITLE_MAX_CHARS,
     AnalysisUnit,
     EstimatedResources,
     ReportPlan,
@@ -54,8 +55,12 @@ _UNIT_KEY_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
 # 时间范围单位换算，用于比较各单元跨度并让发散单元继承最长者。
 _SPAN_UNIT_DAYS: dict[str, int] = {"d": 1, "w": 7, "m": 30, "q": 90, "y": 365}
 # 绝对区间：2016-01-01 至 2036-12-31（兼容 到/~/-/—/起 等连接词）。
+# 「/」是本抽取器 canonical 输出的连接符，必须进连接词表，否则 canonical 值
+# 2016-01-01/2036-12-31 无法被自身重解析（幂等性缺失）；误匹配风险可忽略：
+# 模式仍要求两侧各是完整「年月日」三段日期，单日期 2016/01/01 无连接词、
+# 路径样 2016/01/01/02 的第二段构不成 19xx/20xx 年份，都不会命中。
 _ABSOLUTE_RANGE_RE = re.compile(
-    r"((?:19|20)\d{2}[-/.]\d{1,2}[-/.]\d{1,2})\s*(?:至|到|~|-|—|起)\s*((?:19|20)\d{2}[-/.]\d{1,2}[-/.]\d{1,2})"
+    r"((?:19|20)\d{2}[-/.]\d{1,2}[-/.]\d{1,2})\s*(?:至|到|~|-|—|起|/)\s*((?:19|20)\d{2}[-/.]\d{1,2}[-/.]\d{1,2})"
 )
 # 相对区间：最近/近/过去 3 个月、90 天、2 年。
 _RELATIVE_RANGE_RE = re.compile(r"(?:最近|近|过去|往前)\s*(\d{1,4})\s*(天|周|个月|月|年)")
@@ -663,6 +668,14 @@ class ReportPlanner:
             seen.add(key)
             payload = {name: value for name, value in raw.items() if name != "unit_id"}
             payload.update({"unit_id": key, "question": question})
+            # 标题与 question 在同一次 report.plan 调用里产出，这里只做透传，不额外起模型调用。
+            # 但不能原样塞：契约的 12 字上限拦的是模型，单元字段上限更宽，超长值会让整个单元
+            # 通不过 AnalysisUnit 校验被静默跳过（业务问题一起消失），故按单元上限收窄。
+            # 上限复用 _UNIT_TITLE_MAX_CHARS，不在这里另写一个数字造成脱钩。
+            title = " ".join(str(raw.get("title") or "").split())
+            payload.pop("title", None)
+            if title:
+                payload["title"] = title[:_UNIT_TITLE_MAX_CHARS]
             # 模型的时间范围建议可能缺失或残缺（None、空值、自然语言时长）：残缺值必须剔除，
             # 让单元落到默认值再走服务端兜底；不能把非法值原样塞进契约，
             # 否则一个空字符串会让整个单元连问题一起被拒收（与 max_length=12 同类的静默丢失）。
@@ -683,7 +696,7 @@ class ReportPlanner:
 
     # 方法作用：把模型给出的 time_range 建议规范化成 AnalysisUnit 契约可接受的形式。
     # Args: raw - 模型输出的 time_range 字段值，可能是 dict、None 或其它类型。
-    # Returns: 含 kind/value 的字典；不可用时返回 None，表示交回服务端默认值。
+    # Returns: 含 kind/value 的字典；不可用或无法通过 TimeRange 校验时返回 None，表示交回服务端默认值。
     @staticmethod
     def _normalize_llm_time_range(raw: Any) -> dict[str, str] | None:
         logger.debug("模型时间范围规范化入口", raw_type=type(raw).__name__)
@@ -698,7 +711,7 @@ class ReportPlanner:
             result = {"kind": "all", "value": value or "all"}
         elif kind == "absolute" and value:
             # 模型可能把区间写成「起 至 止」等自然语言形态，先复用抽取器规范化；
-            # 抽不到时保留原值，由 TimeRange 自身的格式校验兜底。
+            # 抽不到的形态（如中文年月日）不保留原值，交给下方契约校验拒绝。
             extracted = extract_time_range(value)
             if extracted is not None and extracted.kind == "absolute":
                 value = extracted.value
@@ -708,6 +721,15 @@ class ReportPlanner:
             result = {"kind": "relative", "value": re.sub(r"\s+", "", value)}
         else:
             result = None
+        # 规范化结果必须能通过 TimeRange 的字符集与长度校验：非 ASCII 值（如「全部」、
+        # 「2016年1月1日」）一旦写进单元，AnalysisUnit 会整体拒收，单元连同业务问题
+        # 一起静默消失。此处提前丢弃，让该单元落回默认相对值，再由规则抽取兜底。
+        if result is not None:
+            try:
+                TimeRange.model_validate(result)
+            except ValueError:
+                logger.info("模型时间范围规范化完成", accepted=False, reason="值未通过 TimeRange 校验", kind=kind)
+                return None
         logger.info("模型时间范围规范化完成", accepted=result is not None, kind=kind)
         return result
 

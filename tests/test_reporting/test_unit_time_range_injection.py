@@ -73,7 +73,11 @@ class TestComposeUnitQuery:
             question="库存水平走势",
             time_range=TimeRange(kind="relative", value="90d"),
         )
-        assert _compose_unit_query(unit) == "库存水平走势（时间范围：最近 90 天）"
+        query = _compose_unit_query(unit)
+        # 时间范围括号串必须原样保留（下游按「时间范围：」定位），
+        # 取数要求作为其后追加的独立句子存在。
+        assert query.startswith("库存水平走势（时间范围：最近 90 天）。")
+        assert "聚合" in query
 
     # 方法作用：回归缺陷——注入时间范围后，主图不再要求用户补时间范围。
     # Args: self - 测试实例。

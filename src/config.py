@@ -355,6 +355,10 @@ class Settings(BaseSettings):
     report_public_share_enabled: bool = True
     report_retry_max_attempts: int = Field(default=3, ge=1, le=10)
     report_run_timeout_seconds: int = Field(default=900, ge=1, le=86_400)
+    # 单次查询回传给分析链路的行数上限。原值 200 是硬编码，超出即静默砍行：
+    # 明细粒度（如 员工×项目×年月）一超就被裁，报表因此样本不足。
+    # 放宽并改为可配；真正超限时由 sample_guard 交给模型判断聚合或缩小范围。
+    report_max_sample_rows: int = Field(default=5000, ge=100, le=100_000)
 
     # ---- 多租户与认证 ----
     multi_tenant: bool = False               # 是否启用多租户
