@@ -203,3 +203,58 @@ class TestUnitTimeRange:
 
         # Assert
         assert "2016-01-01" in query and "2036-12-31" in query
+
+
+class TestTimeRangePositionRule:
+    """覆盖 2026-09-16 事故：用户在开头写「时间范围是去年」，计划却取了后文的日期区间。"""
+
+    # 方法作用：验证最早出现的时间写法胜出，而不是绝对区间无条件优先。
+    def test_earliest_expression_wins(self) -> None:
+        """需求第一句才是报表级口径，后文顺带提到的日期区间不能覆盖它。"""
+        # Arrange
+        from src.reporting.planner import extract_time_range
+
+        prompt = "立即生成一份《集团经营全景分析报表》，时间范围是去年，页面保留 30 天，并允许团队成员查看。"
+
+        # Act
+        result = extract_time_range(prompt)
+
+        # Assert
+        assert result is not None
+        year = int(result.value[:4])
+        # 去年＝当前年份减一，起止为整年。
+        assert result.value == f"{year}-01-01/{year}-12-31"
+
+    # 方法作用：验证粘回需求里的上一版计划渲染块不参与时间范围解析。
+    def test_rendered_plan_block_is_not_parsed_as_requirement(self) -> None:
+        """实机需求里，「你要求的分析」之后的单元文本带着 2016–2036 的旧区间。"""
+        # Arrange
+        from src.reporting.planner import extract_time_range
+
+        prompt = (
+            "立即生成一份《集团经营全景分析报表》，时间范围是去年，页面保留 30 天。\n"
+            "你要求的分析\n"
+            "按年月统计净销售额，时间范围 2016-01-01 至 2036-12-31。\n"
+            "数据源：待绑定"
+        )
+
+        # Act
+        result = extract_time_range(prompt)
+
+        # Assert
+        assert result is not None
+        assert "2016-01-01" not in result.value
+        assert "2036-12-31" not in result.value
+
+    # 方法作用：验证需求正文里本来就带绝对区间时仍以它为准。
+    def test_leading_absolute_range_still_wins(self) -> None:
+        """按位置排序不能把用户明确写在前面的绝对区间让给后文的口语说法。"""
+        # Arrange
+        from src.reporting.models import TimeRange
+        from src.reporting.planner import extract_time_range
+
+        # Act
+        result = extract_time_range("时间范围 2024-01-01 至 2024-12-31，统计去年同期的对比")
+
+        # Assert
+        assert result == TimeRange(kind="absolute", value="2024-01-01/2024-12-31")

@@ -117,6 +117,7 @@ class TestTruncateDocumentToBlockBudget:
         assert removed == 4
         assert [len(section.blocks) for section in document.sections] == [53, 27]
         assert len(document.navigation) == 3
+        assert any("页面块" in item and "4" in item for item in document.limitations)
 
     # 方法作用：被裁空的区段连同导航锚点一并摘除，overview 首屏锚点必须保留。
     # Args: self - 测试实例；monkeypatch - 补丁夹具。

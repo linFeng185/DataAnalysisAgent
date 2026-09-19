@@ -318,18 +318,22 @@ class UnitFinding(BaseModel):
 ```python
 "report.diverge": PromptDefinition(
     prompt_id="report.diverge",
-    version="1.0.0",
+    version="1.1.0",
     task="report_diverge",
     template=(
         "你是报表分析发散助手。给定用户已确认的分析单元、每个数据源的表名清单和本次允许的建议数量上限，"
         "提出最多 {limit} 个'用户没要求但会影响其结论'的补充分析单元。"
         "每个建议必须说明 rationale（为什么与已有需求相关）与 expected_signal（预期能看到什么信号）。"
+        # 标题约束与 report.plan 同标准（字数、概括主题、禁照抄、禁维度罗列开头）：
+        # 发散单元同样要当页面区段标题，标准不同会出现两种读感；主语按语境取「这个建议」。
+        "title 是这个建议在页面上的精简标题，不超过 12 个字，概括业务主题；"
+        "不要照抄 question 原文，也不要以「按年月」「按地区」这类维度罗列开头。"
         "datasource 只能从给定清单里选，不确定时留空字符串，禁止凭猜测填写。"
         "禁止提出与已有单元语义重复的建议；"
         # 因果约束与对话侧 analysis.result、报表侧 report.supplement 共用同一常量。
         + COMMON_NO_CAUSAL_CLAIM
-        + "只输出 JSON：{{\"proposed_units\": [{{\"question\": \"...\", \"datasource\": \"\", "
-        "\"rationale\": \"...\", \"expected_signal\": \"...\"}}]}}。"
+        + "只输出 JSON：{{\"proposed_units\": [{{\"question\": \"...\", \"title\": \"不超过 12 字的精简标题\", "
+        "\"datasource\": \"\", \"rationale\": \"...\", \"expected_signal\": \"...\"}}]}}。"
         "确实没有值得补充的方向时返回空数组，"
         + COMMON_NO_PADDING
     ),
@@ -348,7 +352,7 @@ class UnitFinding(BaseModel):
 ```python
 "report.supplement": PromptDefinition(
     prompt_id="report.supplement",
-    version="1.0.0",
+    version="1.2.0",
     task="report_supplement",
     template=(
         "你是报表分析补充助手。给定已有分析单元、这些单元实际取回数据后计算出的显著发现"
@@ -356,11 +360,15 @@ class UnitFinding(BaseModel):
         "判断是否存在'为了解释或验证这些发现而需要补充查询'的分析单元。"
         "只有当发现确实指向一个尚未覆盖的方向时才提出建议，每条必须说明 supports_finding"
         "（它解释或验证哪一条已有发现）。"
+        # 标题约束与 report.plan 同标准（字数、概括主题、禁照抄、禁维度罗列开头）：
+        # 补查单元同样要当页面区段标题，标准不同会出现两种读感；主语按语境取「这个建议」。
+        "title 是这个建议在页面上的精简标题，不超过 12 个字，概括业务主题；"
+        "不要照抄 question 原文，也不要以「按年月」「按地区」这类维度罗列开头。"
         "datasource 只能从给定清单里选，不确定时留空字符串。"
         # 因果约束与对话侧 analysis.result、报表侧 report.diverge 共用同一常量。
         + COMMON_NO_CAUSAL_CLAIM
-        + "只输出 JSON：{{\"proposed_units\": [{{\"question\": \"...\", \"datasource\": \"\", "
-        "\"rationale\": \"...\", \"supports_finding\": \"...\"}}]}}。"
+        + "只输出 JSON：{{\"proposed_units\": [{{\"question\": \"...\", \"title\": \"不超过 12 字的精简标题\", "
+        "\"datasource\": \"\", \"rationale\": \"...\", \"supports_finding\": \"...\"}}]}}。"
         "没有需要补充的方向时返回空数组——这是最常见也最正确的结果，"
         + COMMON_NO_PADDING
     ),
@@ -387,22 +395,23 @@ class UnitFinding(BaseModel):
 
 任一硬前置不满足、或两条进入条件都不满足 → 直接返回 `"continue"`，**不消耗 LLM 调用**。
 
-**第 4b 条的门槛与产出侧同源**：`profiling.needs_baseline_supplement(unit, rows, findings)` 在单元问题命中「同比/去年同期/上年同期」或「环比/上月/上期」措辞时，按本轮实际取回的样本数出聚合周期数与首尾跨度，不足即返回可读理由（写明缺哪类基期、当前周期数与跨度）。门槛与同环比产出侧 `_period_findings` **共用同一处谓词**（`_period_min_observations()` / `_has_enough_yoy_span()`），两侧都不许自带数字——一旦分头定义，就会出现「判定说足够、产出方产不出」的死区。该判定全程确定性，不调用模型。
+**第 4b 条的门槛与产出侧同源**：`profiling.needs_baseline_supplement(unit, rows, findings)` 在单元问题命中「同比/去年同期/上年同期」或「环比/上月/上期」措辞时，按本轮实际取回的样本数出聚合周期与日历基期，不足即返回可读理由（写明缺哪类基期、当前周期数与跨度）。门槛与同环比产出侧 `_period_findings` **共用同一处谓词**（`_period_min_observations()` / `_has_yoy_baseline()`），两侧都不许自带数字——一旦分头定义，就会出现「判定说足够、产出方产不出」的死区。同比是否具备基期按「当前周期能否按日历年平移到样本中的去年同周期」判断，不得用 `13×30=390` 天近似一年。该判定全程确定性，不调用模型。缺同比触发补查时，服务端同时扩大补查单元的 `time_range`，避免 question 要求去年同期、显式时间窗却仍限制在原区间。
 
 满足时调用 `report.supplement`：
 
-- 返回空数组 → `"continue"`（正常路径，**不写 `warnings`**）
-- 返回非空 → 截断至 `min(_DIVERGENCE_UNITS_PER_ROUND[level], 剩余额度)` → 生成 `origin="diverged"`、`decided_by="runtime"` 的单元 → 返回 `"supplement"`
+- 返回空数组、模型不可用、调用失败或候选全部未通过校验 → `"continue"`，并在触发单元的 `warnings` 披露“补查未生成可执行单元，已按现有结果继续”；
+- 返回非空 → 截断至 `min(_DIVERGENCE_UNITS_PER_ROUND[level], 剩余额度)` → 生成 `origin="diverged"`、`decided_by="runtime"` 的单元 → 返回 `"supplement"`，并按实际采纳数量写入触发单元的 `warnings`。披露必须在候选规范化之后生成，不能按模型原始建议数提前声称已追加。
 
 ### 6.4 两阶段的模型输出处理（统一原则）
 
-阶段一与阶段二共用同一套服务端处理（沿用 `_coerce_llm_units`，`planner.py:420-449` 的既有原则）：
+阶段一与阶段二共用同一套服务端处理（`ReportPlanner._coerce_diverge_units`，沿用 `_coerce_llm_units`，`planner.py:420-449` 的既有原则）。**plan 期（`planner.diverge`）与运行期（`report_workbench.report_plan_supplement`）调用的是同一个静态方法**，不是两份实现：
 
 1. **丢弃模型给出的任何 `unit_id`**（输出契约里根本没有该字段），由服务端 `uuid4` 重新分配。
 2. `datasource` 不在已授权清单内 → **清空**（沿用"模型在授权集合内的猜测会被清空"的既有模式），由 `report.route` 重新定位。
-3. 超出额度 → 截断 + `warnings`。
+3. 超出额度 → 截断 + `warnings`；主规划与计划期发散有候选未通过服务端校验时，必须聚合披露候选总数与拒绝数，保留其余合法单元。
 4. `rationale` 命中因果措辞黑名单（`导致|造成|因为|引起|致使|归因于`）→ 丢弃该条 + `warnings`。提示词约束是软约束，**服务端必须硬校验**。
 5. `priority` 固定 `"secondary"`；阶段二额外要求 `supports_finding` 非空，否则丢弃（防止无依据的补查）。
+6. `title` 只做透传与收窄，**不额外起模型调用**（与 `question` 同一次调用产出）：契约的 12 字上限（`_REPORT_UNIT_TITLE_MAX_CHARS`）拦的是模型，`AnalysisUnit.title` 字段上限更宽（`_UNIT_TITLE_MAX_CHARS = 20`），超长值原样塞入会让整个单元通不过 `AnalysisUnit` 校验、被静默跳过（业务问题一起消失），故折叠空白后按单元上限收窄，缺失时留空、由展示层按既有逻辑回退。实机验收里 14 个区段有 6 个发散单元标题退回截断的问题原文，原因正是契约没有 `title` 字段、解析层也从不赋值——契约与解析层两处都补齐之后才有标题可透传。透传写在 `_coerce_diverge_units` 内，plan 期与运行期两条发散路径自动同时生效，不存在第二处实现。
 
 ### 6.5 降级路径
 
@@ -462,7 +471,7 @@ def analyze_cross_source(
    - `limitations` **强制包含**：`["跨数据源未做行级连接，结论仅基于各自样本分布的秩相关，不能推断个体级关联，不构成因果"]`
 7. 任一侧数值列方差为 0 → `insufficient`，说明"数值列无有效变化"。
 
-**不做的**：不估算连接行数、不猜测业务粒度、不做行级 join、不把字段同名当作关系。与 `aggregation.py:26-36` 的同类禁令保持一致。
+**不做的**：不估算连接行数、不猜测业务粒度、不做行级 join、不把字段同名当作关系。与 `aggregation.py:29-43` 的同类禁令保持一致（该区间在本轮被拆成「单元数超预算」与「资源参数非法」两条降级分支，行号随之右移）。
 
 ### 7.3 调度位置
 

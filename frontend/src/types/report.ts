@@ -98,6 +98,10 @@ export interface ReportRun {
   row_count: number;
   /** 真实 token 用量（prompt + completion）。 */
   token_usage: number;
+  /** 输入（prompt）token 用量。 */
+  prompt_token_usage: number;
+  /** 输出（completion）token 用量。 */
+  completion_token_usage: number;
   /** 以下为运行期真实计数，与 query_count 的估算口径相互独立。 */
   llm_call_count: number;
   llm_failure_count: number;
@@ -126,6 +130,44 @@ export interface ReportRunStep {
   duration_ms?: number | null;
 }
 
+/** 运行级计数汇总，对应后端 ReportRunRecord.stats_summary()。 */
+export interface ReportRunStats {
+  llm_call_count: number;
+  llm_failure_count: number;
+  llm_success_count: number;
+  llm_token_usage: number;
+  llm_prompt_tokens: number;
+  llm_completion_tokens: number;
+  sql_query_count: number;
+  sql_success_count: number;
+  sql_failure_count: number;
+  /** 配额计费口径的预估查询数，不是实际执行次数。 */
+  estimated_query_count: number;
+}
+
+/** 执行明细页的一行：运行记录 + 计数汇总 + 所属任务摘要。 */
+export interface ReportRunDetailRow extends ReportRun {
+  stats: ReportRunStats;
+  job_title: string;
+  job_prompt: string;
+  job_status: ReportJobStatus;
+}
+
+export interface ReportRunListResponse {
+  runs: ReportRunDetailRow[];
+  total: number;
+  page: number;
+  page_size: number;
+}
+
+/** 执行明细的查询条件；job_id 为空表示不限任务。 */
+export interface ReportRunListQuery {
+  job_id?: string;
+  status?: string;
+  page?: number;
+  page_size?: number;
+}
+
 /** 单个分析单元最近一次执行的完整调试快照，字段与后端 report_unit_snapshots 表对应。 */
 export interface ReportUnitSnapshot {
   id: string;
@@ -137,7 +179,8 @@ export interface ReportUnitSnapshot {
   datasource: string;
   dialect: string;
   sql_text: string;
-  prompt_text: string;
+  /** 完整提示词正文。API 边界已剥离该字段，仅在内部调试链路上存在。 */
+  prompt_text?: string;
   prompt_id: string;
   model_id: string;
   params: Record<string, unknown>;

@@ -170,6 +170,7 @@ class TestMetricCitationSection:
         # Assert
         assert not [item for item in artifact.document.sections if item.id == "metric_refs"]
 
+
     # 方法作用：验证页面校验拒绝该区段时降级为不展示而不是整份报表失败。
     # Args: self - 测试实例。
     # Returns: 无返回值，断言失败时由 pytest 报告。
@@ -190,3 +191,31 @@ class TestMetricCitationSection:
         # Assert
         assert len(artifact.document.sections) == before
         assert not [item for item in artifact.document.sections if item.id == "metric_refs"]
+
+
+class TestMetricUnitOnKpi:
+    """覆盖 KPI 单位只从可信指标口径进入页面，内部 unit_id 不得冒充单位。"""
+
+    # 方法作用：验证唯一指标口径的单位会写入 KPI content.unit。
+    # Args: self - pytest 测试类实例。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    def test_kpi_uses_metric_catalog_unit(self) -> None:
+        """前端读取 content.unit，后端必须下发真实计量单位而不是分析单元标识。"""
+        # Arrange
+        from src.reporting.document import build_report_document
+        from src.reporting.models import AnalysisUnit, ReportPlan, UnitResult
+
+        plan = ReportPlan(analysis_units=[AnalysisUnit(unit_id="sales", question="成交总额")])
+        result = UnitResult(
+            unit_id="sales",
+            rows=[{"gmv": 128.5}],
+            metric_citations=[{"code": "gmv", "name": "成交总额", "unit": "元", "version": 3}],
+        )
+
+        # Act
+        artifact = build_report_document(plan, [result])
+
+        # Assert
+        kpi = next(block for block in artifact.document.sections[0].blocks if block.type == "kpi")
+        assert kpi.content["unit"] == "元"
+        assert "unit_id" not in kpi.content

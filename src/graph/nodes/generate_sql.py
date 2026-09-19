@@ -453,6 +453,18 @@ def build_retry_context(state: AnalysisState, retry: int, tables: list[dict]) ->
     )
     if retry <= 0:
         return ""
+    # 上一轮直接没输出 SQL（模型自称缺表/缺字段而拒绝生成）：把它的自述缺口原样回注，
+    # 并明确要求基于已给 Schema 重试。实机里多数"缺失"其实在 Schema 内——总账与人力
+    # 单元都出现过模型宣称没有借贷/工时表，而表就在检索结果里。
+    if not str(state.get("generated_sql", "") or "").strip():
+        previous = str(state.get("input_explanation", "") or "").strip()
+        return (
+            f"## 第 {retry} 次生成：上一轮没有输出 SQL\n"
+            f"你上一轮给出的理由：{previous or '（未说明）'}\n"
+            "请据此重新生成一条可执行 SQL：优先用下方 Schema 中真实存在的表与列表达同一业务口径，"
+            "不要因为找不到字面同名的表就放弃；跨表关联可以借助 Schema 给出的外键。"
+            "确实无法用任何真实表表达该口径时，才继续返回空 SQL，并写明缺哪张表、哪个字段。"
+        )
     validation_errors = state.get("validation_errors", []) or []
     hallucinations = [
         error for error in validation_errors

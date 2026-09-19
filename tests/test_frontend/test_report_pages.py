@@ -18,23 +18,28 @@ UNIT_ROW = "frontend/src/components/report/ReportPlanUnitRow.tsx"
 class TestReportSubmenu:
     """覆盖需求 1.1、1.8：子菜单能力键控制与旧「自动化」入口移除。"""
 
-    # 方法作用：验证报表工作台是含三个子项的子菜单，且每个子项按自己的能力键控制。
+    # 方法作用：验证报表工作台是含四个子项的子菜单，且每个子项按自己的能力键控制。
     # Args: self - pytest 测试类实例。
     # Returns: 无返回值，断言失败时由 pytest 报告。
-    def test_menu_is_submenu_with_three_capability_keys(self) -> None:
-        """三个子页必须各配一个能力键；父菜单仍由 report.menu 控制。"""
+    def test_menu_is_submenu_with_four_capability_keys(self) -> None:
+        """四个子页必须各配一个能力键；父菜单仍由 report.menu 控制。
+
+        第四个是「执行明细」：与「报表信息」同用 report.list（都是列表级能力），
+        因此能力键判断处共 4 处、键名 3 个。
+        """
         # Arrange
         app = Path(APP).read_text(encoding="utf-8")
 
         # Act / Assert：父菜单可见性沿用 reportMenuAllowed（report.menu）
         assert "reportMenuAllowed === true" in app
         assert "{t(\"报表工作台\")}" in app
-        # 子菜单结构：children 三项，各按自己的键控制
+        # 子菜单结构：children 四项，各按自己的键控制
         assert "children: [" in app
-        assert app.count("reportCapabilities.includes('") == 3, "三个子项必须各有一个能力键判断"
+        assert app.count("reportCapabilities.includes('") == 4, "四个子项必须各有一个能力键判断"
         assert "reportCapabilities.includes('report.create_page')" in app
-        assert "reportCapabilities.includes('report.list')" in app
+        assert app.count("reportCapabilities.includes('report.list')") == 2, "报表信息与执行明细同用 report.list"
         assert "reportCapabilities.includes('report.link_manage')" in app
+        assert "report-workbench/runs" in app
         # 能力探针失败必须按无能力处理，不能把子项全量放行。
         # 写入点在共享上下文（应用挂载时拉取一次，菜单/守卫/页面共用），App.tsx 只读。
         provider = Path(PROVIDER).read_text(encoding="utf-8")

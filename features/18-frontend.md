@@ -165,7 +165,22 @@
 |---|------|------|------|------|--------|
 | 18.15 | 报表工作台三子页 | `frontend/src/pages/ReportCreatePage.tsx`、`ReportListPage.tsx`、`LinkManagementPage.tsx`、`frontend/src/report/promptExamples.ts`、`frontend/src/report/status.ts` | 父菜单拆成创建报表 / 报表信息 / 链接管理三个子项，各按 `report.create_page` / `report.list` / `report.link_manage` 控制可见性，旧 `/report-workbench` 重定向到创建页；创建页左表单右案例（案例为纯静态数据文件，不调接口，点击仅回填提示词）；报表信息页 7 列（标题/数据源/发散档位/状态/运行次数/下次运行时间/创建时间）按创建时间倒序，租户管理员可按用户筛选，非终态 2.5 秒轮询，详情抽屉含计划查看与发散单元删减、调度编辑、逐页延期/永久与「生成」「重试计划」「删除」；旧「自动化」菜单与路由摘除 | 单测完成 | P1 |
 | 18.16 | 通知中心 | `frontend/src/components/notifications/`、`frontend/src/pages/NotificationsPage.tsx`、`frontend/src/hooks/useNotifications.ts`、`frontend/src/api/notifications.ts` | 顶栏铃铛（未读角标、0 隐藏、99+ 截断）与收件箱抽屉/整页；四类通知展示、标记已读、全部已读、软删；发布界面按角色开放（平台通知仅超管、租户与用户群仅租户管理员，个人通知不在此发布）；租户级渠道配置，敏感项只显示「已配置」不回显明文，并明示邮件与飞书/Slack 暂不外发；WebSocket 推送（握手复用 HttpOnly Cookie，URL 不带令牌）断线指数退避重连、长连不可用降级 60 秒轮询，未读数以推送值为准不做本地自增；StrictMode 双挂载不产生多余连接；应用层心跳每 25 秒发一次文本 `ping`、服务端回 `{"type":"pong"}`，双向流量持续重置反向代理的空闲超时（nginx `proxy_read_timeout` / `proxy_send_timeout` 各 600s），并以 70 秒内收不到任何消息判定链路已死、主动关闭以复用既有重连 | 单测完成 | P1 |
+| 18.17 | 报表呈现层组件（hero / 图文配对 / 图表基线扩展） | `frontend/src/components/report/ReportHero.tsx`、`ReportBlockPair.tsx`、`ReportDocumentRenderer.tsx`、`chartBase.ts`、`frontend/src/report/templates.ts`、`frontend/src/index.css` | → **见 23.23 与 23.24**（主实现在报表模块，本页不重复计数，约定同 18.13）。前端侧要点：hero 横幅文字色按底色亮度推导（复用 `chartBase.isDarkSurface` 的既有模式与单测），不新增成对的明暗文字 token；配对容器内**显式分支**决定变体 1 / 变体 2，不做隐式 `col_span` 覆盖；六种图表的线宽（2px）、柱顶圆角（4px，仅数据端）、相邻柱间隙（2px）、散点标记（≥8px）统一到一套规格；单系列柱状图**全场一色 + 高亮研判点名实体**，不做按名次的深浅渐变（柱长已编码大小，颜色重复编码是冗余，且颜色会跟随名次而非实体）；热力图用单色明度阶梯，**深色模板下阶梯反向**（低值退向底色）。视觉稿见 `spec/49` 第 5 节 | Phase 3 | 单测完成 | P1 |
 
 界面支撑：共享状态映射抽到 `frontend/src/report/status.ts`（与后端状态枚举同源），案例数据独立成文件便于维护；通知铃铛经 `App.tsx` 顶栏接入，路由 `/notifications` 懒加载。前端契约测试新增 `tests/test_frontend/test_report_pages.py`（14 例）与 `test_notifications_ui.py`（17 例），并把 `test_p3_experience.py` 里「自动化菜单存在」的断言改为「菜单/路由/引用均已移除，页面文件保留」。`npx tsc -b` 退出码 0；前端套件 177 passed、22 skipped（浏览器用例默认 skip）。
+
+## 2026-09-19 应用外壳固定：超长报表不再把侧栏菜单一起滚走
+
+用户反馈：生成的报表过长时向下滚动，侧栏菜单被一并滑出视口。属 18.1.2 布局缺陷修复，不新增功能点、不改状态。
+
+根因（浏览器实测，桌面视口 1440x800）：外壳 `<Layout>` 只写了 `min-height: 100vh`，内层 `Layout` 没有任何高度约束，于是侧栏被撑到 **4736px** 高（视口仅 800）；内容区 `overflow-y` 为 `visible`，滚动目标是整个文档（`bodyScrollHeight` 4800）。滚动文档时侧栏随之下移，菜单顶边从 `72` 变成 `-1128` —— 与反馈一致。antd 侧栏自身是 `position: relative`（`antd/es/layout/style/sider.js`），不会自行固定。
+
+修复（3 个文件）：
+
+- `frontend/src/index.css`：新增 `.app-shell`（`height: 100vh/100dvh` + `overflow: hidden`）把外壳钉在视口内；`.app-content` 增加 `overflow-y: auto` 接管纵向滚动（窄屏仍由 767 断点的 `overflow-x: hidden` 收窄）；`.app-shell .ant-layout-sider-children` 增加 `overflow-y: auto`，保证矮屏下菜单超高时末项仍可滚到（1440x400 实测可滚 116px）。
+- `frontend/src/App.tsx`：外层 `Layout` 改用 `className="app-shell"`；`Content` 加 `ref` 与 `tabIndex={-1}`，并在路由切换后（且当前焦点仍在 `body` 时）把焦点交给内容区 —— 外壳固定后文档不再是滚动目标，焦点不在内容区时 PageDown/Space 找不到可滚动祖先（实测 `contentScrollTop` 保持 0），页面自身已聚焦控件时（如对话页提问框）不抢焦点。
+- `tests/test_frontend/test_responsive_no_overflow.py`：新增 `TestAppShellKeepsNavigationVisible`（4 例）锁定外壳高度、内容区滚动归属、侧栏菜单可达性与类名挂载点，防止回退。
+
+验证：修复后同一脚本实测文档高度从 4800 降到 **800（=视口）**、侧栏高度 **736（=视口-顶栏）**，窗口滚动 1200px 后菜单顶边仍为 `72`；PageDown 可滚内容区（`contentScrollTop` 644）。遍历 `/`、`/datasources`、`/history`、`/admin`、`/report-workbench/create`：文档宽高均等于视口、内容区无横向溢出、无多出滚动条；390x844 窄屏侧栏改走抽屉且无横向溢出。前端套件 **241 passed、23 skipped**（新增 4 例），`npx tsc --noEmit` 退出码 0。
 
 ---

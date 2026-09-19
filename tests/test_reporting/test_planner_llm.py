@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import pytest
-
 
 class TestReportPlannerLlmUnits:
     """覆盖功能 23.1：结构化 LLM 业务语义拆解与规则回退。"""
@@ -37,6 +35,33 @@ class TestReportPlannerLlmUnits:
         assert plan.requested_datasources == ["sales"]
         assert plan.execution_mode == "scheduled"
         assert not any("模型规划不可用" in warning for warning in plan.warnings)
+
+    # 方法作用：验证模型单元部分校验失败时公开候选数与拒绝数。
+    # Args: self - pytest 测试类实例。
+    # Returns: 无返回值。
+    async def test_partially_invalid_llm_units_are_disclosed(self) -> None:
+        """保留合法单元时也必须说明另一个候选被服务端拒绝，不能静默消失。"""
+        # Arrange
+        from src.reporting.planner import ReportPlanner
+
+        class FakePlanner:
+            # 方法作用：返回一个合法单元和一个优先级非法的单元。
+            # Args: prompt - 规则解析传入的用户文本。
+            # Returns: 含部分非法单元的模型输出字典。
+            async def ainvoke(self, prompt: str) -> dict[str, object]:
+                return {
+                    "analysis_units": [
+                        {"unit_id": "sales", "question": "销售趋势"},
+                        {"unit_id": "risk", "question": "风险分析", "priority": "tertiary"},
+                    ]
+                }
+
+        # Act
+        plan = await ReportPlanner(FakePlanner()).parse("生成销售与风险报表", datasources=["sales"])
+
+        # Assert
+        assert [unit.unit_id for unit in plan.analysis_units] == ["sales"]
+        assert any("2" in warning and "1" in warning and "未通过服务端校验" in warning for warning in plan.warnings)
 
     # 方法作用：验证模型返回空单元时保留规则拆分并给出降级提示。
     # Args: self - pytest 测试类实例。
@@ -105,7 +130,7 @@ class TestReportPlannerLlmUnits:
         assert all(unit.datasource in {"", "sales"} for unit in plan.analysis_units)
         assert any("模型规划不可用" in warning for warning in plan.warnings)
 
-    # 方法作用：验证模型给出超过上限的单元数量时被截断到 12 个。
+    # 方法作用：验证模型给出超过上限的单元数量时被截断并公开披露。
     # Args: self - pytest 测试类实例。
     # Returns: 无返回值，断言失败时由 pytest 报告。
     async def test_excess_llm_units_are_truncated(self, monkeypatch) -> None:
@@ -134,6 +159,55 @@ class TestReportPlannerLlmUnits:
 
         # Assert
         assert len(plan.analysis_units) == 12
+        assert any("15" in warning and "12" in warning and "分析单元" in warning for warning in plan.warnings)
+
+    # 方法作用：验证规则拆分超过单元上限时同样留下裁剪披露。
+    # Args: self - pytest 测试类实例；monkeypatch - pytest 补丁工具。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    def test_excess_rule_units_are_truncated_with_warning(self, monkeypatch) -> None:
+        """模型降级后的规则路径也不能把尾部章节无声丢掉。"""
+        # Arrange
+        from src.config import get_settings
+        from src.reporting.planner import ReportPlanner
+
+        monkeypatch.setattr(get_settings(), "report_max_units_per_run", 2)
+        warnings: list[str] = []
+        prompt = "一、销售分析\n二、库存分析\n三、客户分析"
+
+        # Act
+        units = ReportPlanner._build_units(prompt, warnings=warnings)
+
+        # Assert
+        assert len(units) == 2
+        assert any("3" in warning and "2" in warning and "分析单元" in warning for warning in warnings)
+
+    # 方法作用：验证模型成功替换规则单元后不会遗留规则路径的裁剪提示。
+    # Args: self - pytest 测试类实例；monkeypatch - pytest 补丁工具。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    async def test_successful_model_replacement_removes_rule_trim_warning(self, monkeypatch) -> None:
+        """最终只采用一个模型单元时，页面不能仍声称规则拆分丢了第三个单元。"""
+        # Arrange
+        from src.config import get_settings
+        from src.reporting.planner import ReportPlanner
+
+        monkeypatch.setattr(get_settings(), "report_max_units_per_run", 2)
+
+        class FakePlanner:
+            # 方法作用：把三段规则输入收敛成一个完整业务单元。
+            # Args: prompt - 规则解析传入的用户文本。
+            # Returns: 仅含一个最终分析单元的模型输出。
+            async def ainvoke(self, prompt: str) -> dict[str, object]:
+                return {"analysis_units": [{"unit_id": "overview", "question": "经营综合分析"}]}
+
+        # Act
+        plan = await ReportPlanner(FakePlanner()).parse(
+            "一、销售分析\n二、库存分析\n三、客户分析",
+            datasources=["sales"],
+        )
+
+        # Assert
+        assert [unit.unit_id for unit in plan.analysis_units] == ["overview"]
+        assert not any("需求共拆分出" in warning for warning in plan.warnings)
 
     # 方法作用：验证模型给出的非法单元标识被替换为安全语义标识。
     # Args: self - pytest 测试类实例。

@@ -46,3 +46,5 @@
 | [46-embedding-backend-onnx.md](46-embedding-backend-onnx.md) | 嵌入后端切换 ONNX Runtime（消除 transformers 启动延迟） | 动态 |
 | [47-configurable-embedding-model.md](47-configurable-embedding-model.md) | 可替换嵌入模型与自动重编码（模型指纹 collection · 后台异步重建） | 动态 |
 | [48-experience-and-workbench-remediation.md](48-experience-and-workbench-remediation.md) | 体验整改与报表工作台重构设计（A～E 五批 · 9 项需求） | 动态 |
+| [49-report-presentation-redesign.md](49-report-presentation-redesign.md) | 报表呈现体系改版设计（hero 横幅 · 图文分栏 · 全图表类型） | 动态 |
+| [50-report-node-routing.md](50-report-node-routing.md) | 报表单元节点路由由大模型决策（节点数据表 · 强护栏 · 静态兜底） | 动态 |

@@ -10,8 +10,10 @@ from src.reporting.run_stats import (
     activate,
     current,
     deactivate,
+    has_sql_query_capacity,
     record_llm_call,
     record_sql_execution,
+    try_reserve_sql_query,
 )
 
 
@@ -136,7 +138,120 @@ class TestRunStatsCounter:
             "sql_query_count",
             "sql_success_count",
             "sql_failure_count",
+            "sql_query_limit",
+            "sql_reserved_count",
         }
+
+    # 方法作用：验证 SQL 查询额度在边界内成功占用、超限后稳定拒绝。
+    # Args: self - 测试实例。
+    # Returns: 无返回值。
+    def test_sql_query_limit_rejects_after_reserved_budget(self) -> None:
+        """运行期查询预算必须在真实执行前硬控，不能只停留在计划估算。"""
+        # Arrange
+        stats, token = activate(sql_query_limit=2)
+        try:
+            # Act
+            reservations = [try_reserve_sql_query() for _ in range(3)]
+        finally:
+            deactivate(token)
+
+        # Assert
+        assert reservations == [True, True, False]
+        assert stats.sql_query_limit == 2
+        assert stats.sql_reserved_count == 2
+
+    # 方法作用：验证只读容量检查准确反映剩余 SQL 额度且不自行占用。
+    # Args: self - 测试实例。
+    # Returns: 无返回值。
+    def test_sql_query_capacity_check_is_read_only(self) -> None:
+        """上层可提前停止模型重试，但唯一原子占用仍由 try_reserve_sql_query 负责。"""
+        # Arrange
+        stats, token = activate(sql_query_limit=1)
+        try:
+            # Act
+            before = has_sql_query_capacity()
+            reserved_before = stats.sql_reserved_count
+            allowed = try_reserve_sql_query()
+            after = has_sql_query_capacity()
+        finally:
+            deactivate(token)
+
+        # Assert
+        assert before is True
+        assert reserved_before == 0
+        assert allowed is True
+        assert after is False
+        assert stats.sql_reserved_count == 1
+
+    # 方法作用：验证非报表路径的容量预检保持放行。
+    # Args: self - 测试实例。
+    # Returns: 无返回值。
+    def test_sql_query_capacity_check_allows_unscoped_calls(self) -> None:
+        """聊天、Grafana 与 live drilldown 没有报表计数器，不受提前门禁影响。"""
+        # Arrange / Act / Assert
+        assert current() is None
+        assert has_sql_query_capacity() is True
+
+    # 方法作用：验证零查询预算会阻断第一次 SQL 尝试。
+    # Args: self - 测试实例。
+    # Returns: 无返回值。
+    def test_zero_sql_query_limit_blocks_first_attempt(self) -> None:
+        """直接回答类计划可以预占零次查询，运行期不得把零误解为无限制。"""
+        # Arrange
+        stats, token = activate(sql_query_limit=0)
+        try:
+            # Act
+            allowed = try_reserve_sql_query()
+        finally:
+            deactivate(token)
+
+        # Assert
+        assert allowed is False
+        assert stats.sql_reserved_count == 0
+
+    # 方法作用：验证 SQL 查询预算拒绝负数配置。
+    # Args: self - 测试实例。
+    # Returns: 无返回值。
+    def test_sql_query_limit_rejects_negative_value(self) -> None:
+        """负数不是可解释的额度，必须在激活边界立即拒绝。"""
+        # Arrange / Act / Assert
+        with pytest.raises(ValueError, match="不能为负数"):
+            activate(sql_query_limit=-1)
+
+    # 方法作用：验证并发子任务共享同一 SQL 预算且不会同时越线。
+    # Args: self - 测试实例。
+    # Returns: 无返回值。
+    @pytest.mark.asyncio
+    async def test_sql_query_limit_is_atomic_across_asyncio_tasks(self) -> None:
+        """并发单元、换源和补查都复制同一计数器引用，预算占用必须只放行上限次数。"""
+        # Arrange
+        stats, token = activate(sql_query_limit=3)
+
+        # 方法作用：由并发子任务尝试占用一次 SQL 查询额度。
+        # Args: 无。
+        # Returns: 成功占用返回 True，额度耗尽返回 False。
+        async def reserve_once() -> bool:
+            await asyncio.sleep(0)
+            return try_reserve_sql_query()
+
+        try:
+            # Act
+            reservations = await asyncio.gather(*(reserve_once() for _ in range(12)))
+        finally:
+            deactivate(token)
+
+        # Assert
+        assert sum(reservations) == 3
+        assert stats.sql_reserved_count == 3
+
+    # 方法作用：验证未激活报表计数器时 SQL 预算检查保持空操作。
+    # Args: self - 测试实例。
+    # Returns: 无返回值。
+    def test_sql_query_limit_does_not_affect_non_report_paths(self) -> None:
+        """聊天、Grafana、自动化与 live drilldown 不应被报表运行预算误拦截。"""
+        # Arrange / Act / Assert
+        assert current() is None
+        assert try_reserve_sql_query() is True
 
     # 方法作用：确认激活与重置可嵌套且不泄漏。
     # Args: self - 测试实例。

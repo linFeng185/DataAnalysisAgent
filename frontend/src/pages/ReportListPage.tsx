@@ -349,7 +349,12 @@ export default function ReportListPage() {
   // 方法作用：打开某条报表的详情抽屉并加载计划、运行与页面版本。
   // Args: reportId - 报表标识。
   // Returns: 异步读取完成后无返回值。
-  const openDetail = async (reportId: string): Promise<void> => {
+  // 必须用 useCallback 固定引用：下面消费 ?report= 的 effect 依赖本函数，
+  // 而 React Router 的 setSearchParams 走 startTransition 低优先级更新——
+  // 若本函数每次渲染都换引用，effect 会在地址栏参数尚未被 React 树吸收前反复重跑，
+  // 每次都重新 setDetailOpen + 拉详情，高优先级更新不断打断那次导航，形成死循环
+  // （实测：点击通知后 1.5 秒内打 132 次详情接口，详情抽屉关掉又被立刻拉起）。
+  const openDetail = useCallback(async (reportId: string): Promise<void> => {
     setDetailOpen(true);
     setDetail(null);
     setDetailReportId(reportId);
@@ -357,7 +362,7 @@ export default function ReportListPage() {
     setExcludedUnitIds([]);
     // 详情与页面列表并行读取：最新页面过期时详情 410，页面列表仍要能支撑延期操作。
     await Promise.all([loadDetail(reportId), loadPages(reportId)]);
-  };
+  }, [loadDetail, loadPages]);
 
   // 方法作用：把单元执行状态映射成界面文案。
   // Args: value - 后端返回的单元状态（success / partial / failed）。
@@ -407,6 +412,8 @@ export default function ReportListPage() {
 
   // 带 ?report=<id> 进来时直接打开那条报表的详情，供通知等入口直达；
   // 参数消费后立刻从地址栏移除，避免关闭抽屉或刷新时被反复拉起。
+  // 依赖必须全程稳定（openDetail 已在定义处用 useCallback 固定）：任一依赖每渲染换新引用，
+  // effect 都会在低优先级导航被 React 吸收之前反复重跑，退化成不停重新打开详情抽屉。
   const [searchParams, setSearchParams] = useSearchParams();
   useEffect(() => {
     const target = searchParams.get('report');

@@ -275,16 +275,19 @@ class TestReportWorkbenchApi:
                 "internal_error_message": "password=secret",
                 "input_hash": "private-hash",
             }]),
+            list_unit_snapshots=AsyncMock(return_value=[]),
         )
         monkeypatch.setattr(route, "get_current_identity", lambda: identity)
         monkeypatch.setattr(route, "get_report_store", lambda: store)
-        monkeypatch.setattr(route, "_require_capability", AsyncMock())
+        monkeypatch.setattr(route, "_has_any_capability", AsyncMock(return_value=True))
 
         # Act
         result = await route.get_run("run1")
 
         # Assert
         assert result["steps"] == [{"node": "report_execute_units", "status": "failed", "user_error_message": "查询失败"}]
+        # 单元快照随详情一并返回，明细页才能定位到具体单元。
+        assert result["units"] == []
 
 
 @pytest.mark.asyncio
@@ -336,6 +339,71 @@ class TestSharedReportApi:
         assert result["data_manifest"] == version.data_manifest
         store.record_audit.assert_awaited_once()
         assert store.record_audit.await_args.args[0]["action"] == "share_access"
+
+    # 方法作用：验证未授权钻取的分享仍下发受限脱敏清单，页面表格不再恒为空。
+    # Args: self - pytest 测试类实例；monkeypatch - pytest 补丁工具。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    async def test_shared_snapshot_without_drilldown_still_returns_manifest(self, monkeypatch) -> None:
+        """实机取证：allow_drilldown=false 时 data_manifest 直接回 {}，表格块永远只有表头。"""
+        # Arrange
+        import src.api.routes.report_workbench as route
+        from src.reporting.models import ReportVersionRecord
+
+        rows = [{"region": f"区域{index}", "sales": index} for index in range(150)]
+        version = ReportVersionRecord(
+            id="v1",
+            report_id="r1",
+            job_id="j1",
+            run_id="run1",
+            version=3,
+            document={
+                "permissions": {"drilldown": True},
+                "drilldowns": [{"drilldown_id": "dd1", "mode": "snapshot", "columns": ["region"], "data_ref": "data:sales"}],
+            },
+            data_manifest={"data:sales": rows},
+            checksum="checksum",
+        )
+        share = {
+            "id": "share1",
+            "report_version_id": "v1",
+            "tenant_id": 3,
+            "scope": "public",
+            "code_hash": "",
+            "revoked_at": None,
+            "expires_at": None,
+            "allow_drilldown": False,
+        }
+        store = SimpleNamespace(get_share_by_token=AsyncMock(return_value=share), get_version_by_id=AsyncMock(return_value=version), record_audit=AsyncMock())
+        monkeypatch.setattr(route, "hash_share_token", lambda token: "hashed-token")
+        monkeypatch.setattr(route, "get_report_store", lambda: store)
+
+        # Act
+        result = await route.get_shared_report("raw-token")
+
+        # Assert：清单仍下发且按上限裁剪，渲染表格块有行可用
+        assert result["data_manifest"]["data:sales"]
+        assert len(result["data_manifest"]["data:sales"]) == route._SHARE_MANIFEST_ROW_LIMIT
+        # 明细入口继续关闭：drilldowns 清空、权限位为 false
+        assert result["document"]["drilldowns"] == []
+        assert result["document"]["permissions"]["drilldown"] is False
+        # 不下发 SQL 文本或凭证字段
+        payload = str(result)
+        assert "SELECT" not in payload
+        assert "code_hash" not in payload
+        assert "password" not in payload
+
+    # 方法作用：验证清单裁剪对异常输入失败关闭，不抛错也不透传。
+    # Args: self - pytest 测试类实例。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    async def test_shared_manifest_tolerates_non_mapping(self) -> None:
+        """版本记录里的清单字段可能是 null 或异常结构，不能让分享页面整体 500。"""
+        # Arrange
+        import src.api.routes.report_workbench as route
+
+        # Act / Assert
+        assert route._shared_manifest(None) == {}
+        assert route._shared_manifest("not-a-mapping") == {}
+        assert route._shared_manifest({"data:sales": None}) == {"data:sales": []}
 
     # 方法作用：验证公开分享 Drilldown 只读取签发快照字段并写入成功审计。
     # Args: self - pytest 测试类实例；monkeypatch - pytest 补丁工具。

@@ -105,3 +105,26 @@ class TestNotificationNavigation:
         # Act / Assert
         assert "useSearchParams" in page
         assert "searchParams.get('report')" in page
+
+    # 方法作用：验证消费 ?report= 的 effect 只依赖引用稳定的函数。
+    # Args: self - 测试实例。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    def test_report_query_effect_keeps_stable_dependencies(self) -> None:
+        """依赖里混入每渲染重建的函数时，effect 会在低优先级导航被吸收前反复重跑。
+
+        事故（2026-09-16）：openDetail 曾是普通函数，消费 ?report= 的 effect 因此每次渲染
+        都重跑一遍 setSearchParams + openDetail。React Router 的 setSearchParams 走
+        startTransition 低优先级更新，被不断到来的高优先级 setState 反复打断、迟迟不提交，
+        地址栏参数清不掉，effect 下一轮又读到旧值——实测点击通知后 1.5 秒内详情接口被打
+        132 次，详情抽屉关掉又被立刻拉起（用户描述为"关不掉、侧栏一直刷新"）。
+        """
+        # Arrange
+        page = LIST_PAGE.read_text(encoding="utf-8")
+
+        # Act
+        stable_definition = "const openDetail = useCallback(" in page
+        consume_effect = "}, [searchParams, setSearchParams, openDetail]);" in page
+
+        # Assert
+        assert stable_definition, "openDetail 必须用 useCallback 固定引用，否则消费 ?report= 的 effect 会每渲染重跑"
+        assert consume_effect, "消费 ?report= 的 effect 依赖数组发生变化，需重新确认其中每个依赖是否引用稳定"

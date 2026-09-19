@@ -203,7 +203,7 @@ async def execute_sql_node(state: AnalysisState) -> dict:
             if item.get("message")
         )
         err_msg = detail_message or execution.error or "SQL 执行失败"
-        if execution.error_type in {"security", "sql_semantic", "configuration"}:
+        if execution.error_type in {"security", "sql_semantic", "configuration", "resource_limit"}:
             error_type = execution.error_type
         else:
             error_type = _classify_execution_error(err_msg)

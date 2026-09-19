@@ -14,7 +14,9 @@ from src.llm.output_contracts import (
     ImageAnalysisOutput,
     IndicatorCatalogReviewOutput,
     PolishOutput,
+    ReportChartPlan,
     ReportDivergeOutput,
+    ReportNodeRouteDecision,
     ReportPlanUnitsOutput,
     ReportSupplementOutput,
     ReportTitleOutput,
@@ -68,6 +70,17 @@ SQL_GENERATION_SYSTEM = (
 3. 检查一对多/多对多 JOIN 膨胀。计数实体时按实体主键 COUNT(DISTINCT ...)，聚合事实时先在正确粒度预聚合再 JOIN。
 4. 检查字段类型、枚举、NULL、空字符串和除零风险；除法使用 NULLIF 或 {dialect} 等价安全写法。
 5. 检查时间字段、时区、闭开区间和同比/环比基期。用户没有要求时间分析时，不擅自加时间过滤。
+6. 用 UNION / UNION ALL 拼接多个口径时，**每个分支的列数必须完全相同、列序一致、对应列类型可比较**；
+   某个分支没有的指标要用 NULL 占位并显式写别名（如 NULL AS issued_count）。
+   列数不一致会在 EXPLAIN 阶段就被拒（MySQL 1222、PostgreSQL「each UNION query must have
+   the same number of columns」、Oracle ORA-01789），整条查询直接不可用。逐分支数一遍 SELECT
+   列表再输出；数不齐宁可拆成多条查询，也不要拼接列数不同的分支。
+7. **列名只能逐字取自 Schema**，禁止按语义推断或缩写字段名。实机证据：模型在
+   finance_expenses 上臆造 actual_amount，被列名校验与 EXPLAIN 双重拦下。想要的指标
+   没有对应列时，用真实存在的列组合表达，或改用别的表，不要编一个像样的列名。
+8. **别名作用域**：SQL 不允许在同一层 SELECT 里引用同级别名（WHERE / GROUP BY /
+   HAVING / 窗口函数中引用 SELECT 列表别名都会报 unknown column，MySQL 1054 最常见）。
+   需要复用计算列时再套一层 CTE：先算出该列，再在下一层引用。
 
 ## 强制规则
 1. 只输出一条只读 SELECT 或 WITH ... SELECT；禁止 DDL、DML、事务、存储过程、多语句和 SQL 注释。
@@ -466,17 +479,22 @@ _INITIAL_PROMPTS: dict[str, PromptDefinition] = {
     ),
     "report.diverge": PromptDefinition(
         prompt_id="report.diverge",
-        version="1.0.0",
+        version="1.1.0",
         task="report_diverge",
         template=(
             "你是报表分析发散助手。给定用户已确认的分析单元、每个数据源的表名清单和本次允许的建议数量上限，"
             "提出最多 {limit} 个用户没要求、但会影响其结论的补充分析单元。"
             "每个建议必须说明 rationale（为什么与已有需求相关）与 expected_signal（预期能看到什么信号）。"
+            # 标题约束与 report.plan 同标准（字数、概括主题、禁照抄、禁维度罗列开头）：
+            # 发散单元同样要当页面区段标题，标准不同会出现两种读感；主语按语境取「这个建议」。
+            "title 是这个建议在页面上的精简标题，不超过 12 个字，概括业务主题；"
+            "不要照抄 question 原文，也不要以「按年月」「按地区」这类维度罗列开头。"
             "datasource 只能从给定清单里选，不确定时留空字符串，禁止凭猜测填写。"
             "禁止提出与已有单元语义重复的建议；"
             # 因果约束与对话侧 analysis.result、报表侧 report.supplement 共用同一常量。
             + COMMON_NO_CAUSAL_CLAIM
-            + "只输出 JSON：{{\"proposed_units\": [{{\"question\": \"完整业务问题\", \"datasource\": \"\", "
+            + "只输出 JSON：{{\"proposed_units\": [{{\"question\": \"完整业务问题\", "
+            "\"title\": \"不超过 12 字的精简标题\", \"datasource\": \"\", "
             "\"rationale\": \"为什么相关\", \"expected_signal\": \"预期信号\"}}]}}。"
             "确实没有值得补充的方向时返回空数组，"
             + COMMON_NO_PADDING
@@ -487,7 +505,7 @@ _INITIAL_PROMPTS: dict[str, PromptDefinition] = {
     ),
     "report.supplement": PromptDefinition(
         prompt_id="report.supplement",
-        version="1.1.0",
+        version="1.2.0",
         task="report_supplement",
         template=(
             "你是报表分析补充助手。给定已有分析单元、这些单元实际取回数据后算出的显著发现"
@@ -495,13 +513,18 @@ _INITIAL_PROMPTS: dict[str, PromptDefinition] = {
             "判断是否存在为了解释或验证这些发现而需要补充查询的分析单元。"
             "只有当发现确实指向一个尚未覆盖的方向时才提出建议，每条必须说明 supports_finding"
             "（它解释或验证哪一条已有发现）。"
+            # 标题约束与 report.plan 同标准（字数、概括主题、禁照抄、禁维度罗列开头）：
+            # 补查单元同样要当页面区段标题，标准不同会出现两种读感；主语按语境取「这个建议」。
+            "title 是这个建议在页面上的精简标题，不超过 12 个字，概括业务主题；"
+            "不要照抄 question 原文，也不要以「按年月」「按地区」这类维度罗列开头。"
             # 缺基期是确定性触发：零发现时如果还要求关联发现，这条路径永远产不出单元。
             "动态上下文给出「缺基期理由」时，该理由本身就是补查依据：围绕补齐基期提出建议，"
             "这类建议不要求关联已有发现，supports_finding 留空即可。"
             "datasource 只能从给定清单里选，不确定时留空字符串。"
             # 因果约束与对话侧 analysis.result、报表侧 report.diverge 共用同一常量。
             + COMMON_NO_CAUSAL_CLAIM
-            + "只输出 JSON：{{\"proposed_units\": [{{\"question\": \"完整业务问题\", \"datasource\": \"\", "
+            + "只输出 JSON：{{\"proposed_units\": [{{\"question\": \"完整业务问题\", "
+            "\"title\": \"不超过 12 字的精简标题\", \"datasource\": \"\", "
             "\"rationale\": \"为什么需要补查\", \"supports_finding\": \"它解释哪条发现\"}}]}}。"
             "没有需要补充的方向时返回空数组——这是最常见也最正确的结果，"
             + COMMON_NO_PADDING
@@ -533,6 +556,66 @@ _INITIAL_PROMPTS: dict[str, PromptDefinition] = {
         # 列清单与样例行；预算低于探针上限会把最关键的样例行裁掉，决策依据反而不完整。
         # 8000 = 探针上限 6000 + 模板与安全策略段的余量（模板本体约 500 字符）。
         context_budget=8000,
+    ),
+    "report.chart": PromptDefinition(
+        prompt_id="report.chart",
+        version="1.0.0",
+        task="report_chart",
+        template=(
+            "你是报表图表方案设计师。给定一个分析单元的问题、列清单、样例行与返回行数，"
+            "按**数据形态**决定怎么画，并选择用哪种呈现形态："
+            "时间序列（含年月/日期等时间列，且按时间推进）→ line；"
+            "分类对比（维度列 + 数值列，类目较多）→ bar；"
+            "构成占比（维度列类目很少且数值是整体的一部分）→ pie；"
+            "两个数值列之间的相关关系 → scatter；"
+            "两个维度交叉出一个数值 → heatmap；"
+            "数据形态不适合画图（只有一两行、或不存在可解释的维度/数值结构）→ table。"
+            "\n你只需要选**看什么**：分组、聚合、排序都由系统用代码完成，你不要做算术。"
+            "四个字段的语义必须分清："
+            "x_field 是横轴列，通常是时间列（如 year_month）或主要分类列；"
+            "series_fields 是**指标列**，即你要看的数值（如净销售额、折扣深度），可以有多个；"
+            "group_field 是**分组维度**：同一根横轴下按哪个维度拆成多条系列"
+            "（如按 region_code 拆成各地区一条线、按 channel_code 拆成各渠道一条线）。"
+            "分组维度只能从**非数值的维度列**里选，不要拿指标列当分组维度。"
+            "选分组的判断依据：数据里有多个维度、且它们的取值在横轴上会重复出现时，"
+            "必须指定 group_field——否则同一个横轴值会挤成多个数据点，图直接作废。"
+            "\n形态按数据实际情况组合："
+            "一个单元有多个互不相同的指标、放在一张图里会互相盖住时，拆成多张图（charts 多条）；"
+            "同一种结构还能换成别的维度看时，把候选维度列填进 switchable_fields，"
+            "系统会把每种分组的系列都算好，使用者在前端切换即可，不必重新取数。"
+            "\ntitle 用不超过 20 字的中文，说明这张图画的是什么；"
+            "x_field、series_fields、group_field、switchable_fields 只能从给定列清单里选，禁止编造列名；"
+            "不要给 KPI 类总量数字单独画图。"
+            "只输出 JSON：{{\"charts\": [{{\"chart_type\": \"line|bar|pie|scatter|heatmap|table\", "
+            "\"title\": \"图标题\", \"x_field\": \"横轴列\", \"series_fields\": [\"指标列\"], "
+            "\"group_field\": \"分组维度列\", \"switchable_fields\": [\"可切换的分组维度列\"]}}]}}。"
+        ),
+        output_model=ReportChartPlan,
+        # 探针段（charts.py）自报 max_chars=8000，且还要装列清单与样例行。
+        context_budget=10000,
+    ),
+    "report.route_nodes": PromptDefinition(
+        prompt_id="report.route_nodes",
+        version="1.0.0",
+        task="report_route_nodes",
+        template=(
+            "你是报表执行链路编排器。给定一张节点数据表和一个分析单元的问题，"
+            "选出这次执行需要经过的节点。"
+            "你只需要选「参与哪些节点」，不需要排序——执行顺序由服务端按数据表的顺序固定。"
+            "选择要求："
+            "只从数据表里列出的节点里选，禁止填写表里没有的名字；"
+            "标了【必选】的节点不要填，服务端会自动补上；"
+            "取数类问题要选成完整可跑的一条链路，不要只选中间一环"
+            "（例如只选 execute_sql 而不选生成 SQL 与校验的节点）；"
+            "需要跨多个数据源对账或对比时选多源扇出，它和单源取数链路**二选一**，不要都选；"
+            "不需要查库、只用模型说明的单元（元数据说明、数据质量陈述）选直答链路；"
+            "不确定时宁可少选：少选只会退化成默认链路，多选会引入与问题无关的节点。"
+            "reason 用不超过 300 字的中文说明选择依据。"
+            "只输出 JSON：{{\"nodes\": [\"节点名\"], \"reason\": \"选择依据\"}}。"
+        ),
+        output_model=ReportNodeRouteDecision,
+        # 节点目录（node_routing.render_node_catalog）自报 max_chars=20000。
+        context_budget=24000,
     ),
     "sql.generate": PromptDefinition(
         prompt_id="sql.generate",

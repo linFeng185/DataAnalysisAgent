@@ -1,4 +1,4 @@
-import { lazy, Suspense, useState, useEffect } from 'react';
+import { lazy, Suspense, useState, useEffect, useRef } from 'react';
 import type { ReactNode } from 'react';
 import { BrowserRouter, Routes, Route, NavLink, Navigate, useLocation } from 'react-router-dom';
 import { Layout, Menu, ConfigProvider, Tag, Typography, theme, Grid, Button, Drawer, Result } from 'antd';
@@ -9,7 +9,7 @@ import {
   ThunderboltOutlined, ReadOutlined, ApiOutlined,
   SafetyCertificateOutlined, LogoutOutlined, UserOutlined,
   MenuOutlined, ScheduleOutlined, BulbOutlined, LinkOutlined,
-  FileTextOutlined, UnorderedListOutlined,
+  FileTextOutlined, UnorderedListOutlined, BarChartOutlined,
 } from '@ant-design/icons';
 import { AuthProvider } from './hooks/AuthContext';
 import { useAuth } from './hooks/AuthContext';
@@ -42,6 +42,7 @@ const AdminPage = lazy(() => import('./pages/AdminPage'));
 const ReportWorkbenchPage = lazy(() => import('./pages/ReportWorkbenchPage'));
 const ReportCreatePage = lazy(() => import('./pages/ReportCreatePage'));
 const ReportListPage = lazy(() => import('./pages/ReportListPage'));
+const ReportRunDetailPage = lazy(() => import('./pages/ReportRunDetailPage'));
 const LinkManagementPage = lazy(() => import('./pages/LinkManagementPage'));
 const ReportViewerPage = lazy(() => import('./pages/ReportViewerPage'));
 const SharedReportPage = lazy(() => import('./pages/SharedReportPage'));
@@ -113,6 +114,7 @@ function AppContent() {
   const screens = Grid.useBreakpoint();
   const isCompact = screens.md === false;
   const { user, logout } = useAuth();
+  const contentRef = useRef<HTMLElement>(null);
   // 报表能力由 ReportPermissionsProvider 统一拉取一次，这里与路由守卫、报表信息页共用。
   const { menuAllowed: reportMenuAllowed, capabilities: reportCapabilities } = useReportPermissions();
 
@@ -122,6 +124,15 @@ function AppContent() {
       .catch(() => setHealth(null))
       .finally(() => setHealthChecked(true));
   }, []);
+
+  // 路由切换后把焦点交给内容区。外壳固定在视口内之后，文档不再是滚动目标，
+  // 焦点不在内容区时 PageDown/Space 找不到可滚动祖先（实测 contentScrollTop 保持 0）。
+  // 页面自身已聚焦控件时（如对话页自动聚焦提问框）不抢焦点，避免打断输入。
+  useEffect(() => {
+    if (document.activeElement === document.body) {
+      contentRef.current?.focus({ preventScroll: true });
+    }
+  }, [location.pathname]);
 
   const menuKey = location.pathname === '/' ? 'chat' : location.pathname.replace('/', '') || 'chat';
   const navigationItems: MenuProps['items'] = [
@@ -157,6 +168,9 @@ function AppContent() {
           reportCapabilities.includes('report.list')
             ? { key: 'report-workbench/jobs', icon: <UnorderedListOutlined />, label: <NavLink to="/report-workbench/jobs">{t("报表信息")}</NavLink> }
             : null,
+          reportCapabilities.includes('report.list')
+            ? { key: 'report-workbench/runs', icon: <BarChartOutlined />, label: <NavLink to="/report-workbench/runs">{t("执行明细")}</NavLink> }
+            : null,
           reportCapabilities.includes('report.link_manage')
             ? { key: 'report-workbench/links', icon: <LinkOutlined />, label: <NavLink to="/report-workbench/links">{t("链接管理")}</NavLink> }
             : null,
@@ -184,7 +198,7 @@ function AppContent() {
   );
 
   return (
-    <Layout style={{ minHeight: '100vh' }}>
+    <Layout className="app-shell">
       <Header className="app-header" style={{
         display: 'flex', alignItems: 'center', justifyContent: 'space-between',
         padding: '0 24px', background: '#001529',
@@ -240,7 +254,8 @@ function AppContent() {
         >
           {navigationMenu}
         </Drawer>
-        <Content className="app-content" style={{ background: '#f5f5f5', minWidth: 0 }}>
+        <Content className="app-content" ref={contentRef} tabIndex={-1}
+          style={{ background: '#f5f5f5', minWidth: 0 }}>
           <ErrorBoundary>
             <Suspense fallback={pageFallback}>
               <Routes>
@@ -256,6 +271,7 @@ function AppContent() {
                 <Route path="/report-workbench" element={<Navigate to="/report-workbench/create" replace />} />
                 <Route path="/report-workbench/create" element={<ReportRoute><ReportCreatePage /></ReportRoute>} />
                 <Route path="/report-workbench/jobs" element={<ReportRoute><ReportListPage /></ReportRoute>} />
+                <Route path="/report-workbench/runs" element={<ReportRoute><ReportRunDetailPage /></ReportRoute>} />
                 <Route path="/report-workbench/links" element={<ReportRoute><LinkManagementPage /></ReportRoute>} />
                 <Route path="/reports/:reportId" element={<ReportViewerPage />} />
                 <Route path="/mcp" element={<McpPage />} />

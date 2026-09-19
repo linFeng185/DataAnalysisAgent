@@ -192,6 +192,80 @@ class TestReportBrowser:
         assert "tenant_id" not in saved[0]
 
 
+class TestNotificationLinkRegression:
+    """覆盖通知直达报表详情：点击通知后不得进入重渲染死循环，详情抽屉必须能关掉。"""
+
+    pytestmark = BROWSER_MARKERS
+
+    # 方法作用：验证点击通知直达报表详情时请求次数正常、抽屉可以关闭。
+    # Args: self - 测试实例；browser_page - 浏览器页面；frontend_origin - 隔离服务地址。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    def test_notification_link_opens_detail_without_render_loop(self, browser_page: Any, frontend_origin: str) -> None:
+        """事故（2026-09-16）：消费 ?report= 的 effect 依赖了每渲染重建的 openDetail。
+
+        React Router 的 setSearchParams 是低优先级导航，被不断到来的高优先级 setState
+        反复打断，地址栏参数清不掉，effect 下一轮又读到旧值——详情接口被瞬时打上百次，
+        详情抽屉关掉又被立刻拉起（用户描述为"关不掉、侧栏一直刷新"）。
+        """
+        from playwright.sync_api import expect
+
+        page = browser_page
+        report_id = "rep-loop"
+        detail_calls: list[str] = []
+        report = {"id": report_id, "title": "销售报表", "prompt": "统计销售额", "datasources": ["ds"],
+                  "divergence": "low", "status": "succeeded", "runs_started": 1,
+                  "next_run_at": None, "created_at": "2026-09-16T10:00:00Z"}
+        quota = {"jobs_remaining": 19, "runs_remaining": 49, "concurrent_remaining": 2,
+                 "tokens_remaining": 199000, "shares_remaining": 20,
+                 "period_start": "2026-08-31T16:00:00Z", "period_end": "2026-09-30T16:00:00Z"}
+
+        # 方法作用：为通知抽屉与报表列表页提供隔离数据，并统计详情接口被调用的次数。
+        # Args: route - 被拦截请求。
+        # Returns: 无返回值。
+        def handle(route: Any) -> None:
+            path = urlparse(route.request.url).path.removeprefix("/api/v1")
+            if path == "/auth/me":
+                data = {"auth_required": True, "authenticated": True, "tenant_id": 3, "user_id": 7,
+                        "tenant_code": "t3", "role": "tenant_admin", "username": "tester"}
+            elif path == "/report-workbench/permissions/me":
+                data = {"menu_allowed": True, "capabilities": ["report.menu", "report.list"]}
+            elif path == "/notifications/inbox":
+                data = {"items": [{"id": "n-loop", "kind": "personal", "title": "报表计划已就绪",
+                                   "body": "报表已生成", "link": f"/report-workbench/jobs?report={report_id}",
+                                   "is_read": False, "created_at": "2026-09-16T10:00:00Z"}],
+                        "total": 1, "page": 1, "page_size": 20}
+            elif path == "/notifications/unread-count":
+                data = {"count": 1}
+            elif path == "/report-workbench/quotas/me":
+                data = quota
+            elif path == "/report-workbench/reports":
+                data = {"reports": [report], "total": 1}
+            elif path == f"/report-workbench/reports/{report_id}":
+                detail_calls.append(path)
+                data = {"report": report, "plan": None}
+            elif path == f"/report-workbench/reports/{report_id}/pages":
+                data = {"pages": []}
+            else:
+                data = {}
+            logger.info("通知直达浏览器探针", path=path, detail_calls=len(detail_calls))
+            route.fulfill(status=200, json=data)
+
+        page.route("**/api/v1/**", handle)
+        page.goto(frontend_origin)
+        page.locator(".notification-bell").click()
+        page.locator(".ant-list-item").first.click()
+        # 详情抽屉带着标题打开，说明通知 link 的参数确实被消费
+        expect(page.locator(".ant-drawer-open .ant-drawer-title")).to_contain_text("销售报表")
+        page.wait_for_timeout(1500)
+        # 死循环下这里会是几十上百次——正常只有 effect 消费参数时的一次
+        assert len(detail_calls) <= 2, f"详情接口被反复调用，疑似 effect 重渲染死循环：{len(detail_calls)} 次"
+        # 关闭后必须保持关闭，不能被下一轮循环重新拉起
+        page.locator(".ant-drawer-open .ant-drawer-close").first.click()
+        page.wait_for_timeout(1000)
+        assert page.locator(".ant-drawer-open").count() == 0, "详情抽屉被重新拉起，关闭不生效"
+        assert len(detail_calls) <= 2
+
+
 class TestReportPageShell:
     """覆盖 23.15：私有查看页与公开分享页共用的整页外壳（整页底色、限宽居中、顶栏作用域）。"""
 

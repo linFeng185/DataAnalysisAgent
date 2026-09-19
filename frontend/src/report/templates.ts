@@ -28,6 +28,10 @@ export interface ReportTemplateTokens {
   density: 'comfortable' | 'compact';
   /** 图表分类色板 */
   chartPalette: string[];
+  /** 连续量的单色明度阶梯，按数值从低到高排列 */
+  sequentialPalette: string[];
+  /** 文档 hero 横幅底色，文字色由亮度自动推导 */
+  heroBg: string;
 }
 
 export interface ReportTemplate {
@@ -68,6 +72,8 @@ export const insightTokens: ReportTemplateTokens = {
   spaceUnit: '16px',
   density: 'comfortable',
   chartPalette: ['#2563eb', '#14b8a6', '#f59e0b', '#8b5cf6', '#ef4444', '#0ea5e9', '#84cc16', '#ec4899'],
+  sequentialPalette: ['#cde2fb', '#86b6ef', '#3987e5', '#1c5cab', '#0d366b'],
+  heroBg: '#0f1a2e',
 };
 
 export const DEFAULT_TEMPLATE_ID = 'insight';
@@ -95,7 +101,9 @@ export const reportTemplates: ReportTemplate[] = [
       textPrimary: '#e2e8f0',
       textSecondary: '#94a3b8',
       shadow: '0 1px 2px rgba(0,0,0,0.4), 0 8px 24px rgba(0,0,0,0.5)',
-      chartPalette: ['#38bdf8', '#34d399', '#fbbf24', '#a78bfa', '#f87171', '#22d3ee', '#a3e635', '#f472b6'],
+      chartPalette: ['#3987e5', '#d95926', '#199e70', '#c98500', '#d55181', '#008300', '#9085e9', '#e66767'],
+      sequentialPalette: ['#0d366b', '#1c5cab', '#3987e5', '#86b6ef', '#cde2fb'],
+      heroBg: '#0b1220',
     },
   },
   {
@@ -116,6 +124,8 @@ export const reportTemplates: ReportTemplate[] = [
       shadow: 'none',
       spaceUnit: '20px',
       chartPalette: ['#9a3412', '#0f766e', '#b45309', '#4d7c0f', '#7c2d12', '#0369a1', '#a16207', '#be185d'],
+      sequentialPalette: ['#cde2fb', '#86b6ef', '#3987e5', '#1c5cab', '#0d366b'],
+      heroBg: '#332b23',
     },
   },
   {
@@ -136,6 +146,8 @@ export const reportTemplates: ReportTemplate[] = [
       spaceUnit: '14px',
       density: 'compact',
       chartPalette: ['#1e3a5f', '#5c7a99', '#8aa4bf', '#c4d2e0', '#2f6f4e', '#7a9e7e', '#a8763e', '#c9a97a'],
+      sequentialPalette: ['#cde2fb', '#86b6ef', '#3987e5', '#1c5cab', '#0d366b'],
+      heroBg: '#0f1a2e',
     },
   },
 ];
@@ -179,6 +191,7 @@ export function cssVariables(tokens: ReportTemplateTokens): Record<string, strin
     '--report-radius': tokens.radius,
     '--report-shadow': tokens.shadow,
     '--report-space-unit': tokens.spaceUnit,
+    '--report-hero-bg': tokens.heroBg,
   };
 }
 

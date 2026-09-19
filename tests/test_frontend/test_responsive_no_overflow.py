@@ -192,3 +192,68 @@ class TestNarrowScreenLayout:
         assert "maxWidth: 960" in source
         assert 'className="app-page"' not in source
         logger.info("test_chat_page_reading_width_untouched 完成")
+
+
+class TestAppShellKeepsNavigationVisible:
+    """验证超长内容只在内容区滚动：顶栏与侧栏不得被滚出视口。"""
+
+    # 方法作用：验证外壳被钉在视口高度并裁掉自身滚动。
+    # Args: self - 测试实例。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    def test_shell_is_pinned_to_viewport(self) -> None:
+        """外壳只写 min-height 时，超长报表会把文档撑高（实测 body 4800 / 视口 800），
+        侧栏随之被撑到 4736 高，滚动文档即把菜单滚出视口。"""
+        logger.debug("test_shell_is_pinned_to_viewport 入口")
+        # Arrange：抓取外壳规则。
+        rule = re.search(r"\.app-shell \{([^}]*)\}", STYLES)
+
+        # Act：取出规则正文。
+        body = rule.group(1) if rule else ""
+
+        # Assert：必须有视口高度（含 dvh 兜底）且外壳自身不滚动。
+        assert rule, "index.css 缺少 .app-shell 规则"
+        assert "height: 100vh" in body and "height: 100dvh" in body
+        assert "overflow: hidden" in body
+        logger.info("test_shell_is_pinned_to_viewport 完成")
+
+    # 方法作用：验证纵向滚动归属内容区。
+    # Args: self - 测试实例。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    def test_content_area_owns_vertical_scroll(self) -> None:
+        """外壳裁掉滚动后，内容区若没有 overflow-y，超长报表将完全无法滚动。"""
+        logger.debug("test_content_area_owns_vertical_scroll 入口")
+        # Arrange：找出全部 .app-content 规则（基础规则与 767 断点各一条）。
+        rules = re.findall(r"\.app-content \{([^}]*)\}", STYLES)
+
+        # Act / Assert：至少有一条提供纵向自动滚动。
+        assert rules, "index.css 缺少 .app-content 规则"
+        assert any("overflow-y: auto" in body for body in rules), ".app-content 未接管纵向滚动"
+        logger.info("test_content_area_owns_vertical_scroll 完成")
+
+    # 方法作用：验证侧栏菜单在矮屏仍可滚到最末项。
+    # Args: self - 测试实例。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    def test_sider_menu_scrolls_inside_sidebar(self) -> None:
+        """侧栏改为视口高度后菜单可能超高，滚动不放进菜单容器则末项不可达。"""
+        logger.debug("test_sider_menu_scrolls_inside_sidebar 入口")
+        # Arrange / Act：抓取侧栏菜单容器规则。
+        rule = re.search(r"\.app-shell \.ant-layout-sider-children \{([^}]*)\}", STYLES)
+
+        # Assert：规则存在且允许纵向滚动。
+        assert rule, "index.css 缺少侧栏菜单容器滚动规则"
+        assert "overflow-y: auto" in rule.group(1)
+        logger.info("test_sider_menu_scrolls_inside_sidebar 完成")
+
+    # 方法作用：验证外壳类名确实挂在应用外层容器上。
+    # Args: self - 测试实例。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    def test_app_shell_class_is_applied(self) -> None:
+        """CSS 规则以 .app-shell / .app-content 为前缀，类名被换掉后固定外壳会静默失效。"""
+        logger.debug("test_app_shell_class_is_applied 入口")
+        # Arrange / Act：读取应用外壳源码。
+        source = Path("frontend/src/App.tsx").read_text(encoding="utf-8")
+
+        # Assert：外层 Layout 与内容区分别使用两个类名。
+        assert 'className="app-shell"' in source
+        assert 'className="app-content"' in source
+        logger.info("test_app_shell_class_is_applied 完成")

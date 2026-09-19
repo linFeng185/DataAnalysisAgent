@@ -40,11 +40,13 @@ class TestUnitSnapshotContract:
 # Returns: 提供 await ainvoke 的假工作流对象。
 def _fake_workflow(response: dict):
     class FakeApp:
-        # 方法作用：忽略入参直接返回固定结果。
+        # 方法作用：忽略入参直接返回固定结果的浅拷贝。
         # Args: payload - 工作流状态；config - 线程配置。
-        # Returns: 预置结果字典。
+        # Returns: 预置结果字典的浅拷贝。
         async def ainvoke(self, payload, config):
-            return response
+            # 真实 CompiledStateGraph 每次 ainvoke 都重建状态字典；替身反复返回同一个
+            # 对象时，执行侧收尾释放状态引用会污染下一次调用（重查轮拿到空数据）。
+            return dict(response)
 
     return FakeApp()
 
@@ -313,45 +315,122 @@ class TestRunnerUnitSnapshot:
 
         assert result.status == "success"
 
-
-class TestRerunAndSnapshotApi:
-    """覆盖单单元重跑与快照查询端点契约。"""
-
-    # 方法作用：准备内存 Store 中的报表、计划、运行记录与路由替身。
-    # Args: monkeypatch - pytest 补丁工具。
-    # Returns: (store, identity, job_id, unit)。
-    async def _prepare(self, monkeypatch):
-        import src.api.routes.report_workbench as route
+    # 方法作用：验证多源单元落快照时 SQL 非空，覆盖实跑里跨源单元 sql_text 为空的回归。
+    # Args: self - 测试实例；monkeypatch - 补丁工具。
+    # Returns: 无返回值。
+    @pytest.mark.asyncio
+    async def test_multisource_unit_snapshot_keeps_merged_sql(self, monkeypatch) -> None:
+        """多源合并最终 return 里的 generated_sql 被删掉时，这条用例立刻变红。"""
+        # Arrange：多源图最终状态由真实合并节点产出，只替身展示子图、LLM 与工作流入口。
         import src.graph.workflow as workflow_module
-        import src.llm.client as llm_client
-        import src.reporting.runner as runner_module
+        from unittest.mock import Mock
+
+        from src.graph.nodes.multi_source import merge_results_node
         from src.reporting.models import AnalysisUnit, ReportPlan
         from src.reporting.runner import ReportRunner
         from src.reporting.store import ReportStore
 
+        presenter = SimpleNamespace(ainvoke=AsyncMock(return_value={}))
+        monkeypatch.setattr("src.graph.subgraphs.result_presentation.build_result_presentation_subgraph", Mock(return_value=presenter))
+        monkeypatch.setattr("src.llm.client.is_task_llm_available", Mock(return_value=False))
+        merged = await merge_results_node({
+            "user_query": "对比 oracle 与 ch 的销售额",
+            "multi_source_results": [
+                {"datasource": "oracle", "success": True, "sql": "SELECT sales FROM orders", "data": [{"sales": 12}]},
+                {"datasource": "ch", "success": True, "sql": "SELECT attributed FROM attribution", "data": [{"attributed": 18}]},
+            ],
+        })
+        monkeypatch.setattr(workflow_module, "app", _fake_workflow(merged))
         store = ReportStore(memory=True)
-        identity = SimpleNamespace(tenant_id=3, user_id=7, role="analyst")
-        unit = AnalysisUnit(question="销售明细")
-        plan = ReportPlan(requested_datasources=["oracle"], analysis_units=[unit])
-        job, _ = await store.create_planning_job(identity, "销售报表", datasources=["oracle"])
-        await store.update_report_plan(job.id, identity, plan=plan, columns={})
-        await store.create_run(job.id, identity)
-
-        monkeypatch.setattr(workflow_module, "app", _fake_workflow({
-            "final_response": {"success": True, "data": [{"v": 1}]},
-            "generated_sql": "SELECT v FROM t",
-            "dialect": "mysql",
-        }))
-        # 路由模型不可用时退回全源检索，测试不发真实 LLM 请求
-        monkeypatch.setattr(llm_client, "is_task_llm_available", lambda task: False)
         runner = ReportRunner(store=store)
-        monkeypatch.setattr(runner_module, "get_report_runner", lambda: runner)
-        monkeypatch.setattr(route, "get_report_store", lambda: store)
-        monkeypatch.setattr(route, "get_current_identity", lambda: identity)
-        monkeypatch.setattr(route, "_require_capability", AsyncMock())
-        monkeypatch.setattr(route, "_has_view_all", AsyncMock(return_value=False))
-        monkeypatch.setattr(route, "_resolve_plan_access", AsyncMock(return_value={}))
-        return store, identity, job.id, unit
+        unit = AnalysisUnit(question="跨源销售额对比")
+        plan = ReportPlan(requested_datasources=["oracle", "ch"], analysis_units=[unit])
+        state = {
+            "plan": plan, "run_id": "run-snap-multi", "report_id": "rep-snap-multi",
+            "identity": {"tenant_id": 3, "user_id": 7, "role": "analyst"},
+            "authorized_datasources": {"oracle": {}, "ch": {}},
+            "unit_datasources": {str(unit.unit_id): ["oracle", "ch"]},
+        }
+
+        # Act
+        result = await runner._default_execute_unit(unit, state)
+
+        # Assert：快照 SQL 必须带各来源标签与语句。
+        assert result.status == "success"
+        rows = await store.list_unit_snapshots("run-snap-multi", SimpleNamespace(tenant_id=3, user_id=7, role="analyst"))
+        assert len(rows) == 1
+        assert rows[0]["datasource"] == "oracle"
+        assert "-- oracle" in rows[0]["sql_text"] and "SELECT sales FROM orders" in rows[0]["sql_text"]
+        assert "-- ch" in rows[0]["sql_text"] and "SELECT attributed FROM attribution" in rows[0]["sql_text"]
+
+
+# 方法作用：构造只用于 ContextVar 断言的假租户模型选择，不读取任何真实凭证。
+# Args: tenant_id - 选择归属租户。
+# Returns: 字段完整但不连接任何真实服务的 TenantLLMSelection。
+def _fake_tenant_selection(tenant_id: int = 3):
+    from src.llm.tenant_config import TenantLLMSelection
+
+    return TenantLLMSelection(
+        tenant_id=tenant_id,
+        connection_id=2,
+        connection_name="默认连接",
+        provider_code="deepseek",
+        protocol="openai",
+        model_catalog_id=11,
+        model_id="deepseek-v4-flash",
+        base_url="http://127.0.0.1:1/v1",
+        api_key="fake-key",
+    )
+
+
+# 方法作用：准备内存 Store 中的报表、计划、运行记录与路由替身。
+# Args: monkeypatch - pytest 补丁工具。
+# Returns: (store, identity, job_id, unit)。
+async def _prepare_rerun_endpoint(monkeypatch):
+    import src.api.routes.report_workbench as route
+    import src.graph.workflow as workflow_module
+    import src.llm.client as llm_client
+    import src.llm.tenant_config as tenant_config
+    import src.reporting.runner as runner_module
+    from src.reporting.models import AnalysisUnit, ReportPlan
+    from src.reporting.runner import ReportRunner
+    from src.reporting.store import ReportStore
+
+    store = ReportStore(memory=True)
+    identity = SimpleNamespace(tenant_id=3, user_id=7, role="analyst")
+    unit = AnalysisUnit(question="销售明细")
+    plan = ReportPlan(requested_datasources=["oracle"], analysis_units=[unit])
+    job, _ = await store.create_planning_job(identity, "销售报表", datasources=["oracle"])
+    await store.update_report_plan(job.id, identity, plan=plan, columns={})
+    await store.create_run(job.id, identity)
+
+    monkeypatch.setattr(workflow_module, "app", _fake_workflow({
+        "final_response": {"success": True, "data": [{"v": 1}]},
+        "generated_sql": "SELECT v FROM t",
+        "dialect": "mysql",
+    }))
+    # 路由模型不可用时退回全源检索，测试不发真实 LLM 请求
+    monkeypatch.setattr(llm_client, "is_task_llm_available", lambda task: False)
+    # 真实解析要连 PostgreSQL 并解密凭证；单测只替身解析结果，避免任何外部依赖。
+    monkeypatch.setattr(tenant_config, "resolve_tenant_llm_selection", AsyncMock(return_value=_fake_tenant_selection()))
+    runner = ReportRunner(store=store)
+    monkeypatch.setattr(runner_module, "get_report_runner", lambda: runner)
+    monkeypatch.setattr(route, "get_report_store", lambda: store)
+    monkeypatch.setattr(route, "get_current_identity", lambda: identity)
+    monkeypatch.setattr(route, "_require_capability", AsyncMock())
+    monkeypatch.setattr(route, "_has_view_all", AsyncMock(return_value=False))
+    monkeypatch.setattr(route, "_resolve_plan_access", AsyncMock(return_value={}))
+    return store, identity, job.id, unit
+
+
+class TestRerunAndSnapshotApi:
+    """覆盖单单元重跑与快照查询端点契约。"""
+
+    # 方法作用：复用模块级夹具，保证重跑相关用例的准备方式完全一致。
+    # Args: monkeypatch - pytest 补丁工具。
+    # Returns: (store, identity, job_id, unit)。
+    async def _prepare(self, monkeypatch):
+        return await _prepare_rerun_endpoint(monkeypatch)
 
     # 方法作用：验证重跑端点执行单单元并返回新快照标识。
     @pytest.mark.asyncio
@@ -425,3 +504,133 @@ class TestRerunAndSnapshotApi:
         payload = await route.get_unit_snapshot(job_id, "unit_missing")
 
         assert payload == {"snapshot": None}
+
+
+class TestRerunUnitTenantLlmScope:
+    """覆盖实机取证（features/23 的 23.41）：重跑必须像调度器一样绑定租户模型。
+
+    没有该绑定时 `is_task_llm_available("report.route")` 会落到 `resolve_llm_task_target`
+    的进程默认配置上；租户 3 的 report_route 恰为 none，于是被判定"路由模型不可用"、
+    退回全源检索，把五个无关数据源各查了一遍 COUNT(*)，还如实返回了 success。
+    """
+
+    # 方法作用：验证数据源路由与单元执行看到同一个租户模型选择，且退出后复位。
+    @pytest.mark.asyncio
+    async def test_rerun_binds_same_selection_for_route_and_execute(self, monkeypatch) -> None:
+        # Arrange：替身解析结果，并把 ContextVar 取值点插在两条真实调用路径的入口。
+        import src.api.routes.report_workbench as route
+        import src.llm.tenant_config as tenant_config
+        import src.reporting.runner as runner_module
+
+        _, _, job_id, unit = await _prepare_rerun_endpoint(monkeypatch)
+        selection = _fake_tenant_selection()
+        seen: list[tuple[str, object]] = []
+        runner = runner_module.get_report_runner()
+
+        async def fake_route_units(plan, requested, tenant_id):
+            seen.append(("route", tenant_config.get_current_tenant_llm_selection()))
+            return {str(unit.unit_id): ["oracle"]}
+
+        async def fake_execute_unit(unit_arg, state):
+            seen.append(("execute", tenant_config.get_current_tenant_llm_selection()))
+            return SimpleNamespace(status="success")
+
+        monkeypatch.setattr(runner, "_route_units", fake_route_units)
+        monkeypatch.setattr(runner, "_default_execute_unit", fake_execute_unit)
+        monkeypatch.setattr(tenant_config, "resolve_tenant_llm_selection", AsyncMock(return_value=selection))
+
+        # Act
+        payload = await route.rerun_report_unit(job_id, unit.unit_id)
+
+        # Assert：两条路径都在作用域内，且拿到的是同一个对象而不是各自解析一次。
+        assert [name for name, _ in seen] == ["route", "execute"]
+        assert all(seen_selection is selection for _, seen_selection in seen)
+        assert payload["status"] == "success"
+        # 离开作用域必须复位：残留的选择会污染同一 Worker 的下一次请求。
+        assert tenant_config.get_current_tenant_llm_selection() is None
+
+    # 方法作用：验证单元执行抛错时租户模型上下文同样复位，不随异常泄漏。
+    @pytest.mark.asyncio
+    async def test_rerun_resets_selection_when_execute_raises(self, monkeypatch) -> None:
+        import src.api.routes.report_workbench as route
+        import src.llm.tenant_config as tenant_config
+        import src.reporting.runner as runner_module
+
+        _, _, job_id, unit = await _prepare_rerun_endpoint(monkeypatch)
+        runner = runner_module.get_report_runner()
+
+        async def failing_execute_unit(unit_arg, state):
+            raise RuntimeError("单元执行中断")
+
+        monkeypatch.setattr(runner, "_route_units", AsyncMock(return_value={}))
+        monkeypatch.setattr(runner, "_default_execute_unit", failing_execute_unit)
+
+        with pytest.raises(RuntimeError):
+            await route.rerun_report_unit(job_id, unit.unit_id)
+
+        assert tenant_config.get_current_tenant_llm_selection() is None
+
+    # 方法作用：验证租户未配置可用模型时按规则回退继续重跑，与既有报表入口口径一致。
+    @pytest.mark.asyncio
+    async def test_rerun_without_configured_model_still_runs(self, monkeypatch) -> None:
+        import src.api.routes.report_workbench as route
+        import src.llm.tenant_config as tenant_config
+        import src.reporting.runner as runner_module
+
+        store, identity, job_id, unit = await _prepare_rerun_endpoint(monkeypatch)
+        seen: list[object] = []
+        runner = runner_module.get_report_runner()
+        real_route_units = runner._route_units
+
+        async def spy_route_units(plan, requested, tenant_id):
+            seen.append(tenant_config.get_current_tenant_llm_selection())
+            return await real_route_units(plan, requested, tenant_id)
+
+        monkeypatch.setattr(runner, "_route_units", spy_route_units)
+        monkeypatch.setattr(
+            tenant_config,
+            "resolve_tenant_llm_selection",
+            AsyncMock(side_effect=LookupError("当前租户未配置可用的 LLM 连接和模型")),
+        )
+
+        payload = await route.rerun_report_unit(job_id, unit.unit_id)
+
+        # 未配置是正常状态：绑定的是 None，而不是让整个重跑失败。
+        assert seen == [None]
+        assert payload["status"] == "success"
+        assert payload["snapshot_id"]
+        runs = await store.list_runs(job_id, identity, limit=1)
+        assert len(await store.list_unit_snapshots(runs[0].id, identity)) == 1
+
+    # 方法作用：验证模型配置查询异常返回 503，且不执行单元、不写成功快照。
+    @pytest.mark.asyncio
+    async def test_rerun_resolution_error_is_503_and_skips_execution(self, monkeypatch) -> None:
+        import src.api.routes.report_workbench as route
+        import src.llm.tenant_config as tenant_config
+        import src.reporting.runner as runner_module
+        from fastapi import HTTPException
+
+        store, identity, job_id, unit = await _prepare_rerun_endpoint(monkeypatch)
+        executed: list[str] = []
+        runner = runner_module.get_report_runner()
+
+        async def spy_execute_unit(unit_arg, state):
+            executed.append(str(unit_arg.unit_id))
+            return SimpleNamespace(status="success")
+
+        monkeypatch.setattr(runner, "_default_execute_unit", spy_execute_unit)
+        monkeypatch.setattr(
+            tenant_config,
+            "resolve_tenant_llm_selection",
+            AsyncMock(side_effect=RuntimeError("pg pool unavailable")),
+        )
+
+        with pytest.raises(HTTPException) as excinfo:
+            await route.rerun_report_unit(job_id, unit.unit_id)
+
+        # 把基础设施异常降级成"全源检索的成功"正是本次实机事故的形态，必须报错而不是报成功。
+        assert excinfo.value.status_code == 503
+        assert executed == []
+        runs = await store.list_runs(job_id, identity, limit=1)
+        assert await store.list_unit_snapshots(runs[0].id, identity) == []
+        assert tenant_config.get_current_tenant_llm_selection() is None

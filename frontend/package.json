@@ -6,7 +6,11 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "test:chart": "node --test tests/chartBase.test.mjs",
+    "test:report-content": "node --test tests/reportContent.test.mjs",
+    "test:report-layout": "node --test tests/reportGroupSwitch.test.mjs",
+    "test:report-groups": "node --test tests/chartGroups.test.mjs"
   },
   "dependencies": {
     "@ant-design/icons": "^5.5.0",

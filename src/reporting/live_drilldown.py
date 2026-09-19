@@ -15,6 +15,20 @@ from src.security.sql_execution import normalize_sql_dialect, validate_sql
 logger = get_logger(__name__)
 
 
+# 方法作用：判断模板是否是当前方言下可解析且通过只读校验的单条查询。
+# Args: sql - 待签发的服务端 SQL；dialect - SQL 方言。
+# Returns: 仅单条只读 Query 返回 True，解析或校验失败返回 False。
+def is_single_query(sql: str, dialect: str) -> bool:
+    if not str(sql or "").strip():
+        return False
+    try:
+        normalized = normalize_sql_dialect(dialect)
+        parsed = sqlglot.parse(sql, read=normalized)
+        return len(parsed) == 1 and isinstance(parsed[0], exp.Query) and validate_sql(sql, normalized).valid
+    except (sqlglot.errors.ParseError, TypeError, ValueError):
+        return False
+
+
 # 方法作用：只将有界标量转为 AST 字面量，不拼接客户端字符串。
 # Args: value - 已校验过滤值。
 # Returns: SQL 字面量表达式。
@@ -38,7 +52,10 @@ def build_live_sql(sql: str, dialect: str, definition: dict[str, Any], filters: 
     dialect = normalize_sql_dialect(dialect)
     if not 1 <= page_size <= min(100, int(definition.get("max_rows", 100))) or page < 1 or page * page_size > 1000:
         raise ValueError("实时钻取超出分页或行数预算")
-    parsed = sqlglot.parse(sql, read=dialect)
+    try:
+        parsed = sqlglot.parse(sql, read=dialect)
+    except sqlglot.errors.ParseError as exc:
+        raise ValueError("实时钻取模板必须是单条只读查询") from exc
     if len(parsed) != 1 or not isinstance(parsed[0], exp.Query) or not validate_sql(sql, dialect).valid:
         raise ValueError("实时钻取模板必须是单条只读查询")
     columns = list(dict.fromkeys(str(column) for column in definition.get("columns", [])))
@@ -85,7 +102,11 @@ async def execute_live_drilldown(query: dict[str, Any], access: dict[str, Any], 
     row_filter = str(access.get("row_filter_sql", "") or "")
     if row_filter:
         sql = inject_row_filter(sql, row_filter)
-    bounded_sql = build_live_sql(sql, dialect, definition, filters, page, page_size)
+    try:
+        bounded_sql = build_live_sql(sql, dialect, definition, filters, page, page_size)
+    except sqlglot.errors.ParseError as exc:
+        # sqlglot 的解析异常不是 ValueError；统一转换后由 API 边界稳定映射为 422。
+        raise ValueError("实时钻取模板必须是单条只读查询") from exc
     execution = await validate_and_execute_sql(bounded_sql, str(query["datasource"]), dialect, explain=True, max_rows=page_size + 1, tenant_id=tenant_id)
     if not execution.success:
         raise RuntimeError("实时查询失败，请重试或联系租户管理员")

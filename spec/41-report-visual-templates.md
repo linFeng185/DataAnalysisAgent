@@ -386,6 +386,62 @@ option={withChartBaseline(block.echarts_option, tokens)}
 
 **安全说明**：前端注入的全部是静态样式常量，不含函数、字符串表达式或外部资源引用，不会破坏后端 `validate_echarts_option`（`document.py:62-72`）所建立的 DSL 安全边界。注入发生在渲染期，结果不回写服务端、不被持久化。
 
+### 8.3 含负值纯柱图的自动数值轴居中（2026-09-19 用户授权追加）
+
+**问题（实机取证）**：分享页「未达成门店缺口金额」与「毛利告警商品分布」各 24 个全负柱值，
+`yAxis.inverse=false`，零线 y=38 落在 grid 上沿（grid 上下 38/260），柱子从顶部往下垂。
+根因是**自动范围在全负数据上退化成 `[min, 0]`**，不是符号写错，也不是轴反转。
+
+**规则**：`withChartBaseline` 在完成样式合并后追加一次**渲染期**判定（`withCenteredZeroAxis`），
+命中全部条件时把该数值轴改写为以 0 为对称中心：
+
+| 条件 | 判定 |
+|---|---|
+| 系列 | `series` 非空且每项都是 `type === 'bar'`（复用 `isAllBarSeries`，判定依据是**实际生效的 series**） |
+| 轴形状 | x/y 必须是**唯一 `value` + 唯一 `category`** 这一种组合；多元素轴数组、两条数值轴、`log` / `time` / 未声明 `type` 与数值轴搭配、另一条轴缺失，一律不动 |
+| 系列绑轴 | 每个系列的 `xAxisIndex` / `yAxisIndex` 未声明或显式为 `0`；出现非 0 索引时不动 |
+| 范围来源 | 该轴 `min` / `max` / `interval` **均未显式声明**（`null` 视为未声明） |
+| 轴方向与类型 | `inverse !== true` 且非 `log` |
+| 数据 | 取值能逐个解析为有限数值，且**至少一个负值** |
+
+> **轴形状只数「实际数值轴个数」，不数「可改写候选数」**（2026-09-19 审查订正）：
+> 早期实现把「筛掉显式范围后剩下的候选」当唯一性依据，于是
+> `xAxis: { type: 'value', min: 0 }` + `yAxis: { type: 'value' }` 会只剩一个候选，
+> 唯一那条被改的轴未必是 series 真正使用的轴。现在按轴类型计数，只有
+> 「一条 value + 一条 category」才认为能可靠解读。
+
+命中后写入 `min = -bound`、`max = bound`、`interval = bound / 2`，其中
+`bound = niceCeil(max(|min|, |max|))`，`niceCeil` 向上取到 `1 / 2 / 2.5 / 5 × 10^k` 的整值
+（2.5 档用于避免 2400 这类取值被粗放扩成 5000、柱子只占半格）。
+`interval = bound / 2` 保证刻度固定落在 `-bound / -bound÷2 / 0 / bound÷2 / bound`。
+
+**0 参考线**：对称轴只保证「刻度里有一个 0」，零线与其它网格线没有区别。命中时给**首系列**
+补一条 `markLine`：锚在数值轴的 0 位（`{ yAxis: 0 }` 或水平柱图下的 `{ xAxis: 0 }`），
+`silent: true`、`symbol: 'none'`、`label.show: false`，线色取模板 `textSecondary`
+（比 `splitLine` 的 `border` 清晰、又不到正文色那么重），因此浅色 / 深色模板各自有合适的零线。
+首系列若**已自带 `markLine`**（后端意图），原样保留，不用零线顶掉它。
+
+**取值解析与堆叠**：`series[i].data[j]` 只接受有限数值与 `{value: number}` 对象项；
+`null` / `undefined` / 非有限数视为缺值（不落点、不参与累计）；字符串、`[x, y]` 数对等
+**判不出的结构一律整体放弃**。带同名 `stack` 的系列按 ECharts 默认 `stackStrategy: 'samesign'`
+口径取界——**正值与负值分别逐类目累计，相反符号不抵消**，非堆叠系列按单点取值计入。
+`stackStrategy` 声明为其它取值（`all` / `positive` / `negative`）时判不出真实边界，整体放弃。
+
+> **堆叠口径订正（2026-09-19，主代理浏览器审计）**：早期实现把同 stack 的正负值做**代数和**，
+> 在 `[-900] / [-900] / [900]` 这类形状上得到 -900，而 ECharts 6.1 的真实
+> `stackResultDimension` 是 `[-900, -1800, 900]`（负向边界 -1800），第二根负柱因此被轴截断
+> （取证：`logs/zero-axis-audit-20260919/stacked-bar-audit.json`，`extent [-1000,1000]`、
+> `clipped: true`）。现在按 samesign 分别累计，取界覆盖真实堆叠高度。
+
+**明确不动的边界**：全正 / 全零 / 空数据 / 无有效数值、非柱图与混合系列（bar+line 等）、
+显式范围（含 `min: 'dataMin'` 这类表达式）、反向轴、对数轴、`stackStrategy` 非默认值，
+以及上面「轴形状」「系列绑轴」两行列出的全部形状，一律原样保留。
+`dataset` 与 `encode` 场景下 `series.data` 不是数组，已被取值解析守卫拦下，无需额外分支。
+
+**实现约束**：只发生在渲染期，旧快照分享页刷新即生效；**不改**数据、不取绝对值、不反转轴，
+不修改入参 option 及其嵌套 `axis` / `series` / `data`（居中后的轴对象是新建的）；
+不改后端 API / SQL / manifest / 持久化文档 / LLM prompt；不引入新依赖。
+
 ---
 
 ## 9. 查看时切换

@@ -247,11 +247,13 @@ class TestSampleGuardDecision:
 # Returns: 提供 await ainvoke 的假工作流对象。
 def _fake_workflow(response: dict):
     class FakeApp:
-        # 方法作用：忽略入参直接返回固定结果。
+        # 方法作用：忽略入参直接返回固定结果的浅拷贝。
         # Args: payload - 工作流状态；config - 线程配置。
-        # Returns: 预置结果字典。
+        # Returns: 预置结果字典的浅拷贝。
         async def ainvoke(self, payload, config):
-            return response
+            # 真实 CompiledStateGraph 每次 ainvoke 都重建一份状态字典；替身若反复返回
+            # 同一个对象，执行侧在单元收尾时释放状态引用就会跨调用串味（单测当场抓到）。
+            return dict(response)
 
     return FakeApp()
 
@@ -345,6 +347,14 @@ class TestSampleGuardWiring:
         }
         return runner, store, unit, state, captured
 
+    # 方法作用：从记录到的模型调用里筛出样本处置调用。
+    # Args: captured - _prepare 记录到的调用列表。
+    # Returns: 只含 report.sample_guard 的调用列表。
+    @staticmethod
+    def _guard_calls(captured: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """单元执行链路还会调节点路由等提示词，断言必须只看样本处置这一支。"""
+        return [item for item in captured if item.get("prompt_id") == "report.sample_guard"]
+
     # 方法作用：验证真实行数规模超限时模型决策进入 warnings、页面 quality 块与快照。
     @pytest.mark.asyncio
     async def test_overflow_decision_reaches_page_and_snapshot(self, monkeypatch) -> None:
@@ -373,11 +383,12 @@ class TestSampleGuardWiring:
         result = await runner._default_execute_unit(unit, state)
 
         # Assert：模型调用走的是已注册提示词，未注册会先在 invoke_structured 抛 KeyError
-        assert captured[0]["prompt_id"] == "report.sample_guard"
-        assert captured[0]["task"] == "report_sample_guard"
-        assert captured[0]["output_model"] is SampleDecision
+        guard = self._guard_calls(captured)
+        assert guard, "超限单元必须触发一次样本处置调用"
+        assert guard[0]["task"] == "report_sample_guard"
+        assert guard[0]["output_model"] is SampleDecision
         # 探针里的两个计数必须各自如实：传成 row_count=max(...) 时会渲染出两个 9000
-        probe = captured[0]["sections"][0].content
+        probe = guard[0]["sections"][0].content
         assert "进入分析链路 20 行" in probe
         assert "查询全量 9000 行" in probe
         assert result.status == "success"
@@ -415,7 +426,7 @@ class TestSampleGuardWiring:
         result = await runner._default_execute_unit(unit, state)
 
         # Assert：不烧模型调用，但裁剪事实以两个真实计数披露到页面与快照
-        assert captured == []
+        assert self._guard_calls(captured) == []
         assert result.status == "success"
         disclosure = next(item for item in result.warnings if "上游执行层已对样本做裁剪" in item)
         assert "本次进入分析链路 20 行" in disclosure
@@ -479,7 +490,7 @@ class TestSampleGuardWiring:
 
         # Assert
         assert result.status == "success"
-        assert captured == []
+        assert self._guard_calls(captured) == []
         assert all("保留原始行集" not in item for item in result.warnings)
 
     # 方法作用：验证「产出行数超过本单元样本上限」这条判据同样触发决策。
@@ -505,7 +516,7 @@ class TestSampleGuardWiring:
         result = await runner._default_execute_unit(unit, state)
 
         # Assert
-        assert captured[0]["prompt_id"] == "report.sample_guard"
+        assert self._guard_calls(captured), "超限单元必须触发一次样本处置调用"
         assert any("补充聚合" in item for item in result.warnings)
 
     # 方法作用：验证模型不可用时仍留下「已超限、未处理」的可解释披露。
@@ -530,7 +541,7 @@ class TestSampleGuardWiring:
         result = await runner._default_execute_unit(unit, state)
 
         # Assert：没走模型，但超限事实照样披露
-        assert captured == []
+        assert self._guard_calls(captured) == []
         assert any("9000" in item and "保留原始行集" in item for item in result.warnings)
         owner = SimpleNamespace(tenant_id=3, user_id=7, role="analyst")
         rows = await store.list_unit_snapshots(state["run_id"], owner)
@@ -671,3 +682,227 @@ class TestContractRowCapCoversSampleLimit:
         assert len(result.rows) == default_limit
         # 列集合由行集推导，行数放开后这条推导链路同样要能用
         assert result.columns == ["employee_id", "project_id", "cost"]
+
+
+class TestOversampleRetryQuery:
+    """覆盖上卷重查文本：必须给出具体目标行数，否则模型只删一个维度、回来仍被裁。"""
+
+    # 方法作用：验证重查文本带上具体目标行数而不是"控制在上限以内"。
+    def test_retry_query_states_concrete_target(self) -> None:
+        """实机：5 个单元重查后仍被裁，根因是要求太松。"""
+        # Arrange
+        from src.reporting.runner import _oversample_retry_query
+
+        # Act
+        text = _oversample_retry_query(question="按年月、地区、门店统计净销售额", full_count=19925, limit=5000)
+
+        # Assert
+        assert "500" in text, "limit=5000 时目标应为 limit//10=500 行"
+        assert "19925" in text and "5000" in text
+        # 不许用 LIMIT 掩盖截断
+        assert "LIMIT" in text
+
+    # 方法作用：验证目标行数有下限，避免把聚合逼到只剩几个点。
+    def test_retry_target_has_floor(self) -> None:
+        # Arrange
+        from src.reporting.runner import _oversample_retry_query
+
+        # Act
+        text = _oversample_retry_query(question="统计", full_count=100, limit=100)
+
+        # Assert：100//10=10 低于下限 50，应取 50。
+        assert "50 行以内" in text
+
+    # 方法作用：验证上限未知时仍给出可用目标而不是 0。
+    def test_retry_target_when_limit_unknown(self) -> None:
+        # Arrange
+        from src.reporting.runner import _oversample_retry_query
+
+        # Act
+        text = _oversample_retry_query(question="统计", full_count=8000, limit=0)
+
+        # Assert
+        assert "500 行以内" in text
+
+
+class TestAggregationRequirementBudget:
+    """覆盖取数要求的行数预算：含糊的"数百行以内"挡不住明细级 SQL。"""
+
+    # 方法作用：验证取数要求带具体行数预算，且预算由样本上限推出。
+    def test_requirement_states_concrete_budget(self) -> None:
+        """实机：两个单元第一次就写成明细粒度（19925 / 27364 行）。"""
+        # Arrange
+        from src.reporting.runner import _unit_aggregation_requirement
+
+        # Act
+        text = _unit_aggregation_requirement()
+
+        # Assert：默认上限 5000 → 预算 500
+        assert "500 行以内" in text
+        assert "数百行" not in text
+        # 仍然要求库内聚合、并明确禁止靠上层截断兜底
+        assert "GROUP BY" in text
+        assert "截断" in text
+
+    # 方法作用：验证重查文本给出"按主指标取前 N 名"这条出路。
+    def test_retry_offers_ranked_top_n(self) -> None:
+        """粒度必须保留时（每商品/每门店），排序前 N 名有业务含义，截断留下的前 N 行没有。"""
+        # Arrange
+        from src.reporting.runner import _oversample_retry_query
+
+        # Act
+        text = _oversample_retry_query(question="按商品统计加权平均成本", full_count=27364, limit=5000)
+
+        # Assert
+        assert "按主指标降序取前" in text
+        assert "前 500 名" in text
+
+
+class TestReleaseUnitRowsAfterPublish:
+    """覆盖发布后释放行数据：这是内存不回落的主要来源（实机 7 万~14 万个 Decimal）。"""
+
+    # 方法作用：验证已发布的行数据被清空且返回释放统计。
+    def test_rows_are_cleared(self) -> None:
+        # Arrange
+        from src.reporting.models import UnitResult
+        from src.reporting.runner import _release_unit_rows
+
+        first = UnitResult(unit_id="u1", rows=[{"a": 1}, {"a": 2}])
+        second = UnitResult(unit_id="u2", rows=[{"b": 3}])
+        empty = UnitResult(unit_id="u3", rows=[])
+
+        # Act
+        released = _release_unit_rows([first, second, empty, "not-a-unit"])
+
+        # Assert
+        assert released == 2
+        assert first.rows == [] and second.rows == []
+        # 空结果不算释放，非 UnitResult 元素被忽略而不抛错
+        assert empty.rows == []
+
+    # 方法作用：验证列表为空时是空操作。
+    def test_empty_list_is_noop(self) -> None:
+        # Arrange
+        from src.reporting.runner import _release_unit_rows
+
+        # Act / Assert
+        assert _release_unit_rows([]) == 0
+
+    # 方法作用：验证发布之后才释放（发布前调会清掉页面要用的行）。
+    def test_release_happens_after_publish(self) -> None:
+        # Arrange
+        import inspect
+
+        from src.reporting import runner as runner_module
+
+        source = inspect.getsource(runner_module.ReportRunner.run_job)
+
+        # Assert
+        assert "_release_unit_rows" in source
+        assert source.index("persist_version") < source.index("_release_unit_rows")
+
+    # 方法作用：验证图状态里的行数据通道被清空，标量字段保持可读。
+    def test_state_payloads_are_cleared(self) -> None:
+        """单元 rows 清空后驻留只降四成，剩下的大头挂在图状态的取数通道上。"""
+        # Arrange
+        from src.reporting.runner import _release_state_payloads
+
+        state = {
+            "query_result": [{"a": 1}, {"a": 2}],
+            "query_result_sample": [{"b": 3}],
+            "analysis_result": {"data": [{"c": 4}]},
+            "artifact": object(),
+            "run_status": "succeeded",
+            "summary": "关键结论",
+        }
+
+        # Act
+        cleared = _release_state_payloads(state)
+
+        # Assert：容器就地清空（别的持有者也能真正释放行），摘要字段原样保留
+        assert set(cleared) == {"query_result", "query_result_sample", "analysis_result", "artifact"}
+        assert state["query_result"] == []
+        assert state["analysis_result"] == {}
+        assert state["artifact"] is None
+        assert state["run_status"] == "succeeded" and state["summary"] == "关键结论"
+
+    # 方法作用：验证非字典状态是空操作。
+    def test_non_dict_state_is_noop(self) -> None:
+        # Arrange
+        from src.reporting.runner import _release_state_payloads
+
+        # Act / Assert
+        assert _release_state_payloads(None) == []
+        assert _release_state_payloads([1, 2]) == []
+
+    # 方法作用：验证图状态的行数据也在发布之后才释放。
+    def test_state_release_also_after_publish(self) -> None:
+        # Arrange
+        import inspect
+
+        from src.reporting import runner as runner_module
+
+        source = inspect.getsource(runner_module.ReportRunner.run_job)
+
+        # Assert
+        assert "_release_state_payloads" in source
+        assert source.index("persist_version") < source.index("_release_state_payloads")
+
+
+class TestUnitStateReleaseKeepsRows:
+    """覆盖单元收尾时的状态释放：只放状态里的引用，不能把单元结果的行清掉。"""
+
+    # 方法作用：验证释放状态引用后，单元结果仍带着完整行数据。
+    async def test_unit_result_keeps_rows_after_state_release(self, monkeypatch) -> None:
+        """实机风险点：rows 很可能就是 state["query_result_sample"] 这同一个列表。"""
+        # Arrange
+        import src.graph.workflow as workflow_module
+        from src.reporting.models import AnalysisUnit, TimeRange, UnitResult
+        from src.reporting.runner import ReportRunner
+        from src.reporting.store import ReportStore
+
+        rows = [{f"c{index}": index for index in range(5)} for _ in range(5000)]
+        state_payload = {
+            "generated_sql": "SELECT 1",
+            "dialect": "postgres",
+            "query_result_sample": rows,
+            "query_result_full_count": 5000,
+            "query_result_sample_capped": False,
+            "final_response": {"success": True, "data": rows, "analysis": {}},
+        }
+
+        returned: list[dict[str, Any]] = []
+
+        class _FakeApp:
+            async def ainvoke(self, payload, config):
+                state = dict(state_payload)
+                returned.append(state)
+                return state
+
+        monkeypatch.setattr(workflow_module, "app", _FakeApp())
+        runner = ReportRunner(store=ReportStore(memory=True))
+
+        unit = AnalysisUnit(
+            unit_id="u1",
+            question="按员工统计人力成本",
+            datasource="postgres",
+            time_range=TimeRange(kind="absolute", value="2016-01-01/2016-12-31"),
+        )
+        run_state = {
+            "plan": SimpleNamespace(requested_datasources=["postgres"]),
+            "identity": {"tenant_id": 3, "user_id": 3, "role": "tenant_admin"},
+            "authorized_datasources": {"postgres": {"allowed_columns": [], "row_filter_sql": ""}},
+            "run_id": "run-1",
+        }
+
+        # Act
+        result = await runner._execute_unit_workflow(unit, dict(run_state), {})
+
+        # Assert：行数据完整保留在单元结果里（调用方要继续用），而图状态里那一份引用
+        # 已经被断开——两份引用收敛成一份，才是释放内存的同时不丢数据。
+        assert isinstance(result, UnitResult)
+        assert len(result.rows) == 5000
+        assert result.rows[0] == {"c0": 0, "c1": 1, "c2": 2, "c3": 3, "c4": 4}
+        assert returned, "假图必须被调用到"
+        assert returned[0]["query_result_sample"] == []
+        assert returned[0]["final_response"] in ({}, None) or returned[0]["final_response"]

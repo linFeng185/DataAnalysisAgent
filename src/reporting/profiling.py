@@ -43,8 +43,6 @@ _MAD_Z_THRESHOLD = 3.5
 _MAD_SCALE = 1.4826
 # 异常点占比超过此值时整体放弃：说明分布本身就这样，不是异常。
 _MAX_OUTLIER_RATIO = 0.2
-# 同比至少需要回看一个完整年度（13 个月含基期）。
-_MIN_YOY_MONTHS = 13
 # 单元问题里要求同比的措辞；命中即要求回看一个完整年度。
 _YOY_QUESTION_HINTS = ("同比", "去年同期", "上年同期")
 # 单元问题里要求环比的措辞；命中即要求达到 _period_min_observations 的观测点数。
@@ -66,26 +64,11 @@ def _period_min_observations() -> int:
     return _MIN_OBSERVATIONS["period_over_period"]
 
 
-# 方法作用：同比产出所需的最小首尾跨度（天）。
-# Args: 无。
-# Returns: 最小跨度天数。
-def _yoy_min_span_days() -> int:
-    """同比的最小跨度天数：产出方一直按 13×30 天近似一个完整年度，判定侧共用同一口径。"""
-    return _MIN_YOY_MONTHS * 30
-
-
 # 方法作用：判断聚合后的周期数是否够产出同环比指标。
 # Args: period_count - 聚合后的周期数。
 # Returns: 达到门槛返回 True。
 def _has_enough_periods(period_count: int) -> bool:
     return period_count >= _period_min_observations()
-
-
-# 方法作用：判断样本跨度是否够产出同比指标。
-# Args: span_days - 首尾周期日期之差（天）。
-# Returns: 达到门槛返回 True。
-def _has_enough_yoy_span(span_days: int) -> bool:
-    return span_days >= _yoy_min_span_days()
 
 
 # --- 同环比门槛的单一真源结束 -------------------------------------------------
@@ -95,9 +78,20 @@ def _has_enough_yoy_span(span_days: int) -> bool:
 # Args: unit - 报表分析单元。
 # Returns: 是否应在查询与关系分析结束后汇总本轮证据。
 def is_runtime_quality_unit(unit: AnalysisUnit) -> bool:
-    """识别报表级覆盖、截断、权限和关系说明。"""
+    """识别报表级覆盖、截断、权限和关系说明。
+
+    识别面不能只认「说明/披露」开头：实机验收里需求写的是「给出各数据源的时间覆盖
+    范围、被截断或被权限过滤的记录……未能建立可验证关系的单元清单」，以「给出」开头，
+    于是被判成普通取数单元去查库，最终以「未找到相关数据」落 partial——而它本来就是
+    不需要查库的报表级说明。放宽的是**句式**，证据组判据（≥2 组元信息词）不放宽。
+    """
     question = unit.question.strip()
-    explaining = question.startswith(("说明", "披露")) or "本次报表" in question or "本报表" in question
+    explaining = (
+        question.startswith(("说明", "披露", "给出", "汇总", "报告"))
+        or "本次报表" in question
+        or "本报表" in question
+        or "数据质量" in question
+    )
     evidence_groups = (("时间覆盖", "覆盖范围"), ("截断",), ("权限过滤", "权限限制"), ("未能建立", "未建立"))
     return explaining and sum(any(term in question for term in group) for group in evidence_groups) >= 2
 
@@ -355,7 +349,7 @@ def needs_baseline_supplement(
     """缺基期本身即构成补查理由，不依赖本轮是否已产出发现。
 
     门槛与产出方（`_period_findings`）共用同一处判据（`_has_enough_periods` /
-    `_has_enough_yoy_span`），且周期数与跨度都按产出方的同一处聚合算法数出来：
+    `_has_yoy_baseline`），且周期与日历基期都按产出方的同一处聚合算法数出来：
     判定为「足够」必然产得出对应指标，反之才补查，不存在两边都不管的死区。
     事故报表只拿回单月数据时一条发现都产不出，若让判定依赖「已有发现」，
     回路就永远不会触发。判定全程确定性、不调用模型。
@@ -389,13 +383,13 @@ def needs_baseline_supplement(
     first_label = str(aggregated[0].get("period") or "")
     last_label = str(aggregated[-1].get("period") or "")
     reasons: list[str] = []
-    if wants_yoy and not (_has_enough_periods(period_count) and _has_enough_yoy_span(span_days)):
-        # 门槛一律说产出方的实际口径（周期数 + 天数），日历月数只用来把理由写得好读。
+    if wants_yoy and not (_has_enough_periods(period_count) and _has_yoy_baseline(aggregated)):
+        # 天数与月份只用于解释样本覆盖；是否够基期按日历年精确配对，不再用 390 天近似。
         reasons.append(
             f"要求同比但样本只有 {period_count} 个时间周期、首尾相隔 {span_days} 天"
             f"（{first_label} 至 {last_label}，约 {_span_months(aggregated)} 个月），"
             f"缺去年同期基期，产出同比至少需要 {_period_min_observations()} 个周期"
-            f"且首尾相隔不少于 {_yoy_min_span_days()} 天"
+            "且至少包含一组可按日历年对齐的去年同期周期"
         )
     if wants_mom and not _has_enough_periods(period_count):
         reasons.append(
@@ -472,6 +466,28 @@ def _period_span_days(aggregated: list[dict[str, Any]]) -> int:
     if first_date is None or last_date is None:
         return 0
     return (last_date - first_date).days
+
+
+# 方法作用：把日期按日历年向前平移一年，闰日退到 2 月 28 日。
+# Args: value - 当前周期日期。
+# Returns: 去年同周期日期。
+def _previous_year(value: date) -> date:
+    try:
+        return value.replace(year=value.year - 1)
+    except ValueError:
+        return value.replace(year=value.year - 1, day=28)
+
+
+# 方法作用：判断聚合周期中是否存在至少一组当前周期与去年同期。
+# Args: aggregated - _aggregate_periods 输出的周期行。
+# Returns: 存在可按日历年精确对齐的基期时返回 True。
+def _has_yoy_baseline(aggregated: list[dict[str, Any]]) -> bool:
+    periods = {
+        parsed
+        for item in aggregated
+        if (parsed := _parse_date(item.get("period"))) is not None
+    }
+    return any(_previous_year(current) in periods for current in periods)
 
 
 # 方法作用：算聚合周期首尾相隔的含首尾日历月数，只用于把补查理由写得好读。
@@ -572,9 +588,8 @@ def _period_findings(
                 if index < len(aggregated)
             ],
         ))
-    # 同比至少需要一个完整年度；跨度门槛取自单一真源，与缺基期判定侧共用。
-    # 跨度不足时不做，也不写同比数字。
-    if not _has_enough_yoy_span(_period_span_days(aggregated)):
+    # 同比必须有可按日历年精确对齐的基期；判定侧与产出侧共用同一谓词。
+    if not _has_yoy_baseline(aggregated):
         return findings
     yoy = YoYProcessor().process(aggregated, params)
     if yoy.confidence != "low":

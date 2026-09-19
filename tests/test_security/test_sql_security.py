@@ -316,6 +316,48 @@ class TestReadonlySQLValidation:
         assert result.error_type == "timeout"
         assert result.error == "数据库查询超时"
 
+    # 方法作用：验证报表 SQL 预算耗尽时在解析数据源前拒绝真实执行。
+    # Args: self - pytest 测试类实例；monkeypatch - pytest 补丁工具。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    async def test_report_query_budget_blocks_connector_access(self, monkeypatch) -> None:
+        """重试、换源或补查超过本轮预占上限后，不得再访问 Registry 或 Connector。"""
+        # Arrange
+        from unittest.mock import AsyncMock
+
+        import src.security.sql_execution as execution_module
+        from src.reporting.run_stats import activate, deactivate
+
+        resolve_target = AsyncMock(side_effect=AssertionError("查询预算耗尽后不应解析数据源"))
+        monkeypatch.setattr(execution_module, "_resolve_sql_target", resolve_target)
+        stats, token = activate(sql_query_limit=1)
+
+        try:
+            # Act
+            first = await execution_module.validate_and_execute_sql(
+                "SELECT 1",
+                "sales",
+                "postgres",
+                explain=False,
+            )
+            second = await execution_module.validate_and_execute_sql(
+                "SELECT 2",
+                "sales",
+                "postgres",
+                explain=False,
+            )
+        finally:
+            deactivate(token)
+
+        # Assert
+        assert first.success is False
+        assert first.error_type != "resource_limit"
+        assert second.success is False
+        assert second.error_type == "resource_limit"
+        assert "查询次数" in second.error
+        assert resolve_target.await_count == 1
+        assert stats.sql_query_count == 2
+        assert stats.sql_failure_count == 2
+
 
 class TestPermissionFailureClosed:
     """覆盖列权限与行过滤失败关闭。"""

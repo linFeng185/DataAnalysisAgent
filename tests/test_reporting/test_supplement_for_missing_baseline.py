@@ -153,11 +153,11 @@ class TestBaselineSupplement:
         # Assert
         assert reason and "同比" in reason
 
-    # 方法作用：验证 13 个含基期日历月仍判为不足。
+    # 方法作用：验证 13 个日历月存在去年同期时不再误判为缺基期。
     # Args: self - 测试实例。
     # Returns: 无返回值，断言失败时由 pytest 报告。
-    def test_thirteen_month_span_still_missing_yoy_baseline(self) -> None:
-        """2025-06 至 2026-06 有 13 个月标签，但首尾只隔 365 天，不到产出方的 390 天门槛。"""
+    def test_thirteen_calendar_months_cover_yoy_baseline(self) -> None:
+        """2025-06 至 2026-06 虽只隔 365 天，但已有可按日历年对齐的去年同期。"""
         # Arrange
 
         rows = [{"year_month": f"2025-{month:02d}", "net_sales": 100} for month in range(6, 13)]
@@ -166,9 +166,8 @@ class TestBaselineSupplement:
         # Act
         reason = _judge({"question": "按年月统计净销售额并给出同比"}, rows)
 
-        # Assert：判定必须与产出方同一口径，否则同比为空且系统不补查（本次评审发现的死区）
-        assert reason and "同比" in reason
-        assert "365" in reason and "390" in reason
+        # Assert
+        assert reason is None
 
     # 方法作用：验证要求环比但只有一个周期时触发补查。
     # Args: self - 测试实例。
@@ -453,7 +452,7 @@ class TestJudgementMatchesProducer:
     # Args: self - 测试实例。
     # Returns: 无返回值，断言失败时由 pytest 报告。
     def test_truly_sufficient_span_produces_both_indicators(self) -> None:
-        """正例：跨度 ≥390 天且观测点 ≥3 时，既不补查、两个指标也都拿得到。"""
+        """正例：存在日历年对齐基期且观测点 ≥3 时，既不补查、两个指标也都拿得到。"""
         # Arrange
         from src.reporting.models import AnalysisUnit, UnitResult
         from src.reporting.profiling import needs_baseline_supplement, profile_inputs, profile_unit
@@ -492,7 +491,10 @@ class TestSameSourceDerivation:
     async def test_authorization_filtered_metric_keeps_sides_aligned(self) -> None:
         """事故回归：判定侧走自带派生会判「基期足够」，产出方却一条同比都产不出。"""
         # Arrange：单元声明 net_sales，授权只留下 amount；两个数值列覆盖面不同
-        from src.graph.subgraphs.report_workbench import report_analyze_units, report_decide_supplement
+        from src.graph.subgraphs.report_workbench import (
+            report_analyze_units,
+            report_decide_supplement,
+        )
         from src.reporting.models import AnalysisUnit, ReportPlan, UnitResult
 
         months = _month_labels(2025, 1, 14)
@@ -595,6 +597,8 @@ class TestBaselineReasonReachesModelAndPage:
         # 无 supports_finding 的建议没有被过滤掉，且真的被执行了
         added = list(update["runtime_units"])
         assert [unit.question for unit in added] == ["回看去年同期净销售额"]
+        assert added[0].time_range.kind == "relative"
+        assert added[0].time_range.value == "456d"
         assert executed == [added[0].unit_id]
         # 理由进页面 quality 块（复用 UnitResult.warnings → document 的通路）
         annotated = next(item for item in update["unit_results"] if item.unit_id == "sales")
@@ -602,3 +606,76 @@ class TestBaselineReasonReachesModelAndPage:
         section = next(item for item in artifact.document.sections if item.id == "sales")
         quality = next(item for item in section.blocks if item.type == "quality")
         assert any("2026-06" in item and "同比" in item for item in quality.content["limitations"])
+
+
+class TestBaselineTimeRangeExpansion:
+    """覆盖缺同比补查时间窗扩展的相对、绝对与兼容边界。"""
+
+    # 方法作用：验证相对窗口按原单位多覆盖一个完整年度。
+    # Args: self - 测试实例；value - 原时间范围；expected - 扩展后范围。
+    # Returns: 无返回值。
+    @pytest.mark.parametrize(
+        ("value", "expected"),
+        [("90d", "456d"), ("8w", "61w"), ("6m", "18m"), ("2q", "6q"), ("1y", "2y")],
+    )
+    def test_relative_range_expands_in_original_unit(self, value: str, expected: str) -> None:
+        """相对范围保持单位，闰年边界不会少覆盖一天。"""
+        # Arrange
+        from src.reporting.models import TimeRange
+        from src.reporting.planner import expand_time_range_for_yoy
+
+        # Act
+        expanded = expand_time_range_for_yoy(TimeRange(kind="relative", value=value))
+
+        # Assert
+        assert expanded == TimeRange(kind="relative", value=expected)
+
+    # 方法作用：验证闰日绝对窗口向前平移时退到二月末。
+    # Args: self - 测试实例。
+    # Returns: 无返回值。
+    def test_absolute_range_moves_start_back_one_calendar_year(self) -> None:
+        """2024-02-29 的去年同期应为 2023-02-28，结束日期保持不变。"""
+        # Arrange
+        from src.reporting.models import TimeRange
+        from src.reporting.planner import expand_time_range_for_yoy
+
+        # Act
+        expanded = expand_time_range_for_yoy(
+            TimeRange(kind="absolute", value="2024-02-29/2024-03-31")
+        )
+
+        # Assert
+        assert expanded.value == "2023-02-28/2024-03-31"
+
+    # 方法作用：验证全量窗口无需扩大且不会被就地修改。
+    # Args: self - 测试实例。
+    # Returns: 无返回值。
+    def test_all_range_is_preserved(self) -> None:
+        """全量查询已经覆盖基期，扩展应保持等值但返回独立对象。"""
+        # Arrange
+        from src.reporting.models import TimeRange
+        from src.reporting.planner import expand_time_range_for_yoy
+
+        original = TimeRange(kind="all", value="all")
+
+        # Act
+        expanded = expand_time_range_for_yoy(original)
+
+        # Assert
+        assert expanded == original
+        assert expanded is not original
+
+    # 方法作用：验证旧格式相对值按保守默认天数回退。
+    # Args: self - 测试实例。
+    # Returns: 无返回值。
+    def test_legacy_relative_range_uses_bounded_fallback(self) -> None:
+        """无法识别单位的旧值不得抛错，也不能仍保留原窄窗口。"""
+        # Arrange
+        from src.reporting.models import TimeRange
+        from src.reporting.planner import expand_time_range_for_yoy
+
+        # Act
+        expanded = expand_time_range_for_yoy(TimeRange(kind="relative", value="legacy"))
+
+        # Assert
+        assert expanded == TimeRange(kind="relative", value="456d")

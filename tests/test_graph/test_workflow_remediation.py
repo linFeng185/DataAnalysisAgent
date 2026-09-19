@@ -436,6 +436,7 @@ class TestValidationRouting:
         ("sql_semantic", "generate_sql"),
         ("configuration", "build_response"),
         ("security", "build_response"),
+        ("resource_limit", "build_response"),
     ])
     def test_execution_errors_route_by_type(self, error_type, expected):
         """数据库连接波动不得触发 LLM 改写正确 SQL。"""

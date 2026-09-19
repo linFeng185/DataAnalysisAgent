@@ -21,6 +21,9 @@ import type {
   ReportQuotaUsageResetRequest,
   ReportQuotaUsageResetResponse,
   ReportRun,
+  ReportRunListQuery,
+  ReportRunListResponse,
+  ReportRunStats,
   ReportRunStep,
   ReportUnitSnapshot,
   ReportShareRequest,
@@ -156,11 +159,27 @@ export function fetchReportRuns(jobId: string, limit = 20): Promise<{ runs: Repo
   return get<{ runs: ReportRun[]; total: number }>(`${REPORT_BASE}/jobs/${encodeURIComponent(jobId)}/runs?limit=${limit}`);
 }
 
-// 方法作用：读取单次运行及节点步骤日志。
+// 方法作用：读取单次运行及节点步骤日志和单元快照。
 // Args: runId - 报表运行 ID。
-// Returns: 运行摘要和步骤数组。
-export function fetchReportRun(runId: string): Promise<{ run: ReportRun; steps: ReportRunStep[] }> {
-  return get<{ run: ReportRun; steps: ReportRunStep[] }>(`${REPORT_BASE}/runs/${encodeURIComponent(runId)}`);
+// Returns: 运行摘要、步骤数组和单元快照数组。
+export function fetchReportRun(
+  runId: string,
+): Promise<{ run: ReportRun & { stats?: ReportRunStats }; steps: ReportRunStep[]; units?: ReportUnitSnapshot[] }> {
+  return get<{ run: ReportRun & { stats?: ReportRunStats }; steps: ReportRunStep[]; units?: ReportUnitSnapshot[] }>(
+    `${REPORT_BASE}/runs/${encodeURIComponent(runId)}`,
+  );
+}
+
+// 方法作用：分页读取执行明细，含 LLM/SQL 调用次数与输入输出 token。
+// Args: query - 任务过滤、状态过滤和分页参数。
+// Returns: 运行明细数组、总数和分页信息。
+export function fetchRunDetails(query: ReportRunListQuery = {}): Promise<ReportRunListResponse> {
+  const params = new URLSearchParams();
+  if (query.job_id) params.set('job_id', query.job_id);
+  if (query.status) params.set('status', query.status);
+  params.set('page', String(query.page ?? 1));
+  params.set('page_size', String(query.page_size ?? 20));
+  return get<ReportRunListResponse>(`${REPORT_BASE}/runs?${params.toString()}`);
 }
 
 // 方法作用：读取当前用户的不可变私有报表页面和脱敏快照。

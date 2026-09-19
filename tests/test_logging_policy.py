@@ -168,7 +168,12 @@ class TestLoggingPolicy:
         logfile = tmp_path / "app.log"
         root = logging.getLogger()
         old_level = root.level
-        old_config = structlog.get_config()
+        processor_ref = structlog.get_config()["processors"]
+        old_processors = list(processor_ref)
+        old_config = {
+            **structlog.get_config(),
+            "processors": processor_ref,
+        }
         monkeypatch.setattr(root, "handlers", [])
         monkeypatch.setattr(logging_config, "get_settings", lambda: SimpleNamespace(log_file=str(logfile), log_level=level, log_format="json"))
         processor = MagicMock(wraps=logging_config._redact_sensitive_fields)
@@ -203,5 +208,59 @@ class TestLoggingPolicy:
         finally:
             for handler in root.handlers:
                 handler.close()
+            processor_ref.clear()
+            processor_ref.extend(old_processors)
+            root.setLevel(old_level)
+            structlog.configure(**old_config)
+
+    # 方法作用：验证重复初始化日志后，已缓存 logger 仍跟随当前处理器链。
+    # Args: self - 测试实例；monkeypatch - 配置替换工具；tmp_path - 临时日志目录。
+    # Returns: 无返回值。
+    def test_repeated_setup_keeps_cached_logger_reconfigurable(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        """重复 setup_logging 不得让缓存 logger 固化在过期处理器列表。"""
+        from src import logging_config
+
+        # Arrange
+        root = logging.getLogger()
+        old_level = root.level
+        processor_ref = structlog.get_config()["processors"]
+        old_processors = list(processor_ref)
+        old_config = {
+            **structlog.get_config(),
+            "processors": processor_ref,
+        }
+        monkeypatch.setattr(root, "handlers", [])
+        monkeypatch.setattr(
+            logging_config,
+            "get_settings",
+            lambda: SimpleNamespace(
+                log_file=str(tmp_path / "app.log"),
+                log_level="DEBUG",
+                log_format="json",
+            ),
+        )
+
+        try:
+            logging_config.setup_logging()
+            cached_logger = logging_config.get_logger("tests.logging.reconfigure")
+            cached_logger.debug("首次绑定处理器")
+
+            # Act
+            logging_config.setup_logging()
+            with capture_logs() as events:
+                cached_logger.info("重复配置后捕获")
+
+            # Assert
+            assert structlog.get_config()["processors"] is processor_ref
+            assert [event["event"] for event in events] == ["重复配置后捕获"]
+        finally:
+            for handler in root.handlers:
+                handler.close()
+            processor_ref.clear()
+            processor_ref.extend(old_processors)
             root.setLevel(old_level)
             structlog.configure(**old_config)

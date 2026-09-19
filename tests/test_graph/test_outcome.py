@@ -66,6 +66,20 @@ class TestOutcomeContract:
         assert message == "数据源配置、认证或连接失败"
         assert "password" not in message.lower()
 
+    # 方法作用：验证资源上限错误返回可覆盖查询次数与扫描行数的通用说明。
+    # Args: self - pytest 测试类实例。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    def test_public_failure_reason_explains_generic_resource_limit(self) -> None:
+        """resource_limit 同时承载次数与 EXPLAIN 扫描量限制，文案不得误称只有次数超限。"""
+        # Arrange
+        from src.graph.outcome import public_failure_reason
+
+        # Act
+        message = public_failure_reason("SQL_EXECUTION_FAILED", "resource_limit")
+
+        # Assert
+        assert message == "查询触及运行资源上限，已停止继续执行"
+
     # 方法作用：验证统一响应出口保留外部动作的人工确认状态。
     # Args: self - pytest 测试类实例。
     # Returns: 无返回值，断言失败时由 pytest 报告。

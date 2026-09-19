@@ -76,6 +76,7 @@ class TestChartGeneratorTool:
 
         # Assert
         assert result["recommended_chart_type"] == "pie"
+        assert [item["name"] for item in result["option"]["series"][0]["data"]] == ["C5", "C6"]
         assert result["option"]["series"][0]["data"][-1]["value"] == 6.0
         logger.info("test_type_inference_skips_leading_nulls 完成")
 
@@ -97,3 +98,35 @@ class TestChartGeneratorTool:
 
         # Assert
         assert result["recommended_chart_type"] == "pie"
+
+    # 方法作用：验证对话路径的柱状图同样按数据项触发提示。
+    # Args: self - pytest 测试类实例。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    def test_bar_option_uses_item_tooltip(self) -> None:
+        """悬停单柱只显示该柱读数；按轴触发会一次列出整批类目。"""
+        # Arrange
+        from src.tools.chart_generator import build_chart_option
+
+        rows = [{"category": "A", "amount": 1}, {"category": "B", "amount": 2}]
+
+        # Act
+        option = build_chart_option(rows, "bar")
+
+        # Assert
+        assert option["tooltip"]["trigger"] == "item"
+
+    # 方法作用：验证对话路径的折线图保留按轴触发提示。
+    # Args: self - pytest 测试类实例。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    def test_line_option_keeps_axis_tooltip(self) -> None:
+        """趋势图需要一次读出某一期的全部系列。"""
+        # Arrange
+        from src.tools.chart_generator import build_chart_option
+
+        rows = [{"month": "2026-01", "amount": 1}, {"month": "2026-02", "amount": 2}]
+
+        # Act
+        option = build_chart_option(rows, "line")
+
+        # Assert
+        assert option["tooltip"]["trigger"] == "axis"

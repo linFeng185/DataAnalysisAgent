@@ -32,11 +32,11 @@ class TestContainerDeployment:
         assert "PIP_TRUSTED_HOST" not in source
         assert source.index("RUN python -m pip wheel") < source.index("COPY src ./src")
 
-    # 方法作用：验证前端镜像独立构建并通过 Nginx 代理 API 和 SSE。
+    # 方法作用：验证前端镜像独立构建并通过 Nginx 代理 API、SSE 与通知 WebSocket。
     # Args: self - pytest 测试类实例。
     # Returns: 无返回值，断言失败时由 pytest 报告。
     def test_frontend_dockerfile_and_nginx_proxy_are_production_ready(self) -> None:
-        """前端应产出静态镜像，并保持流式响应不被 Nginx 缓冲。"""
+        """前端应产出静态镜像，保持流式响应不被 Nginx 缓冲，并透传 WebSocket 协议升级头。"""
         # Arrange
         dockerfile = Path("frontend/Dockerfile").read_text(encoding="utf-8")
         nginx = Path("frontend/nginx.conf").read_text(encoding="utf-8")
@@ -52,6 +52,13 @@ class TestContainerDeployment:
         assert "proxy_pass http://backend:8000" not in nginx
         assert "proxy_buffering off" in nginx
         assert "try_files $uri $uri/ /index.html" in nginx
+        # 通知 WebSocket（/api/v1/notifications/stream）必须透传协议升级头，
+        # 否则 nginx 会把握手降级成普通 HTTP 请求，被后端认证中间件以 401 挡下，
+        # 前端表现为控制台持续报 "WebSocket connection failed"。
+        assert "map $http_upgrade $connection_upgrade" in nginx
+        assert "proxy_set_header Upgrade $http_upgrade;" in nginx
+        assert "proxy_set_header Connection $connection_upgrade;" in nginx
+        assert 'proxy_set_header Connection "";' not in nginx
 
     # 方法作用：验证 Compose 将前后端分离，并持久化配置、日志和状态数据。
     # Args: self - pytest 测试类实例。

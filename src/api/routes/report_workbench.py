@@ -62,6 +62,62 @@ logger = get_logger(__name__)
 router = APIRouter(prefix="/report-workbench")
 _plan_cache: dict[tuple[int, int, str], ReportPlan] = {}
 _unlock_sessions: dict[str, tuple[str, datetime]] = {}
+# 进程内缓存的容量与有效期：这两个字典原先是**只写不删**的模块级结构——每预览一次
+# 计划就永久留一份 ReportPlan（含全部单元与提示词现场），分享解锁项也只增不减。
+# 实机表现为「报表生成时内存飙升、执行完成后也不下降」，长跑进程必然 OOM。
+_PLAN_CACHE_MAX_ENTRIES = 200
+_PLAN_CACHE_TTL = timedelta(hours=2)
+_plan_cache_saved_at: dict[tuple[int, int, str], datetime] = {}
+# 单元快照里的 SQL 正文传输上限：明细页够看即可，避免单个响应体被长 SQL 撑大。
+_MAX_SNAPSHOT_SQL_CHARS = 8000
+
+
+# 方法作用：清掉计划缓存里已过期的条目。
+# Args: now - 当前时间。
+# Returns: 被清除的条目数。
+def _evict_expired_plans(now: datetime) -> int:
+    expired = [
+        key for key, saved_at in _plan_cache_saved_at.items()
+        if now - saved_at > _PLAN_CACHE_TTL
+    ]
+    for key in expired:
+        _plan_cache.pop(key, None)
+        _plan_cache_saved_at.pop(key, None)
+    if expired:
+        logger.info("计划缓存过期清理完成", removed=len(expired), remaining=len(_plan_cache))
+    return len(expired)
+
+
+# 方法作用：写入计划缓存，并按容量与有效期淘汰旧条目。
+# Args: key - 缓存键；plan - 计划对象。
+# Returns: 无返回值。
+def _remember_plan(key: tuple[int, int, str], plan: ReportPlan) -> None:
+    """计划预览与随后的一次执行相隔通常在分钟级，长有效期只是兜底。"""
+    now = datetime.now(timezone.utc)
+    _evict_expired_plans(now)
+    _plan_cache[key] = plan
+    _plan_cache_saved_at[key] = now
+    # 超容量时按写入时间淘汰最旧的一批，保证进程内存不随使用时长单调增长。
+    if len(_plan_cache) > _PLAN_CACHE_MAX_ENTRIES:
+        oldest = sorted(_plan_cache_saved_at.items(), key=lambda item: item[1])[
+            : len(_plan_cache) - _PLAN_CACHE_MAX_ENTRIES
+        ]
+        for stale_key, _ in oldest:
+            _plan_cache.pop(stale_key, None)
+            _plan_cache_saved_at.pop(stale_key, None)
+        logger.info("计划缓存容量淘汰完成", removed=len(oldest), remaining=len(_plan_cache))
+
+
+# 方法作用：清掉分享解锁会话里已过期的条目。
+# Args: now - 当前时间。
+# Returns: 被清除的条目数。
+def _evict_expired_unlocks(now: datetime) -> int:
+    expired = [session for session, (_, expires_at) in _unlock_sessions.items() if now >= expires_at]
+    for session in expired:
+        _unlock_sessions.pop(session, None)
+    if expired:
+        logger.info("分享解锁会话清理完成", removed=len(expired), remaining=len(_unlock_sessions))
+    return len(expired)
 
 
 # 方法作用：把数据库或内存分享记录中的用户范围统一转换为整数列表。
@@ -172,6 +228,19 @@ async def _has_any_capability(identity: Any, capabilities: tuple[str, ...]) -> b
 # Returns: 具备 report.view_all 返回 True。
 async def _has_view_all(identity: Any) -> bool:
     return await get_report_permission_service().has(identity, "report.view_all")
+
+
+# 方法作用：剥离单元快照中的内部字段并把超长正文裁剪到可传输长度。
+# Args: item - store.list_unit_snapshots 返回的单元快照字典。
+# Returns: 可供前端展示的单元快照字典。
+def _safe_unit_snapshot(item: dict[str, Any]) -> dict[str, Any]:
+    # prompt_text 是完整提示词，体积大且含内部上下文，明细页只需要 prompt_id 与模型名。
+    safe = {key: value for key, value in item.items() if key not in {"prompt_text"}}
+    sql_text = str(safe.get("sql_text", "") or "")
+    if len(sql_text) > _MAX_SNAPSHOT_SQL_CHARS:
+        safe["sql_text"] = sql_text[:_MAX_SNAPSHOT_SQL_CHARS] + "…（已截断）"
+        safe["sql_truncated"] = True
+    return safe
 
 
 # 方法作用：读取单条报表记录，不存在或越权时统一返回 404。
@@ -371,7 +440,7 @@ async def preview_plan(request: ReportPlanRequest) -> dict[str, Any]:
         )
         plan = await planner.diverge(plan, datasources=request.datasources, catalog=catalog)
     await _resolve_plan_access(identity, plan)
-    _plan_cache[(int(identity.tenant_id), int(identity.user_id), plan.canonical_hash())] = plan
+    _remember_plan((int(identity.tenant_id), int(identity.user_id), plan.canonical_hash()), plan)
     logger.info("报表计划预览完成", tenant_id=identity.tenant_id, user_id=identity.user_id, plan_hash=plan.canonical_hash())
     return _plan_response(plan)
 
@@ -547,13 +616,40 @@ async def list_job_runs(job_id: str, limit: int = Query(default=20, ge=1, le=100
     return {"runs": [item.model_dump(mode="json") for item in runs], "total": len(runs)}
 
 
+@router.get("/runs")
+# 方法作用：分页返回报表运行执行明细，含 LLM/SQL 调用次数与输入输出 token 用量。
+# Args: job_id - 可选任务过滤；status - 可选运行状态；page/page_size - 分页参数。
+# Returns: 运行明细数组、总数和分页信息。
+async def list_run_details(
+    job_id: str | None = Query(default=None),
+    status: str = Query(default=""),
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=20, ge=1, le=100),
+) -> dict[str, Any]:
+    identity = get_current_identity()
+    await _require_capability(identity, "report.list")
+    logger.debug("报表执行明细接口入口", job_id=str(job_id or ""), status=status, page=page, page_size=page_size)
+    runs, total = await get_report_store().list_run_details(
+        identity,
+        job_id=(job_id or None),
+        status=status.strip(),
+        limit=page_size,
+        offset=(page - 1) * page_size,
+        view_all=await _has_view_all(identity),
+    )
+    logger.info("报表执行明细接口完成", total=total, returned=len(runs), page=page)
+    return {"runs": runs, "total": total, "page": page, "page_size": page_size}
+
+
 @router.get("/runs/{run_id}")
 # 方法作用：返回运行用户可见错误、节点日志和耗时摘要，不暴露内部堆栈。
 # Args: run_id - 运行 ID。
 # Returns: 运行详情和步骤。
 async def get_run(run_id: str) -> dict[str, Any]:
     identity = get_current_identity()
-    await _require_capability(identity, "report.menu")
+    # 执行明细页只持有 report.list，旧工作台只持有 report.menu，两者都要能打开同一个抽屉。
+    if not await _has_any_capability(identity, ("report.list", "report.menu")):
+        raise HTTPException(403, "缺少报表能力: report.list")
     store = get_report_store()
     run = await store.get_run(run_id, identity)
     if run is None:
@@ -564,7 +660,10 @@ async def get_run(run_id: str) -> dict[str, Any]:
         {key: value for key, value in step.items() if key not in {"internal_error", "internal_error_message", "input_hash"}}
         for step in steps
     ]
-    return {"run": run.model_dump(mode="json"), "steps": safe_steps}
+    # 单元快照带上每单元的数据源、模型、SQL 与耗时，执行明细才能定位到具体单元。
+    units = [_safe_unit_snapshot(item) for item in await store.list_unit_snapshots(run_id, identity)]
+    logger.info("报表运行详情接口完成", run_id=str(run_id), step_count=len(safe_steps), unit_count=len(units))
+    return {"run": {**run.model_dump(mode="json"), "stats": run.stats_summary()}, "steps": safe_steps, "units": units}
 
 
 @router.get("/reports/{report_id}")
@@ -788,6 +887,25 @@ async def run_report(report_id: str) -> dict[str, Any]:
     return {"report_id": report_id, "status": "queued", "execution_mode": plan.execution_mode, "run_id": None, "quota": asdict(quota)}
 
 
+# 方法作用：解析单元重跑可用的租户默认模型，未配置时返回 None 交给规则路由回退。
+# Args: tenant_id - 当前认证租户。
+# Returns: 已授权并解密凭证的租户 LLM 选择；未配置时为 None。
+async def _resolve_unit_rerun_llm_selection(tenant_id: int):
+    from src.llm.tenant_config import resolve_tenant_llm_selection
+
+    try:
+        return await resolve_tenant_llm_selection(tenant_id=int(tenant_id))
+    except (LookupError, ValueError) as exc:
+        # 未配置模型属正常状态：单元路由会退回全源检索，与计划预览、后台规划的降级口径一致。
+        logger.info("报表单元重跑未启用租户模型，按规则路由", tenant_id=tenant_id, reason=str(exc))
+        return None
+    except Exception as exc:
+        # 配置查询异常不能降级成"重跑成功"：退回全源检索会用无关数据源覆盖单元快照，
+        # 却仍然如实返回 success，页面上的错误数字再无标记可循。
+        logger.error("报表单元重跑租户模型解析失败", tenant_id=tenant_id, exc_info=True)
+        raise HTTPException(503, "租户模型配置读取失败，请稍后重试") from exc
+
+
 @router.post("/reports/{report_id}/units/{unit_id}/rerun")
 # 方法作用：重跑单个分析单元并用新结果覆盖该单元在最新运行下的快照。
 # Args: report_id - 报表标识；unit_id - 分析单元标识。
@@ -812,22 +930,32 @@ async def rerun_report_unit(report_id: str, unit_id: str) -> dict[str, Any]:
     if not runs:
         raise HTTPException(409, "该报表还没有运行记录，请先生成报表")
     access = await _resolve_plan_access(identity, plan)
+    tenant_id = int(getattr(identity, "tenant_id", 0) or 0)
+    # 调度器在整段 runner.run_job 外围绑定租户模型；重跑此前没有这一步，单元路由便落到
+    # 进程默认配置上被判"路由模型不可用"，退回全源检索后把五个无关数据源都查了一遍
+    # （2026-09-19 实机取证，见 features/23-report-workbench.md 的 23.41 验收记录）。
+    selection = await _resolve_unit_rerun_llm_selection(tenant_id)
+    logger.info("报表单元重跑模型上下文绑定边界", report_id=report_id, unit_id=str(unit.unit_id), tenant_id=tenant_id, llm_bound=selection is not None)
+    from src.llm.tenant_config import use_tenant_llm_selection
     from src.reporting.runner import get_report_runner
 
     runner = get_report_runner()
     # 只把点名单元交给路由：单单元 Prompt 更短，也不会重新路由其它单元产生额外模型调用。
     single_plan = plan.model_copy(update={"analysis_units": [unit]})
-    routed = await runner._route_units(single_plan, [str(item) for item in (plan.requested_datasources or [])], int(getattr(identity, "tenant_id", 0) or 0))
-    state: dict[str, Any] = {
-        "plan": single_plan,
-        "run_id": runs[0].id,
-        "report_id": report_id,
-        "identity": {"tenant_id": int(getattr(identity, "tenant_id", 0) or 0), "user_id": int(getattr(identity, "user_id", 0) or 0), "role": str(getattr(identity, "role", "") or "")},
-        "authorized_datasources": access,
-    }
-    if routed:
-        state["unit_datasources"] = routed
-    result = await runner._default_execute_unit(unit, state)
+    # 数据源路由与单元执行必须看到同一个租户模型：只覆盖其中一段，另一段仍按进程默认
+    # 配置跑，就是本次事故的形态（详见上方取证注释）。
+    with use_tenant_llm_selection(selection):
+        routed = await runner._route_units(single_plan, [str(item) for item in (plan.requested_datasources or [])], tenant_id)
+        state: dict[str, Any] = {
+            "plan": single_plan,
+            "run_id": runs[0].id,
+            "report_id": report_id,
+            "identity": {"tenant_id": tenant_id, "user_id": int(getattr(identity, "user_id", 0) or 0), "role": str(getattr(identity, "role", "") or "")},
+            "authorized_datasources": access,
+        }
+        if routed:
+            state["unit_datasources"] = routed
+        result = await runner._default_execute_unit(unit, state)
     snapshot_id = ""
     for item in await store.list_unit_snapshots(runs[0].id, identity):
         if str(item.get("unit_id", "")) == str(unit.unit_id):
@@ -1264,6 +1392,36 @@ async def reset_quota_usage(request: QuotaUsageResetRequest) -> dict[str, Any]:
     return QuotaUsageResetResponse(reset_users=len(cleared), fields=list(request.fields), period_start=period_start, period_end=period_end).model_dump()
 
 
+# 分享页面下发的数据清单行数上限：未授权钻取时页面只用它渲染首屏表格，
+# 整份下发明细等于把全量样本交给只读访客。
+_SHARE_MANIFEST_ROW_LIMIT = 100
+
+
+# 方法作用：为分享页面裁剪出渲染所需的受限脱敏数据清单。
+# Args: manifest - 报表版本里已脱敏的数据清单。
+# Returns: 每个 data_ref 最多 _SHARE_MANIFEST_ROW_LIMIT 行的清单。
+def _shared_manifest(manifest: Any) -> dict[str, Any]:
+    """未授权钻取时也必须下发渲染清单：整份不下发会让页面表格恒为空。
+
+    实机取证：allow_drilldown=false 时 data_manifest 直接回 {}，快照表格块拿不到任何行，
+    页面上永远只有表头。这里只做行数裁剪与结构保留——行内容在生成版本时已经过
+    sanitize_value 脱敏，不含 SQL 文本、凭证或未脱敏数据；真正的明细入口仍由
+    drilldowns 清空 + drilldown 路由 403 双重挡住。
+    """
+    if not isinstance(manifest, dict):
+        return {}
+    limited = {
+        str(data_ref): list(rows or [])[:_SHARE_MANIFEST_ROW_LIMIT]
+        for data_ref, rows in manifest.items()
+    }
+    logger.info(
+        "分享页面数据清单下发",
+        data_refs=len(limited),
+        row_limit=_SHARE_MANIFEST_ROW_LIMIT,
+    )
+    return limited
+
+
 @router.get("/shared/reports/{token}")
 # 方法作用：通过高熵 token 访问脱敏报表快照，公开路由不暴露数据库或权限信息。
 # Args: token - URL 中的分享 token；share_session - 授权码解锁会话。
@@ -1303,7 +1461,13 @@ async def get_shared_report(token: str, share_session: str | None = Header(defau
         document["drilldowns"] = []
         document["permissions"] = {**document.get("permissions", {}), "drilldown": False}
     await store.record_audit({"tenant_id": share.get("tenant_id"), "share_id": share.get("id"), "report_id": version.report_id, "action": "share_access", "result": "success", "metadata": {"scope": share.get("scope", "public")}})
-    return {"report_id": version.report_id, "version": version.version, "document": document, "data_manifest": version.data_manifest if bool(share.get("allow_drilldown", False)) else {}}
+    # 清单始终下发，只是按行数受限：不下载具行会让表格块恒为空（实机分享页面永远只有表头）。
+    return {
+        "report_id": version.report_id,
+        "version": version.version,
+        "document": document,
+        "data_manifest": _shared_manifest(version.data_manifest),
+    }
 
 
 @router.post("/shared/reports/{token}/drilldowns/{drilldown_id}")
@@ -1372,7 +1536,10 @@ async def unlock_shared_report(token: str, request: AuthorizationCodeRequest) ->
         await store.record_audit({"tenant_id": share.get("tenant_id") if share else None, "share_id": share.get("id") if share else None, "action": "share_unlock", "result": "denied"})
         raise HTTPException(401, "授权码错误或分享不存在")
     session = secrets.token_urlsafe(24)
-    _unlock_sessions[session] = (str(share["id"]), datetime.now(timezone.utc) + timedelta(minutes=15))
+    now = datetime.now(timezone.utc)
+    # 先清理过期项再写入：只在校验时判断过期会让字典条目永久累积。
+    _evict_expired_unlocks(now)
+    _unlock_sessions[session] = (str(share["id"]), now + timedelta(minutes=15))
     await store.record_audit({"tenant_id": share.get("tenant_id"), "share_id": share.get("id"), "action": "share_unlock", "result": "success"})
     return {"session_token": session, "expires_in_seconds": 900}
 

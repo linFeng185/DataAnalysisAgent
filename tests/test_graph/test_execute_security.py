@@ -66,6 +66,53 @@ class TestExecuteSQLSecurity:
         assert execution_calls[0]["tenant_id"] == 4
         assert audit.await_args.kwargs["tenant_id"] == 4
 
+    # 方法作用：验证统一执行边界返回的查询预算错误不会被重分类为 SQL 语义错误。
+    # Args: self - pytest 测试类实例；monkeypatch - pytest 补丁工具。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    async def test_resource_limit_error_type_is_preserved(self, monkeypatch) -> None:
+        """预算耗尽必须直接终止，若降级成 sql_semantic 会继续调用模型改写 SQL。"""
+        # Arrange
+        from unittest.mock import AsyncMock
+
+        import src.security.sql_execution as sql_execution
+        from src.graph.nodes import execute_sql as execute_module
+
+        execution = SimpleNamespace(
+            success=False,
+            sql="SELECT 1",
+            data=[],
+            truncated=False,
+            details=[{"type": "resource_limit", "message": "查询次数已达上限"}],
+            error="查询次数已达上限",
+            error_type="resource_limit",
+        )
+        monkeypatch.setattr(sql_execution, "validate_and_execute_sql", AsyncMock(return_value=execution))
+        monkeypatch.setattr(
+            execute_module,
+            "get_tenant_policy",
+            lambda: SimpleNamespace(datasource_isolation_enabled=False),
+        )
+        monkeypatch.setattr(
+            execute_module,
+            "get_settings",
+            lambda: SimpleNamespace(max_result_rows=10, max_retry_count=3),
+        )
+        audit = AsyncMock()
+        monkeypatch.setattr(execute_module, "_record_query_audit", audit)
+
+        # Act
+        result = await execute_module.execute_sql_node({
+            "datasource": "sales",
+            "dialect": "postgres",
+            "generated_sql": "SELECT 1",
+            "request_rate_limit_checked": True,
+        })
+
+        # Assert
+        assert result["execution_error_type"] == "resource_limit"
+        assert result["execution_error"] == "查询次数已达上限"
+        audit.assert_awaited_once()
+
     async def test_result_is_bounded_and_masked(self, monkeypatch):
         """查询应有界读取，并在写入 state 前脱敏 PII。"""
         # Arrange

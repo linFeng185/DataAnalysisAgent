@@ -39,6 +39,7 @@ def public_failure_reason(error_code: str, error_type: str = "") -> str:
         "sql_semantic": "SQL 与当前 Schema 或字段语义不匹配",
         "transient": "数据源暂时不可用或查询超时",
         "configuration": "数据源配置、认证或连接失败",
+        "resource_limit": "查询触及运行资源上限，已停止继续执行",
         "llm_unavailable": _ERROR_MESSAGES["LLM_UNAVAILABLE"],
     }
     return reasons.get(str(error_type or "").strip(), public_error_message(error_code))

@@ -72,6 +72,69 @@ _TABLE_LEXICAL_HINTS: dict[str, tuple[str, ...]] = {
     "点击": ("click", "search"),
     "转化": ("conversion", "funnel"),
     "实验": ("experiment", "variant"),
+    # 总账/会计口径：实机「试算平衡」单元（核对总账凭证借贷差额）踩的正是上面
+    # 广告归因同一个坑——语义 top-50 里没有 finance_journals/finance_journal_lines/
+    # finance_trial_balances，模型据此判定「白名单中不存在借贷分录表」直接拒绝生成 SQL。
+    # 片段按财务库实测命中数收敛：journal=2 张、trial_balance=1 张、account=3 张。
+    "总账": ("journal", "ledger", "trial_balance"),
+    "凭证": ("journal", "voucher"),
+    "分录": ("journal", "entry"),
+    "试算": ("trial_balance",),
+    "借贷": ("journal", "trial_balance"),
+    "余额": ("balance", "trial_balance"),
+    "科目": ("account",),
+    "会计期": ("period", "journal"),
+    # 人力口径：实机「人力成本」单元（按员工/项目/工时/薪酬聚合）同样因为无中文映射
+    # 落进 hit_fragment_count=0，模型看不到 workforce_timesheets / workforce_payroll /
+    # workforce_engagement_surveys，直接返回空 SQL 拒绝生成。
+    "员工": ("employee",),
+    "人力": ("workforce", "payroll", "labour", "labor"),
+    "工时": ("timesheet", "overtime"),
+    "薪酬": ("payroll", "salary", "compensation"),
+    "工资": ("payroll", "salary"),
+    "部门": ("department",),
+    "敬业度": ("engagement", "survey"),
+    "调查": ("survey",),
+    # 会员价值分层口径：实机 run_id=cc74fa66-a0f1-4242-8f0f-e1b1d09bcdea 的
+    # customer_member 单元失败，问题为「按 RFM 分层统计客户规模与消费贡献，分析流失
+    # 信号分布、生命周期价值分层，以及会员权益的发放与核销规模对比」。retail_rfm_scores /
+    # retail_lifetime_values / retail_churn_signals / retail_benefit_grants 在 MySQL
+    # Schema 里都真实存在，但 RFM、流失、生命周期价值、权益发放四个概念都没有词面映射，
+    # 命中片段只剩 客户/会员 三个片段（表名不含 customer/member），模型据残缺白名单
+    # 判定「不存在 RFM / 流失 / 生命周期价值事实表」直接拒绝生成 SQL。
+    # 发放与核销必须各自成片段：retail 库中 benefit_* 有 6 张表，若只加宽泛的 benefit，
+    # _LEXICAL_PER_FRAGMENT=3 会让 benefit_rules / benefit_catalog / benefit_grants
+    # 先占满配额，把更长的 retail_benefit_redemptions 挤出去。
+    "RFM": ("rfm",),
+    "rfm": ("rfm",),
+    "生命周期": ("lifetime", "ltv"),
+    "LTV": ("ltv", "lifetime_value"),
+    "ltv": ("ltv",),
+    "流失": ("churn",),
+    "权益": ("benefit",),
+    "发放": ("grant",),
+    "核销": ("redemption",),
+    # 定价与降价口径：实机 run_id=517e0f12-e56a-4f83-82e4-4993aace1d0e 的
+    # price_promotion 单元失败，问题为「对比不同定价区域的折扣深度与销量弹性，识别
+    # 毛利告警商品，并评估降价计划对清库存的实际贡献，时间范围为去年」。
+    # retail_price_zones / retail_price_elasticities / retail_margin_alerts /
+    # retail_markdown_plans / retail_markdown_items / retail_order_items /
+    # retail_products 在 MySQL Schema 里全部真实存在，但「定价、折扣、弹性、毛利、
+    # 告警、降价、商品」七个概念都没有词面映射：片段只由「区域」「库存」产出
+    # region / inventory / stock 三组（hit_fragment_count=3），七张核心表一张都没进
+    # 白名单，模型据此回答「这些表不在本数据源白名单」并返回空 SQL。
+    # 片段一律取业务组合词而非 price / markdown 这类宽泛词：宽泛词会先被同前缀的
+    # 干扰表占满 _LEXICAL_PER_FRAGMENT=3 的配额（markdown_* 就有多张），
+    # 把真正的主表挤出去。商品用 product 是因为同片段内按表名长度升序排序，
+    # retail_products 恒为最短名，干扰表 retail_product_* 挤不掉它。
+    "定价": ("price_zone", "price_elasticit"),
+    "弹性": ("price_elasticit",),
+    "销量": ("order_item",),
+    "毛利": ("margin_alert",),
+    "告警": ("margin_alert",),
+    "折扣": ("markdown_plan", "markdown_item"),
+    "降价": ("markdown_plan", "markdown_item"),
+    "商品": ("product",),
 }
 
 

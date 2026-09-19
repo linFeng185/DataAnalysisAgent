@@ -148,14 +148,13 @@ async def report_retrieve_schema(state: ReportWorkbenchState) -> dict[str, Any]:
 # Args: state - 含已解析单元的状态。
 # Returns: query_plans 列表，不包含可直接执行的任意 SQL。
 async def report_plan_queries(state: ReportWorkbenchState) -> dict[str, Any]:
-    from src.reporting.models import max_plan_units
     from src.reporting.profiling import is_runtime_quality_unit
 
     await _log_step(state, "report_plan_queries", "running")
     plans: list[dict[str, Any]] = []
     units_by_id = _units_by_id(state)
     grouped: dict[tuple, dict[str, Any]] = {}
-    for unit in state.get("resolved_units", [])[:max_plan_units()]:
+    for unit in state.get("resolved_units", []):
         # 运行说明不与空维度/指标的数据单元合并，否则顺序变化会吞掉真正的查询。
         if is_runtime_quality_unit(units_by_id[unit["unit_id"]]):
             plans.append({"unit_id": unit["unit_id"], "unit_ids": [unit["unit_id"]], "datasource": unit.get("datasource", ""), "query_kind": "runtime_quality"})
@@ -198,6 +197,8 @@ async def report_plan_queries(state: ReportWorkbenchState) -> dict[str, Any]:
 # Args: state - 当前状态；unit - 待执行单元；datasource - 命中的数据源；resolved - 该单元的解析摘要；executor - 执行器。
 # Returns: 规范化后的 UnitResult。
 async def _execute_single_unit(state: ReportWorkbenchState, unit: Any, datasource: str, resolved: dict[str, Any], executor: Any) -> UnitResult:
+    from src.reporting.run_stats import has_sql_query_capacity
+
     if resolved.get("authorization_status") == "denied":
         return UnitResult(unit_id=unit.unit_id, datasource=datasource, status="failed", error_code="DATASOURCE_FORBIDDEN", user_error_message="该分析单元使用的数据源未授权，已阻止执行")
     from src.reporting.profiling import is_runtime_quality_unit
@@ -213,18 +214,32 @@ async def _execute_single_unit(state: ReportWorkbenchState, unit: Any, datasourc
                 result = await result
             if isinstance(result, UnitResult):
                 normalized = result if result.unit_id == unit.unit_id else result.model_copy(update={"unit_id": unit.unit_id})
-                if normalized.status == "failed" and normalized.error_code in {"TRANSIENT_DATABASE", "LLM_TRANSIENT", "TIMEOUT"} and attempt < 3:
-                    await _log_step(state, "report_execute_units", "retry", normalized.user_error_message)
-                    continue
+                retryable = normalized.status == "failed" and normalized.error_code in {"TRANSIENT_DATABASE", "LLM_TRANSIENT", "TIMEOUT"}
+                if retryable and attempt < 3:
+                    if not has_sql_query_capacity():
+                        logger.warning(
+                            "报表 SQL 查询预算已耗尽，停止分析单元重试",
+                            unit_id=unit.unit_id,
+                            attempt=attempt,
+                        )
+                    else:
+                        await _log_step(state, "report_execute_units", "retry", normalized.user_error_message)
+                        continue
                 return normalized
             if isinstance(result, dict):
                 return UnitResult.model_validate({"unit_id": unit.unit_id, "datasource": datasource, **result})
             raise TypeError("分析执行器返回类型无效")
         except Exception as exc:
-            if attempt < 3:
+            if attempt < 3 and has_sql_query_capacity():
                 await _log_step(state, "report_execute_units", "retry", "分析单元遇到瞬态错误，准备重试")
                 continue
-            logger.error("报表分析单元执行失败", unit_id=unit.unit_id, error=str(exc), exc_info=True)
+            logger.error(
+                "报表分析单元执行失败",
+                unit_id=unit.unit_id,
+                error=str(exc),
+                retry_stopped_by_sql_budget=not has_sql_query_capacity(),
+                exc_info=True,
+            )
             return UnitResult(unit_id=unit.unit_id, datasource=datasource, status="failed", error_code="UNIT_EXECUTION_FAILED", user_error_message="该分析单元执行失败，请查看运行日志后重试")
     return UnitResult(unit_id=unit.unit_id, datasource=datasource, status="failed", error_code="UNIT_EXECUTION_FAILED", user_error_message="该分析单元执行失败，请查看运行日志后重试")
 
@@ -339,7 +354,27 @@ async def report_synthesize_insights(state: ReportWorkbenchState) -> dict[str, A
 # Returns: ReportArtifact。
 async def report_plan_layout(state: ReportWorkbenchState) -> dict[str, Any]:
     await _log_step(state, "report_plan_layout", "running")
-    artifact = build_report_document(state["plan"], list(state.get("unit_results", [])), report_id=state.get("report_id"), relations=list(state.get("relations", [])), template_id=str(state.get("template_id") or "insight"))
+    # 图表方案必须在这里先算：build_report_document 是同步函数（既有调用方众多），
+    # 而模型决策是异步的。决策整套失败也不阻断出页——plan_charts 自身带确定性兜底。
+    from src.reporting.charts import plan_unit_charts
+
+    questions = {str(unit.unit_id): str(unit.question or "") for unit in state["plan"].analysis_units}
+    artifact = build_report_document(
+        state["plan"],
+        list(state.get("unit_results", [])),
+        report_id=state.get("report_id"),
+        relations=list(state.get("relations", [])),
+        template_id=str(state.get("template_id") or "insight"),
+        chart_plans=await plan_unit_charts([
+            (
+                str(result.unit_id),
+                questions.get(str(result.unit_id), ""),
+                list(result.columns),
+                list(result.rows),
+            )
+            for result in state.get("unit_results", [])
+        ]),
+    )
     if state.get("cross_business_analysis", {}).get("limitations"):
         artifact.document.limitations.extend(state["cross_business_analysis"]["limitations"])
     _append_metric_citations(artifact, list(state.get("metric_citations", []) or []))
@@ -438,14 +473,14 @@ def _supplement_context(state: ReportWorkbenchState) -> dict[str, Any] | None:
     if missing_baseline is not None:
         return {"trigger": "missing_baseline", "unit_id": missing_baseline[0], "reason": missing_baseline[1]}
     # 深挖没有显著发现说明数据正常，无需补查，且这条筛选不消耗 LLM 调用。
-    significant = any(
-        item.significance in {"high", "moderate"}
-        for finding in state.get("unit_findings", []) or []
-        for item in finding.items
-    )
-    if not significant:
-        return None
-    return {"trigger": "significant_finding", "unit_id": "", "reason": ""}
+    for finding in state.get("unit_findings", []) or []:
+        if any(item.significance in {"high", "moderate"} for item in finding.items):
+            return {
+                "trigger": "significant_finding",
+                "unit_id": str(getattr(finding, "unit_id", "") or ""),
+                "reason": str(getattr(finding, "title", "") or ""),
+            }
+    return None
 
 
 # 方法作用：判断是否进入运行期补查回路。三条硬前置条件全满足，且两条进入条件
@@ -454,7 +489,10 @@ def _supplement_context(state: ReportWorkbenchState) -> dict[str, Any] | None:
 # Returns: "supplement" 表示进入回路，"continue" 表示继续后续节点。
 def report_decide_supplement(state: ReportWorkbenchState) -> str:
     from src.reporting.models import divergence_max_rounds, max_plan_units
+    from src.reporting.run_stats import has_sql_query_capacity
 
+    if not has_sql_query_capacity():
+        return "continue"
     level, remaining = _remaining_budget(state)
     if remaining <= 0:
         return "continue"
@@ -479,22 +517,46 @@ def report_decide_supplement(state: ReportWorkbenchState) -> str:
     return "supplement"
 
 
-# 方法作用：把缺基期理由写进触发单元的 warnings，页面 quality 块据此向用户披露。
-# Args: results - 当前单元结果列表；context - 补查上下文。
-# Returns: 追加了披露文案的单元结果列表；非缺基期触发时原样返回。
-def _disclose_supplement_reason(results: list[UnitResult], context: dict[str, Any] | None) -> list[UnitResult]:
-    if not context or str(context.get("trigger", "")) != "missing_baseline":
+# 方法作用：按补查真实结果向触发单元披露追加成功或降级继续的事实。
+# Args: results - 当前单元结果列表；context - 补查上下文；added_count - 实际追加的可执行单元数。
+# Returns: 追加了披露文案的单元结果列表；没有上下文或结果时原样返回。
+def _disclose_supplement_outcome(
+    results: list[UnitResult],
+    context: dict[str, Any] | None,
+    *,
+    added_count: int,
+) -> list[UnitResult]:
+    if not context or not results:
         return results
     unit_id = str(context.get("unit_id", "") or "")
-    text = f"数据不足以产出同环比：{context.get('reason', '')}；系统已据此追加补查单元"
+    trigger = str(context.get("trigger", "") or "")
+    reason = str(context.get("reason", "") or "")
+    prefix = (
+        f"数据不足以产出同环比：{reason}"
+        if trigger == "missing_baseline"
+        else f"显著发现触发运行期补查：{reason or '需要进一步核验'}"
+    )
+    outcome = (
+        f"系统已追加 {added_count} 个补查单元"
+        if added_count > 0
+        else "补查未生成可执行单元，已按现有结果继续"
+    )
+    text = f"{prefix}；{outcome}"
+    target_id = unit_id if any(item.unit_id == unit_id for item in results) else results[0].unit_id
     annotated: list[UnitResult] = []
     for result in results:
-        if result.unit_id != unit_id or text in result.warnings:
+        if result.unit_id != target_id or text in result.warnings:
             annotated.append(result)
             continue
-        # warnings 上限与 UnitResult 契约一致，写在最后不挤掉前面的样本处置披露。
-        annotated.append(result.model_copy(update={"warnings": [*result.warnings, text][:20]}))
-    logger.info("报表缺基期理由已写入单元披露", unit_id=unit_id, matched=any(item.unit_id == unit_id for item in results))
+        # 本条是用户判断完整性的关键事实，已有 20 条限制时保留前 19 条并确保它可见。
+        existing = [item for item in result.warnings if item != text]
+        annotated.append(result.model_copy(update={"warnings": [*existing[:19], text]}))
+    logger.info(
+        "报表补查结果已写入单元披露",
+        unit_id=target_id,
+        trigger=trigger,
+        added_count=added_count,
+    )
     return annotated
 
 
@@ -516,9 +578,10 @@ async def report_plan_supplement(state: ReportWorkbenchState) -> dict[str, Any]:
     # 条件边函数不能写状态，触发理由必须由本节点重算一次并落进 state：下游的补查
     # 提示词与页面披露都从 supplement_context 取，保证同一份结论被两处复用。
     context = _supplement_context(state)
+    base_results = list(state.get("unit_results", []) or [])
     update: dict[str, Any] = {
         "divergence_round": round_index,
-        "unit_results": _disclose_supplement_reason(list(state.get("unit_results", []) or []), context),
+        "unit_results": base_results,
     }
     if context is not None:
         update["supplement_context"] = context
@@ -529,11 +592,13 @@ async def report_plan_supplement(state: ReportWorkbenchState) -> dict[str, Any]:
             round=round_index,
         )
     if limit <= 0:
+        update["unit_results"] = _disclose_supplement_outcome(base_results, context, added_count=0)
         await _log_step(state, "report_plan_supplement", "succeeded")
         return update
     authorized = state.get("authorized_datasources", {}) or {}
     new_units = await _propose_runtime_units(state, limit=limit, authorized=authorized, context=context)
     if not new_units:
+        update["unit_results"] = _disclose_supplement_outcome(base_results, context, added_count=0)
         await _log_step(state, "report_plan_supplement", "succeeded")
         return update
     resolved_entries: list[dict[str, Any]] = []
@@ -557,11 +622,12 @@ async def report_plan_supplement(state: ReportWorkbenchState) -> dict[str, Any]:
         results.append(await _execute_single_unit(state, unit, unit.datasource, entry, executor))
     await _log_step(state, "report_plan_supplement", "succeeded")
     logger.info("报表运行期发散追加单元", round=round_index, added=len(new_units), level=level)
+    disclosed_results = _disclose_supplement_outcome(base_results, context, added_count=len(new_units))
     return {
         **update,
         "runtime_units": [*(state.get("runtime_units", []) or []), *new_units],
         "resolved_units": [*(state.get("resolved_units", []) or []), *resolved_entries],
-        "unit_results": [*update["unit_results"], *results],
+        "unit_results": [*disclosed_results, *results],
     }
 
 
@@ -625,7 +691,7 @@ async def _propose_runtime_units(
         # 补查失败只留痕，已有结论与页面必须继续产出。
         logger.warning("报表运行期补查失败，按已有结果继续", exc_info=True)
         return []
-    from src.reporting.planner import ReportPlanner
+    from src.reporting.planner import ReportPlanner, expand_time_range_for_yoy
 
     raw: list[dict[str, Any]] = []
     for item in output.proposed_units:
@@ -638,12 +704,28 @@ async def _propose_runtime_units(
             continue
         rationale = item.rationale or (f"解释已有发现：{support}" if support else f"补齐缺失基期：{reason}")
         raw.append({**item.model_dump(mode="python"), "rationale": rationale[:500]})
+    time_range_override = None
+    if baseline_triggered and "同比" in reason:
+        source_unit_id = str((context or {}).get("unit_id", "") or "")
+        source_unit = next(
+            (unit for unit in state["plan"].analysis_units if str(unit.unit_id) == source_unit_id),
+            None,
+        )
+        if source_unit is not None:
+            time_range_override = expand_time_range_for_yoy(source_unit.time_range)
+            logger.info(
+                "同比补查时间范围已扩展",
+                unit_id=source_unit_id,
+                from_range=source_unit.time_range.model_dump(mode="json"),
+                to_range=time_range_override.model_dump(mode="json"),
+            )
     return ReportPlanner._coerce_diverge_units(
         raw,
         allowed_datasources=set(authorized.keys()) if isinstance(authorized, dict) else set(),
         decided_by="runtime",
         limit=limit,
         reference_units=list(state["plan"].analysis_units),
+        time_range_override=time_range_override,
     )
 
 
@@ -680,7 +762,12 @@ async def report_analyze_units(state: ReportWorkbenchState) -> dict[str, Any]:
 def _append_findings(artifact: ReportArtifact, findings: list[Any], units: list[dict[str, Any]]) -> None:
     if not findings:
         return
-    from src.reporting.document import ReportBlock, ReportSection, layout_for_block, unit_short_title
+    from src.reporting.document import (
+        ReportBlock,
+        ReportSection,
+        layout_for_block,
+        unit_short_title,
+    )
 
     questions = {str(item.get("unit_id", "")): str(item.get("question", "") or "") for item in units}
     blocks: list[ReportBlock] = []

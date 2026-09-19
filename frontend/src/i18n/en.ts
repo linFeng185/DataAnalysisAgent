@@ -120,6 +120,7 @@ const en: Record<string, string> = {
   "保存租户额度": "Save tenant quotas",
   "处理摘要": "Processing summary",
   "暂无图表配置": "No chart configuration",
+  "图表分类轴缺少可用标签，请重新生成报表版本": "The chart category axis has no usable labels. Regenerate the report version.",
   "暂无明细数据": "No detail data",
   "暂无洞察": "No insights",
   "关系类型：": "Relationship type: ",

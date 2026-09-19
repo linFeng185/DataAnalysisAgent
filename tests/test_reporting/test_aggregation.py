@@ -93,3 +93,76 @@ class TestReportAggregation:
 
         assert "cross_source_aggregate" in artifact.data_manifest
         assert any(section.id == "cross_source_aggregate" for section in artifact.document.sections)
+
+
+class TestCrossSourceLimitationWording:
+    """缺口 B：限制文案是用户可见的降级说明，不能是内部术语。
+
+    真实验收产物：deep 档 8+6=14 个单元超预算，文档级 limitations 因此多出一条
+    「跨源分析资源边界无效」——该函数其余降级分支都用可读中文，只有这条是术语。
+    """
+
+    # 方法作用：构造指定数量的跨源单元及其成功结果。
+    # Args: count - 单元数。
+    # Returns: 单元定义与脱敏结果，交替落在两个来源上，维度与指标完全一致。
+    def _units(self, count: int) -> tuple[list[dict], list[UnitResult]]:
+        """全部单元声明同一维度与指标，避免预算判定之外的校验先触发。"""
+        units = [
+            {
+                "unit_id": f"unit_{index}",
+                "datasource": "sales" if index % 2 else "refunds",
+                "dimensions": ["day"],
+                "metrics": ["amount"],
+                "authorized_columns": ["day", "amount"],
+            }
+            for index in range(count)
+        ]
+        results = [
+            UnitResult(unit_id=unit["unit_id"], datasource=unit["datasource"], rows=[{"day": "2026-09-01", "amount": 5}])
+            for unit in units
+        ]
+        return units, results
+
+    # 方法作用：验证单元数超预算时产出的限制文案可读且含实际单元数。
+    # Args: self - 测试实例。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    def test_over_budget_limitation_states_count_and_budget(self) -> None:
+        """用户要看到「多少个 / 预算多少 / 已如何降级」，而不是「资源边界无效」。"""
+        from src.reporting.aggregation import aggregate_cross_source
+
+        # Arrange
+        units, results = self._units(13)
+
+        # Act
+        result = aggregate_cross_source(units, results)
+        message = result["limitations"][0]
+
+        # Assert
+        assert result["status"] == "blocked"
+        assert not result["rows"]
+        assert "13" in message and "12" in message
+        assert "分别分析" in message
+        assert "边界" not in message
+        assert message != "跨源分析资源边界无效"
+        # 判据语义不变：12 个单元仍在预算内，超预算只影响 13 及以上
+        assert aggregate_cross_source(*self._units(12))["status"] == "success"
+
+    # 方法作用：验证资源参数非法走另一条文案，不与单元数超预算混用。
+    # Args: self - 测试实例。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    def test_invalid_resource_limits_use_distinct_message(self) -> None:
+        """两种情形原因不同，用一句话覆盖会让用户拿着错误的线索去排查。"""
+        from src.reporting.aggregation import aggregate_cross_source
+
+        # Arrange
+        units, results = self._units(2)
+        budget_message = aggregate_cross_source(*self._units(13))["limitations"][0]
+
+        # Act
+        message = aggregate_cross_source(units, results, max_rows=0)["limitations"][0]
+
+        # Assert
+        assert message != budget_message
+        assert "单元数" not in message
+        assert "边界" not in message
+        assert "分别分析" in message

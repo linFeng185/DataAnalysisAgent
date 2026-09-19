@@ -232,12 +232,21 @@ def setup_logging() -> None:
     else:
         renderer = _RedactingConsoleRenderer()
 
+    processors = structlog.get_config()["processors"]
+    configured_processors = [
+        structlog.stdlib.filter_by_level,
+        *shared_processors,
+        structlog.stdlib.ProcessorFormatter.wrap_for_formatter,
+    ]
+    # structlog 缓存 logger 时会保留 processors 列表引用，重复配置必须原地更新。
+    if isinstance(processors, list):
+        processors.clear()
+        processors.extend(configured_processors)
+    else:
+        processors = configured_processors
+
     structlog.configure(
-        processors=[
-            structlog.stdlib.filter_by_level,
-            *shared_processors,
-            structlog.stdlib.ProcessorFormatter.wrap_for_formatter,
-        ],
+        processors=processors,
         logger_factory=structlog.stdlib.LoggerFactory(),
         wrapper_class=structlog.stdlib.BoundLogger,
         cache_logger_on_first_use=True,

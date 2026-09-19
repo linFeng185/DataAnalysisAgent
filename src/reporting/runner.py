@@ -17,6 +17,11 @@ logger = get_logger(__name__)
 
 # 报表分析单元路由任务标识，供 LLM 任务路由选择本地或租户配置的模型。
 _ROUTE_LLM_TASK = "report_route"
+# 表名清单的进程内缓存：构建一次要为每个源取完整 schema，代价以秒计，
+# 而表名清单在分钟级内不会变。超过有效期或容量即失效，不承担正确性职责。
+_CATALOG_CACHE_TTL = 300.0
+_CATALOG_CACHE_MAX_ENTRIES = 32
+_catalog_cache: dict[tuple[tuple[str, ...], int], tuple[float, str]] = {}
 # 每个数据源最多放进路由 Prompt 的表名数量。
 # 取 200 以覆盖上百张表的库（实测财务库 125 张）；一旦超预算被截断，
 # 排在后面的数据源会整段丢失，路由就必然漏判。
@@ -126,7 +131,11 @@ async def _decide_sample_guidance(
         logger.error("样本上限读取失败，跳过处置决策", unit_id=unit_id, exc_info=True)
         return []
     try:
-        from src.reporting.sample_guard import decide_sample_action, describe_sample_decision, needs_sample_action
+        from src.reporting.sample_guard import (
+            decide_sample_action,
+            describe_sample_decision,
+            needs_sample_action,
+        )
 
         # 快速闸门与 sample_guard 内部判据共用同一个谓词，两处不可能脱钩：
         # ① 真实行数规模 max(进入链路行数, 查询全量行数) 超过样本上限；② 执行层已上报
@@ -196,11 +205,153 @@ async def _decide_sample_guidance(
 
 # 报表取数要求：明细不该进报表。行数超限的根因往往是 SQL 没聚合，
 # 把要求前置到查询文本里，比事后在截断处补救更靠近源头。
-_UNIT_AGGREGATION_REQUIREMENT = (
-    "报表取数要求：优先在数据库侧完成聚合（GROUP BY 与聚合函数），只返回分析需要的结果行，"
-    "不要把明细行带回上层统计；多个指标尽量一次查询取回。"
-    "确实需要明细核验时，也要限制在能说明问题的最小行数。"
-)
+# 方法作用：生成单元的取数要求文本，行数预算按当前样本上限推出。
+# Args: 无（读取 report_max_sample_rows）。
+# Returns: 提示词文本；读取失败时用兜底预算。
+def _unit_aggregation_requirement() -> str:
+    """给出具体行数预算而不是"数百行以内"：含糊的要求挡不住明细级 SQL。
+
+    实机：`budget_tax` 19925 行、`procurement_inventory` 27364 行都是第一次就写成了
+    明细粒度，说明"控制在数百行以内"没有可执行性。改成与上卷重查同一个目标口径
+    （样本上限的十分之一，50–500），第一次就把粒度选对，重查只作兜底。
+    """
+    try:
+        limit = _sample_row_limit()
+    except Exception:
+        logger.error("样本上限读取失败，取数要求改用兜底预算", exc_info=True)
+        limit = 5000
+    budget = max(50, min(limit // 10, 500)) if limit > 0 else 500
+    return (
+        "报表取数要求：本单元的结果用于出图表，必须是**已经聚合好的汇总值**，"
+        "优先在数据库侧完成聚合（GROUP BY 与聚合函数），不要把明细行带回上层统计。"
+        f"**结果行数必须控制在 {budget} 行以内**；如果按当前粒度预计超过，说明粒度太细，"
+        "必须继续上卷维度（例如把日聚到月、把明细聚到分组、把多维度拆成几条更粗的查询）"
+        "而不是让上层截断——被截断的结果无法支撑任何结论。多个指标尽量一次查询取回；"
+        "确实需要明细核验时，也要限制在能说明问题的最小行数。"
+    )
+
+
+# 方法作用：发布页面后清空单元结果里的行数据，断开进程内的长尾引用。
+# Args: unit_results - 本次运行的单元结果列表。
+# Returns: 实际被清空的单元数。
+def _release_unit_rows(unit_results: list[Any]) -> int:
+    """页面发布之后行数据就没有读取方了；留着它只会让单次运行的内存占用长期驻留。"""
+    released = 0
+    released_rows = 0
+    for item in unit_results:
+        if not isinstance(item, UnitResult):
+            continue
+        try:
+            count = len(item.rows)
+        except Exception:  # noqa: BLE001
+            continue
+        if not count:
+            continue
+        item.rows = []
+        released += 1
+        released_rows += count
+    logger.info("报表单元行数据已释放", unit_count=released, row_count=released_rows)
+    return released
+
+
+# 方法作用：清空图最终 state 里承载取数结果的通道，断开最长的那条引用链。
+# Args: state - 图 ainvoke 返回的最终状态。
+# Returns: 被清空的通道名列表。
+def _release_state_payloads(state: Any) -> list[str]:
+    """只清"行数据"通道，不动状态里的标量与摘要字段（排障与审计仍要读它们）。"""
+    if not isinstance(state, dict):
+        return []
+    cleared: list[str] = []
+    # 单元图与报表子图的通道名不完全一致，两张表的并集都要覆盖：
+    # 单元侧是 query_result* / analysis_result，报表侧还有 artifact。
+    for key in (
+        "query_result", "query_result_sample", "query_result_all",
+        "query_result_full_count", "analysis_result", "artifact", "final_response",
+    ):
+        value = state.get(key)
+        if not value:
+            continue
+        # 只**替换**状态里的引用，绝不就地 clear：`rows` 很可能就是
+        # `state["query_result_sample"]` 这同一个列表对象，就地清空会把单元结果一起清掉
+        # （单测当场抓到）。替换掉状态这一份引用，调用方该持有的仍然持有。
+        if isinstance(value, list):
+            state[key] = []
+        elif isinstance(value, dict):
+            state[key] = {}
+        else:
+            state[key] = None
+        cleared.append(key)
+    if cleared:
+        logger.info("报表运行状态中的行数据已释放", channels=cleared)
+    return cleared
+
+
+# 方法作用：为被截断的单元构造"上卷重查"的查询文本。
+# Args: question - 原单元问题；full_count - 上次查询的全量行数；limit - 本次样本上限。
+# Returns: 明确要求提高聚合粒度的查询文本。
+def _oversample_retry_query(*, question: str, full_count: int, limit: int) -> str:
+    """被裁掉的是有序的前 N 行，只覆盖部分维度；据此出图会得出偏差结论。
+
+    与其带着偏差出图，不如要求模型换一个更粗的聚合粒度重新生成 SQL——这正是
+    "多维度多指标就拆开/上卷"的落地方式。
+    """
+    # 给一个具体的目标行数而不是"控制在上限以内"：目标紧一档，模型才会把粒度上卷到位，
+    # 只说"别超上限"时它往往只删掉一个维度，回来仍然几千行（实机 5 个单元重查后仍被裁）。
+    target = max(50, min(limit // 10, 500)) if limit > 0 else 500
+    return (
+        f"{question}。上一次查询返回 {full_count} 行，超过上限 {limit} 行，结果被截断，"
+        "被保留的只是部分维度，不能用于出图，也不能用 LIMIT 掩盖。"
+        f"请重新生成一条 SQL，**结果行数必须控制在 {target} 行以内**，三条路任选一条："
+        "① 按业务含义去掉最细的那个维度；② 把最细的时间维度上卷（日→月、月→年）；"
+        "③ 粒度必须保留时（例如要看每个商品/每家门店），**按主指标降序取前 "
+        f"{target} 名**——排序后的前 N 名是有业务含义的截面，而截断留下的前 N 行不是。"
+        "度量能用比率/均值的就不要逐条明细；如果业务确实需要多个粒度的结果，"
+        "请只返回**最粗粒度**的那一份汇总。"
+    )
+
+
+# 对账/核对类问题的动作词：这类问题问的是「每个会计期是否平」，不是「有没有不平的行」。
+_RECONCILIATION_VERB_HINTS = ("核对", "对账", "试算", "平衡", "不平")
+# 还必须有"差额"语义才成立：单独一个"平衡"会误命中"产能平衡计划"这类非对账问题。
+_RECONCILIATION_DELTA_HINTS = ("差额", "差异", "借贷", "为零", "是否一致", "是否相等")
+
+
+# 方法作用：判断单元问题是否属于对账/核对类语义。
+# Args: question - 单元问题文本。
+# Returns: 是对账类问题返回 True。
+def _is_reconciliation_question(question: str) -> bool:
+    """按词表判定，不绑定具体 unit_id 或具体列名：任何核对类单元都适用。"""
+    text = str(question or "")
+    if not text:
+        return False
+    is_reconciliation = any(hint in text for hint in _RECONCILIATION_VERB_HINTS) and any(
+        hint in text for hint in _RECONCILIATION_DELTA_HINTS
+    )
+    logger.debug("对账类问题判定完成", is_reconciliation=is_reconciliation, question_chars=len(text))
+    return is_reconciliation
+
+
+# 方法作用：为对账类单元生成"逐期返回"的取数要求文本。
+# Args: question - 单元问题文本。
+# Returns: 取数要求；非对账类问题返回空串。
+def _reconciliation_requirement(question: str) -> str:
+    """核对类问题必须逐期返回，不能只留不平的行。
+
+    实机取证（report d5e60e90…，run edc9b5be…）：trial_balance 单元的 SQL 带了
+    `WHERE diff_amount <> 0`，而库里 12 个会计期的差额全部为零、unbalanced 计数为 0，
+    于是查询返回 0 行——「全部平衡」和「一张表都没有数据」在结果里完全无法区分，
+    报表因此给出空结论。把差额过滤条件挪出 WHERE、改成逐期统计即可区分两者。
+    """
+    if not _is_reconciliation_question(question):
+        return ""
+    logger.info("对账类单元追加逐期返回要求", question_chars=len(str(question or "")))
+    return (
+        "核对类取数要求：本单元要回答的是「每一个会计期的核对结果」，**必须逐期返回一行**"
+        "（会计期、借方合计、贷方合计、差额、不平记录数），并按会计期排序。"
+        "**禁止把差额条件写进 WHERE / HAVING**（例如 WHERE 差额 <> 0）：全部平衡时它会返回 0 行，"
+        "而「0 行」与「没有任何数据」在报表里无法区分。全部平衡时必须照常给出不平记录数为 0 的逐期结果；"
+        "确实存在不平时，在同一份逐期结果里保留差额与不平记录数即可，不要为了「只看例外」而过滤掉平衡期。"
+    )
 
 
 # 方法作用：把计划确定的时间范围与取数要求并入单元查询文本。
@@ -210,16 +361,22 @@ def _compose_unit_query(unit: Any) -> str:
     unit_id = str(getattr(unit, "unit_id", "") or "")
     question = str(getattr(unit, "question", "") or "")
     logger.debug("报表单元查询拼装入口", unit_id=unit_id, question_chars=len(question))
+    requirements = _unit_aggregation_requirement()
+    # 对账类语义的附加要求与取数粒度要求并列：两者都在"生成 SQL 之前"下发，
+    # 比事后在结果侧补救更靠近源头（结果侧的 0 行已经丢失了"全部平衡"这个事实）。
+    reconciliation = _reconciliation_requirement(question)
+    if reconciliation:
+        requirements = f"{requirements} {reconciliation}"
     hint = _describe_time_range(getattr(unit, "time_range", None))
     if not hint:
         logger.info("报表单元无可用时间范围，按原问题执行", unit_id=unit_id)
-        return f"{question}。{_UNIT_AGGREGATION_REQUIREMENT}"
+        return f"{question}。{requirements}"
     # 时间范围在预览阶段就已绑定，执行期必须显式带上：主图 classify_intent 会按
     # 问题文本重判 needs_time_range，不带就会被拦成「请指定查询的时间范围」，
     # 白白丢掉一个参数早就确定的单元。
     # 取数要求追加成独立句子放在时间范围之后：括号串保持原样，下游按
     # 「时间范围：」定位的解析不受影响。
-    query = f"{question}（时间范围：{hint}）。{_UNIT_AGGREGATION_REQUIREMENT}"
+    query = f"{question}（时间范围：{hint}）。{requirements}"
     logger.info("报表单元查询拼装完成", unit_id=unit_id, time_hint=hint, query_chars=len(query))
     return query
 
@@ -342,10 +499,23 @@ class ReportRunner:
                 [str(item) for item in (plan.requested_datasources or [])],
                 int(getattr(identity, "tenant_id", 0) or 0),
             )
+            # 预占之前先回收死进程留下的并发租约：不回收则并发槽只减不增，
+            # 最终所有报表都直接 QUOTA_EXCEEDED（实机事故）。
+            try:
+                await self.store.reclaim_stale_run_leases()
+            except Exception:
+                # 回收是自愈动作，失败不得挡住本次运行。
+                logger.error("报表遗留租约回收失败", job_id=job_id, exc_info=True)
+            reserved_plan = self._reserve_plan(plan, unit_datasources)
             quota = await self.store.reserve_run_quota(
-                run.id, identity, self._reserve_plan(plan, unit_datasources), self.quota
+                run.id, identity, reserved_plan, self.quota
             )
             reservation = quota
+            # 配额预占只是准入；重试、换源和运行期补查仍可能让实际调用越过估算。
+            # 在唯一 SQL 执行入口前设置同一上限，才能把预占真正变成运行期硬约束。
+            from src.reporting.run_stats import configure_sql_query_limit
+
+            configure_sql_query_limit(int(reserved_plan.estimated.query_count))
             await self.store.update_run(run.id, identity, status="running", started_at=datetime.now(timezone.utc), last_node="report_load_policy")
             await self.store.update_job_status(job_id, identity, "running")
 
@@ -402,6 +572,14 @@ class ReportRunner:
                 await before_publish()
             writer = version_store or self.store
             version = await writer.persist_version(job_id, run.id, identity, artifact.document.model_dump(mode="json"), artifact.data_manifest, expires_at, require_active_job=version_store is not None)
+            # 页面已发布：单元行数据不再被任何读取方需要（图表值已聚合进文档，快照与
+            # 明细各走自己的通路）。实机取证：16 单元报表跑完后进程里仍存活 7 万~14 万个
+            # Decimal，正是这些行值；显式断开引用，避免"取回多少行就长期占多少内存"。
+            _release_unit_rows(unit_results)
+            # 图返回的最终 state 里还挂着这一次取数的整份行数据（query_result 等通道）。
+            # 实测：单元 rows 清空后 Decimal 驻留只降了约四成，剩下的大头就挂在这里；
+            # 页面已发布，这些通道没有任何读取方，直接清掉。
+            _release_state_payloads(result)
             final_status = "partial" if run_status == "partial" else "succeeded"
             # query_count 保持配额计费口径的估算值；真实计数与 token 用量在 finally 中统一落库。
             await self.store.update_run(run.id, identity, status=final_status, partial=final_status == "partial", row_count=row_count, query_count=plan.estimated.query_count, finished_at=datetime.now(timezone.utc))
@@ -440,6 +618,8 @@ class ReportRunner:
                     llm_call_count=stats.llm_call_count,
                     llm_failure_count=stats.llm_failure_count,
                     token_usage=stats.llm_token_usage,
+                    prompt_token_usage=stats.llm_prompt_tokens,
+                    completion_token_usage=stats.llm_completion_tokens,
                     sql_query_count=stats.sql_query_count,
                     sql_success_count=stats.sql_success_count,
                     sql_failure_count=stats.sql_failure_count,
@@ -469,11 +649,68 @@ class ReportRunner:
     # Args: unit - 分析单元；state - 报表子图状态和身份摘要。
     # Returns: UnitResult 或失败结果。
     async def _default_execute_unit(self, unit: Any, state: dict[str, Any]) -> UnitResult:
+        from src.reporting.run_stats import has_sql_query_capacity
+
         started = time.monotonic()
         # 提示词现场只组装一次：工作流入参与快照共用同一文本，避免两次日志与两处漂移。
         trace: dict[str, Any] = {"prompt_text": _compose_unit_query(unit)}
         try:
             result = await self._execute_unit_workflow(unit, state, trace)
+            # 样本被裁则上卷重查：截断的是**有序的前 N 行**（实机 10080 行只取到前 5000），
+            # 图表据此透视会只覆盖部分维度、得出偏差结论。与其带着偏差出图，不如要求
+            # 模型把聚合粒度上卷一档后重生成 SQL。只重试一次，避免成本失控。
+            if str(result.status) == "success" and bool(trace.get("truncated")):
+                if not has_sql_query_capacity():
+                    logger.warning(
+                        "报表 SQL 查询预算已耗尽，停止上卷重查",
+                        unit_id=unit.unit_id,
+                    )
+                else:
+                    retry_question = _oversample_retry_query(
+                        question=str(getattr(unit, "question", "") or ""),
+                        full_count=int(trace.get("full_count") or 0),
+                        limit=_sample_row_limit(),
+                    )
+                    logger.info(
+                        "报表单元样本被裁，触发上卷重查",
+                        unit_id=unit.unit_id,
+                        full_count=trace.get("full_count"),
+                    )
+                    retry_unit = unit.model_copy(update={"question": retry_question})
+                    retry_trace: dict[str, Any] = {"prompt_text": _compose_unit_query(retry_unit)}
+                    retry_result = await self._execute_unit_workflow(retry_unit, state, retry_trace)
+                    if str(retry_result.status) == "success" and not bool(retry_trace.get("truncated")):
+                        result = retry_result
+                        trace = retry_trace
+                    elif str(retry_result.status) == "success":
+                        # 上卷重查后仍被裁：保留新结果。**不改状态**——截断的披露口径由
+                        # sample_guard 统一负责（进入 `_decide_sample_guidance` 写进 warnings），
+                        # 在这里再判一次会变成第二处口径，两处迟早不一致。
+                        trace = retry_trace
+                        logger.warning(
+                            "报表单元上卷重查后仍被截断",
+                            unit_id=unit.unit_id,
+                            full_count=retry_trace.get("full_count"),
+                            row_count=retry_trace.get("row_count"),
+                        )
+            # 单源失败后换源重试：单元被路由到结构不匹配的源时（实机：销售基盘被路由到
+            # 只有简化 orders 表的 oracle，模型据此判定"缺少订单事实表"拒绝生成 SQL），
+            # 换一个授权源往往就能取到数。最多再试两个候选源，全都失败才按失败收口。
+            for candidate in self._fallback_datasources(unit, state) if str(result.status) == "failed" else []:
+                if not has_sql_query_capacity():
+                    logger.warning(
+                        "报表 SQL 查询预算已耗尽，停止换源重试",
+                        unit_id=unit.unit_id,
+                    )
+                    break
+                logger.info("报表单元换源重试", unit_id=unit.unit_id, datasource=candidate)
+                attempt_trace: dict[str, Any] = {"prompt_text": _compose_unit_query(unit)}
+                alt = unit.model_copy(update={"datasource": candidate})
+                alt_result = await self._execute_unit_workflow(alt, state, attempt_trace)
+                if str(alt_result.status) != "failed":
+                    result = alt_result
+                    trace = attempt_trace
+                    break
         except Exception as exc:
             # 异常路径也留快照：单元崩在半路时现场比堆栈更直接。
             await self._persist_unit_snapshot(unit, state, trace, status="failed", error_code="EXECUTION_ERROR", error_message=str(exc), elapsed_ms=round((time.monotonic() - started) * 1000))
@@ -481,6 +718,18 @@ class ReportRunner:
         status = str(result.status or "success")
         await self._persist_unit_snapshot(unit, state, trace, status=status, error_code=result.error_code, error_message=result.user_error_message if status != "success" else "", elapsed_ms=round((time.monotonic() - started) * 1000))
         return result
+
+    # 方法作用：列出该单元失败后可以换用的其它授权数据源。
+    # Args: unit - 分析单元；state - 报表子图状态。
+    # Returns: 候选数据源名列表（不含已试过的那个），最多两个。
+    def _fallback_datasources(self, unit: Any, state: dict[str, Any]) -> list[str]:
+        plan = state.get("plan")
+        authorized = state.get("authorized_datasources") or {}
+        requested = [str(item) for item in (getattr(plan, "requested_datasources", []) or [])]
+        tried = str(getattr(unit, "datasource", "") or "")
+        candidates = [name for name in requested if name in authorized and name != tried]
+        logger.debug("报表单元换源候选", unit_id=getattr(unit, "unit_id", ""), tried=tried, candidates=candidates[:2])
+        return candidates[:2]
 
     # 方法作用：执行单元工作流并把调试现场写入 trace，供外层组装快照。
     # Args: unit - 分析单元；state - 报表子图状态；trace - 过程采集字典（prompt_text/sql/dialect/行数等）。
@@ -519,7 +768,27 @@ class ReportRunner:
             raise ValueError("报表执行缺少独立运行标识")
         session_id = f"report-{run_id}-{unit.unit_id}"
         thread_id = f"tenant:{int(identity.get('tenant_id', 0))}:user:{int(identity.get('user_id', 0))}:session:{session_id}"
-        result = await app.ainvoke({
+        # 节点路由：由模型从节点数据表里选节点，服务端按规范顺序成序并现场建模。
+        # 任何一步失败（模型不可用、护栏收敛为空、建模异常）都退回静态图 app，
+        # 因此这里不改变既有兜底语义，只是把它从"唯一路径"变成"默认路径"。
+        # 见 spec/50-report-node-routing.md。
+        from src.graph.node_routing import build_sequence_graph, decide_node_sequence
+
+        routed_nodes = await decide_node_sequence(
+            str(trace.get("prompt_text", "") or ""),
+            # 模型看不到"这次实际有几个源"，必须由执行侧告知：单源单元选多源扇出
+            # 会产出 0 行空 SQL 的假成功（实机复现过）。
+            allow_multi_source=len(selected_sources) > 1,
+        )
+        routed_graph = await build_sequence_graph(routed_nodes) if routed_nodes else None
+        if routed_graph is None:
+            routed_nodes = []
+            routed_graph = app
+        trace["params"] = {**(trace.get("params") or {}), "routed_nodes": routed_nodes}
+        # 动态图改过拓扑，与静态图共用同一 thread_id 会让 checkpointer 续上一个
+        # 结构不同的旧现场；加后缀把两条路径的存档空间分开。
+        effective_thread = thread_id if routed_graph is app else f"{thread_id}:routed"
+        result = await routed_graph.ainvoke({
             "user_query": str(trace.get("prompt_text", "") or ""),
             "datasource": datasource,
             "selected_datasources": selected_sources,
@@ -536,8 +805,12 @@ class ReportRunner:
             # 会覆盖预置值；而且它真生效时 after_analyze_result 会把单元路由到
             # report_subgraph（生成报告而不是取数），后果比原问题更严重。
             "suppress_supplemental_query": True,
+            # 能力子图（forecast / report）是对话侧能力，会用自己的输入条件接管结果：
+            # 质检单元只要「筛选未来情景」，被判成 forecast 后已取到的 2016 行被
+            # FORECAST_INPUT_INVALID 覆盖成失败。报表单元只取数，不派发能力子图。
+            "suppress_capability_subgraphs": True,
             "request_rate_limit_checked": True,
-        }, {"configurable": {"thread_id": thread_id}})
+        }, {"configurable": {"thread_id": effective_thread}})
         final = dict(result.get("final_response", {}) or {})
         rows = final.get("data", result.get("query_result_sample", []))
         if not isinstance(rows, list):
@@ -554,10 +827,19 @@ class ReportRunner:
             return UnitResult(unit_id=unit.unit_id, datasource=datasource, status="failed", user_error_message=str(final.get("error_message", "查询失败")), error_code=str(final.get("error_code", "QUERY_FAILED")))
         live_query_id = ""
         if sql and rows:
+            from src.reporting.live_drilldown import is_single_query
             from src.security.tenant_policy import RequestIdentity
 
-            owner = RequestIdentity(tenant_id=int(identity.get("tenant_id", 0)), user_id=int(identity.get("user_id", 0)), role=str(identity.get("role", "")))
-            live_query_id = await self.store.save_live_query(run_id, owner, datasource, dialect, sql)
+            if len(selected_sources) == 1 and is_single_query(sql, dialect):
+                owner = RequestIdentity(tenant_id=int(identity.get("tenant_id", 0)), user_id=int(identity.get("user_id", 0)), role=str(identity.get("role", "")))
+                live_query_id = await self.store.save_live_query(run_id, owner, datasource, dialect, sql)
+            else:
+                logger.warning(
+                    "实时钻取模板未签发",
+                    unit_id=unit.unit_id,
+                    source_count=len(selected_sources),
+                    single_query=is_single_query(sql, dialect),
+                )
         # 只看报表自己展示的行集是否被截断：上游的 query_result_truncated 还包含
         # "给模型的样本被裁到 50/30 行"这类与用户可见行集无关的标记，透传会让
         # "共 60 行、全部展示"的单元被判成"样本被截断"（实机页面上逐条刷屏）。
@@ -590,19 +872,29 @@ class ReportRunner:
         ))
         # 处置结论排在最前：warnings 会被页面质量块按前 20 条裁剪，排在分析模型给出的
         # 限制之后时，限制一多就把披露挤掉，等于没披露。
-        warnings = list(dict.fromkeys([*sample_guidance, *limitations]))[:20]
+        display_rows = [dict(row) for row in rows if isinstance(row, dict)]
+        no_data = answer_kind == "data" and not display_rows
+        no_data_warnings = ["当前查询暂无数据，无法生成数据图表"] if no_data else []
+        warnings = list(dict.fromkeys([*no_data_warnings, *sample_guidance, *limitations]))[:20]
+        # 取数行已经全部提取到 UnitResult、SQL 与计数也已写进 trace：单元图返回的
+        # 状态里再留一份行数据没有任何读取方。实测（固定负载复现）：单元 rows 清空后
+        # 仍有一份行数据存活，来源正是这里——把"每次取数留两份"收敛成一份。
+        _release_state_payloads(result)
         return UnitResult(
             unit_id=unit.unit_id,
             datasource=datasource,
             live_query_id=live_query_id,
+            status="partial" if no_data else "success",
             answer_kind=answer_kind,
-            rows=[dict(row) for row in rows if isinstance(row, dict)],
+            rows=display_rows,
             truncated=truncated,
             metric_citations=_extract_metric_citations(result.get("activated_knowledge")),
             column_comments=_extract_column_comments(result.get("relevant_tables")),
             field_descriptions=_extract_field_descriptions(analysis),
             summary=str(analysis.get("summary", "") or ""),
             warnings=warnings,
+            error_code="NO_DATA" if no_data else "",
+            user_error_message="当前查询暂无数据" if no_data else "",
         )
 
     # 方法作用：把单元执行现场组装成快照并落库，失败只记告警不影响报表生成。
@@ -655,6 +947,15 @@ class ReportRunner:
     async def _datasource_table_catalog(requested: list[str], tenant_id: int) -> str:
         from src.knowledge.schema_manager import get_schema_manager
 
+        # 表名清单短期不变，但每次获取要为每个源构建完整 schema（含列与关系）。
+        # 2026-09-16 复测：五源冷构建 3.14 秒（postgresql 1.51s 最慢），期间事件循环
+        # **没有**被独占（同步驱动已在线程里执行，实测最长停顿 70ms），所以它不会拖慢
+        # 同进程的其它请求；省下的是计划路径自己这几秒。缓存按租户 5 分钟内只付一次。
+        cache_key = (tuple(requested), int(tenant_id))
+        cached = _catalog_cache.get(cache_key)
+        if cached is not None and time.monotonic() - cached[0] < _CATALOG_CACHE_TTL:
+            logger.debug("报表表清单命中缓存", datasource_count=len(requested), tenant_id=tenant_id)
+            return cached[1]
         manager = get_schema_manager()
         blocks: list[str] = []
         for name in requested:
@@ -666,7 +967,15 @@ class ReportRunner:
                 logger.warning("报表路由读取表清单失败", datasource=name, error_type=type(exc).__name__)
                 tables = []
             blocks.append(f"### {name}\n" + ("、".join(tables) if tables else "（未获取到表结构）"))
-        return "\n".join(blocks)
+        catalog = "\n".join(blocks)
+        # 只保留最近若干租户的表清单：缓存不能反过来变成新的内存增长点。
+        if len(_catalog_cache) >= _CATALOG_CACHE_MAX_ENTRIES:
+            oldest = sorted(_catalog_cache.items(), key=lambda item: item[1][0])[: len(_catalog_cache) // 2]
+            for stale_key, _ in oldest:
+                _catalog_cache.pop(stale_key, None)
+        _catalog_cache[cache_key] = (time.monotonic(), catalog)
+        logger.info("报表表清单构建完成", datasource_count=len(requested), chars=len(catalog), cached=True)
+        return catalog
 
     # 方法作用：判断每个分析单元应命中哪些数据源，避免把问题广播给无关数据源。
     # Args: plan - 报表计划；requested - 已授权数据源；tenant_id - 当前租户。

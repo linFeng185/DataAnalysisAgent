@@ -28,9 +28,6 @@ _SOURCES_KEY = "multi_source_results"
 # 投喂给模型的提示词样本上限。这是**提示词预算**，不是数据截断：
 # 与用户可见行集无关，因此单独记 sample_capped，不得混入 truncated。
 _PROMPT_SAMPLE_ROWS = 50
-# 跨源合并时每个来源允许贡献的行数。原为硬编码 30，实测会把 50 行的来源
-# 直接砍到 30 行，属于静默丢数据；放宽为 200 并单独命名以便追溯。
-_MERGED_BATCH_ROWS = 200
 # 合并后回传分析链路的行集上限：原为硬编码 200，现取自 report_max_sample_rows。
 _MERGED_SAMPLE_ROWS_FALLBACK = 200
 
@@ -285,7 +282,9 @@ async def _analyze_one(
             datasource=datasource,
             success=True,
             sql=final_sql,
-            data=data[:_PROMPT_SAMPLE_ROWS],
+            # data 是用户可见的有界结果，不能为了 Prompt 预算在这里改写；
+            # LLM 上下文只在 _build_merge_context 中取少量样例。
+            data=data,
             dialect=dialect,
             tables=len(result.get("relevant_tables", []) or []),
             full_count=int(result.get("query_result_full_count", len(data)) or len(data)),
@@ -721,13 +720,13 @@ def _collect_merged_rows(
         for result, batch in zip(results, normalized_batches, strict=True):
             rows.extend(
                 {"_datasource": result["datasource"], **dict(row)}
-                for row in batch[:_MERGED_BATCH_ROWS]
+                for row in batch
             )
     else:
         rows = [
             {"_datasource": result["datasource"], **dict(row)}
             for result in results
-            for row in result.get("data", [])[:_MERGED_BATCH_ROWS]
+            for row in result.get("data", [])
         ]
     logger.debug("收集跨源结果行完成", rows=len(rows))
     return rows
@@ -751,6 +750,21 @@ def _append_source_failures(analysis: dict, failed_results: list[dict]) -> dict:
         result = {**analysis, "summary": f"{current_summary} {failure_note}".strip()}
     logger.debug("补充跨源失败摘要完成", changed=result is not analysis)
     return result
+
+
+# 方法作用：把各成功来源的 SQL 按 `-- 数据源` 标签拼成统一展示文本。
+# Args: results - 成功来源结果列表，元素含 datasource 与 sql 字段。
+# Returns: 以空行连接的 SQL 文本；无来源或各来源 SQL 均为空时返回空字符串。
+def _format_source_sql(results: list[dict]) -> str:
+    """展示子图与报表快照共用同一份多源 SQL 文本，两处不允许出现第二种格式。"""
+    logger.debug("多源 SQL 拼接入口", source_count=len(results))
+    if not any(str(result.get("sql", "") or "").strip() for result in results):
+        # 只剩数据源标签的文本会让快照的 has_sql 判成有 SQL，宁可返回空串。
+        logger.info("多源 SQL 拼接完成", chars=0, has_source=bool(results))
+        return ""
+    text = "\n\n".join(f"-- {result.get('datasource', '')}\n{result.get('sql', '')}" for result in results)
+    logger.info("多源 SQL 拼接完成", chars=len(text))
+    return text
 
 
 # 方法作用：合并多源数据并通过结果展示子图生成统一分析与图表。
@@ -876,14 +890,14 @@ async def merge_results_node(
     all_data = _collect_merged_rows(ok, normalized_rows, normalized_batches)
     # 真实截断只由执行层上报的 truncated 决定；单源样本裁剪与合并上限属于
     # 提示词预算（sample_capped），混在一起会让"全量展示"的结果被误报为截断。
-    sampled_batches = normalized_batches if normalized_batches is not None else [result.get("data", []) for result in ok]
     merged_limit = _merged_sample_limit()
     sample_capped = bool(
-        (normalized_rows is None and any(len(batch) > _MERGED_BATCH_ROWS for batch in sampled_batches))
-        or len(all_data) > merged_limit
+        len(all_data) > merged_limit
         or any(result.get("sample_capped", False) for result in ok)
     )
     truncated = bool(any(result.get("truncated", False) for result in ok))
+    # 多源 SQL 文本在这里算一次：展示子图与最终返回值共用，报表快照直接取最终返回值。
+    merged_sql = _format_source_sql(ok)
 
     if all_data:
         try:
@@ -896,7 +910,7 @@ async def merge_results_node(
                 "query_result_full_count": sum(int(result.get("full_count", len(result.get("data", [])))) for result in ok),
                 "query_result_truncated": truncated,
                 "query_result_statistics": {"row_count": len(all_data), "truncated": truncated},
-                "generated_sql": "\n\n".join(f"-- {result['datasource']}\n{result.get('sql', '')}" for result in ok),
+                "generated_sql": merged_sql,
                 "business_rules_text": "\n".join(
                     f"来源 {result['datasource']}：字段 {list(dict.fromkeys(column for row in result.get('data', []) for column in row))}；"
                     f"查询返回 {result.get('full_count', '未知')} 行；截断 {bool(result.get('truncated', False))}。"
@@ -938,8 +952,13 @@ async def merge_results_node(
     return {
         "analysis_result": analysis,
         "chart_config": chart,
+        # 跨源单元的最终返回值必须带 SQL：报表快照靠它留下执行现场，缺了就只有空 sql_text。
+        "generated_sql": merged_sql,
         "query_result_sample": all_data[:merged_limit],
-        "query_result_full_count": len(all_data),
+        "query_result_full_count": sum(
+            int(result.get("full_count", len(result.get("data", []))))
+            for result in ok
+        ),
         "query_result_truncated": truncated,
         "query_result_sample_capped": sample_capped,
         "query_result_statistics": {

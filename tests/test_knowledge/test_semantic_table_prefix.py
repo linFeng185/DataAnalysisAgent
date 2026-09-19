@@ -195,3 +195,132 @@ class TestLexicalTableHints:
         assert "retail_promotions" in hits
         assert "retail_customer_notes" not in hits
         assert SchemaManager._lexical_hit_tables("销售提升", []) == set()
+
+    # 方法作用：验证会员价值分层类问题能把 RFM / LTV / 流失 / 权益发放核销主表全部召回。
+    # Args: self - 测试实例。
+    # Returns: 断言通过时无返回值。
+    def test_member_value_tables_recalled(self) -> None:
+        """实机回归 2026-09-19：run_id=cc74fa66-a0f1-4242-8f0f-e1b1d09bcdea 的 customer_member 单元失败。
+
+        原始问题：「按 RFM 分层统计客户规模与消费贡献，分析流失信号分布、生命周期
+        价值分层，以及会员权益的发放与核销规模对比，时间范围为去年。」
+        MySQL Schema 中 retail_rfm_scores / retail_lifetime_values /
+        retail_churn_signals / retail_benefit_grants 全都存在，但词面通道对 RFM、
+        流失、生命周期价值、权益发放四个概念没有映射，只靠「核销」偶然捞回
+        retail_benefit_redemptions，模型据残缺白名单判定「不存在 RFM / 流失 /
+        生命周期价值事实表」而拒绝生成 SQL。
+        """
+        # Arrange：表名取自 retail 库真实清单；benefit_* 干扰项用于验证
+        # _LEXICAL_PER_FRAGMENT=3 的配额不会把 grants / redemptions 挤出去。
+        tables = [
+            SimpleNamespace(name=name)
+            for name in (
+                "retail_rfm_scores",
+                "retail_lifetime_values",
+                "retail_churn_signals",
+                "retail_benefit_grants",
+                "retail_benefit_redemptions",
+                "retail_benefit_rules",
+                "retail_benefit_catalog",
+                "retail_partner_benefits",
+                "retail_benefit_complaints",
+                "retail_contract_releases",
+            )
+        ]
+        query = (
+            "按 RFM 分层统计客户规模与消费贡献，分析流失信号分布、生命周期价值分层，"
+            "以及会员权益的发放与核销规模对比，时间范围为去年。"
+        )
+
+        # Act
+        hits = SchemaManager._lexical_hit_tables(query, tables)
+
+        # Assert
+        assert {
+            "retail_rfm_scores",
+            "retail_lifetime_values",
+            "retail_churn_signals",
+            "retail_benefit_grants",
+            "retail_benefit_redemptions",
+        } <= hits
+        assert "retail_contract_releases" not in hits
+
+    # 方法作用：验证定价/折扣/销量弹性/毛利告警/降价计划类问题能确定性召回全部核心表。
+    # Args: self - 测试实例。
+    # Returns: 断言通过时无返回值。
+    def test_pricing_markdown_tables_recalled(self) -> None:
+        """实机回归 2026-09-19：run_id=517e0f12-e56a-4f83-82e4-4993aace1d0e 的 price_promotion 单元 QUERY_FAILED。
+
+        原始问题：「对比不同定价区域的折扣深度与销量弹性，识别毛利告警商品，
+        并评估降价计划对清库存的实际贡献，时间范围为去年。」
+        MySQL Schema 中 retail_order_items / retail_products / retail_price_zones /
+        retail_price_elasticities / retail_margin_alerts / retail_markdown_plans /
+        retail_markdown_items 七张表全部真实存在（日志已核实），但词面通道只由
+        「区域」「库存」产出 region / inventory / stock 三个片段，七张核心表一张
+        都没进白名单，模型据此回答「这些表不在本数据源白名单」并返回空 SQL。
+        """
+        # Arrange：表名取自 retail 库真实清单；product_* / inventory_* / region_*
+        # 为干扰项，用于验证 _LEXICAL_PER_FRAGMENT=3 的配额不会把主表挤出去
+        # （retail_product_* 在字母序上排在 retail_products 之前）。
+        tables = [
+            SimpleNamespace(name=name)
+            for name in (
+                # 七张核心表
+                "retail_order_items",
+                "retail_products",
+                "retail_price_zones",
+                "retail_price_elasticities",
+                "retail_margin_alerts",
+                "retail_markdown_plans",
+                "retail_markdown_items",
+                # 真实库里同前缀的干扰表
+                "retail_orders",
+                "retail_inventory",
+                "retail_stock_reviews",
+                "retail_region_targets",
+                "retail_product_categories",
+                "retail_product_reviews",
+                "retail_product_suppliers",
+                "retail_markdown_events",
+                "retail_customer_notes",
+                "retail_supplier_contracts",
+            )
+        ]
+        query = (
+            "对比不同定价区域的折扣深度与销量弹性，识别毛利告警商品，"
+            "并评估降价计划对清库存的实际贡献，时间范围为去年。"
+        )
+
+        # Act
+        hits = SchemaManager._lexical_hit_tables(query, tables)
+
+        # Assert
+        assert {
+            "retail_order_items",
+            "retail_products",
+            "retail_price_zones",
+            "retail_price_elasticities",
+            "retail_margin_alerts",
+            "retail_markdown_plans",
+            "retail_markdown_items",
+        } <= hits
+        assert "retail_customer_notes" not in hits
+        assert "retail_supplier_contracts" not in hits
+
+    # 方法作用：验证问题里直接写英文缩写 RFM / LTV 时同样能召回对应主表。
+    # Args: self - 测试实例。
+    # Returns: 断言通过时无返回值。
+    def test_rfm_ltv_abbreviation_recalled(self) -> None:
+        """实机回归：用户常用英文缩写提问，缩写与中文词必须都能命中同一批表。"""
+        # Arrange
+        tables = [
+            SimpleNamespace(name=name)
+            for name in ("retail_rfm_scores", "retail_lifetime_values", "retail_orders")
+        ]
+
+        # Act
+        hits = SchemaManager._lexical_hit_tables("用 RFM 和 LTV 给客户分层", tables)
+
+        # Assert
+        assert "retail_rfm_scores" in hits
+        assert "retail_lifetime_values" in hits

@@ -69,8 +69,8 @@ class ChartGeneratorTool(BaseTool):
 
         logger.info("图表生成工具调用", row_count=len(rows), chart_type=chart_type)
         try:
-            resolved = chart_type if chart_type != "auto" else _classify_chart_type(rows)
-            return {"recommended_chart_type": resolved, "option": _build_option(rows, resolved)}
+            resolved = chart_type if chart_type != "auto" else classify_chart_type(rows)
+            return {"recommended_chart_type": resolved, "option": build_chart_option(rows, resolved)}
         except Exception as e:
             logger.error("图表生成失败", error=str(e), exc_info=True)
             return {"error": str(e)}
@@ -79,7 +79,7 @@ class ChartGeneratorTool(BaseTool):
 # 方法作用：根据时间、文本和数值列组合推荐图表类型。
 # Args: rows - 非空查询结果行。
 # Returns: line/bar/pie/scatter/table 之一。
-def _classify_chart_type(rows: list[dict]) -> str:
+def classify_chart_type(rows: list[dict]) -> str:
     """14.1 智能选图 — 时间+数值→line / 分类+数值→bar / 少数类目→pie。"""
     logger.debug("图表类型分类入口", row_count=len(rows))
     cols = list(rows[0].keys())
@@ -106,7 +106,7 @@ def _classify_chart_type(rows: list[dict]) -> str:
 # 方法作用：根据查询行和图表类型构建 ECharts option。
 # Args: rows - 非空查询结果行；chart_type - 已选择图表类型。
 # Returns: ECharts 配置字典或 table 数据配置。
-def _build_option(rows: list[dict], chart_type: str) -> dict:
+def build_chart_option(rows: list[dict], chart_type: str) -> dict:
     """14.2~14.6 生成 ECharts option JSON。"""
     logger.debug("图表配置构建入口", row_count=len(rows), chart_type=chart_type)
     cols = list(rows[0].keys())
@@ -114,10 +114,17 @@ def _build_option(rows: list[dict], chart_type: str) -> dict:
     label_col = text_cols[0] if text_cols else cols[0]
     value_col = numeric[0] if numeric else cols[-1]
     labels = [str(r.get(label_col, "")) for r in rows]
-    values = [float(r.get(value_col, 0) or 0) for r in rows] if numeric else []
+    values = [
+        None if row.get(value_col) is None else _numeric_float(row.get(value_col))
+        for row in rows
+    ] if numeric else []
 
     base: dict[str, Any] = {
-        "tooltip": {"trigger": "axis" if chart_type in ("line", "bar") else "item"},
+        # 柱状图按数据项触发：单柱悬停只看该系列该维度。按轴触发会把同一横轴上全部
+        # 系列一起弹出来（实机取证：悬停一根柱子弹出 8 条系列的读数）。折线图的读法
+        # 本来就是"看某一期的全部系列"，保持按轴触发；pie/scatter/heatmap 是 item。
+        # 本规则与报表链 src/reporting/charts.py 的构型口径一致（报表链已先修，此处同步）。
+        "tooltip": {"trigger": "axis" if chart_type == "line" else "item"},
     }
 
     if chart_type == "line":
@@ -134,6 +141,7 @@ def _build_option(rows: list[dict], chart_type: str) -> dict:
             "data": [
                 {"name": label, "value": value}
                 for label, value in zip(labels, values, strict=False)
+                if value is not None
             ],
         }]
     elif chart_type == "scatter" and len(numeric) >= 2:
@@ -141,8 +149,11 @@ def _build_option(rows: list[dict], chart_type: str) -> dict:
         base["yAxis"] = {"type": "value"}
         base["series"] = [{
             "name": value_col, "type": "scatter",
-            "data": [[float(r.get(numeric[0], 0) or 0), float(r.get(numeric[1], 0) or 0)]
-                      for r in rows],
+            "data": [
+                [_numeric_float(row[numeric[0]]), _numeric_float(row[numeric[1]])]
+                for row in rows
+                if row.get(numeric[0]) is not None and row.get(numeric[1]) is not None
+            ],
         }]
     elif chart_type == "heatmap":
         if len(cols) < 3 or not numeric:
@@ -160,9 +171,10 @@ def _build_option(rows: list[dict], chart_type: str) -> dict:
             [
                 x_index[str(row.get(x_col, ""))],
                 y_index[str(row.get(y_col, ""))],
-                float(row.get(value_col, 0) or 0),
+                _numeric_float(row.get(value_col, 0)),
             ]
             for row in rows
+            if row.get(value_col) is not None
         ]
         values_for_range = [item[2] for item in heat_data]
         base["tooltip"] = {"position": "top"}
@@ -223,12 +235,21 @@ def _infer_column_types(
 # Returns: int/float 或合法十进制字符串返回 True。
 def _is_numeric_value(value: Any) -> bool:
     logger.debug("图表数值判断入口", value_type=type(value).__name__)
-    result = isinstance(value, (int, float, Decimal)) and not isinstance(value, bool)
-    if isinstance(value, str):
-        try:
-            float(value)
-            result = True
-        except ValueError:
-            result = False
+    try:
+        _numeric_float(value)
+        result = not isinstance(value, bool)
+    except (TypeError, ValueError, OverflowError):
+        result = False
     logger.debug("图表数值判断完成", numeric=result)
     return result
+
+
+# 方法作用：把数据库数值或带千分位的数值字符串转换为浮点数。
+# Args: value - 待转换值。
+# Returns: 可用于图表的浮点数；非法值抛出 ValueError 或 TypeError。
+def _numeric_float(value: Any) -> float:
+    if isinstance(value, bool):
+        raise TypeError("布尔值不是图表数值")
+    if isinstance(value, str):
+        return float(value.strip().replace(",", ""))
+    return float(value)

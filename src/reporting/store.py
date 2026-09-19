@@ -726,7 +726,7 @@ class ReportStore:
     # Args: run_id - 运行 ID；identity - 当前身份；updates - 允许更新的字段。
     # Returns: 更新后的 ReportRunRecord，越权或不存在返回 None。
     async def update_run(self, run_id: str, identity: Any, **updates: Any) -> ReportRunRecord | None:
-        allowed = {"status", "last_node", "query_count", "row_count", "token_usage", "llm_call_count", "llm_failure_count", "sql_query_count", "sql_success_count", "sql_failure_count", "partial", "error_code", "internal_error_message", "user_error_message", "started_at", "finished_at"}
+        allowed = {"status", "last_node", "query_count", "row_count", "token_usage", "prompt_token_usage", "completion_token_usage", "llm_call_count", "llm_failure_count", "sql_query_count", "sql_success_count", "sql_failure_count", "partial", "error_code", "internal_error_message", "user_error_message", "started_at", "finished_at"}
         data = {key: value for key, value in updates.items() if key in allowed}
         if self._memory:
             row = self._runs.get(str(run_id))
@@ -789,6 +789,52 @@ class ReportStore:
         async with pg_pool_connection(pool, job.tenant_id, job.user_id, str(getattr(identity, "role", "") or "")) as connection:
             rows = await connection.fetch("SELECT * FROM report_runs WHERE job_id=$1::uuid AND tenant_id=$2 ORDER BY created_at DESC LIMIT $3", str(job_id), job.tenant_id, bounded)
         return [self._to_run(row) for row in rows]
+
+    # 方法作用：跨任务分页列出报表运行明细，供执行明细页展示 LLM/SQL 调用次数与 token 用量。
+    # Args: identity - 当前身份；job_id - 可选任务过滤；status - 可选运行状态过滤；limit/offset - 分页参数；view_all - 是否具备 report.view_all。
+    # Returns: (运行明细行列表, 命中总数)，每行含运行计数汇总与所属任务标题。
+    async def list_run_details(self, identity: Any, *, job_id: str | None = None, status: str | None = None, limit: int = 50, offset: int = 0, view_all: bool = False) -> tuple[list[dict[str, Any]], int]:
+        """一条 SQL 带出运行行、所属任务标题和总数，避免明细页按行回查任务。"""
+        bounded = max(1, min(int(limit or 50), 200))
+        bounded_offset = max(0, int(offset or 0))
+        tenant_id = int(getattr(identity, "tenant_id", 0) or 0)
+        logger.debug("报表执行明细查询入口", tenant_id=tenant_id, user_id=int(getattr(identity, "user_id", 0) or 0), job_id=str(job_id or ""), status=str(status or ""), limit=bounded)
+        if self._memory:
+            rows: list[dict[str, Any]] = []
+            for row in self._runs.values():
+                if not self._report_visible(row, identity, view_all):
+                    continue
+                if job_id and str(row.get("job_id", "")) != str(job_id):
+                    continue
+                if status and str(row.get("status", "")) != str(status):
+                    continue
+                # 内存模式没有 JOIN，这里补上所属任务字段，保证与数据库路径返回同构。
+                job_row = self._jobs.get(str(row.get("job_id", "")), {})
+                rows.append({**row, "job_title": job_row.get("title", ""), "job_prompt": job_row.get("prompt", ""), "job_status": job_row.get("status", "")})
+            rows.sort(key=lambda row: row.get("created_at") or datetime.min.replace(tzinfo=timezone.utc), reverse=True)
+            total = len(rows)
+            items = [self._run_detail_dict(row) for row in rows[bounded_offset:bounded_offset + bounded]]
+            logger.info("报表执行明细查询完成", tenant_id=tenant_id, total=total, returned=len(items), memory=True)
+            return items, total
+        pool = await self._pool()
+        from src.memory.pg_pool import pg_pool_connection
+
+        role = str(getattr(identity, "role", "") or "")
+        async with pg_pool_connection(pool, tenant_id, int(getattr(identity, "user_id", 0) or 0), role) as connection:
+            db_rows = await connection.fetch(
+                "SELECT r.*, j.title AS job_title, j.prompt AS job_prompt, j.status AS job_status, COUNT(*) OVER () AS total_count "
+                "FROM report_runs r JOIN report_jobs j ON j.id=r.job_id "
+                "WHERE r.tenant_id=$1 "
+                "AND ($2<>'super_admin' AND ($3::boolean OR $2='tenant_admin' OR r.user_id=$4)) "
+                "AND ($5::uuid IS NULL OR r.job_id=$5::uuid) AND ($6='' OR r.status=$6) "
+                "ORDER BY r.created_at DESC LIMIT $7 OFFSET $8",
+                tenant_id, role, bool(view_all), int(getattr(identity, "user_id", 0) or 0),
+                (str(job_id) if job_id else None), str(status or ""), bounded, bounded_offset,
+            )
+        total = int(db_rows[0]["total_count"]) if db_rows else 0
+        items = [self._run_detail_dict(row) for row in db_rows]
+        logger.info("报表执行明细查询完成", tenant_id=tenant_id, total=total, returned=len(items), memory=False)
+        return items, total
 
     # 方法作用：记录节点级运行日志并区分内部错误与用户可读错误。
     # Args: run_id - 运行 ID；node - 节点名；status - 节点状态；attempt - 节点尝试次数；input_hash/output_ref - 非敏感引用；error_code/internal_error/user_error - 错误字段；identity - 可选当前身份。
@@ -2002,6 +2048,48 @@ class ReportStore:
                 await connection.execute("UPDATE report_quota_usage SET concurrent_runs=GREATEST(0,concurrent_runs-1) WHERE tenant_id=$1 AND user_id=$2 AND period_start=$3", identity.tenant_id, identity.user_id, row["quota_period_start"])
                 await connection.execute("UPDATE report_runs SET quota_held=FALSE WHERE id=$1::uuid AND tenant_id=$2", run_id, identity.tenant_id)
 
+    # 方法作用：回收超时仍未收尾的运行租约，避免死进程永久占用并发槽。
+    # Args: stale_after_seconds - 超过该时长仍处于 queued/running 的运行视为遗留。
+    # Returns: 被回收的运行数。
+    async def reclaim_stale_run_leases(self, stale_after_seconds: int = 1800) -> int:
+        """执行进程被杀、容器重启都会留下 quota_held 未释放的运行；不回收则并发槽只减不增。
+
+        实机事故：两个运行分别停在上一次进程退出前后，`concurrent_runs` 顶到上限 2，
+        此后任何报表都直接 QUOTA_EXCEEDED，而恢复逻辑只在重跑同一任务时触发。
+        """
+        threshold = max(60, int(stale_after_seconds))
+        if self._memory:
+            return 0
+        from src.memory.pg_pool import pg_pool_connection
+
+        pool = await self._pool()
+        # 系统身份清理跨租户的遗留租约：调用方不是某个业务用户，不能用业务身份的作用域连接。
+        async with pg_pool_connection(pool, 0, 0, "super_admin") as connection:
+            reclaimed = await connection.fetch(
+                "UPDATE report_runs SET status='failed', error_code='WORKER_INTERRUPTED', "
+                "user_error_message='执行进程已中断，并发资源已释放', finished_at=NOW(), quota_held=FALSE "
+                "WHERE status IN ('queued','running') AND quota_held IS TRUE "
+                "AND COALESCE(started_at, created_at) < NOW() - make_interval(secs => $1::int) "
+                "RETURNING tenant_id, user_id, quota_period_start",
+                threshold,
+            )
+            if not reclaimed:
+                logger.debug("报表遗留租约回收完成", reclaimed=0, threshold_seconds=threshold)
+                return 0
+            # 按 (租户, 用户, 周期) 归并后一次扣减：逐条扣会放大成 N 次往返。
+            for row in reclaimed:
+                if row["quota_period_start"] is None:
+                    continue
+                await connection.execute(
+                    "UPDATE report_quota_usage SET concurrent_runs=GREATEST(0, concurrent_runs-1) "
+                    "WHERE tenant_id=$1 AND user_id=$2 AND period_start=$3",
+                    int(row["tenant_id"]),
+                    int(row["user_id"]),
+                    row["quota_period_start"],
+                )
+        logger.warning("报表遗留租约已回收", reclaimed=len(reclaimed), threshold_seconds=threshold)
+        return len(reclaimed)
+
     # 方法作用：取得独占执行锁后终结旧进程遗留运行并释放可确认的配额租约。
     # Args: job_id - 任务；identity - 原任务拥有者身份；quota - 配额服务。
     # Returns: 中断恢复数与已发布页面恢复数。
@@ -2139,7 +2227,20 @@ class ReportStore:
     # Returns: ReportRunRecord。
     @staticmethod
     def _to_run(row: Any) -> ReportRunRecord:
-        return ReportRunRecord(id=str(row["id"]), job_id=str(row["job_id"]), status=str(row.get("status", "queued")), attempt=int(row.get("attempt", 1) or 1), last_node=str(row.get("last_node", "") or ""), query_count=int(row.get("query_count", 0) or 0), row_count=int(row.get("row_count", 0) or 0), token_usage=int(row.get("token_usage", 0) or 0), llm_call_count=int(row.get("llm_call_count", 0) or 0), llm_failure_count=int(row.get("llm_failure_count", 0) or 0), sql_query_count=int(row.get("sql_query_count", 0) or 0), sql_success_count=int(row.get("sql_success_count", 0) or 0), sql_failure_count=int(row.get("sql_failure_count", 0) or 0), partial=bool(row.get("partial", False)), error_code=str(row.get("error_code", "") or ""), user_error_message=str(row.get("user_error_message", "") or ""), trace_id=str(row.get("trace_id", "") or ""), started_at=row.get("started_at"), finished_at=row.get("finished_at"))
+        return ReportRunRecord(id=str(row["id"]), job_id=str(row["job_id"]), status=str(row.get("status", "queued")), attempt=int(row.get("attempt", 1) or 1), last_node=str(row.get("last_node", "") or ""), query_count=int(row.get("query_count", 0) or 0), row_count=int(row.get("row_count", 0) or 0), token_usage=int(row.get("token_usage", 0) or 0), prompt_token_usage=int(row.get("prompt_token_usage", 0) or 0), completion_token_usage=int(row.get("completion_token_usage", 0) or 0), llm_call_count=int(row.get("llm_call_count", 0) or 0), llm_failure_count=int(row.get("llm_failure_count", 0) or 0), sql_query_count=int(row.get("sql_query_count", 0) or 0), sql_success_count=int(row.get("sql_success_count", 0) or 0), sql_failure_count=int(row.get("sql_failure_count", 0) or 0), partial=bool(row.get("partial", False)), error_code=str(row.get("error_code", "") or ""), user_error_message=str(row.get("user_error_message", "") or ""), trace_id=str(row.get("trace_id", "") or ""), started_at=row.get("started_at"), finished_at=row.get("finished_at"))
+
+    # 方法作用：把运行行转换为执行明细页直接可用的字典，附上计数汇总与所属任务摘要。
+    # Args: row - asyncpg Record 或内存字典，需含 job_title/job_prompt/job_status 可选列。
+    # Returns: 含 run 字段、stats 计数汇总与任务摘要的字典。
+    @classmethod
+    def _run_detail_dict(cls, row: Any) -> dict[str, Any]:
+        run = cls._to_run(row)
+        payload = run.model_dump(mode="json")
+        payload["stats"] = run.stats_summary()
+        payload["job_title"] = str(row.get("job_title", "") or "")
+        payload["job_prompt"] = str(row.get("job_prompt", "") or "")
+        payload["job_status"] = str(row.get("job_status", "") or "")
+        return payload
 
     # 方法作用：把数据库行转换为安全的版本模型。
     # Args: row - asyncpg Record 或内存字典。

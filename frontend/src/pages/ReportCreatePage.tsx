@@ -5,6 +5,7 @@ import { BulbOutlined, FileTextOutlined, SearchOutlined } from '@ant-design/icon
 import { useNavigate } from 'react-router-dom';
 import { get } from '../api/client';
 import { createReport } from '../api/reportWorkbench';
+import { randomId } from '../utils/randomId';
 import { DEFAULT_TEMPLATE_ID, reportTemplates, resolveTemplate } from '../report/templates';
 import { reportPromptExamples } from '../report/promptExamples';
 import type { DatasourceConfig } from '../types';
@@ -89,7 +90,7 @@ export default function ReportCreatePage() {
     creatingInFlight.current = true;
     setCreating(true);
     try {
-      if (!idempotencyKey.current) idempotencyKey.current = crypto.randomUUID();
+      if (!idempotencyKey.current) idempotencyKey.current = randomId();
       await createReport({
         prompt: prompt.trim(),
         datasources: selectedDatasources,

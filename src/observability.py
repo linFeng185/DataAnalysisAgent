@@ -196,7 +196,13 @@ class LLMMetricsCallback(BaseCallbackHandler):
             prompt_tokens=prompt_tokens,
             completion_tokens=completion_tokens,
         )
-        _record_run_stats(self.stats, failed=False, tokens=prompt_tokens + completion_tokens)
+        _record_run_stats(
+            self.stats,
+            failed=False,
+            tokens=prompt_tokens + completion_tokens,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+        )
 
     # 方法作用：记录 LLM 异常次数和失败前耗时，不记录异常正文。
     # Args: self - 当前回调；error - 模型异常；run_id - 调用 ID；kwargs - 扩展字段。
@@ -273,27 +279,59 @@ def get_metrics_registry() -> MetricsRegistry:
 # 方法作用：把一次 LLM 终态写入报表运行计数器；不在报表运行作用域内时是空操作。
 # Args: stats - 挂载回调时捕获的计数器，非报表路径为 None；failed - 本次调用是否失败；tokens - token 总量。
 # Returns: 无返回值。
-def _record_run_stats(stats: Any, *, failed: bool, tokens: int = 0) -> None:
+def _record_run_stats(
+    stats: Any,
+    *,
+    failed: bool,
+    tokens: int = 0,
+    prompt_tokens: int = 0,
+    completion_tokens: int = 0,
+) -> None:
     if stats is None:
         return
     # 写入挂载时捕获的对象，而不是读取 contextvar：回调可能运行在与挂载不同的 task 上。
     from src.reporting.run_stats import record_llm_call_for
 
-    record_llm_call_for(stats, failed=failed, tokens=tokens)
+    record_llm_call_for(
+        stats,
+        failed=failed,
+        tokens=tokens,
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens,
+    )
 
 
 # 方法作用：给现有 ChatModel 附加指标 callback 并保持对象身份不变。
 # Args: model - Provider 返回模型；task - 节点任务名。
 # Returns: 原模型对象。
 def attach_llm_metrics(model: Any, task: str) -> Any:
+    """返回带指标回调的模型副本，**不就地修改传入对象**。
+
+    Provider 会按调用配置缓存 ChatModel 并跨次复用（见 provider_openai 的 `_cached_llms`）。
+    早先的实现往 `model.callbacks` 里 append，等于往一个进程级共享对象上无限追加回调：
+    每次报表生成都留下一批回调，每个回调按引用持着那一次运行的 RunStats，
+    表现为「报表生成时内存飙升、跑完也不下降」，而且缓存实例上的回调越攒越多、
+    之后每次调用都要把它们全跑一遍。
+    """
     try:
         from src.reporting.run_stats import current as _current_run_stats
 
         # 挂载发生在发起该次调用的运行上下文内，按引用捕获即可，无需依赖后续传播。
         callback = LLMMetricsCallback(get_metrics_registry(), task, stats=_current_run_stats())
-        callbacks = list(getattr(model, "callbacks", None) or [])
-        callbacks.append(callback)
-        model.callbacks = callbacks
+        callbacks = [*(getattr(model, "callbacks", None) or []), callback]
+        # 复制而不是就地改：三档依次尝试，最后一档才退回就地修改（并在上面记警告）。
+        copier = getattr(model, "model_copy", None)  # Pydantic v2 / LangChain 0.2+
+        if callable(copier):
+            return copier(update={"callbacks": callbacks})
+        copier = getattr(model, "copy", None)  # Pydantic v1
+        if callable(copier):
+            return copier(update={"callbacks": callbacks})
+        # 普通对象（测试替身、自定义客户端）没有 Pydantic 复制方法：浅拷贝后换掉回调列表。
+        import copy as _copy
+
+        clone = _copy.copy(model)
+        clone.callbacks = callbacks
+        return clone
     except Exception as exc:
         logger.warning("LLM 指标回调附加失败", task=task, error=str(exc), exc_info=True)
     return model
@@ -356,6 +394,23 @@ def _extract_token_usage(response: Any) -> tuple[int, int]:
     completion = int(
         usage.get("completion_tokens", 0) or usage.get("output_tokens", 0) or 0
     )
+    if prompt or completion:
+        return prompt, completion
+
+    # OpenAI 兼容端点在 LangChain 0.2+ 把用量挂在消息的 usage_metadata 上，llm_output
+    # 往往是空的：只读 llm_output 会让每一次调用都记成 0 token（实机 87 次 LLM 调用
+    # 全部为 0，页面「输入/输出 token」永远看不到数）。逐条消息补读，兼容两种键名。
+    for generation_list in getattr(response, "generations", None) or []:
+        for generation in generation_list or []:
+            message = getattr(generation, "message", None)
+            metadata = dict(getattr(message, "usage_metadata", None) or {})
+            if not metadata:
+                info = getattr(generation, "generation_info", None) or {}
+                metadata = dict(info.get("usage") or {})
+            prompt += int(metadata.get("input_tokens", 0) or metadata.get("prompt_tokens", 0) or 0)
+            completion += int(
+                metadata.get("output_tokens", 0) or metadata.get("completion_tokens", 0) or 0
+            )
     return prompt, completion
 
 

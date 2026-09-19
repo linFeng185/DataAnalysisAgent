@@ -70,8 +70,24 @@ def after_generate_sql(state: AnalysisState) -> str:
         return target
     sql = state.get("generated_sql", "")
     if sql == "" or sql.startswith("-- "):
-        logger.info("SQL 生成后路由", target="build_response", reason="SQL 为空或生成失败")
-        return "build_response"
+        # 空 SQL（模型认为缺表/缺字段而拒绝生成）必须给一次改正机会：它是跨轮最常见的
+        # 失败形态——实机五库验收里 3 个单元因它直接判死，而"表名幻觉"同类问题却允许重试。
+        # 上限与表名幻觉一致（min(max_retry_count, 2)），重试耗尽仍按失败收口。
+        from src.config import get_settings
+        # 容错读取：测试与定制部署会注入精简的 settings 桩，缺该字段不应让路由崩掉。
+        max_retry = int(getattr(get_settings(), "max_retry_count", 3) or 3)
+        target = (
+            "generate_sql"
+            if contexts.execution.retry_count < min(max_retry, 2)
+            else "build_response"
+        )
+        logger.info(
+            "SQL 生成后路由",
+            target=target,
+            reason="SQL 为空或生成失败",
+            retry_count=contexts.execution.retry_count,
+        )
+        return target
     logger.info("SQL 生成后路由", target="layer3_validate", reason="SQL 已生成")
     return "layer3_validate"
 
@@ -137,7 +153,7 @@ def should_retry(state: AnalysisState) -> str:
             if contexts.execution.execution_retry_count < get_settings().max_retry_count
             else "build_response"
         )
-    if error_type in {"configuration", "security", "rate_limit"}:
+    if error_type in {"configuration", "security", "rate_limit", "resource_limit"}:
         return "build_response"
     # 兼容旧节点输出：明确配置/资源缺失错误仍然终止。
     if "未配置" in err or "未找到" in err or "not found" in err.lower():
@@ -276,6 +292,13 @@ def after_analyze_result(state: AnalysisState) -> str:
             table_names=supplemental_request.get("table_names", []) or [],
         )
         return "supplemental_query"
+    # 报表单元显式关闭能力子图派发：forecast / report 子图是对话侧能力，各自要求
+    # 自己的输入形态。实机事故：质检单元只是要求「碳排放只筛选未来情景」，被意图
+    # 判成 forecast 后由预测子图接管，已取到的 2016 行被 FORECAST_INPUT_INVALID 覆盖成失败。
+    # 开关由报表侧显式传入，默认关闭，对话路径行为不变。
+    if state.get("suppress_capability_subgraphs"):
+        logger.info("分析完成后能力路由", capability=capability, target="generate_chart", suppressed=True)
+        return "generate_chart"
     target = {
         "forecast": "forecast_subgraph",
         "report": "report_subgraph",

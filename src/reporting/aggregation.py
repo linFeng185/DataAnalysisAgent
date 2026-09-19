@@ -23,8 +23,15 @@ def aggregate_cross_source(units: list[dict[str, Any]], results: list[UnitResult
         return {**base, "status": "not_applicable"}
     logger.debug("跨源样本聚合入口", unit_count=len(units), max_rows=max_rows, max_groups=max_groups)
     try:
-        if not 2 <= len(units) <= 12 or min(max_rows, max_groups, max_bytes) < 1:
-            raise ValueError("跨源分析资源边界无效")
+        # 单元数超预算与资源参数非法是两种不同的降级原因，必须各给一句如实文案：
+        # 用前者的话术描述后者会把排查方向带偏。真实验收里 deep 档 8+6=14 个单元走的是
+        # 第一条，用户看到的却是「跨源分析资源边界无效」这类内部术语。
+        if not 2 <= len(units) <= 12:
+            logger.info("跨源聚合单元数超出预算", unit_count=len(units), min_units=2, max_units=12)
+            raise ValueError(f"本次分析单元数 {len(units)} 个超出跨源聚合预算（2–12 个），已分别分析各来源，不做跨源合并")
+        if min(max_rows, max_groups, max_bytes) < 1:
+            logger.info("跨源聚合资源上限非法", max_rows=max_rows, max_groups=max_groups, max_bytes=max_bytes)
+            raise ValueError("跨源聚合的行数、分组数或字节数上限不是正整数，已跳过跨源合并，改为分别分析各来源")
         result_map = {result.unit_id: result for result in results}
         dimensions = list(dict.fromkeys(str(field) for field in units[0].get("dimensions", [])))
         if not dimensions or len(dimensions) > 3 or any(set(unit.get("dimensions", [])) != set(dimensions) for unit in units):

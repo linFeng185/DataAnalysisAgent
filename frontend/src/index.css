@@ -10,6 +10,21 @@ body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sa
 .automation-form-row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); width: 100%; gap: 16px; }
 .automation-form-row > .ant-space-item { min-width: 0; }
 .automation-notification-body { white-space: pre-wrap; overflow-wrap: anywhere; margin-bottom: 0 !important; }
+/* 应用外壳固定在视口内：顶栏与侧栏不参与滚动，滚动只发生在内容区。
+   此前外壳只有 min-height，超长报表把文档撑高（桌面视口实测 body 高 4800、
+   侧栏高 4736），滚动文档时侧栏菜单被一并滚出视口（菜单顶边 72 → -1128）。 */
+.app-shell {
+  height: 100vh;
+  height: 100dvh;
+  overflow: hidden;
+}
+/* 内容区自己滚：规范下 overflow-x: visible 与 overflow-y: auto 不能共存，横向会一并
+   计算为 auto；窄屏仍由 767 断点的 overflow-x: hidden 收窄，宽屏行为与改前一致。 */
+.app-content { overflow-y: auto; }
+/* 侧栏高度改为视口高度后，菜单在矮屏（如 768 高）可能超出侧栏；滚动放进菜单容器，
+   菜单项仍可完整访问，固定定位的折叠触发器不受影响。 */
+.app-shell .ant-layout-sider-children { overflow-y: auto; }
+
 /* 页面统一容器：旧页面各自写死内联 maxWidth 并居中，宽屏下两侧留大片空白；
    这里统一占满可用宽度，只保留内边距，窄屏体积由下方媒体查询收窄。 */
 .app-page { width: 100%; min-width: 0; margin: 0 auto; padding: 24px; box-sizing: border-box; }
@@ -65,29 +80,51 @@ body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sa
   color: var(--report-text-primary, #1f2329);
   font-family: var(--report-font, inherit);
 }
-.report-document-header { border-bottom: 1px solid var(--report-border, #f0f0f0); padding-bottom: 18px; margin-bottom: 22px; }
-.report-document-header .ant-typography { margin-bottom: 6px; }
-.report-document-header h2.ant-typography { font-family: var(--report-heading-font, inherit); }
+.report-hero {
+  margin-bottom: calc(var(--report-space-unit, 16px) * 1.5);
+  padding: clamp(24px, 4vw, 52px);
+  border-radius: var(--report-radius, 8px);
+  overflow: hidden;
+}
+.report-hero .ant-typography { margin-bottom: 8px; }
+.report-hero h1.ant-typography { max-width: 22ch; margin-top: 8px; font-family: var(--report-heading-font, inherit); font-size: clamp(30px, 4vw, 54px); line-height: 1.08; }
+.report-hero-eyebrow { display: block; font-size: 11px; font-weight: 700; letter-spacing: 0.18em; }
+.report-hero-meta { display: block; margin-top: 12px; }
+.report-hero-kpis { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 1px; margin-top: 28px; background: rgba(255,255,255,0.18); }
+.report-hero-kpi { min-width: 0; padding: 16px 18px; background: color-mix(in srgb, var(--report-hero-bg, #0f1a2e) 90%, transparent); }
+.report-hero-kpi-value { font-variant-numeric: normal; }
+.report-hero-kpi .ant-statistic-content { font-variant-numeric: normal; }
 .report-document-limitations { margin-bottom: 22px; }
 .report-section { scroll-margin-top: 20px; margin: 0 0 calc(var(--report-space-unit, 16px) * 2); }
-.report-section-heading { margin-bottom: 12px; padding-left: 10px; border-left: 3px solid var(--report-accent, transparent); }
+.report-section-heading { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: start; gap: 14px; margin-bottom: 18px; padding-bottom: 12px; border-bottom: 1px solid var(--report-border, #f0f0f0); }
+.report-section-index { padding-top: 4px; color: var(--report-accent, inherit); font-size: 12px; font-weight: 700; font-variant-numeric: tabular-nums; letter-spacing: 0.08em; }
 .report-section-heading .ant-typography { margin: 0 0 4px; font-family: var(--report-heading-font, inherit); }
 .report-section-grid { display: grid; grid-template-columns: repeat(12, minmax(0, 1fr)); gap: var(--report-space-unit, 16px); align-items: start; }
 .report-block { grid-column: span var(--report-desktop-span, 12); min-width: 0; }
-.report-block .ant-card {
-  height: 100%;
-  overflow: hidden;
-  background: var(--report-surface, #ffffff);
-  border-color: var(--report-border, #f0f0f0);
-  border-radius: var(--report-radius, 8px);
-  box-shadow: var(--report-shadow, none);
-}
-.report-block .ant-card-body { min-width: 0; }
-/* 块类型差异化：长文限宽提升可读性，图表与 KPI 调整留白与字号。 */
-.report-block-narrative .ant-card-body { max-width: 72ch; }
+.report-block-title { margin: 0 0 10px !important; font-family: var(--report-heading-font, inherit) !important; font-size: 16px !important; }
+.report-block-content { min-width: 0; }
+/* 图表分组切换容器：分组标签是完整业务名（「订单数 - 地区：华南」），Segmented 的
+   min-content 宽度会把整页撑宽（实机 390px：scrollWidth 646 / clientWidth 390，
+   最大溢出源就是这个控件，宽 636）。滚动放在控件自己的容器里——控件不隐藏、不截断，
+   仍可完整访问，只是窄屏需要横向滑动；桌面下内容不超宽，不会出现滚动条。 */
+.report-chart-group-switch { max-width: 100%; min-width: 0; overflow-x: auto; overflow-y: hidden; }
+/* 容器内保持内容宽度：否则 flex 会把选项压缩到不可读，横向滚动也就无从触发。
+   图表块的 Space/flex 链路同样需要 min-width: 0，否则子项会把父级一起撑开。 */
+.report-chart-group-switch > .ant-segmented { width: max-content; }
+.report-block-content .ant-space,
+.report-block-content .ant-space-item { min-width: 0; max-width: 100%; }
+/* 块类型差异化：长文限宽提升可读性，数字区只在需要纵向对齐时使用等宽字形。 */
+.report-block-narrative .report-block-content { max-width: 72ch; }
+.report-block-table .ant-table-cell,
+.report-block-chart { font-variant-numeric: tabular-nums; }
 .report-block-kpi .ant-statistic-content { color: var(--report-accent, inherit); }
-.report-block-kpi .ant-card-body { padding: calc(var(--report-space-unit, 16px) * 0.75); }
-.report-block-chart .ant-card-body { padding: calc(var(--report-space-unit, 16px) * 1.25); }
+.report-block-pair { grid-column: 1 / -1; min-width: 0; padding: 18px 0; border-top: 1px solid var(--report-border, #f0f0f0); border-bottom: 1px solid var(--report-border, #f0f0f0); }
+.report-block-pair-split { display: grid; grid-template-columns: minmax(0, 62fr) minmax(260px, 38fr); gap: clamp(20px, 3vw, 42px); }
+.report-block-pair-stacked { display: grid; grid-template-columns: minmax(0, 1fr); gap: 18px; }
+.report-block-pair-chart,
+.report-block-pair-narrative { min-width: 0; }
+.report-block-pair-split .report-block-pair-narrative { padding-left: clamp(18px, 2.5vw, 32px); border-left: 1px solid var(--report-border, #f0f0f0); }
+.report-block-pair-stacked .report-block-pair-narrative { max-width: 72ch; padding-top: 16px; border-top: 1px solid var(--report-border, #f0f0f0); }
 .report-relationship-content .ant-typography { margin-bottom: 6px; }
 .report-citation-content .ant-typography { margin-bottom: 6px; }
 .report-findings-method { font-size: 12px; }
@@ -103,6 +140,7 @@ body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sa
   .report-workbench-grid { grid-template-columns: minmax(0, 1fr); }
   .report-section-grid { grid-template-columns: repeat(8, minmax(0, 1fr)); }
   .report-block { grid-column: span var(--report-tablet-span, 8); }
+  .report-hero-kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 
 @media (max-width: 767px) {
@@ -145,6 +183,8 @@ body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sa
   .report-plan-summary { grid-template-columns: minmax(0, 1fr); }
   .report-section-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; }
   .report-block { grid-column: span var(--report-mobile-span, 4); }
-  .report-block .ant-card-head { padding: 0 12px; }
-  .report-block .ant-card-body { padding: 12px; }
+  .report-hero { padding: 24px 18px; border-radius: 0; }
+  .report-hero-kpis { grid-template-columns: minmax(0, 1fr); }
+  .report-block-pair-split { grid-template-columns: minmax(0, 1fr); }
+  .report-block-pair-split .report-block-pair-narrative { padding-top: 16px; padding-left: 0; border-top: 1px solid var(--report-border, #f0f0f0); border-left: 0; }
 }

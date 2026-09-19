@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import calendar
 import re
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from datetime import timezone as datetime_timezone
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -52,6 +52,8 @@ _SECTION_MARK_RE = re.compile(r"(?<![\d.])(?:\d{1,2}\s*[.、)](?!\d)|[一二三�
 _PIECE_TRIM_RE = re.compile(r"^[\s，,、；;。：:和及以及]+|[\s，,、；;。：:和及以及]+$")
 # 单元标识允许的字符集，与 models.AnalysisUnit 的校验保持一致。
 _UNIT_KEY_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
+# 规则拆分的超限披露只描述临时回退计划；模型成功替换单元后必须清除，避免页面谎报。
+_RULE_UNIT_LIMIT_WARNING_PREFIX = "需求共拆分出 "
 # 时间范围单位换算，用于比较各单元跨度并让发散单元继承最长者。
 _SPAN_UNIT_DAYS: dict[str, int] = {"d": 1, "w": 7, "m": 30, "q": 90, "y": 365}
 # 绝对区间：2016-01-01 至 2036-12-31（兼容 到/~/-/—/起 等连接词）。
@@ -62,12 +64,70 @@ _SPAN_UNIT_DAYS: dict[str, int] = {"d": 1, "w": 7, "m": 30, "q": 90, "y": 365}
 _ABSOLUTE_RANGE_RE = re.compile(
     r"((?:19|20)\d{2}[-/.]\d{1,2}[-/.]\d{1,2})\s*(?:至|到|~|-|—|起|/)\s*((?:19|20)\d{2}[-/.]\d{1,2}[-/.]\d{1,2})"
 )
-# 相对区间：最近/近/过去 3 个月、90 天、2 年。
-_RELATIVE_RANGE_RE = re.compile(r"(?:最近|近|过去|往前)\s*(\d{1,4})\s*(天|周|个月|月|年)")
+# 相对区间：最近/近/过去 3 个月、90 天、2 年；数词允许中文（「最近三个月」很常见）。
+_RELATIVE_RANGE_RE = re.compile(r"(?:最近|近|过去|往前)\s*(\d{1,4}|[一二两三四五六七八九十]+)\s*(天|周|个月|月|年)")
 # 年度范围标题：XXXX年…报表/报告/分析（原 year_match 补丁的写法并入统一抽取）。
 _YEAR_HEADING_RE = re.compile(r"(?<!\d)((?:19|20)\d{2})\s*年(?:度)?[^，。；:：]{0,40}(?:报表|报告|分析)")
+# 具名相对时间段：用户说「统计去年的」而不是写具体日期，必须按当前日期换算成区间。
+# 这类说法比「XXXX年…报表」更具体地表达了取数意图，故优先于年度标题匹配。
+_NAMED_PERIOD_RE = re.compile(
+    r"(去年|今年|本年度|前年|上个季度|上季度|本季度|这个季度|上上个月|上个月|上月|本月|这个月|上季)"
+)
 # 相对区间的中文单位到存储码，与 TimeRange 默认值 90d 的单位体系保持一致。
 _RELATIVE_UNIT_CODES: dict[str, str] = {"天": "d", "周": "w", "个月": "m", "月": "m", "年": "y"}
+# 中文数词到阿拉伯数字，供「最近三个月」这类写法换算。
+_CN_NUMERALS: dict[str, int] = {
+    "一": 1, "两": 2, "二": 2, "三": 3, "四": 4, "五": 5,
+    "六": 6, "七": 7, "八": 8, "九": 9, "十": 10,
+}
+
+
+# 方法作用：把中文数词或阿拉伯数字换算成整数。
+# Args: token - 阿拉伯数字或中文数词。
+# Returns: 对应的整数；无法识别时返回 0。
+def _parse_amount(token: str) -> int:
+    text = str(token or "").strip()
+    if text.isdigit():
+        return int(text)
+    if text in _CN_NUMERALS:
+        return _CN_NUMERALS[text]
+    # 「十三」「二十四」这类复合数词：按十位 + 个位拆开。
+    if "十" in text:
+        head, _, tail = text.partition("十")
+        tens = _CN_NUMERALS.get(head, 1) if head else 1
+        ones = _CN_NUMERALS.get(tail, 0) if tail else 0
+        return tens * 10 + ones
+    return 0
+
+
+# 方法作用：把具名相对时间段换算成绝对日期区间。
+# Args: name - 具名时间段词；today - 参照日期。
+# Returns: 对应的 TimeRange；无法识别时返回 None。
+def _named_period_to_range(name: str, today: date) -> TimeRange | None:
+    year = today.year
+    if name == "去年":
+        return TimeRange(kind="absolute", value=f"{year - 1}-01-01/{year - 1}-12-31")
+    if name in {"今年", "本年度"}:
+        return TimeRange(kind="absolute", value=f"{year}-01-01/{year}-12-31")
+    if name == "前年":
+        return TimeRange(kind="absolute", value=f"{year - 2}-01-01/{year - 2}-12-31")
+    if name in {"本月", "这个月"}:
+        start = today.replace(day=1)
+        end = (start + timedelta(days=32)).replace(day=1) - timedelta(days=1)
+        return TimeRange(kind="absolute", value=f"{start.isoformat()}/{end.isoformat()}")
+    if name in {"上个月", "上月"}:
+        end = today.replace(day=1) - timedelta(days=1)
+        return TimeRange(kind="absolute", value=f"{end.replace(day=1).isoformat()}/{end.isoformat()}")
+    if name in {"本季度", "这个季度"}:
+        start = today.replace(month=(today.month - 1) // 3 * 3 + 1, day=1)
+        end = (start + timedelta(days=93)).replace(day=1) - timedelta(days=1)
+        return TimeRange(kind="absolute", value=f"{start.isoformat()}/{end.isoformat()}")
+    if name in {"上季度", "上个季度", "上季"}:
+        current_start = today.replace(month=(today.month - 1) // 3 * 3 + 1, day=1)
+        end = current_start - timedelta(days=1)
+        start = end.replace(month=(end.month - 1) // 3 * 3 + 1, day=1)
+        return TimeRange(kind="absolute", value=f"{start.isoformat()}/{end.isoformat()}")
+    return None
 
 
 # 方法作用：把时间范围值换算成天数，用于比较跨度长短。
@@ -86,6 +146,37 @@ def _span_days(time_range: Any) -> int:
     return int(match.group(1)) * _SPAN_UNIT_DAYS.get(match.group(2).lower(), 1)
 
 
+# 方法作用：把缺同比基期单元的时间范围向前扩展一个完整年度。
+# Args: time_range - 原分析单元的时间范围。
+# Returns: 覆盖原窗口及去年同期的新时间范围。
+def expand_time_range_for_yoy(time_range: TimeRange) -> TimeRange:
+    """相对窗口按原单位扩展，绝对窗口只前移起点，all 保持不变。"""
+    if time_range.kind == "all":
+        return time_range.model_copy()
+    if time_range.kind == "absolute":
+        try:
+            start_text, end_text = str(time_range.value).split("/", maxsplit=1)
+            start = date.fromisoformat(start_text)
+            try:
+                expanded_start = start.replace(year=start.year - 1)
+            except ValueError:
+                expanded_start = start.replace(year=start.year - 1, day=28)
+            return TimeRange(
+                kind="absolute",
+                value=f"{expanded_start.isoformat()}/{date.fromisoformat(end_text).isoformat()}",
+            )
+        except (TypeError, ValueError):
+            logger.warning("同比补查绝对时间范围无法解析，按相对天数扩展", value=time_range.value)
+    match = re.fullmatch(r"(\d+)\s*([dwmqy])", str(time_range.value or "").strip(), re.IGNORECASE)
+    if match:
+        amount = int(match.group(1))
+        unit = match.group(2).lower()
+        annual_increment = {"d": 366, "w": 53, "m": 12, "q": 4, "y": 1}[unit]
+        return TimeRange(kind="relative", value=f"{amount + annual_increment}{unit}")
+    # 非规范旧值按已能估算的跨度转成天数；至少保留默认 90 天窗口。
+    return TimeRange(kind="relative", value=f"{max(_span_days(time_range), 90) + 366}d")
+
+
 # 方法作用：把「年-月-日」的各种分隔符写法规范成 ISO 日期。
 # Args: token - 正则捕获到的日期串，如 2016-1-1、2016.01.01、2016/1/1。
 # Returns: YYYY-MM-DD 格式的日期串。
@@ -97,35 +188,72 @@ def _normalize_date(token: str) -> str:
     return normalized
 
 
-# 方法作用：从需求文本里抽取时间范围，绝对区间优先，其次是年度标题与相对区间。
+# 「你要求的分析」是前端把上一版计划渲染成文字时的固定标题。这段文字被粘回需求里
+# 再解析一次，等于把计划自己的输出当成用户约束：实机事故里用户在开头写「时间范围是去年」，
+# 计划却按这段渲染文本里的 2016-01-01 至 2036-12-31 取了 21 年。
+_RENDERED_PLAN_BLOCK_RE = re.compile(r"^[ \t]*你要求的分析[ \t]*$", re.MULTILINE)
+
+
+# 方法作用：剥离需求末尾粘贴进来的上一版计划渲染块。
+# Args: text - 原始需求文本。
+# Returns: 去掉渲染块后的需求文本；渲染块不在正文之后时原样返回。
+def _strip_rendered_plan_block(text: str) -> str:
+    match = _RENDERED_PLAN_BLOCK_RE.search(text)
+    # 只有该标题出现在正文之后才剥离：整段需求就以它开头时，剥离会把需求清空。
+    if match is not None and match.start() > 0:
+        logger.info("需求中的计划渲染块已剥离", dropped_chars=len(text) - match.start())
+        return text[: match.start()]
+    return text
+
+
+# 方法作用：从需求文本里抽取时间范围，**以最早出现的写法为准**。
 # Args: text - 用户需求或单元问题原文。
-# Returns: 识别到的 TimeRange；三种写法都不含时返回 None，由调用方决定默认值。
+# Returns: 识别到的 TimeRange；四种写法都不含时返回 None，由调用方决定默认值。
 def extract_time_range(text: str) -> TimeRange | None:
+    """按出现位置取范围，而不是按写法类别：用户的第一句才是报表级口径。
+
+    原先绝对区间无条件优先，只要需求后文出现任何一个日期区间，开头写的
+    「时间范围是去年」就会被静默覆盖——用户看到的是完全不同的时间跨度。
+    """
     logger.debug("时间范围抽取入口", text_chars=len(str(text or "")))
-    raw = str(text or "")
+    raw = _strip_rendered_plan_block(str(text or ""))
+    # (出现位置, 同位置时的写法优先级, 结果)：位置相同才用优先级兜底。
+    candidates: list[tuple[int, int, TimeRange]] = []
     match = _ABSOLUTE_RANGE_RE.search(raw)
     if match:
         start = _normalize_date(match.group(1))
         end = _normalize_date(match.group(2))
-        result = TimeRange(kind="absolute", value=f"{start}/{end}")
-        logger.info("时间范围抽取完成", kind=result.kind, value=result.value)
-        return result
+        candidates.append((match.start(), 0, TimeRange(kind="absolute", value=f"{start}/{end}")))
+    match = _NAMED_PERIOD_RE.search(raw)
+    if match:
+        named = _named_period_to_range(match.group(1), date.today())
+        if named is not None:
+            candidates.append((match.start(), 1, named))
     match = _YEAR_HEADING_RE.search(raw)
     if match:
         # 年度标题代表全年，起止固定为该年 1 月 1 日至 12 月 31 日。
         year = int(match.group(1))
-        result = TimeRange(kind="absolute", value=f"{year}-01-01/{year}-12-31")
-        logger.info("时间范围抽取完成", kind=result.kind, value=result.value)
-        return result
+        candidates.append((match.start(), 2, TimeRange(kind="absolute", value=f"{year}-01-01/{year}-12-31")))
     match = _RELATIVE_RANGE_RE.search(raw)
     if match:
-        amount = int(match.group(1))
+        amount = _parse_amount(match.group(1))
         unit = _RELATIVE_UNIT_CODES.get(match.group(2), "d")
-        result = TimeRange(kind="relative", value=f"{amount}{unit}")
-        logger.info("时间范围抽取完成", kind=result.kind, value=result.value)
-        return result
-    logger.info("时间范围抽取完成", kind="", value="")
-    return None
+        if amount > 0:
+            candidates.append((match.start(), 3, TimeRange(kind="relative", value=f"{amount}{unit}")))
+        else:
+            logger.info("时间范围抽取跳过", reason="数量无法解析", token=match.group(1))
+    if not candidates:
+        logger.info("时间范围抽取完成", kind="", value="")
+        return None
+    position, _priority, chosen = min(candidates, key=lambda item: (item[0], item[1]))
+    logger.info(
+        "时间范围抽取完成",
+        kind=chosen.kind,
+        value=chosen.value,
+        position=position,
+        candidate_count=len(candidates),
+    )
+    return chosen
 # 被否定的调度词，用户说“不要定时”时不能按定时意图处理；同样只认多字否定词。
 _NEGATED_SCHEDULE_RE = re.compile(
     r"(?:不要|不需要|无需|不用|禁止)\s*(?:定时|以后|之后|周期|每小时|每天|每周|每月)"
@@ -176,7 +304,7 @@ class ReportPlanner:
             raise ValueError("页面有效期必须在 1 到 90 天之间")
         permanent = any(word in normalized for word in ("永久保存", "永久有效", "永不过期"))
         share = self._parse_share(normalized)
-        units = self._build_units(normalized)
+        units = self._build_units(normalized, warnings=warnings)
         if execution_mode == "scheduled" and frequency is None:
             warnings.append("已识别定时意图，但缺少每小时/每天/每周/每月频率，需要确认")
         if permanent:
@@ -304,10 +432,10 @@ class ReportPlanner:
         return None
 
     # 方法作用：按用户书写的章节结构拆分业务主题，缺少章节结构时回退到分句切分。
-    # Args: text - 用户报表描述。
+    # Args: text - 用户报表描述；warnings - 可选计划提示列表，发生单元裁剪时写入披露。
     # Returns: 有界且唯一的 AnalysisUnit 列表。
     @staticmethod
-    def _build_units(text: str) -> list[AnalysisUnit]:
+    def _build_units(text: str, *, warnings: list[str] | None = None) -> list[AnalysisUnit]:
         cleaned = _SCHEDULE_NOISE_RE.sub(" ", text)
         # 用户显式写了编号章节时，章节就是分析单元边界；章节内部的并列词不再切分。
         pieces = ReportPlanner._split_sections(cleaned)
@@ -318,7 +446,10 @@ class ReportPlanner:
             pieces = [text[:4000]]
         units: list[AnalysisUnit] = []
         seen: set[str] = set()
-        for index, piece in enumerate(pieces[:max_plan_units()], start=1):
+        limit = max_plan_units()
+        if len(pieces) > limit and warnings is not None:
+            warnings.append(f"需求共拆分出 {len(pieces)} 个分析单元，受单次上限限制仅保留前 {limit} 个")
+        for index, piece in enumerate(pieces[:limit], start=1):
             topic = piece[:4000]
             key = ReportPlanner._topic_key(topic, index)
             if key in seen:
@@ -436,12 +567,20 @@ class ReportPlanner:
             raw_units = result.get("analysis_units")
             if not isinstance(raw_units, list):
                 raise ValueError("结构化模型未返回分析单元列表")
+            raw_units = [item for item in raw_units if isinstance(item, dict)]
             proposed = self._coerce_llm_units(
-                [item for item in raw_units if isinstance(item, dict)],
+                raw_units,
                 allowed_datasources=set(plan.requested_datasources),
                 prompt=prompt,
             )
             plan = self._apply_proposed_units(plan, proposed)
+            plan = self._with_rejected_unit_warning(
+                plan,
+                candidate_count=min(len(raw_units), max_plan_units()),
+                accepted_count=len(proposed),
+                source="模型规划",
+            )
+            plan = self._with_unit_limit_warning(plan, len(raw_units))
         except Exception as exc:
             logger.warning("报表结构化模型补充失败，回退规则计划", error_type=type(exc).__name__, error=str(exc))
             plan = self._with_planner_warning(plan)
@@ -488,12 +627,20 @@ class ReportPlanner:
                 system_values={"max_units": str(max_plan_units())},
                 metadata={"node": "report_planner"},
             )
+            raw_units = [unit.model_dump() for unit in output.analysis_units]
             proposed = self._coerce_llm_units(
-                [unit.model_dump() for unit in output.analysis_units],
+                raw_units,
                 allowed_datasources=set(allowed),
                 prompt=prompt,
             )
             plan = self._apply_proposed_units(plan, proposed)
+            plan = self._with_rejected_unit_warning(
+                plan,
+                candidate_count=min(len(raw_units), max_plan_units()),
+                accepted_count=len(proposed),
+                source="模型规划",
+            )
+            plan = self._with_unit_limit_warning(plan, len(raw_units))
             logger.info("报表规划模型完成拆解", unit_count=len(plan.analysis_units))
         except Exception as exc:
             logger.warning("报表规划模型不可用，回退规则拆分", error_type=type(exc).__name__, error=str(exc))
@@ -513,6 +660,11 @@ class ReportPlanner:
         # 重新走完整计划校验，避免直接给 Pydantic 实例赋值绕过数据源和 unit_id 约束。
         candidate_data = plan.model_dump(mode="json")
         candidate_data["analysis_units"] = [unit.model_dump(mode="json") for unit in proposed]
+        candidate_data["warnings"] = [
+            warning
+            for warning in candidate_data.get("warnings", [])
+            if not str(warning).startswith(_RULE_UNIT_LIMIT_WARNING_PREFIX)
+        ]
         candidate = ReportPlan.model_validate(candidate_data)
         if set(candidate.requested_datasources) != allowed_datasources:
             raise ValueError("结构化模型改变了已授权数据源集合")
@@ -567,12 +719,19 @@ class ReportPlanner:
             # 发散失败只降级留痕，主链路必须继续。
             logger.warning("报表计划期发散失败，按原需求继续", divergence=divergence, exc_info=True)
             return self._with_warnings(plan, ["发散分析不可用，已按原需求生成计划"])
+        raw_units = [item.model_dump(mode="python") for item in output.proposed_units]
         proposed = self._coerce_diverge_units(
-            [item.model_dump(mode="python") for item in output.proposed_units],
+            raw_units,
             allowed_datasources=set(datasources or plan.requested_datasources),
             decided_by="plan",
             limit=limit,
             reference_units=user_units,
+        )
+        plan = self._with_rejected_unit_warning(
+            plan,
+            candidate_count=min(len(raw_units), limit),
+            accepted_count=len(proposed),
+            source="计划期发散",
         )
         if not proposed:
             logger.info("报表计划期发散无建议", divergence=divergence)
@@ -593,8 +752,9 @@ class ReportPlanner:
         decided_by: str,
         limit: int,
         reference_units: list[AnalysisUnit],
+        time_range_override: TimeRange | None = None,
     ) -> list[AnalysisUnit]:
-        time_range = ReportPlanner._inherit_time_range(reference_units)
+        time_range = time_range_override or ReportPlanner._inherit_time_range(reference_units)
         units: list[AnalysisUnit] = []
         for raw in raw_units[:limit]:
             question = str(raw.get("question") or "").strip()
@@ -618,6 +778,13 @@ class ReportPlanner:
                 "priority": "secondary",
                 "time_range": time_range.model_dump(mode="python"),
             }
+            # 标题与 question 同一次发散调用产出，这里只透传，不额外起模型调用。
+            # 契约的 12 字上限拦的是模型，单元字段上限更宽，超长值会让整个单元通不过
+            # AnalysisUnit 校验被静默跳过（业务问题一起消失），故按单元上限收窄：
+            # 与 _coerce_llm_units 处理 title 的做法一致，上限同用 _UNIT_TITLE_MAX_CHARS。
+            title = " ".join(str(raw.get("title") or "").split())
+            if title:
+                payload["title"] = title[:_UNIT_TITLE_MAX_CHARS]
             try:
                 units.append(AnalysisUnit.model_validate(payload))
             except ValueError:
@@ -643,6 +810,40 @@ class ReportPlanner:
     def _with_warnings(plan: ReportPlan, messages: list[str]) -> ReportPlan:
         merged = list(dict.fromkeys([*plan.warnings, *[item for item in messages if item.strip()]]))
         return plan.model_copy(update={"warnings": merged})
+
+    # 方法作用：模型单元超过配置上限时在计划上追加可见裁剪说明。
+    # Args: plan - 已采用模型单元的计划；proposed_count - 模型原始有效字典数量。
+    # Returns: 未超限时原样返回，超限时返回带 warning 的计划。
+    @staticmethod
+    def _with_unit_limit_warning(plan: ReportPlan, proposed_count: int) -> ReportPlan:
+        limit = max_plan_units()
+        if proposed_count <= limit:
+            return plan
+        return ReportPlanner._with_warnings(
+            plan,
+            [f"模型共提出 {proposed_count} 个分析单元，受单次上限限制仅保留前 {limit} 个"],
+        )
+
+    # 方法作用：候选单元部分未通过服务端校验时在计划上追加聚合披露。
+    # Args: plan - 已采用合法单元的计划；candidate_count - 实际进入校验的候选数；accepted_count - 通过数；source - 候选来源名称。
+    # Returns: 全部通过时原样返回，否则返回带拒绝数量提示的计划。
+    @staticmethod
+    def _with_rejected_unit_warning(
+        plan: ReportPlan,
+        *,
+        candidate_count: int,
+        accepted_count: int,
+        source: str,
+    ) -> ReportPlan:
+        rejected_count = max(0, candidate_count - accepted_count)
+        if rejected_count == 0:
+            return plan
+        return ReportPlanner._with_warnings(
+            plan,
+            [
+                f"{source}共提出 {candidate_count} 个候选单元，其中 {rejected_count} 个未通过服务端校验，未纳入计划"
+            ],
+        )
 
     # 方法作用：把模型给出的原始单元规范化为通过契约校验的 AnalysisUnit。
     # Args: raw_units - 模型输出的单元字典列表；allowed_datasources - 计划已授权数据源；prompt - 用户原始描述。

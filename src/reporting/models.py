@@ -126,6 +126,21 @@ def max_document_blocks() -> int:
     return max(_MIN_DOCUMENT_BLOCKS, max_plan_units() * _UNIT_BLOCK_BUDGET + _FIXED_BLOCK_BUDGET)
 
 
+# 方法作用：返回页面数据清单（钻取与表格）允许保留的行数上限。
+# Args: 无。
+# Returns: 配置的行数上限；配置读取失败时回退到 200。
+def max_page_rows() -> int:
+    """只约束页面清单：图表改用完整结果透视，不再受这个上限影响。"""
+    try:
+        from src.config import get_settings
+
+        return int(getattr(get_settings(), "report_max_page_rows", 0) or 200)
+    except Exception:
+        # 配置读不到不应让出页失败：回退到与默认值一致的保守上限。
+        logger.warning("页面行数上限读取失败，回退默认值", fallback=200, exc_info=True)
+        return 200
+
+
 # 因果措辞黑名单：提示词约束是软约束，服务端必须硬校验。
 _CAUSAL_PHRASE_RE = re.compile(r"导致|造成|因为|引起|致使|归因于")
 
@@ -512,6 +527,9 @@ class ReportRunRecord(BaseModel):
     query_count: int = 0
     row_count: int = 0
     token_usage: int = 0
+    # token 用量的输入/输出拆分：明细页要分别展示"用了多少输入、多少输出"。
+    prompt_token_usage: int = 0
+    completion_token_usage: int = 0
     # 以下为运行期真实计数，与 query_count 的配额估算口径相互独立。
     llm_call_count: int = 0
     llm_failure_count: int = 0
@@ -535,6 +553,8 @@ class ReportRunRecord(BaseModel):
             "llm_failure_count": self.llm_failure_count,
             "llm_success_count": max(0, self.llm_call_count - self.llm_failure_count),
             "llm_token_usage": self.token_usage,
+            "llm_prompt_tokens": self.prompt_token_usage,
+            "llm_completion_tokens": self.completion_token_usage,
             "sql_query_count": self.sql_query_count,
             "sql_success_count": self.sql_success_count,
             "sql_failure_count": self.sql_failure_count,

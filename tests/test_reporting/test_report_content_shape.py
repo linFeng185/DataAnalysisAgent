@@ -12,8 +12,6 @@ from __future__ import annotations
 
 from typing import Any
 
-import pytest
-
 from src.reporting.document import build_report_document
 from src.reporting.models import AnalysisUnit, ReportPlan, UnitResult
 from src.reporting.relations import RelationEvidence
@@ -70,6 +68,26 @@ class TestReportContentShape:
         # 图表与分析仍在：去掉明细不等于去掉内容
         types = _block_types(artifact)
         assert "chart" in types and "kpi" in types
+
+    # 方法作用：验证文档层防御性裁剪分析结果时向页面披露被省略数量。
+    # Args: self - 测试实例；monkeypatch - pytest 补丁工具。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    def test_result_limit_trimming_is_disclosed(self, monkeypatch) -> None:
+        """配置在计划生成后收紧时，超出上限的区段不能无声消失。"""
+        # Arrange
+        import src.reporting.document as document_module
+
+        plan = _plan("销售", "库存", "客户")
+        results = [_result("unit_1"), _result("unit_2"), _result("unit_3")]
+        monkeypatch.setattr(document_module, "max_plan_units", lambda: 2)
+
+        # Act
+        artifact = build_report_document(plan, results)
+
+        # Assert
+        assert {section.id for section in artifact.document.sections} >= {"unit_1", "unit_2"}
+        assert "unit_3" not in {section.id for section in artifact.document.sections}
+        assert any("3" in item and "2" in item and "分析单元" in item for item in artifact.document.limitations)
 
     # 方法作用：验证区段标题使用业务短标题而不是英文标识。
     # Args: self - 测试实例。
@@ -156,21 +174,22 @@ class TestReportContentShape:
         assert units[1].title and len(units[1].title) <= 20
         assert units[2].title == ""
 
-    # 方法作用：验证契约层把模型标题限制在 12 字。
+    # 方法作用：验证契约层把模型标题收敛到 12 字，且越界只截断不拒收。
     # Args: self - 测试实例。
     # Returns: 无返回值，断言失败时由 pytest 报告。
     def test_plan_unit_contract_caps_title_length(self) -> None:
-        """标题进契约才拦得住；只靠提示词约束会让长句直接灌进区段标题。"""
-        # Arrange
-        from pydantic import ValidationError
+        """标题进契约才拦得住；但展示字段越界不能拖垮整批单元。
 
+        历史教训：把上限做成硬拒收时，模型多写一个字就会让 parse_json_model
+        整批校验失败，整个计划降级成规则拆分的标题残渣。
+        """
+        # Arrange
         from src.llm.output_contracts import ReportPlanUnit
 
         # Act / Assert
         assert ReportPlanUnit(question="销售分析", title="销售基盘").title == "销售基盘"
         assert ReportPlanUnit(question="销售分析").title == ""
-        with pytest.raises(ValidationError):
-            ReportPlanUnit(question="销售分析", title="超" * 13)
+        assert ReportPlanUnit(question="销售分析", title="超" * 13).title == "超" * 12
 
     # 方法作用：验证模型标题从拆解输出一路走到页面区段标题。
     # Args: self - 测试实例。

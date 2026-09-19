@@ -574,6 +574,20 @@ async def validate_and_execute_sql(
     max_rows: int | None = None,
     tenant_id: int | None = None,
 ) -> SQLExecutionResult:
+    from src.reporting.run_stats import record_sql_execution, try_reserve_sql_query
+
+    if not try_reserve_sql_query():
+        # 额度检查必须早于 SQL 解析、Registry 解析和 Connector 调用；否则所谓硬上限
+        # 只能在成本已经发生后记账。被拒调用仍计入真实尝试数与失败数。
+        result = _failure_result(
+            sql,
+            dialect,
+            "本次报表的查询次数已达到预占上限",
+            "resource_limit",
+            [{"type": "resource_limit", "message": "本次报表的查询次数已达到预占上限"}],
+        )
+        record_sql_execution(failed=True)
+        return result
     result = await _run_validate_and_execute_sql(
         sql,
         datasource,
@@ -583,8 +597,6 @@ async def validate_and_execute_sql(
         tenant_id=tenant_id,
     )
     # 校验未通过而未提交执行的调用同样计数——它确实被尝试过。
-    from src.reporting.run_stats import record_sql_execution
-
     record_sql_execution(failed=not result.success)
     return result
 

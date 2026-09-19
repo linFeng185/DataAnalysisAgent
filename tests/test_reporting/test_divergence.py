@@ -188,6 +188,7 @@ class TestPlanPhaseDiverge:
 
         # Assert
         assert added == ["履约时效"]
+        assert any("2" in warning and "1" in warning and "未通过服务端校验" in warning for warning in plan.warnings)
 
     # 方法作用：验证越权数据源被清空而不是保留。
     # Args: self - 测试实例；monkeypatch - pytest 补丁工具。
@@ -380,6 +381,26 @@ class TestRuntimeDecision:
         # Act / Assert
         assert report_decide_supplement(state) == "continue"
 
+    # 方法作用：验证 SQL 额度耗尽时不进入补查模型节点。
+    # Args: self - 测试实例。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    def test_sql_query_budget_exhaustion_skips_supplement(self) -> None:
+        """补查必然产生查询；无剩余额度时不得先白耗一次模型调用再被 SQL 边界拒绝。"""
+        # Arrange
+        from src.graph.subgraphs.report_workbench import report_decide_supplement
+        from src.reporting.run_stats import activate, deactivate
+
+        state = {"plan": _plan("standard"), "unit_findings": [_finding("high")]}
+        _stats, token = activate(sql_query_limit=0)
+        try:
+            # Act
+            target = report_decide_supplement(state)
+        finally:
+            deactivate(token)
+
+        # Assert
+        assert target == "continue"
+
 
 class TestRuntimeSupplement:
     """验证 23.17：运行期补查节点只执行新增单元并并回状态。"""
@@ -467,6 +488,45 @@ class TestRuntimeSupplement:
         # Assert
         assert update.get("runtime_units") is None
         assert update["divergence_round"] == 1
+
+    # 方法作用：验证补查模型失败时把降级事实写入已有单元，而不是只记日志。
+    # Args: self - 测试实例；monkeypatch - pytest 补丁工具。
+    # Returns: 无返回值。
+    async def test_supplement_failure_is_disclosed_in_unit_warnings(self, monkeypatch) -> None:
+        """运行期补查失败后报表仍发布，但页面必须说明按现有结果继续。"""
+        # Arrange
+        import src.llm.client as llm_client
+        import src.llm.invocation as llm_invocation
+        from src.graph.subgraphs.report_workbench import report_plan_supplement
+        from src.reporting.models import UnitResult
+
+        monkeypatch.setattr(llm_client, "is_task_llm_available", lambda task: True)
+
+        # 方法作用：模拟补查模型在外部调用边界失败。
+        # Args: prompt_id - 提示词标识；sections - 动态分区；kwargs - 其余调用参数。
+        # Returns: 不返回，始终抛出瞬态错误。
+        async def fail_invoke(prompt_id, sections, **kwargs):
+            raise TimeoutError("supplement timeout")
+
+        monkeypatch.setattr(llm_invocation, "invoke_structured", fail_invoke)
+        existing = UnitResult(unit_id="u1", status="success", rows=[{"金额": 2}])
+        state = {
+            "plan": _plan("standard"),
+            "unit_findings": [_finding()],
+            "unit_results": [existing],
+            "resolved_units": [{"unit_id": "u1", "question": "生成销售报表"}],
+            "authorized_datasources": {"sales": {"allowed_columns": ["金额"]}},
+            "divergence_round": 0,
+        }
+
+        # Act
+        update = await report_plan_supplement(state)
+
+        # Assert
+        assert update.get("runtime_units") is None
+        warning = next(item for item in update["unit_results"][0].warnings if "补查" in item)
+        assert "未生成可执行单元" in warning
+        assert "按现有结果继续" in warning
 
 
 class TestReservation:
@@ -556,3 +616,142 @@ class TestPromptVariableContract:
         # Assert：渲染必须成功（缺变量会在这里抛 ValueError），且额度出现在正文里
         body = get_prompt_definition(captured["prompt_id"]).render(**captured["system_values"])
         assert "3" in body
+
+
+class TestDivergeUnitTitle:
+    """缺口 A：发散单元必须带模型给出的精简标题，不能回退成截断的问题原文。
+
+    真实五库验收产物：14 个区段里 6 个发散单元标题是「按年月、地区、渠道统计订单取消率与取消订…」
+    这类截断文本，根因是契约没有 title 字段、解析层也从不赋值。
+    """
+
+    # 方法作用：验证发散与补查契约都暴露 title，且边界与 report.plan 单元完全一致。
+    # Args: self - 测试实例。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    def test_diverge_contracts_expose_title(self) -> None:
+        """契约没有 title 字段时模型无处可给，页面只能退回截断的问题原文。"""
+        # Arrange
+
+        from src.llm.output_contracts import (
+            ReportDivergeUnit,
+            ReportPlanUnit,
+            ReportSupplementUnit,
+        )
+
+        # Act / Assert：默认空、12 字可过、13 字被截断到 12 字，三个单元契约逐一对齐。
+        # 越界只截断不拒收：展示字段的越界不得让整批建议被 parse_json_model 打回。
+        assert ReportDivergeUnit(question="退款趋势").title == ""
+        assert ReportSupplementUnit(question="退款趋势").title == ""
+        assert ReportPlanUnit(question="销售分析", title="销" * 12).title == "销" * 12
+        assert ReportDivergeUnit(question="退款趋势", title="退" * 12).title == "退" * 12
+        assert ReportSupplementUnit(question="退款趋势", title="补" * 12).title == "补" * 12
+        assert ReportDivergeUnit(question="退款趋势", title="退" * 13).title == "退" * 12
+        assert ReportSupplementUnit(question="退款趋势", title="补" * 13).title == "补" * 12
+        assert ReportPlanUnit(question="销售分析", title="销" * 13).title == "销" * 12
+
+    # 方法作用：验证两个发散提示词都要求模型给出标题，措辞与 report.plan 一致。
+    # Args: self - 测试实例。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    def test_diverge_prompts_ask_for_unit_title(self) -> None:
+        """只加契约不加提示词，模型不会给 title；措辞不一致会让模型按不同标准产出。"""
+        # Arrange
+        from src.llm.prompts import get_prompt_definition
+
+        # Act
+        plan_template = get_prompt_definition("report.plan").template
+        templates = {prompt_id: get_prompt_definition(prompt_id).template for prompt_id in ("report.diverge", "report.supplement")}
+
+        # Assert
+        for prompt_id, template in templates.items():
+            assert '"title"' in template, f"{prompt_id} 的输出示例里没有 title"
+            assert "12 个字" in template, f"{prompt_id} 没有字数上限"
+            assert "维度罗列" in template, f"{prompt_id} 没有禁止维度罗列开头的措辞"
+        assert "不超过 12 个字，概括业务主题" in plan_template
+        assert "不超过 12 个字，概括业务主题" in templates["report.diverge"]
+        assert "不超过 12 个字，概括业务主题" in templates["report.supplement"]
+
+    # 方法作用：验证发散单元解析层透传标题，且超长标题只收窄不丢单元。
+    # Args: self - 测试实例。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    def test_diverge_unit_title_is_passed_through_and_narrowed(self) -> None:
+        """超长标题曾让整个单元通不过 AnalysisUnit 校验被静默丢弃，问题一起消失。"""
+        # Arrange
+        from src.reporting.models import _UNIT_TITLE_MAX_CHARS
+        from src.reporting.planner import ReportPlanner
+
+        raw_units = [
+            {"question": "按年月、地区、渠道统计订单取消率与取消订单数", "rationale": "与销售趋势相关", "title": "订单取消率"},
+            {"question": "库存不足对履约的影响", "rationale": "与取消率相关", "title": "溢" * 200},
+            {"question": "没有标题的补充方向", "rationale": "相关"},
+            {"question": "支付方式分布", "rationale": "相关", "title": "  支付   失败分布  "},
+        ]
+
+        # Act
+        units = ReportPlanner._coerce_diverge_units(
+            raw_units,
+            allowed_datasources=set(),
+            decided_by="plan",
+            limit=4,
+            reference_units=[],
+        )
+
+        # Assert
+        assert len(units) == 4, "超长标题不得导致发散单元被整体拒收"
+        assert units[0].title == "订单取消率"
+        assert units[1].title and len(units[1].title) <= _UNIT_TITLE_MAX_CHARS
+        assert units[2].title == ""
+        assert units[3].title == "支付 失败分布"
+        assert all(unit.decided_by == "plan" for unit in units)
+        # 运行期补查走同一个 static 方法（report_workbench 传 decided_by="runtime"），
+        # 所以标题透传对两个阶段同时生效，不需要第二处改动。
+        runtime_units = ReportPlanner._coerce_diverge_units(
+            raw_units,
+            allowed_datasources=set(),
+            decided_by="runtime",
+            limit=4,
+            reference_units=[],
+        )
+        assert [unit.title for unit in runtime_units] == [unit.title for unit in units]
+        assert all(unit.decided_by == "runtime" for unit in runtime_units)
+
+    # 方法作用：验证带标题的发散建议一路走到页面区段标题。
+    # Args: self - 测试实例；monkeypatch - pytest 补丁工具。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    async def test_diverge_title_reaches_section_title(self, monkeypatch) -> None:
+        """锁住「模型输出 → 计划单元 → 页面区段标题」的完整链路，正是验收里断掉的那一段。"""
+        # Arrange
+        import src.llm.client as llm_client
+        import src.llm.invocation as llm_invocation
+        from src.llm.output_contracts import ReportDivergeOutput
+        from src.reporting.document import build_report_document
+        from src.reporting.models import UnitResult
+        from src.reporting.planner import ReportPlanner
+
+        question = "按年月、地区、渠道统计订单取消率与取消订单数"
+        monkeypatch.setattr(llm_client, "is_task_llm_available", lambda task: True)
+
+        async def fake_invoke(prompt_id, sections, **kwargs):
+            return ReportDivergeOutput(proposed_units=[
+                {"question": question, "title": "订单取消率", "rationale": "与销售趋势相关"},
+            ])
+
+        monkeypatch.setattr(llm_invocation, "invoke_structured", fake_invoke)
+
+        # Act
+        plan = await ReportPlanner().diverge(_plan("standard"), datasources=["sales"])
+        diverged = [unit for unit in plan.analysis_units if unit.origin == "diverged"]
+        artifact = build_report_document(plan, [
+            UnitResult(
+                unit_id=diverged[0].unit_id,
+                datasource="sales",
+                rows=[{"year_month": "2026-06", "net_sales": 200.0}],
+                columns=["year_month", "net_sales"],
+            ),
+        ])
+
+        # Assert
+        assert diverged and diverged[0].title == "订单取消率"
+        section = next(item for item in artifact.document.sections if item.id == diverged[0].unit_id)
+        assert section.title == "订单取消率"
+        assert not section.title.endswith("…")
+        assert section.title != question[:20]
