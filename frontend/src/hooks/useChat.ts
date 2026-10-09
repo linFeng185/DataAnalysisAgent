@@ -13,6 +13,7 @@ import type { ChatAbortController } from '../api/client';
 import type { ActionRequestPayload, ChatTurnData } from '../types';
 import { useAuth } from './AuthContext';
 import { clearChatStorage } from './chatStorage';
+import { applyPublicEvent, type PublicAssistantState } from './chatPresentation';
 
 interface ProgressNode {
   status: 'pending' | 'running' | 'done' | 'error';
@@ -22,7 +23,7 @@ interface StreamBuffer {
   node: string;
   tokens: string;
 }
-interface AssistantContent {
+interface AssistantContent extends PublicAssistantState {
   decisionSummary: string;
   tokens: string;
   streamBuffers: Record<string, StreamBuffer>;
@@ -49,6 +50,7 @@ function emptyAssistant(): AssistantContent {
   return {
     decisionSummary: '', tokens: '', sql: '',
     streamBuffers: {},
+    activeStreamId: '', processEnabled: false, processSummaries: {},
     progressNodes: {}, validationErrors: [], analysisText: '',
   };
 }
@@ -66,7 +68,8 @@ function turnFromData(d: ChatTurnData, datasource: string): ChatTurn {
     assistant: {
       ...emptyAssistant(),
       sql: (finalResult?.sql as string) || d.sql,
-      decisionSummary: (finalResult?.decision_summary as string) || '',
+      decisionSummary: finalResult?.process_summary_enabled ? (finalResult?.decision_summary as string) || '' : '',
+      processEnabled: finalResult?.process_summary_enabled === true,
       tokens: d.assistant_summary,
     },
     finalResult,
@@ -158,8 +161,38 @@ function useChatState() {
     const cid = _llmConnectionId;
     aborterRef.current = streamChat(query, datasource, sid,
       (evt: Record<string, unknown>) => {
+        if (streamingTurnIdRef.current !== turnId) return;
         const e = evt as Record<string, unknown>;
         switch (e.type) {
+          case 'presentation':
+          case 'process_summary':
+          case 'answer_reset':
+          case 'answer_delta':
+            updateAssistant(a => applyPublicEvent(a, e));
+            if (e.type === 'answer_reset') {
+              setTurns(prev => prev.map(turn => turn.id === turnId && turn.finalResult ? {
+                ...turn, finalResult: { ...turn.finalResult, analysis: {
+                  ...(turn.finalResult.analysis as Record<string, unknown> || {}), summary: '',
+                  insights: [], related_metrics: [], business_impacts: [], possible_causes: [], recommended_actions: [], limitations: [], data_quality: [],
+                } },
+              } : turn));
+            }
+            break;
+          case 'analysis_patch':
+            setTurns(prev => prev.map(turn => turn.id === turnId && turn.assistant.activeStreamId === e.stream_id ? {
+              ...turn, finalResult: { success: true, status: 'success', ...turn.finalResult, analysis: {
+                ...(turn.finalResult?.analysis as Record<string, unknown> || {}),
+                ...(e.analysis as Record<string, unknown> || {}),
+              } },
+            } : turn));
+            break;
+          case 'data':
+          case 'chart':
+            setTurns(prev => prev.map(turn => turn.id === turnId ? {
+              ...turn,
+              finalResult: { success: true, status: 'success', ...turn.finalResult, ...e },
+            } : turn));
+            break;
           case 'node_start':
             if (e.node) updateAssistant(a => ({
               progressNodes: {
@@ -208,22 +241,26 @@ function useChatState() {
             }));
             break;
           case 'analysis':
-            if (e.analysis) updateAssistant(a => ({
-              analysisText: (e.analysis as Record<string, unknown>).summary as string || '',
-            }));
+            setTurns(prev => prev.map(turn => turn.id === turnId ? {
+              ...turn,
+              assistant: { ...turn.assistant, analysisText: String((e.analysis as Record<string, unknown> | undefined)?.summary || e.summary || '') },
+              finalResult: { success: true, status: 'success', ...turn.finalResult, analysis: e.analysis || e },
+            } : turn));
             break;
           case 'decision_summary':
-            if (e.summary) updateAssistant(() => ({ decisionSummary: String(e.summary) }));
+            if (e.summary) updateAssistant(a => a.processEnabled ? { decisionSummary: String(e.summary) } : {});
             break;
           case 'result':
             setTurns(prev => prev.map(t => t.id === turnId ? {
               ...t,
               assistant: {
                 ...t.assistant,
-                decisionSummary: String((e.decision_summary as string) || t.assistant.decisionSummary || ''),
+                decisionSummary: e.process_summary_enabled ? String(e.decision_summary || t.assistant.decisionSummary || '') : '',
+                processEnabled: e.process_summary_enabled === true,
+                processSummaries: e.process_summary_enabled ? t.assistant.processSummaries : {},
                 sql: (e.sql as string) || t.assistant.sql,
               },
-              finalResult: e as unknown as Record<string, unknown>, status: 'done',
+              finalResult: e as unknown as Record<string, unknown>,
             } : t));
             break;
           case 'retry_status':
@@ -233,6 +270,7 @@ function useChatState() {
             setRetryInfo(null);
             setTurns(prev => prev.map(t => t.id === turnId ? {
               ...t, status: 'error', errorMessage: (e.message as string) || '未知错误',
+              assistant: { ...t.assistant, processSummaries: Object.fromEntries(Object.entries(t.assistant.processSummaries).map(([key, entry]) => [key, { ...entry, status: entry.status === 'running' ? 'error' as const : entry.status }])) },
             } : t));
             break;
         }

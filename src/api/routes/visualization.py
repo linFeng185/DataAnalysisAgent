@@ -24,7 +24,17 @@ async def adjust_chart(req: ChartAdjustRequest):
     )
     try:
         chart_type = resolve_chart_type_instruction(req.instruction)
-        result = ChartGeneratorTool()._run(req.rows, chart_type=chart_type)
+        if req.chart_plan or req.column_labels:
+            from src.tools.chart_generator import classify_chart_type
+            from src.tools.chart_presentation import adapt_plan, build_option
+
+            selected_type = classify_chart_type(req.rows) if chart_type == "auto" else chart_type
+            effective_plan = adapt_plan(req.rows, selected_type, req.chart_plan)
+            result = {"recommended_chart_type": selected_type,
+                      "option": build_option(req.rows, selected_type, effective_plan, req.column_labels)}
+        else:
+            effective_plan = {}
+            result = ChartGeneratorTool()._run(req.rows, chart_type=chart_type)
         if result.get("error"):
             raise ValueError(str(result["error"]))
     except ValueError as exc:
@@ -33,6 +43,8 @@ async def adjust_chart(req: ChartAdjustRequest):
     response = {
         "type": str(result["recommended_chart_type"]),
         "option": dict(result["option"]),
+        "chart_plan": effective_plan,
+        "column_labels": req.column_labels,
     }
     logger.info(
         "图表调整路由完成",

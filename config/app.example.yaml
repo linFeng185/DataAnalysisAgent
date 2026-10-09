@@ -30,6 +30,8 @@ llm_timeout: 60
 analysis_llm_timeout: 30
 # 用途：流式响应相邻分片最大间隔秒数，超时判定断流 | 默认值：30 | 生效范围：热生效
 llm_stream_chunk_timeout: 30
+# 用途：显示公开业务过程摘要，不包含原始思维链 | 默认值：false | 生效范围：启动默认需重启，运行覆盖仅平台管理员热改，后续聊天请求生效
+chat_show_analysis_process: false
 # 用途：轻量节点（摘要、命名等）使用的低成本模型 | 默认值：gpt-4o-mini | 生效范围：热生效
 cheap_llm_model: gpt-4o-mini
 # 用途：本地模型名，留空表示不启用本地模型 | 默认值：空 | 生效范围：需重启

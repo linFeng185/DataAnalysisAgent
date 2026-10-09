@@ -355,6 +355,7 @@ async def analyze_result_node(state: AnalysisState) -> dict:
                 supplemental_evidence=supplemental_evidence_text,
                 chart_type=processor_result.chart_type,
                 intent=intent,
+                display_language=state.get("display_language", "zh-CN"),
             )
             result["processor_name"] = getattr(proc, "name", "unknown")
             result["statistics"] = stats
@@ -438,6 +439,7 @@ async def analyze_result_node(state: AnalysisState) -> dict:
             supplemental_evidence=supplemental_evidence_text,
             chart_type=chart_type,
             intent=intent,
+            display_language=state.get("display_language", "zh-CN"),
         )
     else:
         result = _rule_analyze(
@@ -811,6 +813,9 @@ async def _execute_post_analysis_skill_tools(
     return enriched, used
 
 
+# 基于已授权证据生成公开分析，并遵循问题与界面的展示语言。
+# Args: rows/sql/stats/trend/outlier/conc - 查询证据；history - 对话历史；关键字参数 - 分析边界与语言偏好。
+# Returns: 经契约校验的分析结果，失败时返回确定性回退。
 async def _llm_analyze(
     rows,
     sql,
@@ -828,6 +833,7 @@ async def _llm_analyze(
     supplemental_evidence: str = "",
     chart_type: str = "table",
     intent: str = "query",
+    display_language: str = "zh-CN",
 ) -> dict:
     """基于问题、结果完整性、统计和业务证据生成分析报告。
 
@@ -847,6 +853,7 @@ async def _llm_analyze(
         supplemental_evidence: 当前请求此前自主补查得到的证据。
         chart_type: 规则引擎根据真实列类型推荐的图表类型。
         intent: 当前用户问题的真实意图。
+        display_language: 问题及历史语言不明确时使用的界面语言。
 
     Returns:
         兼容基础字段并包含质量、限制、置信度和行动建议的分析结果。
@@ -888,10 +895,13 @@ async def _llm_analyze(
     )
     business_block = business_context or "(无额外业务口径，以 SQL 与统计结果为准)"
     question = user_query or "(未提供原问题，仅解释当前结果)"
+    from src.tools.chart_presentation import resolve_language
+
+    language = resolve_language(user_query, history, display_language)
     prompt_sections = [
             PromptSection(
                 "query",
-                f"## 用户原问题\n{question}\n请给出分析报告。",
+                f"## 用户原问题\n{question}\n请给出分析报告，正文、column_labels 和 field_descriptions 使用展示语言 {language}。请同时输出 chart_plan（x/y/series/facets/metrics/aggregation），默认 aggregation=none。",
                 priority=100,
                 min_chars=400,
                 max_chars=1800,
@@ -998,9 +1008,12 @@ async def _llm_analyze(
 
         deadline = time.monotonic() + timeout_seconds
         messages = list(prepared.messages)
+        from src.llm.knowledge_loop import invoke_with_knowledge
+
         for attempt in range(2):
+            # 走统一工具循环：允许按需检索口径，但整体 timeout 预算不变。
             resp = await asyncio.wait_for(
-                prepared.model.ainvoke(messages),
+                invoke_with_knowledge(prepared, messages),
                 timeout=max(0.01, deadline - time.monotonic()),
             )
             parsed = adapter.parse_response(resp)

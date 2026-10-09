@@ -5,7 +5,6 @@
 
 from __future__ import annotations
 
-from decimal import Decimal
 from typing import Any
 
 from langchain_core.tools import BaseTool
@@ -107,99 +106,10 @@ def classify_chart_type(rows: list[dict]) -> str:
 # Args: rows - 非空查询结果行；chart_type - 已选择图表类型。
 # Returns: ECharts 配置字典或 table 数据配置。
 def build_chart_option(rows: list[dict], chart_type: str) -> dict:
-    """14.2~14.6 生成 ECharts option JSON。"""
-    logger.debug("图表配置构建入口", row_count=len(rows), chart_type=chart_type)
-    cols = list(rows[0].keys())
-    numeric, text_cols = _infer_column_types(rows, cols)
-    label_col = text_cols[0] if text_cols else cols[0]
-    value_col = numeric[0] if numeric else cols[-1]
-    labels = [str(r.get(label_col, "")) for r in rows]
-    values = [
-        None if row.get(value_col) is None else _numeric_float(row.get(value_col))
-        for row in rows
-    ] if numeric else []
+    """14.2~14.6 共用受约束构型，初始与切换图表不再分叉。"""
+    from src.tools.chart_presentation import build_option
 
-    base: dict[str, Any] = {
-        # 柱状图按数据项触发：单柱悬停只看该系列该维度。按轴触发会把同一横轴上全部
-        # 系列一起弹出来（实机取证：悬停一根柱子弹出 8 条系列的读数）。折线图的读法
-        # 本来就是"看某一期的全部系列"，保持按轴触发；pie/scatter/heatmap 是 item。
-        # 本规则与报表链 src/reporting/charts.py 的构型口径一致（报表链已先修，此处同步）。
-        "tooltip": {"trigger": "axis" if chart_type == "line" else "item"},
-    }
-
-    if chart_type == "line":
-        base["xAxis"] = {"type": "category", "data": labels}
-        base["yAxis"] = {"type": "value"}
-        base["series"] = [{"name": value_col, "type": "line", "data": values}]
-    elif chart_type == "bar":
-        base["xAxis"] = {"type": "category", "data": labels}
-        base["yAxis"] = {"type": "value"}
-        base["series"] = [{"name": value_col, "type": "bar", "data": values}]
-    elif chart_type == "pie":
-        base["series"] = [{
-            "name": value_col, "type": "pie",
-            "data": [
-                {"name": label, "value": value}
-                for label, value in zip(labels, values, strict=False)
-                if value is not None
-            ],
-        }]
-    elif chart_type == "scatter" and len(numeric) >= 2:
-        base["xAxis"] = {"type": "value"}
-        base["yAxis"] = {"type": "value"}
-        base["series"] = [{
-            "name": value_col, "type": "scatter",
-            "data": [
-                [_numeric_float(row[numeric[0]]), _numeric_float(row[numeric[1]])]
-                for row in rows
-                if row.get(numeric[0]) is not None and row.get(numeric[1]) is not None
-            ],
-        }]
-    elif chart_type == "heatmap":
-        if len(cols) < 3 or not numeric:
-            raise ValueError("热力图需要两个维度列和一个数值列")
-        value_col = numeric[-1]
-        dimensions = [column for column in cols if column != value_col]
-        if len(dimensions) < 2:
-            raise ValueError("热力图需要两个维度列")
-        x_col, y_col = dimensions[0], dimensions[1]
-        x_labels = list(dict.fromkeys(str(row.get(x_col, "")) for row in rows))
-        y_labels = list(dict.fromkeys(str(row.get(y_col, "")) for row in rows))
-        x_index = {label: index for index, label in enumerate(x_labels)}
-        y_index = {label: index for index, label in enumerate(y_labels)}
-        heat_data = [
-            [
-                x_index[str(row.get(x_col, ""))],
-                y_index[str(row.get(y_col, ""))],
-                _numeric_float(row.get(value_col, 0)),
-            ]
-            for row in rows
-            if row.get(value_col) is not None
-        ]
-        values_for_range = [item[2] for item in heat_data]
-        base["tooltip"] = {"position": "top"}
-        base["xAxis"] = {"type": "category", "data": x_labels, "splitArea": {"show": True}}
-        base["yAxis"] = {"type": "category", "data": y_labels, "splitArea": {"show": True}}
-        base["visualMap"] = {
-            "min": min(values_for_range),
-            "max": max(values_for_range),
-            "calculable": True,
-            "orient": "horizontal",
-            "left": "center",
-            "bottom": 0,
-        }
-        base["series"] = [{
-            "name": value_col,
-            "type": "heatmap",
-            "data": heat_data,
-            "label": {"show": True},
-        }]
-    else:
-        base["columns"] = [{"field": c, "title": c} for c in cols]
-        base["rows"] = rows[:50]
-
-    logger.info("图表配置构建完成", chart_type=chart_type, series_count=len(base.get("series", [])))
-    return base
+    return build_option(rows, chart_type)
 
 
 # 方法作用：跳过 NULL 后从最多 100 个有效值推断数值列和文本列。

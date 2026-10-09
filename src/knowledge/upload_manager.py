@@ -351,8 +351,8 @@ async def _write_to_chromadb(
             meta["owner_user_id"] = user_id
         elif normalized_scope is KnowledgeScope.TENANT:
             meta["uploaded_by_user_id"] = user_id
-        if datasource.strip():
-            meta["datasource"] = datasource.strip()
+        # 未绑定的知识显式写入空 datasource，未绑定检索才能精确下推且失败关闭。
+        meta["datasource"] = datasource.strip()
         tbl = c.metadata.get("table_name", "")
         if tbl:
             meta["table_name"] = tbl

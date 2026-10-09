@@ -3,7 +3,7 @@ import { useEffect, useState } from 'react';
 import { Alert, Button, Input, InputNumber, Modal, Select, Space, Switch, Table, Tabs, Tag, Typography, message } from 'antd';
 import { get, post, put } from '../api/client';
 
-interface SettingField { key: string; value: unknown; default: unknown; overridden: boolean; schema: { type?: string; enum?: string[]; minimum?: number; maximum?: number } }
+interface SettingField { key: string; value: unknown; default: unknown; overridden: boolean; schema: { type?: string; enum?: string[]; minimum?: number; maximum?: number; description?: string } }
 interface SettingsCatalog { revision: number; fields: SettingField[]; read_only: string[] }
 export interface ConnectorPlugin { dialect: string; label: string; sqlglot_dialect: string; enabled: boolean; external: boolean; fields: string[]; error: string }
 
@@ -89,7 +89,7 @@ export default function RuntimeControlsPanel() {
         <Alert type="info" showIcon message={t("环境变量作为默认值，后台覆盖优先")} description={t("后续请求使用新配置，多 Worker 最迟约 2 秒同步。主数据库、密钥、存储后端及进程启动项仍需部署配置，不支持在线热改。")} />
         <Space style={{ margin: '16px 0' }} wrap><Input.Search placeholder={t("搜索配置名称")} value={query} onChange={event => setQuery(event.target.value)} /><Button onClick={() => void load()} loading={busy}>{t("重新加载")}</Button><Button type="primary" onClick={() => void save()} loading={busy} disabled={!Object.keys(changes).length}>{t("保存配置")}</Button></Space>
         <Table<SettingField> rowKey="key" dataSource={catalog?.fields.filter(field => field.key.includes(query)) || []} pagination={{ pageSize: 15 }} scroll={{ x: 950 }} columns={[
-          { title: t("配置名称"), dataIndex: 'key' }, { title: t("当前值"), render: (_, field) => editor(field) },
+          { title: t("配置名称"), render: (_, field) => <Space direction="vertical" size={0}><Typography.Text>{field.key === 'chat_show_analysis_process' ? t("展示公开分析过程摘要") : field.key}</Typography.Text>{field.schema.description && <Typography.Text type="secondary" style={{ fontSize: 12 }}>{t(field.schema.description)}</Typography.Text>}</Space> }, { title: t("当前值"), render: (_, field) => editor(field) },
           { title: t("环境默认值"), render: (_, field) => <Typography.Text code>{JSON.stringify(field.default)}</Typography.Text> },
           { title: t("来源"), render: (_, field) => <Tag>{field.key in changes ? t("待保存") : field.overridden ? t("后台覆盖") : t("环境默认")}</Tag> },
           { title: t("操作"), render: (_, field) => <Button disabled={!field.overridden && !(field.key in changes)} onClick={() => setChanges(previous => ({ ...previous, [field.key]: null }))}>{t("恢复默认")}</Button> },

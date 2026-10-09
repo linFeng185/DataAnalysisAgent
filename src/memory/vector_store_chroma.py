@@ -164,12 +164,18 @@ class ChromaVectorStore(VectorStore):
         """
         top_k = min(top_k, 50)
         where = _build_where(filters)
+        # Chroma 与 embedding 都是同步实现：offload 到线程，避免阻塞事件循环并让超时可控。
+        raw = await asyncio.to_thread(self._query_sync, query, top_k, where)
+        return _parse_results(raw)
+
+    # 方法作用：在线程中执行同步向量查询，保持事件循环可响应取消与超时。
+    # Args: self - 当前 ChromaVectorStore；query - 查询文本；top_k - 结果数量；where - 已构造过滤条件。
+    # Returns: Chroma 原始查询结果。
+    def _query_sync(self, query: str, top_k: int, where: Any) -> Any:
         if self._embed:
             emb = self._embed(query)
-            raw = self._col.query(query_embeddings=[emb], n_results=top_k, where=where)
-        else:
-            raw = self._col.query(query_texts=[query], n_results=top_k, where=where)
-        return _parse_results(raw)
+            return self._col.query(query_embeddings=[emb], n_results=top_k, where=where)
+        return self._col.query(query_texts=[query], n_results=top_k, where=where)
 
     async def get_by_id(self, entry_id: str) -> VectorEntry | None:
         """按 ID 精确获取单条。
@@ -179,7 +185,7 @@ class ChromaVectorStore(VectorStore):
 
         Returns: 匹配的 VectorEntry，不存在返回 None
         """
-        raw = self._col.get(ids=[entry_id])
+        raw = await asyncio.to_thread(self._col.get, ids=[entry_id])
         ids = raw.get("ids", [])
         if not ids:
             return None
@@ -199,7 +205,8 @@ class ChromaVectorStore(VectorStore):
 
         Returns: 匹配的 VectorEntry 列表
         """
-        raw = self._col.get(where=_build_where(filters))
+        where = _build_where(filters)
+        raw = await asyncio.to_thread(self._col.get, where=where)
         ids = raw.get("ids", [])
         docs = raw.get("documents", [])
         metas = raw.get("metadatas", [])
@@ -283,7 +290,10 @@ class ChromaVectorStore(VectorStore):
         Returns: 条目数量
         """
         where = _build_where(filters)
-        return len((self._col.get(where=where) if where else self._col.get()).get("ids", []))
+        raw = await asyncio.to_thread(
+            self._col.get, where=where
+        ) if where else await asyncio.to_thread(self._col.get)
+        return len(raw.get("ids", []))
 
     async def health_check(self) -> bool:
         """连通性检查——调用 count() 验证 Collection 可用。
@@ -292,7 +302,7 @@ class ChromaVectorStore(VectorStore):
         """
         logger.debug("ChromaVectorStore 健康检查入口")
         try:
-            self._col.count()
+            await asyncio.to_thread(self._col.count)
             logger.info("ChromaVectorStore 健康检查完成", healthy=True)
             return True
         except Exception as exc:

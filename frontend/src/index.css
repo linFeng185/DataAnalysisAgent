@@ -168,7 +168,7 @@ body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sa
   .chat-toolbar-controls > .ant-space-item { max-width: 100%; }
   .chat-model-select { width: min(240px, 100%) !important; }
   .chat-reasoning-toggle { white-space: nowrap; }
-  .chart-container { height: 280px !important; min-height: 240px; margin: 8px 0; }
+  .chart-container { min-height: 240px; margin: 8px 0; }
   .ant-table-wrapper { max-width: 100%; }
   .ant-modal { max-width: calc(100vw - 20px); margin: 10px auto; }
   .ant-modal-content { padding: 16px; }

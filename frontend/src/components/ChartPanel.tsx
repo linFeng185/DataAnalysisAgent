@@ -1,8 +1,10 @@
-import { t, useLanguage } from '../i18n';
-import { lazy, Suspense, useEffect, useState } from 'react';
+import { getLanguage, t, useLanguage } from '../i18n';
+import { lazy, Suspense, useEffect, useMemo, useRef, useState } from 'react';
 import { Button, Dropdown, Empty, message, Space, Tooltip, Typography } from 'antd';
 import { BarChartOutlined, DownOutlined } from '@ant-design/icons';
 import { post } from '../api/client';
+import DataTable from './DataTable';
+import { buildChatChartLayout } from './chatChartLayout';
 
 const ReactECharts = lazy(() => import('./EChartsView'));
 
@@ -12,6 +14,9 @@ export interface ChartConfig {
   status?: 'success' | 'failed' | 'not_applicable';
   reason?: string;
   data_source?: 'primary' | 'supplemental' | 'attribution';
+  chart_plan?: Record<string, unknown>;
+  column_labels?: Record<string, string>;
+  display_language?: string;
   core_value?: { label: string; value: unknown; column: string };
 }
 
@@ -36,8 +41,29 @@ export default function ChartPanel({ chartConfig, rows = [], height = 360 }: {
   useLanguage();
   const [current, setCurrent] = useState<ChartConfig | null | undefined>(chartConfig);
   const [adjusting, setAdjusting] = useState(false);
+  const chartRef = useRef<HTMLDivElement>(null);
+  const [chartWidth, setChartWidth] = useState(0);
 
   useEffect(() => setCurrent(chartConfig), [chartConfig]);
+  useEffect(() => {
+    const element = chartRef.current;
+    if (!element) return;
+    // 观察图表容器而非窗口，侧栏变化、历史回放与分面切换都能重新适配。
+    // Args: entries - 容器尺寸通知。
+    // Returns: 无返回值，仅在宽度变化时更新状态。
+    const updateWidth = (entries: ResizeObserverEntry[]): void => {
+      const width = entries[0]?.contentRect.width || element.clientWidth;
+      setChartWidth(previous => previous === width ? previous : width);
+    };
+    setChartWidth(element.clientWidth);
+    const observer = new ResizeObserver(updateWidth);
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, [current?.type, Boolean(current?.option)]);
+  const displayLanguage = current?.display_language || getLanguage();
+  const layout = useMemo(() => buildChatChartLayout(
+    current?.option || {}, chartWidth, height, displayLanguage,
+  ), [current?.option, displayLanguage, chartWidth, height]);
 
   // 方法作用：调用后端白名单生成器切换图表类型且复用当前数据。
   // Args: instruction - 菜单选择的图表类型。
@@ -49,8 +75,11 @@ export default function ChartPanel({ chartConfig, rows = [], height = 360 }: {
     }
     setAdjusting(true);
     try {
-      const adjusted = await post<ChartConfig>('/charts/adjust', { rows, instruction });
-      setCurrent(adjusted);
+      const adjusted = await post<ChartConfig>('/charts/adjust', {
+        rows, instruction, chart_plan: chartConfig?.chart_plan || {},
+        column_labels: chartConfig?.column_labels || {},
+      });
+      setCurrent({ ...adjusted, display_language: chartConfig?.display_language });
     } catch (error) {
       message.error(error instanceof Error ? error.message : t("图表调整失败"));
     } finally {
@@ -86,6 +115,9 @@ export default function ChartPanel({ chartConfig, rows = [], height = 360 }: {
     </div>
   );
 
+  if (current.type === 'table') {
+    return <div>{toolbar}<DataTable data={rows} columnLabels={current.column_labels} /></div>;
+  }
   if (!current.option || Object.keys(current.option).length === 0) {
     return (
       <div>
@@ -105,16 +137,23 @@ export default function ChartPanel({ chartConfig, rows = [], height = 360 }: {
     );
   }
 
+  const chartHeight = layout.height;
+  const hasMissing = Array.isArray(current.option.series) && current.option.series.some(
+    series => Array.isArray(series?.data) && series.data.some((value: unknown) => value === null),
+  );
   return (
     <div>
       {toolbar}
-      <div className="chart-container" style={{ height }}>
+      {current.type === 'line' && hasMissing && <Typography.Paragraph type="secondary" style={{ fontSize: 12 }}>
+        {t("缺失值保留为空；折线连接有效数据点，不代表缺失位置为零或已有观测值。")}
+      </Typography.Paragraph>}
+      <div ref={chartRef} className="chart-container" style={{ height: chartHeight, minWidth: 0 }}>
         <Suspense fallback={(
           <div style={{ height: '100%', display: 'grid', placeItems: 'center' }}>
             <Typography.Text type="secondary">{t("图表加载中...")}</Typography.Text>
           </div>
         )}>
-          <ReactECharts option={current.option}
+          <ReactECharts option={layout.option}
             style={{ height: '100%' }} notMerge opts={{ renderer: 'canvas' }} />
         </Suspense>
       </div>

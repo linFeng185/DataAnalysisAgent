@@ -51,10 +51,14 @@ def prepare_invocation(
     """统一准备模型、消息、Prompt 预算和 LangSmith 追踪元数据。"""
     definition = get_prompt_definition(prompt_id)
     effective_task = task or definition.task
+    # 可信身份下为工具定义、一条有界工具结果与协议开销预留空间。
+    from src.llm.knowledge_loop import knowledge_tool_reserve_chars
+
     budgeted = build_budgeted_prompt(
         prompt_id,
         sections,
         system_values=system_values,
+        reserve_chars=knowledge_tool_reserve_chars(definition.context_budget),
     )
     selected_model = model or get_task_llm(
         effective_task,
@@ -136,7 +140,10 @@ async def invoke_structured(
         prompt_version=prepared.prompt_version,
         task=prepared.task,
     )
-    response = await prepared.model.ainvoke(prepared.messages)
+    # 统一走有界工具循环：模型不请求工具时仍是原有一次调用、零检索。
+    from src.llm.knowledge_loop import invoke_with_knowledge
+
+    response = await invoke_with_knowledge(prepared)
     parsed = parse_json_model(getattr(response, "content", response), model_type)
     logger.info(
         "统一结构化 LLM 调用完成",
@@ -153,8 +160,10 @@ async def invoke_text(
     **kwargs: Any,
 ) -> str:
     """通过注册 Prompt 返回原始正文，供显式兼容场景使用。"""
+    from src.llm.knowledge_loop import invoke_with_knowledge
+
     prepared = prepare_invocation(prompt_id, sections, **kwargs)
-    response = await prepared.model.ainvoke(prepared.messages)
+    response = await invoke_with_knowledge(prepared)
     return str(getattr(response, "content", response) or "").strip()
 
 
@@ -163,7 +172,9 @@ async def stream_prompt(
     sections: list[PromptSection],
     **kwargs: Any,
 ) -> AsyncIterator[Any]:
-    """通过注册 Prompt 流式返回模型 chunk。"""
+    """通过注册 Prompt 流式返回模型 chunk，中间工具回合以重置标记隔离。"""
+    from src.llm.knowledge_loop import stream_with_knowledge
+
     prepared = prepare_invocation(prompt_id, sections, **kwargs)
-    async for chunk in prepared.model.astream(prepared.messages):
+    async for chunk in stream_with_knowledge(prepared):
         yield chunk

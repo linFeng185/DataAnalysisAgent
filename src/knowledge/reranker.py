@@ -14,7 +14,7 @@ logger = get_logger(__name__)
 # Args: evidence - 初始召回证据；query - 用户查询；top_k - 返回数量。
 # Returns: 按 rerank 分数降序排列的 Evidence 列表。
 def rerank_evidence(evidence: list[Evidence], query: str, top_k: int = 5) -> list[Evidence]:
-    logger.debug("知识证据重排入口", candidates=len(evidence), query=query[:80], top_k=top_k)
+    logger.debug("知识证据重排入口", candidates=len(evidence), query_chars=len(query), top_k=top_k)
     if top_k <= 0:
         raise ValueError("top_k 必须大于零")
     query_lower = query.lower().strip()

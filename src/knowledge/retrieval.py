@@ -60,7 +60,8 @@ def build_knowledge_filters(
 
 # 构造当前身份可访问的系统、租户和个人三组知识过滤条件。
 # Args: datasource - 可选数据库数据源名称；category - 可选知识类别；asset_id - 可选资产 ID；
-#       tenant_id - 后台任务显式租户；user_id - 后台任务显式用户；source - 可选知识来源。
+#       tenant_id - 后台任务显式租户；user_id - 后台任务显式用户；source - 可选知识来源；
+#       unbound_only - 仅关键字，True 时下推精确空 datasource，与非空 datasource 互斥。
 # Returns: 三组彼此隔离的 VectorStore metadata 精确过滤字典。
 def build_accessible_knowledge_filters(
     datasource: str = "",
@@ -69,6 +70,8 @@ def build_accessible_knowledge_filters(
     tenant_id: int | None = None,
     user_id: int | None = None,
     source: str = "",
+    *,
+    unbound_only: bool = False,
 ) -> list[dict[str, Any]]:
     logger.debug(
         "构造可访问知识过滤入口",
@@ -78,13 +81,19 @@ def build_accessible_knowledge_filters(
         source=source,
         tenant_id=tenant_id,
         user_id=user_id,
+        unbound_only=unbound_only,
     )
+    if unbound_only and datasource:
+        raise ValueError("unbound_only 不能与非空 datasource 同时使用")
     policy = get_tenant_policy()
     current_tenant_id = tenant_id if tenant_id is not None else get_current_tenant_id()
     current_user_id = user_id if user_id is not None else get_current_user_id()
     shared: dict[str, Any] = {}
     if datasource:
         shared["datasource"] = datasource
+    elif unbound_only:
+        # 精确匹配空 datasource：缺少该 metadata 的历史条目自然落选（失败关闭）。
+        shared["datasource"] = ""
     if category:
         shared["category"] = category
     if asset_id:
@@ -188,10 +197,17 @@ def vector_result_to_evidence(result: Any, default_version: str = "v1") -> Evide
     return evidence
 
 
+class KnowledgeBackendUnavailable(RuntimeError):
+    """知识库后端整体不可用，区别于「确实没有命中」。"""
+
+
 # 执行带强制范围过滤的语义检索并去重排序。
 # Args: store - VectorStore 实例；query - 用户检索文本；datasource - 数据源名称。
-#       category - 可选知识类别；asset_id - 可选资产 ID；top_k - 返回数量；source - 可选知识来源。
+#       category - 可选知识类别；asset_id - 可选资产 ID；top_k - 返回数量；source - 可选知识来源；
+#       unbound_only - 仅关键字，True 时只检索明确未绑定数据源的知识；
+#       fail_on_backend_error - 仅关键字，True 时所有范围分组都失败则抛 KnowledgeBackendUnavailable。
 # Returns: 按相关性排序的 Evidence 列表。
+# Raises: KnowledgeBackendUnavailable - 开启严格模式且后端整体不可用。
 async def search_knowledge(
     store: Any,
     query: str,
@@ -201,14 +217,18 @@ async def search_knowledge(
     top_k: int = 5,
     hybrid: bool = True,
     source: str = "",
+    *,
+    unbound_only: bool = False,
+    fail_on_backend_error: bool = False,
 ) -> list[Evidence]:
     logger.debug(
         "安全知识检索入口",
-        query=query[:80],
+        query_chars=len(query),
         datasource=datasource,
         category=category,
         source=source,
         top_k=top_k,
+        unbound_only=unbound_only,
     )
     if not query.strip():
         logger.info("安全知识检索跳过", reason="查询为空")
@@ -218,16 +238,20 @@ async def search_knowledge(
         category=category,
         asset_id=asset_id,
         source=source,
+        unbound_only=unbound_only,
     )
     bounded_top_k = min(max(top_k, 1), 50)
     unique: dict[str, Evidence] = {}
     scope_priority = {"system": 1, "private": 2, "tenant": 3}
+    backend_failures = 0
+    backend_successes = 0
     for filters in filter_groups:
         try:
             results = await store.search(query, top_k=bounded_top_k, filters=filters)
         except Exception as exc:
             from src.failure_policy import FailureDomain, fallback_allowed
 
+            backend_failures += 1
             if not fallback_allowed(FailureDomain.KNOWLEDGE):
                 raise
             logger.error(
@@ -237,6 +261,7 @@ async def search_knowledge(
                 exc_info=True,
             )
             continue
+        backend_successes += 1
         for result in results:
             evidence = vector_result_to_evidence(result)
             if not evidence.source_id:
@@ -322,6 +347,9 @@ async def search_knowledge(
                     error=str(exc),
                     exc_info=True,
                 )
+    if fail_on_backend_error and backend_failures and not backend_successes:
+        # 所有范围分组都失败：这是后端不可用，不能伪装成「知识库没有该口径」。
+        raise KnowledgeBackendUnavailable("知识库检索后端不可用")
     from src.knowledge.reranker import rerank_evidence
     candidates = sorted(
         unique.values(),
@@ -400,7 +428,7 @@ def _count_metadata(evidence: list[Evidence], field_name: str) -> dict[str, int]
 # Args: query - 用户查询；content - 知识正文；metadata - 表名、字段名和标签等元数据。
 # Returns: 0 到 1 之间的词法相关性分数。
 def _lexical_score(query: str, content: str, metadata: dict[str, Any] | None = None) -> float:
-    logger.debug("计算知识词法相关性入口", query=query[:60])
+    logger.debug("计算知识词法相关性入口", query_chars=len(query))
     query_tokens = set(_tokenize(query))
     if not query_tokens:
         return 0.0

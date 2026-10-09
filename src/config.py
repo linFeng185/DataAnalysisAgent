@@ -273,6 +273,7 @@ class Settings(BaseSettings):
     llm_max_tokens: int = 4096
     llm_timeout: int = 60
     analysis_llm_timeout: float = Field(default=30.0, ge=0.1, le=3600.0)
+    chat_show_analysis_process: bool = Field(default=False, description="展示公开分析过程摘要；仅平台管理员可热配置，不包含模型原始推理")
     llm_stream_chunk_timeout: int = 30
 
     cheap_llm_model: str = "gpt-4o-mini"

@@ -30,4 +30,6 @@
 | [24-tenant-governance-audit.md](24-tenant-governance-audit.md) | 平台与租户职责治理及部署验收边界 | 动态 |
 | [25-runtime-platform-and-ui.md](25-runtime-platform-and-ui.md) | 平台运行时配置、动态数据库类型、双语界面与同步任务 | 动态 |
 | [26-sql-schema-validation.md](26-sql-schema-validation.md) | SQL Schema 校验层（生成后 · 打库前） | 动态 |
+| [27-autonomous-knowledge-retrieval.md](27-autonomous-knowledge-retrieval.md) | 自主知识检索、统一工具循环、流式及安全验收 | 动态 |
+| [28-chat-presentation.md](28-chat-presentation.md) | 对话分析呈现、管理员过程摘要、真实流式与图表语义 | 动态 |
 | [99-summary.md](99-summary.md) | 附录 | 145 行 |

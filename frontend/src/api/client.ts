@@ -1,4 +1,4 @@
-import { t } from '../i18n';
+import { getLanguage, t } from '../i18n';
 
 const BASE = '/api/v1';
 const pendingGetRequests = new Map<string, Promise<unknown>>();
@@ -221,6 +221,7 @@ export function streamChat(
       reasoning_effort: reasoningEffort,
       file_ids: fileIds,
       action_request: actionRequest || null,
+      display_language: getLanguage(),
       stream: true,
       session_id: sessionId,
     }),
@@ -236,23 +237,35 @@ export function streamChat(
     if (!reader) { onError('读取流失败'); return; }
     const decoder = new TextDecoder();
     let buf = '';
+    let terminalStatus = '';
+    let reportedError = false;
+    // 解析完整 SSE 行并记录结束协议，断流不能被误报为成功。
+    // Args: line - 已按 UTF-8 解码的完整事件行。
+    // Returns: 无返回值，非法协议抛出错误进入统一读取边界。
+    const consumeLine = (line: string): void => {
+      if (!line.startsWith('data:') || controller.signal.aborted) return;
+      try {
+        const event = JSON.parse(line.slice(5).trim()) as Record<string, unknown>;
+        if (event.type === 'error') reportedError = true;
+        if (event.type === 'done') terminalStatus = String(event.status || '');
+        onEvent(event);
+      } catch (error) {
+        console.error('流式事件 JSON 解析失败', error);
+        throw new Error('流式事件格式无效');
+      }
+    };
     try {
       while (true) {
         const { done, value } = await reader.read();
-        if (done) break;
+        if (done) {
+          buf += decoder.decode();
+          if (buf.trim()) consumeLine(buf);
+          break;
+        }
         buf += decoder.decode(value, { stream: true });
         const lines = buf.split('\n');
         buf = lines.pop() || '';
-        for (const line of lines) {
-          if (line.startsWith('data: ')) {
-            try {
-              onEvent(JSON.parse(line.slice(6)));
-            } catch (error) {
-              console.error('流式事件 JSON 解析失败', error);
-              throw new Error('流式事件格式无效');
-            }
-          }
-        }
+        for (const line of lines) consumeLine(line);
       }
     } catch (error) {
       if (controller.signal.aborted) notifyCancelled();
@@ -261,6 +274,10 @@ export function streamChat(
     }
     if (controller.signal.aborted) {
       notifyCancelled();
+      return;
+    }
+    if (reportedError || terminalStatus !== 'complete') {
+      onError(terminalStatus === 'error' || reportedError ? t("流式处理失败，请稍后重试") : t("连接中断，分析未完成，请重试"));
       return;
     }
     onDone();

@@ -376,6 +376,9 @@ async def upload_chat_files(files: list[UploadFile] = File(...)) -> dict:
     logger.info("聊天附件上传完成", saved_count=len(saved_files))
     return {"files": saved_files, "total": len(saved_files)}
 
+# 按请求模式执行对话并保留最终节点生成的公开展示元数据。
+# Args: req - 已校验的对话请求，包含问题、数据源和流式选项。
+# Returns: 非流式公开响应模型或 SSE 流式响应。
 @router.post("/chat")
 async def chat(req: ChatRequest):
     """统一 chat 端点：stream=False 返回 JSON，stream=True 返回 SSE 流式。"""
@@ -417,6 +420,7 @@ async def chat(req: ChatRequest):
                 llm_selection=llm_selection,
                 file_ids=req.file_ids,
                 action_request=req.action_request.model_dump() if req.action_request else None,
+                display_language=req.display_language,
             ),
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
@@ -453,11 +457,19 @@ async def chat(req: ChatRequest):
         scope_thread_id,
     )
     cfg = {"configurable": {"thread_id": scope_thread_id(sid)}}
+    # 非流式入口与 SSE 使用同一套知识检索范围，显式选源时收窄白名单。
+    from src.llm.knowledge_loop import use_request_knowledge_scope
     from src.llm.tenant_config import use_tenant_llm_selection
 
-    with use_tenant_llm_selection(llm_selection):
+    with use_tenant_llm_selection(llm_selection), use_request_knowledge_scope(
+        datasource=req.datasource,
+        allowed_datasources=(
+            frozenset(datasource_access) if selected_datasources else None
+        ),
+    ):
         result = await routes_package._app().ainvoke({
             "user_query": req.query,
+            "display_language": req.display_language,
             "datasource": req.datasource,
             "session_id": sid,
             "selected_datasources": selected_datasources,
@@ -486,6 +498,9 @@ async def chat(req: ChatRequest):
         truncated=bool(f.get("truncated", result.get("query_result_truncated", False))),
         analysis=f.get("analysis", result.get("analysis_result", {})),
         chart=f.get("chart", result.get("chart_config", {})),
+        display_language=str(f.get("display_language", req.display_language) or req.display_language),
+        column_labels=f.get("column_labels", {}) or {},
+        process_summary_enabled=bool(f.get("process_summary_enabled", False)),
         decision_summary=str(f.get("decision_summary", "") or ""),
         artifact=f.get("artifact", {}),
         activated_skills=list(f.get("activated_skills", result.get("activated_skills", [])) or []),
@@ -528,6 +543,7 @@ async def chat_stream(req: ChatRequest):
             llm_selection=llm_selection,
             file_ids=req.file_ids,
             action_request=req.action_request.model_dump() if req.action_request else None,
+            display_language=req.display_language,
         ),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},

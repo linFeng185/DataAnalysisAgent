@@ -11,6 +11,7 @@ LLM 驱动的数据分析智能体。用自然语言提问，自动完成：轮�
 ```
 ├── src/
 │   ├── api/              ① Web 接口层 — 访问策略/领域路由/纯 ASGI 认证/安全头 + SSE 流式；含 Grafana SimpleJSON 与优化建议
+│   │   └── public_stream.py 公开 JSON 正文/章节增量提取，不输出内部推理
 │   ├── graph/            ② 核心流水线 — LangGraph 主图 + 可复用 SQL 子图
 │   │   ├── attribution.py   触点归因模型选择、路径数据资格和补查数据集编排
 │   │   ├── context.py       请求/权限/路由/执行四组轻量上下文适配
@@ -50,6 +51,7 @@ LLM 驱动的数据分析智能体。用自然语言提问，自动完成：轮�
 │   ├── skill_runtime.py      Skill 契约、资源和隔离执行入口
 │   └── skill_worker.py       非内置 Skill 子进程 Worker
 ├── frontend/                 React SPA (Vite + Ant Design + ECharts)
+│   ├── src/hooks/chatPresentation.ts 公开流 reducer、并行隔离与过程摘要状态
 │   ├── src/i18n/                中文默认、英文词典与可订阅语言状态
 │   ├── Dockerfile               Node builder + Nginx runtime
 │   └── nginx.conf               SPA、API 代理和 SSE 配置
@@ -104,7 +106,8 @@ POST /api/v1/chat {"query": "本月 GMV 排名？", "stream": true}
 | `routes/grafana.py` | SimpleJSON search/query/annotations，ACL 快照、有界并发、超时和多目标故障隔离 |
 | `routes/optimization.py` | 确定性 SQL 优化建议 API，自动获取 Schema/索引/统计证据，只读分析不执行 DDL |
 | `schemas.py` | Pydantic 请求/响应模型 |
-| `streaming.py` | SSE 流式（13 种事件类型，LLM 调用按 stream_id 隔离） |
+| `streaming.py` | SSE 流式：脱敏 data/chart 先到，公开正文及章节增量按 node/stream_id 隔离；管理员开关控制业务过程摘要 |
+| `public_stream.py` | 不完整 JSON 的顶层公开字段白名单提取、转义解码，内部 SQL/工具正文/原始推理禁止进入正文 |
 | `middleware.py` | 异常 → HTTP 状态码映射 |
 | `auth.py` | 全模式强制 JWT/Cookie 认证、登录限流与原子账号锁定，身份 ContextVar 覆盖完整流式响应生命周期 |
 | `access_policy.py` | 纯 ASGI 接口 IP 阻断、策略下传和 standard/security/audit/none 聚合访问日志 |
@@ -145,7 +148,7 @@ POST /api/v1/chat {"query": "本月 GMV 排名？", "stream": true}
 
 ### ③ `src/llm/` — LLM 调用层
 
-`client.py`（兼容工厂 + local/remote/none 任务路由）+ `provider_registry.py`（协议别名与 Provider 注册）+ `tenant_config.py`（租户命名连接、默认值、凭证解密、模型能力和请求级推理 ContextVar）+ `capability_schema.py`（厂商动态能力表单和值校验）+ `invocation.py`（统一调用出口）+ `adapters/` + `prompts.py` + `prompt_budget.py` + `output_contracts.py`。`routes/llm_admin.py` 由 super_admin 维护、启停和物理删除厂商/模型目录，由 tenant_admin 维护当前租户连接和默认值；Chat/SSE 入口解析 `llm_connection_id + model_id + reasoning_enabled + reasoning_effort` 后绑定请求上下文，未配置租户连接时失败关闭，不再回退全局凭证。DeepSeek V4 Pro/Flash Adapter 统一映射 thinking、high/max 和 reasoning_content 工具链回传，原始推理不进入公开响应或历史。Prompt 通过稳定 ID/多版本注册，支持激活和回滚；System 与动态上下文共享字符预算，所有业务调用统一附加 Prompt/任务追踪 metadata，节点输出优先由 Pydantic 校验；远程模型凭证和模型选择统一来自租户管理后台，轻量节点优先 `LOCAL_LLM_*`。
+`knowledge_loop.py`（统一有界知识检索工具循环）+ `client.py`（兼容工厂 + local/remote/none 任务路由）+ `provider_registry.py`（协议别名与 Provider 注册）+ `tenant_config.py`（租户命名连接、默认值、凭证解密、模型能力和请求级推理 ContextVar）+ `capability_schema.py`（厂商动态能力表单和值校验）+ `invocation.py`（统一调用出口）+ `adapters/` + `prompts.py` + `prompt_budget.py` + `output_contracts.py`。`routes/llm_admin.py` 由 super_admin 维护、启停和物理删除厂商/模型目录，由 tenant_admin 维护当前租户连接和默认值；Chat/SSE 入口解析 `llm_connection_id + model_id + reasoning_enabled + reasoning_effort` 后绑定请求上下文，未配置租户连接时失败关闭，不再回退全局凭证。DeepSeek V4 Pro/Flash Adapter 统一映射 thinking、high/max 和 reasoning_content 工具链回传，原始推理不进入公开响应或历史。Prompt 通过稳定 ID/多版本注册，支持激活和回滚；System 与动态上下文共享字符预算，所有业务调用统一附加 Prompt/任务追踪 metadata，节点输出优先由 Pydantic 校验；远程模型凭证和模型选择统一来自租户管理后台，轻量节点优先 `LOCAL_LLM_*`。
 
 ### ④ `src/datasource/` — 数据源管理
 
@@ -208,7 +211,9 @@ POST /api/v1/chat {"query": "本月 GMV 排名？", "stream": true}
 
 | 模块 | 职责 |
 |------|------|
+| `tools/knowledge_search.py` | 只读知识检索工具：`KnowledgeSearchArgs`（extra=forbid）、身份复核、数据源白名单+授权、未绑定下推、状态化返回（ok/empty/invalid_arguments/forbidden/timeout/unavailable/budget_exhausted）与受限引用 |
 | `tools/analyzer.py` | 描述性统计/趋势/Z-score 异常/集中度/Pearson 相关 |
+| `tools/chart_presentation.py` | 受约束 ChartPlan、语言与字段标签、六类展示共用构建器、类型切换角色适配；日期主轴、额外维度分组/分面、重复坐标显式聚合、缺失 null 连线 |
 | `tools/touchpoint_attribution.py` | 路径字段映射与资格复核；首次、末次、线性、时间衰减和 U 型归因的 Decimal 守恒计算 |
 | `tools/forecasting.py` | naive/线性预测、rolling backtest、预测区间和模型卡 |
 | `tools/forecast_engine.py` | ForecastRequest、可注册 ForecastModel、滚动回测和统一 ForecastResult |
@@ -278,6 +283,12 @@ checksum。执行器同时兼容历史 LF/CRLF 登记值，避免 Git 跨平台�
 
 ## 前端
 
+对话结果按图表/核心数值→数据详情→分析正文展示。`frontend/src/hooks/chatPresentation.ts` 只接收公开 answer_delta/answer_reset，并隔离并行和旧轮次；`useChat.ts` 将 data/chart/analysis_patch 写回部分结果，不等待 final 才渲染。`api/client.ts` 完整处理 UTF-8 分片，仅 done(status=complete) 为成功，提前断流按错误处理。`DataTable` 分离展示标签与原始键；`ChartPanel` 切换时保留 chart_plan 与 column_labels。缺失值保持 null，折线 connectNulls=true，不补零或插值。
+
+`frontend/src/components/chatChartLayout.ts` 是聊天图表共用的纯响应式布局模块：`ChartPanel` 通过 `ResizeObserver` 观察实际容器，再独立调整多面板高度、窄屏紧凑刻度、标题/图例及饼图/热力色阶位置，不修改原选项、业务数据、分类、null 或坐标索引。紧凑刻度采用结果展示语言，提示框仍保留精确原值；移动样式不再覆盖计算高度。非流式 `/chat` 与公开最终结果保持相同的顶层语言、字段标签及摘要开关契约。
+
+`ReasoningPanel` 现在只呈现公开业务过程摘要，默认折叠并按节点/调用分组，原始模型思维链始终隐藏。开关 chat_show_analysis_process 默认 false，由固定平台管理员通过运行参数面板热改，聊天请求不能覆盖；这与模型侧 reasoning_enabled 能力开关独立。语言优先显式要求、本轮问题、历史、界面，display_language 透传至分析提示词。设计与验收边界见 `spec/52-chat-presentation.md`，浏览器综合回归见 `tests/test_frontend/test_chat_presentation_browser.py`。
+
 `frontend/` — React 18 + TypeScript 5 + Ant Design 5 + ECharts。登录固定输入 `tenant_code + username + password`，不展示公开注册；登录后按角色展示业务菜单。`AdminPage` 对 super_admin 展示租户、厂商能力字段编辑器和可物理删除的平台模型目录，并以精确确认文本物理删除非默认租户；对 tenant_admin 展示当前租户用户、命名连接和默认模型。`ChatPage` 只提交当前租户可见的连接与模型，并按模型能力展示推理开关和深度。`AutomationPage` 提供兼容任务说明、创建、暂停/恢复、立即运行、运行记录、删除和站内通知视图。`ReportWorkbenchPage` 负责自然语言计划预览、任务排队和权限/配额提示；`ReportViewerPage` 展示版本化动态 DSL、快照 Drilldown、运行节点日志和分享治理；`SharedReportPage` 只读取脱敏快照并通过短时授权会话访问分享 Drilldown。
 
 ### 报表工作台 — `src/reporting/`
@@ -323,14 +334,16 @@ checksum。执行器同时兼容历史 LF/CRLF 登记值，避免 Git 跨平台�
 - **分析预算与回退**：模型样本按来源交错，并提供确定性样本日期范围、来源计数和 SQL。最终结果分析不被旧前三行摘要覆盖；JSON 契约异常最多在同一超时预算内重试一次，失败仍带堆栈回退，不静默丢弃额外对象。
 - **深度并发与关闭**：ClickHouse 共享只读客户端禁用自动 session ID；DataSourceRegistry 经 AppContext 关闭，等待活动连接及缓存失效产生的释放任务，不能依赖事件循环结束后的析构。
 - **最终 SQL 展示**：多源 worker 返回 execute_sql 方言重写/权限注入后的 SQL，响应通过 sql_statements 按来源展示
-- **并行流隔离**：SSE 使用 LangChain run_id 派生 stream_id，前端按调用实例缓冲 token；原始 reasoning_content 仅做服务端受控诊断
+- **有界知识工具循环**：`invoke_structured`/`invoke_text`/`stream_prompt` 统一经 `knowledge_loop`，模型不请求工具时仍只有原一次调用、零检索；工具回合 ≤3、真实检索 ≤6，每个 `tool_call`（含未知工具、非法参数、`invalid_tool_calls`）都必须有匹配 `tool_call_id` 的 `ToolMessage`。权限失败关闭，检索故障按 `FailureDomain.KNOWLEDGE` 降级。工具交互空间按真实序列化计数在 `build_budgeted_prompt(reserve_chars=...)` 中预留：包含工具定义、一条有界工具结果（与 `RESULT_TOTAL_CHARS` 同源的 6000 字符）与协议开销，保证证据不会被预算裁空；连一条有用证据都放不下时不挂工具，退化为一次普通调用而不是事后裁剪；`bind_tools` 后重新套回原 `with_config` 配置，provider 续轮消息保留 `additional_kwargs`（DeepSeek `reasoning_content`）
+- **知识检索范围与后台身份**：普通请求只绑定数据源与请求白名单（`bind_request_knowledge_scope`），身份始终取自真实请求上下文并在执行期复核；后台任务用 `use_trusted_identity` 同时绑定认证 ContextVar 与循环配置，退出时精确 reset，无可信身份只禁用检索而不采用默认租户或平台身份
+- **并行流隔离**：SSE 使用 LangChain run_id 派生 stream_id，前端按调用实例缓冲 token；原始 reasoning_content 仅做服务端受控诊断。挂工具的模型回合带 `knowledge_tool_round` 标记：SSE 先缓冲，在 `on_chat_model_end` 按输出是否含 `tool_calls` 决定释放或丢弃，`llm_start`/`llm_end`/`final`/`done` 语义不变；`KnowledgeRoundReset` 供节点内消费方丢弃中间正文
 - **安全阻断**：layer3 使用 sqlglot AST 只读白名单，阻断 DDL/DML、SELECT INTO 和状态变更函数；表/列解析异常失败关闭
 - **列引用归属校验**：列白名单是所有表列名的并集，只看列名会漏掉跨表错配（`created_at` 只存在于 A 源 orders，却写成 B 源 finance_invoices 的别名前缀 `i.created_at`，能通过白名单直到 EXPLAIN 打库才报错）。校验必须解析别名后按表归属判断，且前移到 `layer3_validate`——幻觉列在那里失败才能把可用列清单喂回重试，`execute_sql` 的同类校验只作最后防线。判定逻辑唯一实现于 `security/sql_schema_validation.py`（按 `(datasource, table)` 建索引、作用域感知），产出分级 `ValidationIssue`：high 拦截重试；low 放行留痕，但只有 `SELECT *` 会产出低置信 `ValidationIssue` 并计入指标，CTE 限定符 / 含 CTE 零命中 / 空列集表 / 命名空间前缀等"无法判定"分支只写 warning 日志并 `return []`——它们不产出 issue、不进入 `data_agent_sql_schema_validation_total`，排查"为什么没拦住"时必须看日志而不是只查指标。基准按数据源取权威快照：layer3 阶段一用 `relevant_tables` 零 IO 校验，出现 high 置信问题或阶段一无基准时才进入阶段二，用 `get_or_fetch_schema(ds, user_query="")` 全量快照复核后定拦截，消除裁剪假阳性；schema 幻觉重试不回注失败 SQL，只按表回喂可用列清单（issue 上限 3、每表列上限 10）
 - **后处理层不得改坏正确输入**：`sql_rewriter` 的 sqlglot 归一化会把 ClickHouse 的 `toStartOfMonth(x)` 渲染回 `dateTrunc('MONTH', x)`，而后者只接受 DateTime，Date32 列直接报 code 43——等于把模型按方言提示写对的函数改坏。ClickHouse 必须在其后再做一次 `dateTrunc → toStartOfX` 回退；凡是自加的后处理层，都要验证它不破坏正确输入
 - **提示预算跟随模型窗口**：`context_budget` 不是与模型窗口无关的常数。固定 4400 的 schema 上限会把上百张表的库裁到只剩几张，目标表列名进不了 Prompt，模型只能按惯例猜列名（曾导致 `created_at` 不存在）。schema 段按"能装下整库表结构"设置，总预算需同时容纳 schema 与业务上下文，否则会把问题从一段挤到另一段
 - **高权限连接告警**：DataSourceRegistry 识别 Oracle `SYS/SYSTEM` 和 SQL Server `sa` 时记录 warning 但继续连接；数据库账号权限不改变 layer3 的只读失败关闭策略
 - **向量过滤精确化**：Milvus LIKE 仅缩小候选集，解析 metadata 后再次精确校验，搜索、计数和删除共享同一过滤语义
-- **阻塞 SDK 隔离**：Milvus 集合操作及嵌入模型导入统一通过工作线程执行，RPC 有限超时；取消写任务等待线程退出后才释放写锁。规范表结构先发布，派生索引刷新有独立超时和异常收束。
+- **阻塞 SDK 隔离**：Milvus 集合操作及嵌入模型导入统一通过工作线程执行，RPC 有限超时；取消写任务等待线程退出后才释放写锁。规范表结构先发布，派生索引刷新有独立超时和异常收束。Chroma 的 `search`/`get_by_id`/`get_by_filter`/`count` 同样 `asyncio.to_thread` offload，否则同步 SDK 会占住事件循环，`asyncio.wait_for` 无法生效；Milvus 只读路径进一步拆分取消策略：`_run_on_collection_read`/`_run_abandonable_read` 取消后立即返回，在途线程受 SDK `_RPC_TIMEOUT_SECONDS` 约束并由 `_consume_task_result` 收束异常，工具期限因此真正有界；写入路径仍用 `_run_sync` 等在途调用退出后才释放写锁
 - **认证暂时不可用**：`AuthContext` 区分服务故障和明确未认证；超时、断网、5xx 保留当前路由显示重试，不清 Cookie。只有明确未认证结果进入登录页，不能用保存的用户信息绕过服务端校验。
 - **生产密钥门禁**：生产禁止默认数据库凭证、默认凭证主密钥和临时 JWT；Docs、Redoc、OpenAPI 同时关闭
 - **API 中间件安全**：访问策略先解析可信客户端 IP 并执行 deny/allow，再把认证模式下传纯 ASGI Auth；CORS 默认拒绝跨域；生产 HTTPS 启用 CSP/HSTS

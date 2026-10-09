@@ -110,8 +110,9 @@ def build_budgeted_prompt(
     sections: list[PromptSection],
     *,
     system_values: dict[str, object] | None = None,
+    reserve_chars: int = 0,
 ) -> BudgetedPrompt:
-    """固定 System 不截断，动态 section 先保底再按优先级扩展。"""
+    """固定 System 不截断，动态 section 先保底再按优先级扩展；reserve_chars 留给工具 schema。"""
     from src.llm.prompts import get_prompt_definition
 
     definition = get_prompt_definition(prompt_id)
@@ -125,9 +126,12 @@ def build_budgeted_prompt(
             f"{len(fixed_system)}/{budget}",
         )
 
+    # 预留量不能挤占固定 System，也不能超过总预算的一半。
+    reserved = max(0, min(int(reserve_chars), max(0, budget - len(fixed_system)), budget // 2))
+    allocatable = budget - reserved
     prepared = _prepare_sections(sections)
     separator_reserve = len(prepared) * 2
-    available = max(0, budget - len(fixed_system) - separator_reserve)
+    available = max(0, allocatable - len(fixed_system) - separator_reserve)
     allocations = {item.section.name: 0 for item in prepared}
     ordered = sorted(prepared, key=lambda item: (-item.section.priority, item.index))
 

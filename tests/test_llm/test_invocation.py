@@ -18,7 +18,10 @@ class TestStructuredInvocation:
         captured: dict[str, object] = {}
 
         class FakeModel:
-            async def ainvoke(self, messages):
+            # 方法作用：记录统一入口传入的消息；签名对齐工具循环的 config 透传。
+            # Args: messages - 已预算消息；config - 可选运行配置。
+            # Returns: 固定结构化响应。
+            async def ainvoke(self, messages, config=None):
                 captured["messages"] = messages
                 return SimpleNamespace(content='{"answer":"已完成"}')
 

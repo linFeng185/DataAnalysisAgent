@@ -78,6 +78,16 @@ async def generate_chart_node(state: AnalysisState) -> dict:
 
     analysis = state.get("analysis_result", {}) or {}
     data, data_source = _select_chart_rows(state, analysis)
+    from src.tools.chart_presentation import ChartPlan, column_labels, resolve_language
+
+    language = resolve_language(state.get("user_query", ""), state.get("conversation_history", []), state.get("display_language", "zh-CN"))
+    labels = column_labels(data, analysis.get("column_labels") or analysis.get("field_descriptions"), language) if state.get("user_query") or state.get("display_language") else {}
+    plan = analysis.get("chart_plan", {}) or {}
+    try:
+        plan = ChartPlan.model_validate(plan).model_dump()
+    except ValueError:
+        logger.warning("图表方案格式无效，回退确定性构型")
+        plan = {}
     logger.info(
         "图表候选选择完成",
         primary_rows=len(state.get("query_result_sample", []) or []),
@@ -112,6 +122,7 @@ async def generate_chart_node(state: AnalysisState) -> dict:
         return {"chart_config": _no_chart("查询没有返回数据，无法生成图表")}
     core_value = _extract_core_value(data)
     if len(data) == 1 and core_value:
+        core_value["label"] = labels.get(core_value["column"], core_value["label"])
         logger.info("节点完成（核心数值）", node="generate_chart", column=core_value["column"])
         return {"chart_config": {
             **_no_chart("单行单值结果使用核心数值展示"),
@@ -123,7 +134,7 @@ async def generate_chart_node(state: AnalysisState) -> dict:
         return {"chart_config": _no_chart("当前结果缺少可形成图表的维度与数值组合")}
 
     try:
-        option = _build_echarts_option(data, chart_type)
+        option = _build_echarts_option(data, chart_type, plan, labels) if analysis.get("chart_plan") or labels else _build_echarts_option(data, chart_type)
     except Exception as exc:
         logger.error("图表配置生成失败", chart_type=chart_type, error=str(exc), exc_info=True)
         return {"chart_config": _failed_chart(chart_type, f"图表配置生成失败：{exc}")}
@@ -140,10 +151,13 @@ async def generate_chart_node(state: AnalysisState) -> dict:
         "status": "success",
         "reason": "",
         "data_source": data_source,
+        "chart_plan": plan,
+        "column_labels": labels,
+        "display_language": language,
     }}
 
 
-_SUPPORTED_TYPES = ("bar", "line", "pie", "scatter", "table")
+_SUPPORTED_TYPES = ("bar", "line", "pie", "scatter", "heatmap", "table")
 
 
 # 根据分析推荐和数据列类型选择图表类型。
@@ -211,14 +225,9 @@ def _failed_chart(chart_type: str, reason: str) -> dict:
 # Args: rows - 查询结果行。
 # Returns: 至少存在一个非空数值的列名列表。
 def _numeric_columns(rows: list[dict]) -> list[str]:
-    if not rows:
-        return []
-    return [
-        str(column)
-        for column in rows[0]
-        if _first_numeric_value(rows, str(column)) is not None
-        and not _is_identifier_column(str(column))
-    ]
+    from src.tools.chart_presentation import numeric_columns
+
+    return numeric_columns(rows)
 
 
 # 方法作用：判断数值列是否更可能是标识符而不是可视化指标。
@@ -277,15 +286,13 @@ def _extract_core_value(rows: list[dict]) -> dict:
     }
 
 
-def _build_echarts_option(rows: list[dict], chart_type: str) -> dict:
-    if not rows:
-        return {}
-    keys = list(rows[0].keys())
-    if chart_type in ("pie",):
-        return _pie_option(rows, keys)
-    if chart_type in ("line", "bar", "scatter"):
-        return _axis_option(rows, keys, chart_type)
-    return {}
+# 通过统一构型器生成图表，兼容旧两参数调用。
+# Args: rows - 查询数据；chart_type - 类型；plan - 角色方案；labels - 展示名。
+# Returns: ECharts 配置，不适用时抛出 ValueError。
+def _build_echarts_option(rows: list[dict], chart_type: str, plan: dict | None = None, labels: dict | None = None) -> dict:
+    from src.tools.chart_presentation import build_option
+
+    return build_option(rows, chart_type, plan, labels)
 
 
 # 方法作用：根据确定性触点归因结果生成固定柱状图配置。
@@ -309,104 +316,9 @@ def _build_attribution_option(rows: list[dict]) -> dict:
     }
 
 
-def _pie_option(rows: list[dict], keys: list[str]) -> dict:
-    name_col = keys[0]
-    val_col = keys[1] if len(keys) > 1 else None
-    if not val_col:
-        return {}
-    items = [{"name": str(r.get(name_col, "")), "value": _to_num(r.get(val_col))}
-             for r in rows[:30]]
-    return {
-        "tooltip": {"trigger": "item"},
-        "series": [{"type": "pie", "radius": "60%", "data": items}],
-    }
-
-
-# 构建坐标轴图表配置，并支持 Decimal 数值及交叉分组数据。
-# Args: rows - 查询结果行；keys - 数据列顺序；chart_type - 图表类型。
-# Returns: 可直接传给 ECharts 的 option；无数值列时返回空字典。
-def _axis_option(rows: list[dict], keys: list[str], chart_type: str) -> dict:
-    logger.debug("坐标轴配置构建入口", chart_type=chart_type, row_count=len(rows), columns=keys)
-    numeric_columns = _numeric_columns(rows)
-    numeric_col = numeric_columns[0] if numeric_columns else None
-    if not numeric_col:
-        logger.warning("坐标轴配置回退", reason="无数值列", columns=keys)
-        return {}
-    dimension_columns = [column for column in keys if column not in numeric_columns]
-    if not dimension_columns:
-        logger.warning("坐标轴配置回退", reason="无维度列", columns=keys)
-        return {}
-    x_col = next(
-        (
-            column for column in dimension_columns
-            if any(marker in column.lower() for marker in (
-                "date", "time", "day", "month", "year", "dt", "日期", "时间", "月份",
-            ))
-        ),
-        dimension_columns[0],
-    )
-
-    # 检测交叉透视：X 列值大量重复 → 应按第三列分组
-    x_vals = [str(r.get(x_col, "")) for r in rows]
-    uniq_x = len(set(x_vals))
-    is_cross = uniq_x < len(rows) * 0.6 and uniq_x > 1 and len(keys) >= 3
-    group_col = None
-    if is_cross:
-        logger.info(
-            "交叉图分组选择边界",
-            x_column=x_col,
-            numeric_column=numeric_col,
-            dimension_candidates=dimension_columns,
-        )
-        for col in dimension_columns:
-            if col in {x_col, numeric_col}:
-                continue
-            if any(isinstance(row.get(col), str) for row in rows):
-                group_col = col
-                break
-        logger.info("交叉图分组选择完成", group_column=group_col or "")
-
-    if is_cross and group_col:
-        # 交叉透视：按分组列拆多系列
-        group_vals = sorted(set(str(r.get(group_col, "")) for r in rows))
-        if len(group_vals) > 12:
-            group_vals = group_vals[:12]
-        categories = sorted(set(x_vals))
-        series = []
-        for gv in group_vals:
-            data_map = {}
-            for r in rows:
-                if str(r.get(group_col, "")) == gv:
-                    data_map[str(r.get(x_col, ""))] = _to_num(r.get(numeric_col))
-            vals = [data_map.get(c, 0) for c in categories]
-            series.append({"name": gv, "type": chart_type, "data": vals,
-                           "smooth": chart_type == "line"})
-        option = {
-            "tooltip": {"trigger": "axis"},
-            "legend": {"data": group_vals, "bottom": 0},
-            "xAxis": {"type": "category", "data": categories,
-                       "axisLabel": {"rotate": len(categories) > 8 and 45 or 0}},
-            "yAxis": {"type": "value"},
-            "series": series,
-        }
-        logger.info("坐标轴配置构建完成", mode="cross", series_count=len(series), category_count=len(categories))
-        return option
-
-    # 普通模式
-    if len(rows) > 30:
-        rows = rows[:25]
-    categories = [str(r.get(x_col, "")) for r in rows]
-    vals = [_to_num(r.get(numeric_col)) for r in rows]
-    option = {
-        "tooltip": {"trigger": "axis"},
-        "xAxis": {"type": "category", "data": categories,
-                   "axisLabel": {"rotate": len(categories) > 8 and 45 or 0}},
-        "yAxis": {"type": "value"},
-        "series": [{"type": chart_type, "data": vals,
-                     "smooth": chart_type == "line"}],
-    }
-    logger.info("坐标轴配置构建完成", mode="standard", series_count=1, category_count=len(categories))
-    return option
+# 将归因图表的规则结果转换为数值，不参与查询数据缺失值处理。
+# Args: val - 归因规则输出数值。
+# Returns: 有限数值，规则缺省为零。
 
 
 def _to_num(val) -> float:

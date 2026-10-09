@@ -229,7 +229,13 @@ async def _analyze_one(
             "multi_source",
             f"datasource:{datasource}",
         ]
-        result = await subgraph.ainvoke(s1, config=worker_config)
+        # 每个子任务只在自己的数据源范围内检索知识，绝不继承主源造成错误口径。
+        from src.llm.knowledge_loop import use_request_knowledge_scope
+
+        with use_request_knowledge_scope(
+            datasource=datasource, allowed_datasources=frozenset({datasource}),
+        ):
+            result = await subgraph.ainvoke(s1, config=worker_config)
         if not isinstance(result, dict):
             return SourceQueryResult.failed(
                 datasource,

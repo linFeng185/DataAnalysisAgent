@@ -521,7 +521,7 @@ function TurnBubble({ turn, onSendMessage, onConfirmAction }: {
 }) {
   useLanguage();
   const { userQuery, assistant, finalResult, status } = turn;
-  const hasResult = status === 'done' && !!finalResult;
+  const hasResult = !!finalResult;
   const hasError = status === 'error';
   const isCancelled = status === 'cancelled';
   const isStreaming = status === 'streaming';
@@ -634,9 +634,6 @@ function TurnBubble({ turn, onSendMessage, onConfirmAction }: {
 
           <ProgressBar nodes={assistant.progressNodes} />
 
-          {(isStreaming || assistant.decisionSummary) && (
-            <ReasoningPanel summary={assistant.decisionSummary} />
-          )}
 
           {isCancelled && (
             <Card size="small" style={{ background: '#fafafa', borderRadius: 12 }}>
@@ -658,13 +655,16 @@ function TurnBubble({ turn, onSendMessage, onConfirmAction }: {
                 {(finalResult?.analysis as Record<string,unknown>)?.summary as string || assistant.tokens}
               </Typography.Paragraph>
             </Card>
-          ) : hasResult && (
+          ) : (hasResult || isStreaming && assistant.tokens) && (
             <ResultCard sql={assistant.sql}
-              tokens={assistant.tokens} finalResult={finalResult}
+              tokens={assistant.tokens} finalResult={finalResult || { success: true, status: 'success', analysis: { summary: assistant.tokens } }}
+              streaming={isStreaming}
               validationErrors={assistant.validationErrors}
               onSendMessage={onSendMessage}
               onConfirmAction={onConfirmAction} />
           )}
+
+          <ReasoningPanel enabled={assistant.processEnabled} summary={assistant.decisionSummary} entries={assistant.processSummaries} />
 
           {/* 恢复的历史会话 — 含 SQL 折叠面板 */}
           {isRestored && (

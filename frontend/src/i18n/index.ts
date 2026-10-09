@@ -14,6 +14,13 @@ function initialLanguage(): Language {
 }
 let language = initialLanguage();
 
+// 为 API 请求提供界面语言兜底，不覆盖用户明确的语言要求。
+// Args: 无。
+// Returns: 当前界面语言。
+export function getLanguage(): Language {
+  return language;
+}
+
 // 方法作用：读取静态界面词典，动态参数保持原样，不翻译用户业务内容。
 // Args: source - 中文界面键；values - 命名插值。
 // Returns: 当前语言的界面文本。

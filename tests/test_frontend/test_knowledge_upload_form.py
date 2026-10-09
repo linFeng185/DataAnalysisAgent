@@ -200,3 +200,23 @@ class TestRepeatedFilePick:
         assert "fileRef.current.value = ''" in handler
         # 清空必须发生在提前返回之前，否则取消选择时不会复位。
         assert handler.index("fileRef.current.value = ''") < handler.index("return;")
+
+    # 方法作用：验证选中文件在清空 input 之前先快照成数组。
+    # Args: self - 测试实例。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    def test_file_snapshot_precedes_value_reset(self) -> None:
+        """e.target.files 与 input 绑定，清空 value 会把它一并清空成空列表。
+
+        真实浏览器实测：清空 value 后同一 FileList 引用长度由 1 变 0，
+        因此必须先 Array.from 快照，否则后续判空恒真、弹窗永远打不开。
+        """
+        # Arrange
+        handler = SOURCE.split("const handleFileSelect", 1)[1].split("};", 1)[0]
+        # Act
+        snapshot = handler.index("Array.from(files)")
+        reset = handler.index("fileRef.current.value = ''")
+        # Assert
+        assert snapshot < reset, "必须先快照 FileList，再清空 input.value"
+        # 判空与写回都必须基于快照，不能再读已失效的活引用。
+        assert "setPendingFiles(selected)" in handler
+        assert "files.length === 0" not in handler

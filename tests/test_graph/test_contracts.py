@@ -8,6 +8,66 @@ import pytest
 class TestTaskPlan:
     """覆盖第一阶段任务路由契约。"""
 
+    # 验证真实英文月份和数值日期不会重复要求补充时间。
+    # Args: self - 实例；expression - 日期表达；intent - 需要时间的分析类型。
+    # Returns: 无返回值。
+    @pytest.mark.parametrize("intent", ["trend", "aggregation", "attribution"])
+    @pytest.mark.parametrize("expression", [
+        "from January 1 to January 7, 2026",
+        "from Jan. 1st, 2026 to Jan. 7th, 2026",
+        "from 1 January 2026 to 7 January 2026",
+        "from 1 Sept 2026 to 7 September 2026",
+        "from 2026-01-01 to 2026-01-07",
+        "from 2026/1/1 to 2026/1/7",
+        "on February 29, 2024",
+    ])
+    def test_explicit_valid_dates_satisfy_time_range(self, expression: str, intent: str) -> None:
+        """完整有效日期已提供范围，TaskPlan 不应再阻断生成 SQL。"""
+        from src.graph.contracts import build_task_plan
+
+        # Arrange
+        query = f"Show daily regional sales {expression}"
+        # Act
+        plan = build_task_plan(intent, query=query)
+        # Assert
+        assert plan.needs_time_range is False
+        assert plan.missing_inputs == []
+
+    # 验证非法日期、标识符和不完整日期不冒充有效时间范围。
+    # Args: self - 实例；query - 非法或缺少日期的问题。
+    # Returns: 无返回值。
+    @pytest.mark.parametrize("query", [
+        "", "Show regional sales", "Show sales from 2026-02-30 to 2026-02-31",
+        "Show sales on February 29, 2025", "Show sales on Jan 0, 2026",
+        "Show sales on April 31, 2026", "Show sales on 2026/13/01",
+        "Compare code prefix2026-01-01suffix", "Show sales on January 7",
+    ])
+    def test_invalid_or_incomplete_dates_require_time_range(self, query: str) -> None:
+        """不猜测年份，也不因非法日期或编码误放行趋势查询。"""
+        from src.graph.contracts import build_task_plan
+
+        # Arrange / Act
+        plan = build_task_plan("trend", query=query)
+        # Assert
+        assert plan.needs_time_range is True
+        assert plan.missing_inputs == ["time_range"]
+
+    # 验证既有相对时间规则和无时间要求的能力保持不变。
+    # Args: self - 实例；query - 原有相对时间表达。
+    # Returns: 无返回值。
+    @pytest.mark.parametrize("query", ["最近七天销售", "全部历史销售", "Sales last week", "Sales this quarter"])
+    def test_date_fix_keeps_relative_range_fallback(self, query: str) -> None:
+        """精确日期补充不能破坏相对时间或直接问答的路由。"""
+        from src.graph.contracts import build_task_plan
+
+        # Arrange / Act
+        trend = build_task_plan("trend", query=query)
+        direct = build_task_plan("chat", query="Hello")
+        # Assert
+        assert trend.needs_time_range is False
+        assert direct.needs_time_range is False
+        assert direct.capability == "direct_answer"
+
     def test_build_task_plan_maps_trend_and_missing_time_range(self) -> None:
         """趋势请求缺少时间范围时必须显式记录缺失参数。"""
         # Arrange

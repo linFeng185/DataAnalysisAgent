@@ -307,6 +307,15 @@ async def build_response_node(state: AnalysisState) -> dict:
             final_result["error_message"] = public_error_message("MULTI_SOURCE_PARTIAL")
 
     final_result.setdefault("sql_statements", sql_statements)
+    from src.config import get_settings
+    from src.tools.chart_presentation import column_labels, resolve_language
+
+    display_language = resolve_language(contexts.request.user_query, state.get("conversation_history", []), state.get("display_language", "zh-CN"))
+    public_analysis = final_result.get("analysis", {}) or {}
+    public_rows = final_result.get("data", [])
+    final_result["display_language"] = display_language
+    final_result["column_labels"] = column_labels(public_rows if isinstance(public_rows, list) else [], public_analysis.get("column_labels") or public_analysis.get("field_descriptions"), display_language)
+    final_result["process_summary_enabled"] = get_settings().chat_show_analysis_process
     statistics = state.get("query_result_statistics", {}) or {}
     final_result["masking"] = MaskingMetadata.model_validate(statistics.get("masking", {})).model_dump()
     final_result["supplemental_masking"] = [

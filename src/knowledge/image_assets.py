@@ -108,8 +108,13 @@ async def analyze_image_bytes(
             {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64," + base64.b64encode(prepared_image.content).decode("ascii")}},
         ])
         # 图片内容不参加外部追踪；只保留当前请求的文件 ID 和结果摘要。
+        from src.llm.knowledge_loop import invoke_with_knowledge
+
         with tracing_context(enabled=False):
-            response = await asyncio.wait_for(invocation.model.ainvoke(invocation.messages, config={"callbacks": []}), timeout=30)
+            response = await asyncio.wait_for(
+                invoke_with_knowledge(invocation, config={"callbacks": []}),
+                timeout=30,
+            )
         raw = getattr(response, "content", response)
         if isinstance(raw, list):
             raw = "\n".join(str(block.get("text", "")) for block in raw if isinstance(block, dict))

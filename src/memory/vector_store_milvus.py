@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import logging as stdlib_logging
 import time
 from collections.abc import Callable, Generator
 from typing import Any
@@ -54,6 +53,29 @@ _NOT_LOADED_MARKERS = (
 
 class MilvusCollectionUnavailable(RuntimeError):
     """集合处于加载熔断期时抛出，调用方应降级而不是重试。"""
+
+
+# 方法作用：消费被放弃的在途任务结果，避免「Task exception was never retrieved」。
+# Args: task - 已完成或已取消的 asyncio.Task。
+# Returns: 无返回值。
+def _consume_task_result(task: asyncio.Task) -> None:
+    """只读路径放弃在途线程后，由本回调收束结果与异常。"""
+    if task.cancelled():
+        return
+    try:
+        task.exception()
+    except Exception:
+        # 结果已无人等待，异常在此收束即可，不改变调用方状态。
+        logger.debug("Milvus 只读在途任务异常已收束")
+
+
+# 方法作用：只读操作的有界期限执行，取消时放弃在途线程而不等待。
+# Args: operation - 已设置有限 RPC 超时的同步只读操作。
+# Returns: 操作结果；取消立即向上传播，线程由 SDK 超时自然收尾。
+async def _run_abandonable_read[Result](operation: Callable[[], Result]) -> Result:
+    task = asyncio.create_task(asyncio.to_thread(operation))
+    task.add_done_callback(_consume_task_result)
+    return await asyncio.shield(task)
 
 
 class MilvusVectorStore(VectorStore):
@@ -215,6 +237,30 @@ class MilvusVectorStore(VectorStore):
 
         return await self._run_sync(execute)
 
+    # 只读路径的取消策略：放弃在途线程而不等待，让工具期限真正生效。
+    # Args: self - 实例；operation - 接收集合句柄的同步只读操作。
+    # Returns: 操作结果；取消时立即向上传播。
+    async def _run_on_collection_read[Result](self, operation: Callable[[Any], Result]) -> Result:
+        """读操作不持有写锁，取消后无需等待 SDK 返回，也不强杀线程。"""
+        self._raise_if_circuit_open()
+
+        # Args: 无，读取外层操作闭包。
+        # Returns: 操作结果。
+        def execute() -> Result:
+            col = self._get_collection()
+            try:
+                return operation(col)
+            except Exception as exc:
+                if self._is_not_loaded_error(exc):
+                    self._collection_loaded = False
+                    logger.warning("集合加载标记失效，下次操作将重新加载",
+                                   collection=_COLLECTION, error=str(exc))
+                raise
+
+        # 被放弃的在途线程仍受 SDK 的 _RPC_TIMEOUT_SECONDS 约束，结束时消费异常，
+        # 既不遗留未取回异常的任务，也不阻塞当前请求。
+        return await _run_abandonable_read(execute)
+
     # 连同重量级库导入一起在线程中初始化模型，合并并发首次请求。
     # Args: self - 实例。
     # Returns: 已缓存的嵌入编码函数。
@@ -361,7 +407,7 @@ class MilvusVectorStore(VectorStore):
         _start = time.monotonic()
         emb = await self._embed(query)
         candidate_limit = _FILTERED_CANDIDATE_LIMIT if filters else min(top_k, 50)
-        results = await self._run_on_collection(lambda col: col.search(
+        results = await self._run_on_collection_read(lambda col: col.search(
             data=[emb], anns_field="embedding",
             param={"metric_type": "COSINE", "params": {}},
             limit=candidate_limit, expr=self._to_expr(filters),
@@ -396,7 +442,7 @@ class MilvusVectorStore(VectorStore):
             匹配记录；不存在时返回 None。
         """
         logger.debug("Milvus ID 查询入口", entry_id=entry_id)
-        r = await self._run_on_collection(lambda col: col.query(
+        r = await self._run_on_collection_read(lambda col: col.query(
             expr=f"id == {json.dumps(entry_id, ensure_ascii=False)}",
             output_fields=["id", "content", "metadata"], limit=1, timeout=_RPC_TIMEOUT_SECONDS))
         if not r:
@@ -451,7 +497,7 @@ class MilvusVectorStore(VectorStore):
             logger.debug("Milvus metadata 查询完成", count=len(result))
             return result
 
-        return await self._run_on_collection(read_entries)
+        return await self._run_on_collection_read(read_entries)
 
     # ── 写入 ──
 
@@ -574,7 +620,7 @@ class MilvusVectorStore(VectorStore):
             logger.debug("Milvus count 完成", count=result)
             return result
 
-        return await self._run_on_collection(read_count)
+        return await self._run_on_collection_read(read_count)
 
     # 方法作用：检查默认 Milvus 连接是否存在且服务端可响应。
     # Args: self - 当前 MilvusVectorStore 实例。
@@ -599,7 +645,8 @@ class MilvusVectorStore(VectorStore):
                 utility.has_collection(_COLLECTION, using="default", timeout=_RPC_TIMEOUT_SECONDS)
                 return True
 
-            return await self._run_sync(probe)
+            # 探针不持有集合句柄，直接复用只读的可放弃执行语义。
+            return await _run_abandonable_read(probe)
         except Exception as exc:
             logger.error(
                 "MilvusVectorStore 健康检查失败",

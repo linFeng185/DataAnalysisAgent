@@ -103,7 +103,7 @@ class TestGenerateChartDecimal:
         result = await generate_chart_node(state)
 
         assert result["chart_config"]["type"] == "bar"
-        assert result["chart_config"]["option"]["series"][0]["data"] == [0, 12.5]
+        assert result["chart_config"]["option"]["series"][0]["data"] == [None, 12.5]
         logger.info("test_first_row_none_uses_later_numeric_value 完成")
 
 

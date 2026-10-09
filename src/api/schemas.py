@@ -36,6 +36,7 @@ class ChatRequest(BaseModel):
     file_ids: list[PositiveInt] = Field(default_factory=list, max_length=10)
     action_request: ActionRequestInput | None = None
     stream: bool = False
+    display_language: str = Field(default="zh-CN", max_length=32, pattern=r"^[a-z]{2,3}(?:-[A-Za-z]{2,8})?$")
 
     # 方法作用：校验对话级连接和模型是否成对出现，避免选择语义不完整。
     # Args: self - 已解析的聊天请求。
@@ -56,6 +57,8 @@ class ChartAdjustRequest(BaseModel):
 
     rows: list[dict[str, Any]] = Field(..., min_length=1, max_length=500)
     instruction: str = Field(..., min_length=1, max_length=100)
+    chart_plan: dict[str, Any] = Field(default_factory=dict)
+    column_labels: dict[str, str] = Field(default_factory=dict)
 
 
 class SkillRegistryInstallRequest(BaseModel):
@@ -117,6 +120,9 @@ class ChatResponse(BaseModel):
     supplemental_masking: list[MaskingMetadata] = Field(default_factory=list)
     analysis: dict = Field(default_factory=dict)
     chart: dict = Field(default_factory=dict)
+    display_language: str = "zh-CN"
+    column_labels: dict[str, str] = Field(default_factory=dict)
+    process_summary_enabled: bool = False
     decision_summary: str = ""
     artifact: dict = Field(default_factory=dict)
     activated_skills: list[str] = Field(default_factory=list)

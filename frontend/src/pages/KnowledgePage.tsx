@@ -279,12 +279,15 @@ export default function KnowledgePage() {
   // Args: files - 浏览器文件选择框返回的文件列表，可能为 null
   // Returns: 无返回值，直接更新弹窗与待上传文件状态
   const handleFileSelect = (files: FileList | null) => {
+    // 必须先把活 FileList 快照成数组：e.target.files 与 input 绑定，
+    // 清空 value 会把它一并清空，清空后再读长度恒为 0，弹窗就永远打不开。
+    const selected = files ? Array.from(files) : [];
     // 无论本次是否真的选到文件都先清空 input.value：浏览器只在 value 变化时派发
     // change，取消后重选同一个文件本来不会触发，弹窗就再也不会打开。
     if (fileRef.current) fileRef.current.value = '';
-    if (!files || files.length === 0) return;
+    if (selected.length === 0) return;
     resetUploadForm();
-    setPendingFiles(Array.from(files));
+    setPendingFiles(selected);
     setCfgOpen(true);
   };
 

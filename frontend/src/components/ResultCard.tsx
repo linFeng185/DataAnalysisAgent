@@ -17,9 +17,10 @@ import type {
 // Args: sql/tokens/finalResult/validationErrors - 当前轮次输出；onSendMessage - 补参回调；onConfirmAction - 动作确认回调。
 // Returns: 分析结果卡片。
 export default function ResultCard({
-  sql, tokens, finalResult, validationErrors, onSendMessage, onConfirmAction,
+  sql, tokens, finalResult, validationErrors, onSendMessage, onConfirmAction, streaming = false,
 }: {
   sql: string; tokens: string;
+  streaming?: boolean;
   finalResult: Record<string, unknown> | null; validationErrors: string[];
   onSendMessage?: (msg: string) => void;
   onConfirmAction?: (request: ActionRequestPayload) => void;
@@ -36,7 +37,7 @@ export default function ResultCard({
   const isError = status === 'failed' || (!finalResult?.success && !needsInput);
   const isSuccessful = !isError && !needsInput;
   const summary = isError ? errorMessage
-    : (analysis?.summary as string || tokens?.slice(0, 200) || t("分析完成"));
+    : ((streaming ? tokens : '') || analysis?.summary as string || tokens || (streaming ? t("正在生成分析内容...") : t("分析完成")));
   const insights = (analysis?.insights as string[]) || [];
   const indicatorGroups = (analysis?.indicator_groups as Array<{
     theme: string;
@@ -108,12 +109,6 @@ export default function ResultCard({
       label: sqlStatements.length > 1 ? t("执行 SQL ({value0})", { value0: sqlStatements.length }) : t("执行 SQL"),
       children: sqlContent,
     }] : []),
-    ...(hasData ? [{ key: 'data', label: <span>{t("数据 (")}{data.length} {t("行)")} {masking?.applied && <Tag color="gold">{t("敏感数据已脱敏")}</Tag>}</span>, children: <><DataTable data={data} masking={masking} />{supplementalMasking?.some(item => item.applied) && <Tag color="gold">{t("补查数据已脱敏")}</Tag>}</> }] : []),
-    ...(shouldShowChart && chartConfig ? [{
-      key: 'chart',
-      label: chartConfig.status === 'failed' ? t("图表生成失败") : t("图表 ({value0})", { value0: chartConfig.type }),
-      children: <ChartPanel chartConfig={chartConfig} rows={chartRows} />,
-    }] : []),
     ...(renderedReport ? [{ key: 'report', label: t("报告正文"), children: <Typography.Paragraph style={{ whiteSpace: 'pre-wrap', marginBottom: 0 }}>{renderedReport}</Typography.Paragraph> }] : []),
   ];
 
@@ -125,13 +120,25 @@ export default function ResultCard({
         ) : needsInput ? (
           <><span>{status === 'needs_confirmation' ? t("等待人工确认") : t("需要补充信息")}</span><Tag icon={<ClockCircleOutlined />} color="processing">{t("待处理")}</Tag></>
         ) : (
-          <><span>{t("分析完成")}</span><Tag icon={<CheckCircleOutlined />} color="success">{t("成功")}</Tag></>
+          <><span>{streaming ? t("分析中") : t("分析完成")}</span><Tag icon={streaming ? <ClockCircleOutlined /> : <CheckCircleOutlined />} color={streaming ? 'processing' : 'success'}>{streaming ? t("生成中") : t("成功")}</Tag></>
         )}
         {validationErrors.length > 0 && <Tag color="warning">{validationErrors.length} {t("个警告")}</Tag>}
       </Space>}
       extra={<Button type="text" size="small" icon={expanded ? <DownOutlined /> : <RightOutlined />}
         onClick={() => setExpanded(!expanded)}>{expanded ? t("收起") : t("展开")}</Button>}>
-      <Typography.Paragraph style={{ marginBottom: expanded ? 12 : 0 }} ellipsis={!expanded ? { rows: 2 } : false}>
+      {expanded && (shouldShowChart || chartConfig?.core_value) && <section data-section="chart" style={{ marginBottom: 16 }}>
+        {chartConfig?.core_value ? <Statistic title={chartConfig.core_value.label} value={chartConfig.core_value.value as string | number} />
+          : <ChartPanel chartConfig={chartConfig} rows={chartRows} />}
+      </section>}
+      {expanded && hasData && <section data-section="data" style={{ marginBottom: 16 }}>
+        <Typography.Text strong style={{ display: 'block', marginBottom: 8 }}>{t("数据详情")} · {data.length} {t("行")}</Typography.Text>
+        <DataTable data={data} masking={masking} columnLabels={finalResult?.column_labels as Record<string, string> | undefined} />
+        {Boolean(finalResult?.truncated) && <Alert type="info" showIcon message={t("当前展示为截断样本，完整行数：{value0}", { value0: Number(finalResult?.row_count) || data.length })} style={{ marginTop: 8 }} />}
+        {supplementalMasking?.some(item => item.applied) && <Tag color="gold">{t("补查数据已脱敏")}</Tag>}
+      </section>}
+      <section data-section="analysis">
+      {expanded && isSuccessful && <Typography.Text strong style={{ display: 'block', marginBottom: 8 }}>{t("分析内容")}</Typography.Text>}
+      <Typography.Paragraph style={{ marginBottom: expanded ? 12 : 0, whiteSpace: 'pre-wrap' }} ellipsis={!expanded ? { rows: 2 } : false}>
         {summary}
       </Typography.Paragraph>
       {expanded && needsTimeRange && (
@@ -162,14 +169,6 @@ export default function ResultCard({
           {insights.map((ins: string, i: number) => (
             <Typography.Paragraph key={i} style={{ marginBottom: 4, paddingLeft: 12 }}>• {ins}</Typography.Paragraph>
           ))}
-        </div>
-      )}
-      {expanded && chartConfig?.core_value && (
-        <div style={{ marginBottom: 16, padding: '12px 16px', borderLeft: '3px solid #1677ff', background: '#fafafa' }}>
-          <Statistic
-            title={chartConfig.core_value.label}
-            value={chartConfig.core_value.value as string | number}
-          />
         </div>
       )}
       {expanded && chartConfig?.status === 'failed' && chartConfig.reason && (
@@ -282,6 +281,7 @@ export default function ResultCard({
         </div>
       )}
       {expanded && collapseItems.length > 0 && <Collapse size="small" items={collapseItems} style={{ marginTop: 8 }} />}
+      </section>
     </Card>
   );
 }

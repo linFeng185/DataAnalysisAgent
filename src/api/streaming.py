@@ -10,15 +10,22 @@ from __future__ import annotations
 
 import json
 import math
+import time
 from collections import defaultdict
 from datetime import date, datetime
 from decimal import Decimal
 from typing import TYPE_CHECKING
 
+from src.api.public_stream import public_sections, public_text
 from src.app_context import get_tenant_policy
 from src.config import get_settings
 from src.graph.node_registry import get_progress_map
 from src.graph.outcome import sanitize_public_output
+from src.llm.knowledge_loop import (
+    bind_request_knowledge_scope,
+    is_tool_round_tags,
+    reset_knowledge_loop,
+)
 from src.logging_config import get_logger
 
 logger = get_logger(__name__)
@@ -110,6 +117,14 @@ def _json_serialize(obj):
 _PROGRESS_MAP: dict[str, str] = get_progress_map()
 
 
+# 方法作用：判断模型事件是否属于知识工具循环标记的中间回合。
+# Args: event - astream_events 返回的单个事件。
+# Returns: 属于中间工具回合时返回 True。
+def is_intermediate_tool_round_event(event: dict) -> bool:
+    """中间回合的正文不是最终答案增量，SSE 层必须先缓冲再决定去留。"""
+    return is_tool_round_tags(event.get("tags"))
+
+
 # 提取 LangChain 事件的稳定模型调用标识。
 # Args: event - astream_events 返回的单个事件。
 # Returns: 优先使用 run_id；旧事件缺少 run_id 时返回节点兼容标识。
@@ -138,7 +153,8 @@ async def stream_analysis(user_query: str, datasource: str, session_id: str = ""
                            request_rate_limit_checked: bool = False,
                            llm_selection: TenantLLMSelection | None = None,
                            file_ids: list[int] | None = None,
-                           action_request: dict | None = None):
+                           action_request: dict | None = None,
+                           display_language: str = "zh-CN"):
     """SSE: 逐 Node 推送进度 + LLM token + 关键结果。
 
     每个 token 事件均携带 node 和 stream_id 字段，前端可按调用实例分组渲染并行 LLM 输出。
@@ -175,6 +191,13 @@ async def stream_analysis(user_query: str, datasource: str, session_id: str = ""
         authorized_count=len(datasource_access),
         selected_count=len(selected_datasources),
         discovery=not selected_datasources,
+    )
+    # 知识检索范围来自真实请求：显式选源时收窄白名单，未选源时仍由授权复核把关。
+    knowledge_scope_token = bind_request_knowledge_scope(
+        datasource=datasource,
+        allowed_datasources=(
+            frozenset(datasource_access) if selected_datasources else None
+        ),
     )
     config = {"configurable": {"thread_id": scope_thread_id(effective_id)}}
     is_new = not session_id
@@ -217,6 +240,13 @@ async def stream_analysis(user_query: str, datasource: str, session_id: str = ""
     llm_content_parts: dict[str, list[str]] = defaultdict(list)
     active_llm_streams: set[str] = set()
     stream_nodes: dict[str, str] = {}
+    public_prefixes: dict[str, str] = {}
+    section_prefixes: dict[str, dict] = {}
+    process_starts: dict[str, float] = {}
+    show_process = get_settings().chat_show_analysis_process
+    # 中间工具回合的增量先落缓冲区：下一轮模型开始就丢弃，节点结束才视为最终答案补齐。
+    deferred_parts: dict[str, list[str]] = defaultdict(list)
+    deferred_nodes: dict[str, str] = {}
 
     from src.llm.tenant_config import (
         _bind_tenant_llm_selection,
@@ -228,6 +258,7 @@ async def stream_analysis(user_query: str, datasource: str, session_id: str = ""
 
     try:
         input_state = {"user_query": user_query, "datasource": datasource,
+                       "display_language": display_language,
                        "session_id": effective_id,
                        "selected_datasources": selected_datasources,
                        "datasource_access": datasource_access,
@@ -239,136 +270,260 @@ async def stream_analysis(user_query: str, datasource: str, session_id: str = ""
                         "file_ids": list(file_ids or []),
                         "action_request": dict(action_request or {}),
                         "request_rate_limit_checked": request_rate_limit_checked}
-        async for event in app.astream_events(input_state, config, version="v2"
-        ):
-            kind = event["event"]
+        yield _sse("presentation", {"process_summary_enabled": show_process})
+        from src.llm.knowledge_loop import use_public_answer_stream
 
-            # ---- 链开始 (Node 进入) ----
-            if kind == "on_chain_start":
-                name = event.get("name", "")
-                if name and not name.startswith("Runnable") and name != "LangGraph":
-                    stats["chain_start"] += 1
-                    yield _sse("node_start", {"node": name})
-                    msg = _PROGRESS_MAP.get(name)
-                    if msg:
-                        yield _sse("progress", {"node": name, "message": msg})
+        with use_public_answer_stream():
+            async for event in app.astream_events(input_state, config, version="v2"
+            ):
+                kind = event["event"]
 
-            # ---- 链结束 (Node 完成) ----
-            elif kind == "on_chain_end":
-                name = event.get("name", "")
-                output = event.get("data", {}).get("output", {})
-                if name and not name.startswith("Runnable") and name != "LangGraph":
-                    stats["chain_end"] += 1
-                    yield _sse("node_end", {"node": name})
-                    # 重试透明：generate_sql 重试时发通知
-                    if name == "generate_sql" and isinstance(output, dict):
-                        rc = output.get("retry_count", 0)
-                        if rc and rc > 1:
-                            yield _sse("retry_status", {"retry": rc,
-                                      "max": get_settings().max_retry_count,
-                                      "reason": "SQL 生成/校验/执行失败，正在自动重试"})
-                    if name == "generate_sql" and isinstance(output, dict) and "generated_sql" in output:
-                        yield _sse("sql", {"sql": output["generated_sql"]})
-                    elif name == "execute_sql" and isinstance(output, dict) and output.get("generated_sql"):
-                        # 方言重写后的最终 SQL，覆盖 generate_sql 发送的原始版本
-                        yield _sse("sql", {"sql": output["generated_sql"]})
-                    elif name == "layer3_validate":
-                        yield _sse("validation", {"valid": output.get("sql_valid", True)})
-                    elif name == "build_response" and isinstance(output, dict):
-                        public_result = sanitize_public_output(output.get("final_response", {}))
-                        public_analysis = public_result.get("analysis", {}) or {}
-                        public_groups = (
-                            public_analysis.get("indicator_groups", []) or []
-                            if isinstance(public_analysis, dict)
-                            else []
-                        )
-                        logger.info(
-                            "流式公开结果边界",
-                            source=public_result.get("source", ""),
-                            analysis_keys=(
-                                sorted(public_analysis)
+                # ---- 链开始 (Node 进入) ----
+                if kind == "on_chain_start":
+                    name = event.get("name", "")
+                    if name in _PROGRESS_MAP:
+                        stats["chain_start"] += 1
+                        yield _sse("node_start", {"node": name})
+                        msg = _PROGRESS_MAP.get(name)
+                        if msg:
+                            yield _sse("progress", {"node": name, "message": msg})
+                            if show_process:
+                                process_id = str(event.get("run_id", name))
+                                process_starts[process_id] = time.monotonic()
+                                yield _sse("process_summary", {"node": name, "stream_id": process_id, "status": "running", "summary": msg, "elapsed_ms": 0})
+
+                # ---- 链结束 (Node 完成) ----
+                elif kind == "on_chain_end":
+                    name = event.get("name", "")
+                    output = event.get("data", {}).get("output", {})
+                    if name in _PROGRESS_MAP:
+                        stats["chain_end"] += 1
+                        yield _sse("node_end", {"node": name})
+                        if show_process and name in _PROGRESS_MAP:
+                            process_id = str(event.get("run_id", name))
+                            started = process_starts.pop(process_id, time.monotonic())
+                            yield _sse("process_summary", {"node": name, "stream_id": process_id, "status": "done", "summary": _PROGRESS_MAP[name].rstrip(".。…"), "elapsed_ms": round((time.monotonic() - started) * 1000)})
+                        if name in {"execute_sql", "merge_results", "file_analysis_subgraph"} and isinstance(output, dict) and "query_result_sample" in output and not output.get("execution_error"):
+                            from src.tools.chart_presentation import column_labels, resolve_language
+
+                            rows = output.get("query_result_sample", []) or []
+                            language = resolve_language(user_query, fallback=display_language)
+                            yield _sse("data", sanitize_public_output({"data": rows, "row_count": output.get("query_result_full_count", len(rows)), "truncated": output.get("query_result_truncated", False), "masking": (output.get("query_result_statistics", {}) or {}).get("masking", {}), "column_labels": column_labels(rows, language=language), "display_language": language}))
+                        if name == "generate_chart" and isinstance(output, dict):
+                            yield _sse("chart", {"chart": sanitize_public_output(output.get("chart_config", {}))})
+                        # 重试透明：generate_sql 重试时发通知
+                        if name == "generate_sql" and isinstance(output, dict):
+                            rc = output.get("retry_count", 0)
+                            if rc and rc > 1:
+                                yield _sse("retry_status", {"retry": rc,
+                                          "max": get_settings().max_retry_count,
+                                          "reason": "SQL 生成/校验/执行失败，正在自动重试"})
+                        if name == "generate_sql" and isinstance(output, dict) and "generated_sql" in output:
+                            yield _sse("sql", {"sql": output["generated_sql"]})
+                        elif name == "execute_sql" and isinstance(output, dict) and output.get("generated_sql"):
+                            # 方言重写后的最终 SQL，覆盖 generate_sql 发送的原始版本
+                            yield _sse("sql", {"sql": output["generated_sql"]})
+                        elif name == "layer3_validate":
+                            yield _sse("validation", {"valid": output.get("sql_valid", True)})
+                        elif name == "build_response" and isinstance(output, dict):
+                            public_result = sanitize_public_output(output.get("final_response", {}))
+                            public_analysis = public_result.get("analysis", {}) or {}
+                            public_groups = (
+                                public_analysis.get("indicator_groups", []) or []
                                 if isinstance(public_analysis, dict)
                                 else []
-                            ),
-                            indicator_group_count=len(public_groups),
-                        )
-                        yield _sse("result", public_result)
-                        decision_summary = str(public_result.get("decision_summary", "") or "")
-                        if decision_summary:
-                            yield _sse("decision_summary", {"summary": decision_summary})
-                    elif name == "analyze_result" and isinstance(output, dict):
-                        yield _sse("analysis", output.get("analysis_result", {}))
-                    # 回退：该节点 LLM 流式 token 没到时，输出累积内容
-                    pending_streams = [
-                        stream_id for stream_id in active_llm_streams
-                        if stream_nodes.get(stream_id) == name and llm_content_parts.get(stream_id)
-                    ]
-                    for stream_id in pending_streams:
-                        yield _sse("token", {
-                            "node": name,
-                            "stream_id": stream_id,
-                            "content": "".join(llm_content_parts[stream_id]),
-                        })
+                            )
+                            logger.info(
+                                "流式公开结果边界",
+                                source=public_result.get("source", ""),
+                                analysis_keys=(
+                                    sorted(public_analysis)
+                                    if isinstance(public_analysis, dict)
+                                    else []
+                                ),
+                                indicator_group_count=len(public_groups),
+                            )
+                            yield _sse("result", public_result)
+                            decision_summary = str(public_result.get("decision_summary", "") or "")
+                            if decision_summary and show_process:
+                                yield _sse("decision_summary", {"summary": decision_summary})
+                        elif name == "analyze_result" and isinstance(output, dict):
+                            yield _sse("analysis", sanitize_public_output(output.get("analysis_result", {})))
+                        # 中间工具回合缓冲在此补齐：没有后续回合说明它才是最终答案。
+                        for stream_id in [
+                            sid for sid, owner in deferred_nodes.items() if owner == name
+                        ]:
+                            buffered = "".join(deferred_parts.pop(stream_id, []))
+                            deferred_nodes.pop(stream_id, None)
+                            if not buffered:
+                                continue
+                            stats["token_events"] += 1
+                            logger.info(
+                                "中间工具回合增量补齐",
+                                node=name,
+                                stream_id=stream_id,
+                                content_chars=len(buffered),
+                            )
+                            yield _sse("token", {
+                                "node": name,
+                                "stream_id": stream_id,
+                                "content": buffered,
+                            })
+                        # 回退：该节点 LLM 流式 token 没到时，输出累积内容
+                        pending_streams = [
+                            stream_id for stream_id in active_llm_streams
+                            if stream_nodes.get(stream_id) == name and llm_content_parts.get(stream_id)
+                        ]
+                        for stream_id in pending_streams:
+                            yield _sse("token", {
+                                "node": name,
+                                "stream_id": stream_id,
+                                "content": "".join(llm_content_parts[stream_id]),
+                            })
 
-            # ---- LLM 流式开始 ----
-            elif kind == "on_chat_model_start":
-                stats["chat_model_start"] += 1
-                node = _find_parent_node(event)
-                stream_id = _event_stream_id(event)
-                active_llm_streams.add(stream_id)
-                stream_nodes[stream_id] = node or "unknown"
-                llm_content_parts[stream_id].clear()
-                yield _sse("llm_start", {
-                    "node": node or "unknown",
-                    "stream_id": stream_id,
-                })
-
-            # ---- LLM 流式 token ----
-            elif kind == "on_chat_model_stream":
-                stats["chat_model_stream"] += 1
-                chunk = event.get("data", {}).get("chunk")
-                if chunk:
-                    # ChatGenerationChunk 包裹了 AIMessageChunk，需解包
-                    if hasattr(chunk, "message") and not hasattr(chunk, "additional_kwargs"):
-                        if stats["chat_model_stream"] == 1:
-                            logger.info("LLM 流式 chunk 类型: ChatGenerationChunk, 自动解包")
-                        chunk = chunk.message
-                    elif stats["chat_model_stream"] == 1:
-                        logger.info("LLM 流式 chunk 类型", type=type(chunk).__name__)
-
-                    # 从事件 metadata 独立查找父节点（并行 LLM 时各自归因）
+                # ---- LLM 流式开始 ----
+                elif kind == "on_chat_model_start":
+                    stats["chat_model_start"] += 1
                     node = _find_parent_node(event)
                     stream_id = _event_stream_id(event)
-                    stream_nodes.setdefault(stream_id, node or "unknown")
-
-                    from src.llm.adapters.registry import get_adapter
-                    adapter = get_adapter(
-                        llm_selection.model_id if llm_selection else get_settings().llm_model,
-                    )
-                    sc = adapter.parse_stream_chunk(chunk)
-                    if sc.reasoning_content:
-                        stats["thinking_events"] += 1
-                        logger.debug(
-                            "模型内部推理块已抑制",
-                            node=node,
-                            stream_id=stream_id,
-                            reasoning_chars=len(sc.reasoning_content),
-                        )
-                    if sc.content:
-                        stats["token_events"] += 1
-                        llm_content_parts[stream_id].append(sc.content)
-                        yield _sse("token", {
-                            "node": node,
+                    # 同一节点又发起新一轮模型调用：上一轮缓冲不是最终答案，直接丢弃。
+                    stale = [sid for sid, owner in deferred_nodes.items() if owner == node]
+                    for sid in stale:
+                        dropped = len("".join(deferred_parts.pop(sid, [])))
+                        deferred_nodes.pop(sid, None)
+                        if dropped:
+                            stats["deferred_dropped"] = stats.get("deferred_dropped", 0) + 1
+                            logger.info(
+                                "中间工具回合增量丢弃",
+                                node=node or "unknown",
+                                stream_id=sid,
+                                content_chars=dropped,
+                            )
+                    if is_intermediate_tool_round_event(event):
+                        # 仍是完整一次模型调用：保留 llm_start，只把 token 推迟到回合定性之后。
+                        deferred_parts[stream_id].clear()
+                        deferred_nodes[stream_id] = node or "unknown"
+                        yield _sse("llm_start", {
+                            "node": node or "unknown",
                             "stream_id": stream_id,
-                            "content": sc.content,
                         })
+                        continue
+                    active_llm_streams.add(stream_id)
+                    stream_nodes[stream_id] = node or "unknown"
+                    llm_content_parts[stream_id].clear()
+                    if node in {"analyze_result", "llm_direct_answer"}:
+                        public_prefixes[stream_id] = ""
+                        yield _sse("answer_reset", {"node": node, "stream_id": stream_id})
+                    yield _sse("llm_start", {
+                        "node": node or "unknown",
+                        "stream_id": stream_id,
+                    })
 
-            # ---- LLM 流式结束 ----
-            elif kind == "on_chat_model_end":
-                node = _find_parent_node(event)
-                stream_id = _event_stream_id(event)
-                active_llm_streams.discard(stream_id)
-                yield _sse("llm_end", {"node": node, "stream_id": stream_id})
+                # ---- LLM 流式 token ----
+                elif kind == "on_chat_model_stream":
+                    stats["chat_model_stream"] += 1
+                    chunk = event.get("data", {}).get("chunk")
+                    if chunk:
+                        # ChatGenerationChunk 包裹了 AIMessageChunk，需解包
+                        if hasattr(chunk, "message") and not hasattr(chunk, "additional_kwargs"):
+                            if stats["chat_model_stream"] == 1:
+                                logger.info("LLM 流式 chunk 类型: ChatGenerationChunk, 自动解包")
+                            chunk = chunk.message
+                        elif stats["chat_model_stream"] == 1:
+                            logger.info("LLM 流式 chunk 类型", type=type(chunk).__name__)
+
+                        # 从事件 metadata 独立查找父节点（并行 LLM 时各自归因）
+                        node = _find_parent_node(event)
+                        stream_id = _event_stream_id(event)
+                        stream_nodes.setdefault(stream_id, node or "unknown")
+
+                        from src.llm.adapters.registry import get_adapter
+                        adapter = get_adapter(
+                            llm_selection.model_id if llm_selection else get_settings().llm_model,
+                        )
+                        sc = adapter.parse_stream_chunk(chunk)
+                        if sc.reasoning_content:
+                            stats["thinking_events"] += 1
+                            logger.debug(
+                                "模型内部推理块已抑制",
+                                node=node,
+                                stream_id=stream_id,
+                                reasoning_chars=len(sc.reasoning_content),
+                            )
+                        if sc.content:
+                            # 中间工具回合的增量只入缓冲，节点结束且无后续回合时才补齐。
+                            if stream_id in deferred_nodes:
+                                deferred_parts[stream_id].append(sc.content)
+                                continue
+                            stats["token_events"] += 1
+                            llm_content_parts[stream_id].append(sc.content)
+                            yield _sse("token", {
+                                "node": node,
+                                "stream_id": stream_id,
+                                "content": sc.content,
+                            })
+                            text = public_text("".join(llm_content_parts[stream_id]), node or "")
+                            previous = public_prefixes.get(stream_id, "")
+                            if text and text.startswith(previous) and text != previous:
+                                public_prefixes[stream_id] = text
+                                yield _sse("answer_delta", {"node": node, "stream_id": stream_id, "content": text[len(previous):]})
+                            sections = public_sections("".join(llm_content_parts[stream_id]), node or "")
+                            if sections and sections != section_prefixes.get(stream_id):
+                                section_prefixes[stream_id] = sections
+                                yield _sse("analysis_patch", {"node": node, "stream_id": stream_id, "analysis": sections})
+
+                # ---- LLM 流式结束 ----
+                elif kind == "on_chat_model_end":
+                    node = _find_parent_node(event)
+                    stream_id = _event_stream_id(event)
+                    if stream_id in deferred_nodes:
+                        # 回合定性：输出带 tool_calls 说明该轮是工具交互，缓冲正文整体丢弃。
+                        output = event.get("data", {}).get("output")
+                        has_tool_calls = bool(getattr(output, "tool_calls", None))
+                        buffered = "".join(deferred_parts.pop(stream_id, []))
+                        deferred_nodes.pop(stream_id, None)
+                        if has_tool_calls:
+                            logger.info(
+                                "中间工具回合增量丢弃",
+                                node=node or "unknown",
+                                stream_id=stream_id,
+                                content_chars=len(buffered),
+                            )
+                        elif buffered:
+                            stats["token_events"] += 1
+                            yield _sse("token", {
+                                "node": node or "unknown",
+                                "stream_id": stream_id,
+                                "content": buffered,
+                            })
+                        yield _sse("llm_end", {"node": node, "stream_id": stream_id})
+                        continue
+                    active_llm_streams.discard(stream_id)
+                    if node in {"analyze_result", "llm_direct_answer"} and public_prefixes.get(stream_id):
+                        from src.llm.output_contracts import (
+                            AnalysisOutput,
+                            TextAnswerOutput,
+                            parse_json_model,
+                        )
+
+                        try:
+                            output_model = AnalysisOutput if node == "analyze_result" else TextAnswerOutput
+                            parse_json_model("".join(llm_content_parts[stream_id]), output_model)
+                        except ValueError:
+                            public_prefixes[stream_id] = ""
+                            yield _sse("answer_reset", {"node": node, "stream_id": stream_id})
+                    yield _sse("llm_end", {"node": node, "stream_id": stream_id})
+
+                # ---- 工具开始：同节点已缓冲的中间回合不再可能是最终答案 ----
+                elif kind == "on_tool_start":
+                    stats["tool_start"] = stats.get("tool_start", 0) + 1
+                    tool_node = _find_parent_node(event)
+                    for sid in [
+                        s for s, owner in deferred_nodes.items()
+                        if tool_node is None or owner == tool_node
+                    ]:
+                        deferred_parts.pop(sid, None)
+                        deferred_nodes.pop(sid, None)
 
     except Exception as e:
         logger.error("流式错误", error=str(e), exc_info=True)
@@ -378,6 +533,8 @@ async def stream_analysis(user_query: str, datasource: str, session_id: str = ""
         stream_failed = True
     finally:
         _reset_tenant_llm_selection(selection_token)
+        # 无论正常结束、异常还是取消，都必须恢复请求前的知识检索范围。
+        reset_knowledge_loop(knowledge_scope_token)
 
     if stream_failed:
         return
@@ -415,6 +572,9 @@ def _find_parent_node(event: dict) -> str | None:
     tags = event.get("tags", [])
     if isinstance(tags, list):
         for tag in tags:
+            # 知识工具回合标记不是节点名，不能参与父节点推断。
+            if is_tool_round_tags([tag]):
+                continue
             if isinstance(tag, str) and not tag.startswith("Runnable") and tag != "LangGraph":
                 return tag
     return None

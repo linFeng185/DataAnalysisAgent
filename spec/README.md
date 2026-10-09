@@ -48,3 +48,5 @@
 | [48-experience-and-workbench-remediation.md](48-experience-and-workbench-remediation.md) | 体验整改与报表工作台重构设计（A～E 五批 · 9 项需求） | 动态 |
 | [49-report-presentation-redesign.md](49-report-presentation-redesign.md) | 报表呈现体系改版设计（hero 横幅 · 图文分栏 · 全图表类型） | 动态 |
 | [50-report-node-routing.md](50-report-node-routing.md) | 报表单元节点路由由大模型决策（节点数据表 · 强护栏 · 静态兜底） | 动态 |
+| [51-autonomous-knowledge-retrieval.md](51-autonomous-knowledge-retrieval.md) | 自主知识检索工具、全业务LLM有界循环与审核验收 | 动态 |
+| [52-chat-presentation.md](52-chat-presentation.md) | 对话数据优先、公开正文流式、过程摘要权限与多维图表展示 | 动态 |

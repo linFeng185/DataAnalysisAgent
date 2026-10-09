@@ -118,10 +118,16 @@ class ReportPlanWorker:
             datasources = [str(item) for item in (report.get("datasources") or [])]
             title = ""
             selection = await self._resolve_llm_selection(identity, connection_id=connection_id, model_id=model_id)
+            # 后台规划没有请求上下文，必须显式绑定记录拥有者的可信身份；
+            # 无可信身份只禁用知识检索，不采用默认租户或平台身份。
+            from src.llm.knowledge_loop import use_trusted_identity
             from src.llm.tenant_config import use_tenant_llm_selection
 
+            background_datasource = datasources[0] if len(datasources) == 1 else ""
             # 与旧 POST /plans 一致：绑定租户模型后 Planner 才会用大模型做语义拆解。
-            with use_tenant_llm_selection(selection):
+            with use_tenant_llm_selection(selection), use_trusted_identity(
+                identity, datasource=background_datasource,
+            ):
                 plan = await self.planner.parse(
                     prompt,
                     datasources=datasources,

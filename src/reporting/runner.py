@@ -555,7 +555,16 @@ class ReportRunner:
             # 路由结果在预占前已算出，这里只把它传给子图，避免向无关数据源广播查询。
             if unit_datasources:
                 graph_state["unit_datasources"] = unit_datasources
-            result = await graph.ainvoke(graph_state)
+            # 报表执行是后台任务：绑定记录拥有者的可信身份与已授权数据源白名单。
+            # 不指定默认数据源，避免把某个单元的口径误用到其他来源。
+            from src.llm.knowledge_loop import use_trusted_identity
+
+            scope_whitelist = (
+                None if effective_authorized is None
+                else frozenset(str(name) for name in effective_authorized)
+            )
+            with use_trusted_identity(identity, allowed_datasources=scope_whitelist):
+                result = await graph.ainvoke(graph_state)
             run_status = str(result.get("run_status", "failed"))
             unit_results = list(result.get("unit_results", []) or [])
             row_count = sum(len(item.rows) for item in unit_results if isinstance(item, UnitResult))

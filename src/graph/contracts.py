@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+from datetime import date
 from typing import Any, Literal, Mapping
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -267,6 +269,45 @@ class MultiSourceResult(BaseModel):
         return [item.to_legacy_dict() for item in self.results]
 
 
+# 校验显式英文或数值日期，避免仅靠时间关键词把完整日期误判成缺参。
+# Args: query - 已归一化的问题文本。
+# Returns: 是否包含合法完整日期；不补年份，不解析标识符内部的数字。
+def _has_explicit_date(query: str) -> bool:
+    months = (
+        "january", "february", "march", "april", "may", "june",
+        "july", "august", "september", "october", "november", "december",
+    )
+    month_numbers = {name: index for index, name in enumerate(months, start=1)}
+    month_numbers.update({name[:3]: index for index, name in enumerate(months, start=1)})
+    month_numbers["sept"] = 9
+    month_pattern = "(?:" + "|".join(sorted(month_numbers, key=len, reverse=True)) + ")"
+    candidates = [tuple(int(value) for value in match.groups()) for match in re.finditer(
+        r"(?<!\w)(\d{4})[-/](\d{1,2})[-/](\d{1,2})(?!\w)", query,
+    )]
+    for match in re.finditer(
+        rf"(?<!\w)({month_pattern})\.?\s+(\d{{1,2}})(?:st|nd|rd|th)?(?:\s*,\s*|\s+)(\d{{4}})(?!\w)", query,
+    ):
+        month, day, year = match.groups()
+        candidates.append((int(year), month_numbers[month], int(day)))
+    for match in re.finditer(
+        rf"(?<!\w)(\d{{1,2}})(?:st|nd|rd|th)?\s+({month_pattern})\.?(?:\s*,\s*|\s+)(\d{{4}})(?!\w)", query,
+    ):
+        day, month, year = match.groups()
+        candidates.append((int(year), month_numbers[month], int(day)))
+    if not candidates:
+        return False
+    try:
+        # 闰日、月份及每月天数由标准日期类型校验，非法完整日期不能作为放行证据。
+        for year, month, day in candidates:
+            date(year, month, day)
+    except ValueError:
+        return False
+    return True
+
+
+# 将旧意图映射为任务计划，仅在相对时间和合法完整日期都缺失时要求补参。
+# Args: intent - 路由意图；query - 用户问题；datasources - 已选数据源。
+# Returns: 包含能力路由及缺失参数的 TaskPlan。
 def build_task_plan(
     intent: str,
     *,
@@ -318,7 +359,7 @@ def build_task_plan(
         "file_analysis": "file_analysis",
         "meta": "follow_up_analysis",
     }
-    needs_time_range = normalized_intent in {"trend", "aggregation", "attribution"} and not any(
+    needs_time_range = normalized_intent in {"trend", "aggregation", "attribution"} and not _has_explicit_date(normalized_query) and not any(
         marker in normalized_query
         for marker in (
             "最近", "近", "本月", "本周", "今年", "去年", "全部", "历史", "不限",

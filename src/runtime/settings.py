@@ -24,6 +24,7 @@ LIVE_FIELDS = frozenset(
         "llm_temperature", "llm_max_tokens", "llm_timeout", "analysis_llm_timeout",
         "llm_stream_chunk_timeout", "local_llm_timeout", "llm_remote_tasks",
         "llm_allow_remote_fallback", "knowledge_evolution_promotion_threshold",
+        "chat_show_analysis_process",
     }
 )
 

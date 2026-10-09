@@ -28,6 +28,9 @@ class AnalysisState(TypedDict, total=False):
     user_query: str
     """用户的自然语言查询，由 routes.py 注入。—— classify_intent / generate_sql 读"""
 
+    display_language: Annotated[str, UntrackedValue]
+    """当前请求界面语言兜底；问题中的明确语言要求优先。"""
+
     datasource: str
     """目标数据源名称，由 routes.py 注入。—— retrieve_schema / execute_sql 读"""
 

@@ -271,6 +271,12 @@ async def mcp_agent_node(state: AnalysisState) -> dict:
         from src.mcp_client.client_manager import get_mcp_client_manager
 
         attachment_tools = _build_attachment_tools(state)
+        # 知识工具与附件/Skill/MCP 同级并入同一份列表，不另起第二个通用循环。
+        # 先构建本地只读工具，外部 MCP 故障才不会在本地能力就绪前中断。
+        from src.llm.knowledge_loop import build_knowledge_tools_for_call
+
+        knowledge_tools = build_knowledge_tools_for_call()
+        local_tool_count = len(skill_tools) + len(attachment_tools) + len(knowledge_tools)
         mcp_tools = []
         try:
             mcp_manager = get_mcp_client_manager()
@@ -281,13 +287,14 @@ async def mcp_agent_node(state: AnalysisState) -> dict:
                 "MCP 工具加载失败",
                 tenant_id=tenant_id,
                 user_id=user_id,
-                local_tool_count=len(skill_tools) + len(attachment_tools),
+                local_tool_count=local_tool_count,
                 error=str(exc),
                 exc_info=True,
             )
-            if not skill_tools and not attachment_tools:
+            if not local_tool_count:
                 raise
-        all_tools = [*attachment_tools, *skill_tools, *mcp_tools]
+        external_tools = [*attachment_tools, *skill_tools, *mcp_tools]
+        all_tools = [*external_tools, *knowledge_tools]
         logger.info(
             "MCP Agent 工具边界完成",
             tenant_id=tenant_id,
@@ -295,10 +302,12 @@ async def mcp_agent_node(state: AnalysisState) -> dict:
             mcp_tool_count=len(mcp_tools),
             skill_tool_count=len(skill_tools),
             attachment_tool_count=len(attachment_tools),
+            knowledge_tool_count=len(knowledge_tools),
         )
 
         capability = str(contexts.routing.task_plan.get("capability", "") or "")
-        if capability == "market_research" and not all_tools:
+        # 市场研究护栏只看外部工具：知识工具不能把「无外部工具」放宽成可继续。
+        if capability == "market_research" and not external_tools:
             logger.warning(
                 "市场研究失败关闭",
                 tenant_id=tenant_id,

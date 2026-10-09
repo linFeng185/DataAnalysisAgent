@@ -14,8 +14,10 @@ import asyncio
 import os
 import threading
 import time
+from contextlib import contextmanager
 from contextvars import ContextVar, Token
 from datetime import datetime, timedelta, timezone
+from typing import Iterator
 
 import bcrypt
 import jwt
@@ -34,6 +36,7 @@ from src.security.tenant_policy import (
     DEFAULT_TENANT_ID,
     SUPER_ADMIN_USER_ID,
     RequestIdentity,
+    normalize_role,
 )
 
 logger = get_logger(__name__)
@@ -51,6 +54,42 @@ _current_tenant_id: ContextVar[int] = ContextVar(
 _current_role: ContextVar[str] = ContextVar("current_role", default=ANONYMOUS_ROLE)
 _current_tenant_code: ContextVar[str] = ContextVar("current_tenant_code", default="default")
 _current_username: ContextVar[str] = ContextVar("current_username", default="")
+# 方法作用：为后台任务显式绑定服务端可信身份，让底层 ACL 看到同一身份。
+# Args: identity - 已核验的请求身份；tenant_code - 可选租户编码。
+# Returns: 上下文管理器，退出时精确恢复原有认证上下文。
+@contextmanager
+def use_identity_context(
+    identity: RequestIdentity,
+    *,
+    tenant_code: str | None = None,
+) -> Iterator[None]:
+    """绑定五个既有 ContextVar，不使用独立通道绕过请求身份复核。"""
+    user_id = int(getattr(identity, "user_id", 0) or 0)
+    tenant_id = int(getattr(identity, "tenant_id", 0) or 0)
+    role = normalize_role(getattr(identity, "role", None))
+    logger.debug("后台身份绑定入口", user_id=user_id, tenant_id=tenant_id)
+    tokens = (
+        _current_user_id.set(user_id),
+        _current_tenant_id.set(tenant_id),
+        _current_role.set(role),
+        _current_tenant_code.set(
+            str(tenant_code) if tenant_code is not None else _current_tenant_code.get()
+        ),
+        _current_username.set(str(getattr(identity, "username", "") or "")),
+    )
+    try:
+        yield
+    finally:
+        # 逆序精确恢复，避免后台任务把身份泄漏给后续协程。
+        variables = (
+            _current_user_id, _current_tenant_id, _current_role,
+            _current_tenant_code, _current_username,
+        )
+        for variable, token in zip(variables, tokens, strict=True):
+            variable.reset(token)
+        logger.debug("后台身份绑定恢复完成", user_id=user_id)
+
+
 ACCESS_TOKEN_COOKIE = "access_token"
 _DUMMY_PASSWORD_HASH = (
     "$2b$12$yZTzGXG0vRKu0H18pTJmo.9LXjZUANU747KXcPehet4YrkgPnQKlG"

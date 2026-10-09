@@ -61,7 +61,10 @@ class TestAnalyzeResultTimeout:
         import src.config as config_module
         import src.graph.nodes.analyze_result as analyze_module
 
-        async def slow_invoke(_messages):
+        # 方法作用：模拟慢模型；签名对齐统一工具循环的 config 透传。
+        # Args: _messages - 已预算消息；config - 可选运行配置。
+        # Returns: 固定结构化响应（正常情况下不会返回）。
+        async def slow_invoke(_messages, config=None):
             await asyncio.sleep(0.2)
             return SimpleNamespace(content="{}")
 
@@ -98,7 +101,10 @@ class TestAnalyzeResultTimeout:
         import src.config as config_module
         import src.graph.nodes.analyze_result as analyze_module
 
-        async def slow_invoke(_messages):
+        # 方法作用：模拟慢模型；签名对齐统一工具循环的 config 透传。
+        # Args: _messages - 已预算消息；config - 可选运行配置。
+        # Returns: 固定结构化响应（正常情况下不会返回）。
+        async def slow_invoke(_messages, config=None):
             await asyncio.sleep(0.2)
             return SimpleNamespace(content="{}")
 

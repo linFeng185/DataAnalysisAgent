@@ -861,10 +861,20 @@ async def _llm_generate(
         reasoning_parts: list[str] = []
         chunk_count = 0
         try:
-            async for chunk in prepared.model.astream(
-                prepared.messages,
-                config=prepared.config,
-            ):
+            # 统一有界工具循环；中间工具回合的正文以重置标记隔离，不进入 SQL JSON。
+            from src.llm.knowledge_loop import KnowledgeRoundReset, stream_with_knowledge
+
+            async for chunk in stream_with_knowledge(prepared):
+                if isinstance(chunk, KnowledgeRoundReset):
+                    logger.info(
+                        "SQL 生成丢弃中间工具回合正文",
+                        round_index=chunk.round_index,
+                        reason=chunk.reason,
+                        discarded_chars=sum(len(part) for part in content_parts),
+                    )
+                    content_parts.clear()
+                    reasoning_parts.clear()
+                    continue
                 chunk_count += 1
                 if chunk_count == 1:
                     logger.debug(
@@ -901,10 +911,12 @@ async def _llm_generate(
                 prompt_id=prepared.prompt_id,
             )
             fallback_llm = await asyncio.to_thread(get_llm, 0, stream=False)
-            response = await fallback_llm.ainvoke(
-                prepared.messages,
-                config=prepared.config,
-            )
+            # 回退同样走统一循环，保持工具与身份边界一致；工具不再可用时退化为原一次调用。
+            from dataclasses import replace as _replace
+
+            from src.llm.knowledge_loop import invoke_with_knowledge
+
+            response = await invoke_with_knowledge(_replace(prepared, model=fallback_llm))
             fallback_content = getattr(response, "content", response)
             if fallback_content:
                 content_parts.append(
