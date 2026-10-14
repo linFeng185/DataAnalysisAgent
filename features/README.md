@@ -39,4 +39,5 @@
 | [33-web-search-workflow.md](33-web-search-workflow.md) | 联网研究子图、摘要与集成验收 | 动态 |
 | [34-bilingual-intent-fallback.md](34-bilingual-intent-fallback.md) | 中英文意图规则回退一致性 | 动态 |
 | [35-bilingual-public-messages.md](35-bilingual-public-messages.md) | 中英文固定公开提示与节点串联验收 | 动态 |
+| [36-common-platform-hardening.md](36-common-platform-hardening.md) | 通用平台加固（输出兼容、认证 503、日志作用域、迁移前序、知识版本） | 动态 |
 | [99-summary.md](99-summary.md) | 附录 | 动态 |

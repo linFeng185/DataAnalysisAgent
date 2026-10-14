@@ -58,3 +58,4 @@
 | [58-controlled-web-search.md](58-controlled-web-search.md) | 受控联网搜索、真实来源与研究摘要边界 | 动态 |
 | [59-bilingual-intent-fallback.md](59-bilingual-intent-fallback.md) | 中英文意图规则回退、历史追问与权限路由一致性 | 动态 |
 | [60-bilingual-public-messages.md](60-bilingual-public-messages.md) | 中英文固定补参、公开错误与统一响应语言 | 动态 |
+| [61-common-platform-hardening.md](61-common-platform-hardening.md) | 通用平台加固（工具输出、认证故障、日志作用域、迁移前序、知识版本读取） | 动态 |

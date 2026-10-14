@@ -47,6 +47,7 @@ LLM 驱动的数据分析智能体。用自然语言提问，自动完成：轮�
 │   ├── mcp/              ⑭.1 MCP Server 稳定模块入口（python -m src.mcp）
 │   ├── search/           受控联网搜索 — 显式执行意图、已授权工具、响应预算与真实来源
 │   ├── app_context.py        应用级依赖容器 + ASGI 请求绑定 + 资源关闭
+│   ├── log_scopes.py         依赖异常日志的显式 opt-in ContextVar 作用域（默认关闭，旧调用零变化）
 │   ├── config.py             配置管理 (pydantic-settings)
 │   ├── bootstrap.py          分阶段启动/关闭编排
 │   ├── tenant_purge.py       租户关系型、向量和运行时资源的可重试物理清理
@@ -114,7 +115,7 @@ POST /api/v1/chat {"query": "本月 GMV 排名？", "stream": true}
 | `streaming.py` | SSE 流式：脱敏 data/chart 先到，公开正文及章节增量按 node/stream_id 隔离；管理员开关控制业务过程摘要 |
 | `public_stream.py` | 不完整 JSON 的顶层公开字段白名单提取、转义解码，内部 SQL/工具正文/原始推理禁止进入正文 |
 | `middleware.py` | 异常 → HTTP 状态码映射 |
-| `auth.py` | 全模式强制 JWT/Cookie 认证、登录限流与原子账号锁定，身份 ContextVar 覆盖完整流式响应生命周期 |
+| `auth.py` | 全模式强制 JWT/Cookie 认证、登录限流与原子账号锁定；身份 ContextVar 覆盖完整流式响应生命周期，身份库复核故障统一 503 且不清 Cookie，明确无身份/身份变化 401 |
 | `access_policy.py` | 纯 ASGI 接口 IP 阻断、策略下传和 standard/security/audit/none 聚合访问日志 |
 | `background_tasks.py` | API 后台任务强引用、完成回调和异常记录统一入口 |
 | `security_headers.py` | CSP/HSTS/防嵌入/nosniff 纯 ASGI 响应头 |
@@ -194,7 +195,7 @@ POST /api/v1/chat {"query": "本月 GMV 排名？", "stream": true}
 | `doc_parser.py` | PDF/Word/TXT/MD 文本提取 + 4 种分块策略（AUTO/HEADING/PARAGRAPH/FIXED） |
 | `governance.py` | system/tenant/private 三范围授权，区分 super_admin 与 tenant_admin |
 | `tag_store.py` | PostgreSQL 全局/个人标签搜索、创建、停用与提升治理 |
-| `file_store.py` | 原始文档 PostgreSQL 存储、三范围 ACL 与 RLS 身份上下文 |
+| `file_store.py` | 原始文档 PostgreSQL 存储、三范围 ACL 与 RLS 身份上下文；出版版本行（source_version / source_revision_hash / publication_json / supersedes_file_id）与按三元组可见性精确读取原文，旧普通上传路径保持兼容 |
 | `system_scanner.py` | SYSTEM_KNOWLEDGE_DIRS 递归扫描、checksum 幂等系统知识摄取 |
 | `upload_manager.py` | 有界异步上传任务、终态 TTL 回收、范围/标签 metadata 和后台 VectorStore 写入 |
 | `business_rules.py` | 业务规则检索 |
@@ -259,6 +260,7 @@ checksum。执行器同时兼容历史 LF/CRLF 登记值，避免 Git 跨平台�
 仍然失败关闭。已知历史迁移被改写时只允许走版本、文件名、新旧 checksum 和后续修复文件均精确
 匹配的白名单升级路径，且不覆盖原有审计记录。已登记迁移只在 DEBUG 输出逐项结果，INFO 使用
 `applied_count / verified_count / legacy_repair_count` 聚合审计，已完成修复不重复产生 WARNING。
+执行器默认只应用编号 <900 的主库迁移（`include_branch` 必须显式布尔 True 才纳入 900+ 分库分支，非布尔一律拒绝），并支持 `connection_setup` 在连接建立后、advisory lock 前于同一会话恰执行一次，其异常按失败关闭处理并关闭连接。
 `013_tenant_identity_llm.sql` 为租户增加全局不可变 `code` 和租户内大小写敏感用户名约束，并建立平台 LLM 厂商/模型目录、租户命名连接、模型绑定和默认配置表。
 `014_llm_catalog_reasoning.sql` 增加厂商能力表单定义，初始化 DeepSeek V4 Pro/Flash，并把旧 `deepseek-chat` 的租户绑定和默认值平滑迁移到 Pro 后删除旧目录项。
 `007_api_access_policy.sql` 为动态策略和 CIDR 规则启用强制 RLS。API 策略加载属于必需启动步骤，
@@ -367,6 +369,7 @@ checksum。执行器同时兼容历史 LF/CRLF 登记值，避免 Git 跨平台�
 - **向量过滤精确化**：Milvus LIKE 仅缩小候选集，解析 metadata 后再次精确校验，搜索、计数和删除共享同一过滤语义
 - **阻塞 SDK 隔离**：Milvus 集合操作及嵌入模型导入统一通过工作线程执行，RPC 有限超时；取消写任务等待线程退出后才释放写锁。规范表结构先发布，派生索引刷新有独立超时和异常收束。Chroma 的 `search`/`get_by_id`/`get_by_filter`/`count` 同样 `asyncio.to_thread` offload，否则同步 SDK 会占住事件循环，`asyncio.wait_for` 无法生效；Milvus 只读路径进一步拆分取消策略：`_run_on_collection_read`/`_run_abandonable_read` 取消后立即返回，在途线程受 SDK `_RPC_TIMEOUT_SECONDS` 约束并由 `_consume_task_result` 收束异常，工具期限因此真正有界；写入路径仍用 `_run_sync` 等在途调用退出后才释放写锁
 - **认证暂时不可用**：`AuthContext` 区分服务故障和明确未认证；超时、断网、5xx 保留当前路由显示重试，不清 Cookie。只有明确未认证结果进入登录页，不能用保存的用户信息绕过服务端校验。
+- **依赖异常日志作用域**：`src/log_scopes.py` 提供默认关闭的显式 opt-in ContextVar 作用域，最外层安全边界（精确原文读取等）内的资源建立/健康/重建/关闭/解析异常栈不重复输出；不改 loglevel/filter 与旧调用语义。
 - **生产密钥门禁**：生产禁止默认数据库凭证、默认凭证主密钥和临时 JWT；Docs、Redoc、OpenAPI 同时关闭
 - **API 中间件安全**：访问策略先解析可信客户端 IP 并执行 deny/allow，再把认证模式下传纯 ASGI Auth；CORS 默认拒绝跨域；生产 HTTPS 启用 CSP/HSTS
 - **访问策略混合存储**：公开/可选认证仅由版本化 YAML 声明；数据库动态策略只能保持或收紧认证，IP 规则写入后原子刷新 AppContext 快照
