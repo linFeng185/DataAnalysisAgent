@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from typing import Any
 
 from fastapi import APIRouter, HTTPException
 
@@ -105,6 +107,15 @@ def _validate_managed_mcp_request(req: MCPServerCreate, scope: str, role: str) -
         logger.warning("受管 MCP 请求拒绝", reason="host 不在 allowlist", host=host)
         raise HTTPException(400, f"MCP SSE host '{host}' 不在 allowlist")
     logger.info("校验受管 MCP 请求完成", name=req.name, scope=scope, host=host)
+
+
+# 方法作用：构造脱敏异常三元组：固定文案新异常承载原始堆栈，排除敏感正文。
+# Args: exc - 捕获到的原始异常；message - 固定脱敏异常文案。
+# Returns: (type, value, traceback) 三元组，可直接作为 exc_info 传给 logger。
+def _exception_triple(exc: BaseException, message: str) -> tuple[type, BaseException, Any]:
+    # 底层异常可能携带 URL/凭证/数据库细节；日志只保留类型名与原始堆栈位置。
+    safe_error = RuntimeError(message)
+    return (type(safe_error), safe_error, exc.__traceback__)
 
 
 # 方法作用：在事务内借用已注入当前认证身份的连接供 MCP RLS 查询使用。
@@ -369,3 +380,194 @@ async def test_mcp_server(name: str, scope: str | None = None):
             exc_info=True,
         )
         return {"name": name, "ok": False, "error": "MCP Server 连通性测试失败"}
+
+
+# 重置总预算（秒）：覆盖拆除旧连接与重建，超时映射为 HTTP 504。
+_MCP_RESET_TIMEOUT_SECONDS = 30.0
+
+
+@router.post("/mcp/{name}/reset")
+# 方法作用：管理员手动重置 MCP Server，授权与安全检查先于任何连接。
+# Args: name - 对外 Server 名称；scope - 可选 system/tenant/private 精确作用域消歧。
+# Returns: 200 契约响应；不可见 404、无权/停用/阻断 403、存储不可用 503、超时 504、其他 500。
+async def reset_mcp_server(name: str, scope: str | None = None) -> dict[str, Any]:
+    """重置 degraded/unavailable 的 MCP Server；身份一律取自认证上下文。
+
+    Args:
+        name: 对外 Server 名称。
+        scope: 可选精确作用域，用于同名多作用域消歧。
+
+    Returns:
+        {"status": "ok", "name": 公开名, "scope": 实际作用域, "tools": 新工具数}。
+    """
+    logger.debug("重置 MCP Server API 入口", name=name, scope=scope or "")
+    from src.api.auth import get_current_role, get_current_tenant_id, get_current_user_id
+    from src.knowledge.governance import (
+        can_manage_knowledge_resource,
+        is_super_admin,
+        normalize_knowledge_scope,
+    )
+    from src.mcp_client.client_manager import (
+        MCPResetBlockedError,
+        MCPResetError,
+        MCPResetTimeoutError,
+        MCPResetUnavailableError,
+        get_mcp_client_manager,
+    )
+    from src.mcp_client.owner_task import is_error_logged
+
+    tenant_id = get_current_tenant_id()
+    user_id = get_current_user_id()
+    role = get_current_role()
+    normalized_scope = None
+    if scope:
+        try:
+            normalized_scope = normalize_knowledge_scope(scope).value
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+
+    # 第 1 步：授权查库先于任何连接：存储不可用返回 503，命中停用/安全阻断留待授权阶段拒绝。
+    try:
+        import src.api.routes as routes_package
+
+        async with routes_package._connect_scoped_mcp_db() as conn:
+            row = await conn.fetchrow(
+                "SELECT id, scope, tenant_id, owner_user_id, transport, url, enabled, is_builtin "
+                "FROM mcp_servers WHERE name=$1 AND ($2::text IS NULL OR scope=$2) AND "
+                "(scope='system' OR (scope='tenant' AND tenant_id=$3) OR "
+                "(scope='private' AND tenant_id=$3 AND owner_user_id=$4)) AND "
+                "($5<>'super_admin' OR scope='system') "
+                "ORDER BY CASE scope WHEN 'private' THEN 3 WHEN 'tenant' THEN 2 ELSE 1 END DESC "
+                "LIMIT 1",
+                name, normalized_scope, tenant_id, user_id, role,
+            )
+            blocked = False
+            if row:
+                blocked = bool(await conn.fetchval(
+                    "SELECT blocked FROM mcp_security_blocks WHERE name=$1 AND scope=$2 AND "
+                    "COALESCE(tenant_id,0)=$3 AND owner_user_id=$4",
+                    name, str(row["scope"]), int(row["tenant_id"] or 0),
+                    int(row["owner_user_id"] or 0),
+                ))
+    except HTTPException:
+        raise
+    except Exception as exc:
+        # 授权查库是本路由的实际处理边界：固定文案 + error_type + 原堆栈单次记录，
+        # 数据库异常正文（可能含连接串/凭证）不落盘。
+        logger.error(
+            "重置 MCP Server 授权查询失败",
+            name=name,
+            error_type=type(exc).__name__,
+            exc_info=_exception_triple(exc, "授权查库失败，原始异常正文不记录"),
+        )
+        raise HTTPException(503, "MCP Server 配置存储不可用") from exc
+
+    manager = get_mcp_client_manager()
+
+    # 第 2 步：纯内存消歧（不建立连接、不按租户全量加载）。
+    resolved = manager.resolve_resettable_server(name, normalized_scope)
+
+    # 第 3 步：可见性、角色、停用与阻断校验全部通过前不得建立任何连接。
+    authorized_config: dict | None = None
+    prepare_kwargs: dict | None = None
+    if resolved is not None and manager.is_builtin_server(resolved[0]):
+        internal_name = resolved[0]
+        # 内置 YAML 服务不在数据库，仅平台超级管理员可重置。
+        if not is_super_admin(role):
+            raise HTTPException(403, "内置 MCP Server 仅平台超级管理员可重置")
+    else:
+        if row is None:
+            # 未知、跨租户不可见、已删除或运行时残留：统一 404，删除为终态不得重建。
+            raise HTTPException(404, f"MCP Server '{name}' 未找到")
+        row_scope = str(row["scope"])
+        row_tenant = int(row["tenant_id"] or 0)
+        row_owner = int(row["owner_user_id"] or 0)
+        expected = manager.scoped_server_name(name, row_scope, row_tenant, row_owner)
+        if resolved is not None and (
+            resolved[1] != row_scope or resolved[0] != expected
+        ):
+            # 同名消歧结果与数据库行不一致：按不可见处理。
+            raise HTTPException(404, f"MCP Server '{name}' 未找到")
+        # 数据库合法但尚未加载的目标：按行构造内部名，随后只准备该目标。
+        internal_name = expected
+        if not row["enabled"] or blocked:
+            raise HTTPException(403, "MCP Server 已停用或存在安全阻断")
+        if not can_manage_knowledge_resource(
+            row_scope,
+            role=role,
+            current_tenant_id=tenant_id,
+            resource_tenant_id=row_tenant,
+            current_user_id=user_id,
+            owner_user_id=row_owner,
+        ):
+            raise HTTPException(403, "无权重置该 MCP Server")
+        authorized_config = {"transport": row["transport"], "url": row["url"]}
+        # 已授权目标的准备参数：授权已全部通过，随后只准备该目标。
+        prepare_kwargs = {
+            "config": authorized_config,
+            "scope": row_scope,
+            "tenant_id": row_tenant,
+            "owner_user_id": row_owner,
+        }
+
+    # 第 4 步：目标准备、锁等待、拆旧与重建共享同一个剩余总 deadline；
+    # 准备失败与重置失败走同一套脱敏映射，不得漏成未处理异常。
+    loop = asyncio.get_running_loop()
+    started = loop.time()
+    try:
+        async with asyncio.timeout(_MCP_RESET_TIMEOUT_SECONDS):
+            if prepare_kwargs is not None:
+                # 只准备已授权目标：不加载租户其它服务、不建立其它连接。
+                await manager.prepare_authorized_server(internal_name, **prepare_kwargs)
+            remaining = _MCP_RESET_TIMEOUT_SECONDS - (loop.time() - started)
+            result = await manager.reset_server(
+                internal_name,
+                timeout=max(remaining, 0.0),
+                authorized_config=authorized_config,
+            )
+    except (MCPResetTimeoutError, TimeoutError) as exc:
+        # 路由侧预算到点与 manager 内部超时统一映射 504（受控边界，一次脱敏记录）。
+        logger.error("重置 MCP Server API 超时", name=name, error_type=type(exc).__name__)
+        raise HTTPException(504, "重置 MCP Server 超时") from exc
+    except MCPResetUnavailableError as exc:
+        raise HTTPException(404, f"MCP Server '{name}' 未找到") from exc
+    except MCPResetBlockedError as exc:
+        logger.warning("重置 MCP Server API 拒绝", name=name, reason="安全校验或停用")
+        raise HTTPException(403, "MCP Server 配置未通过安全校验或已停用") from exc
+    except MCPResetError as exc:
+        # 最外层处理边界单次记录：用__cause__（owner/重建的真实故障位置）构造脱敏
+        # 三元组；异常链已在 owner 边界落盘时不再重复写同一堆栈，只做状态映射。
+        origin = exc.__cause__ or exc
+        if not is_error_logged(origin):
+            logger.error(
+                "重置 MCP Server API 失败",
+                name=name,
+                error_type=type(origin).__name__,
+                exc_info=_exception_triple(origin, "重置 MCP Server 失败，原始异常正文不记录"),
+            )
+        raise HTTPException(500, "重置 MCP Server 失败") from exc
+    except Exception as exc:
+        # 路由直接处理（目标准备等）的未分类失败：同样固定文案 + error_type + 原堆栈；
+        # 异常链已被上游边界记录（同一故障跨层传播）时不再重复落盘。
+        if not is_error_logged(exc):
+            logger.error(
+                "重置 MCP Server API 内部失败",
+                name=name,
+                error_type=type(exc).__name__,
+                exc_info=_exception_triple(exc, "重置 MCP Server 内部失败，原始异常正文不记录"),
+            )
+        raise HTTPException(500, "重置 MCP Server 失败") from exc
+
+    response = {
+        "status": "ok",
+        "name": name,
+        "scope": result["scope"],
+        "tools": result["tools"],
+    }
+    logger.info(
+        "重置 MCP Server API 完成",
+        name=name,
+        scope=result["scope"],
+        tools=result["tools"],
+    )
+    return response

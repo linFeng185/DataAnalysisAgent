@@ -43,7 +43,7 @@ LLM 驱动的数据分析智能体。用自然语言提问，自动完成：轮�
 │   ├── reporting/        ⑧.1 报表工作台 — 自然语言计划、任务运行、关系证据、动态 DSL、分享与配额
 │   ├── security/         ⑫ 安全模块 — API/IP 策略 + SQL 统一执行 + Schema 校验 + 脱敏 + 限流 + 审计 + 出站策略
 │   ├── db/               ⑬ 状态库基础设施 — 版本化迁移 + URL 工具
-│   ├── mcp_client/       ⑭ MCP 集成 — 客户端管理 + 工具暴露
+│   ├── mcp_client/       ⑭ MCP 集成 — 客户端管理、连接任务与工具暴露
 │   ├── mcp/              ⑭.1 MCP Server 稳定模块入口（python -m src.mcp）
 │   ├── app_context.py        应用级依赖容器 + ASGI 请求绑定 + 资源关闭
 │   ├── config.py             配置管理 (pydantic-settings)
@@ -238,9 +238,12 @@ POST /api/v1/chat {"query": "本月 GMV 排名？", "stream": true}
 | `security/sql_execution.py` | 权威方言解析、AST 只读校验、EXPLAIN 与有界执行唯一入口 |
 | `security/sql_schema_validation.py` | 作用域感知的 SQL↔Schema 校验唯一实现：表索引、归属解析、置信度分层与结构化 issue，供 layer3 / execute_sql / generate_sql 共用；不依赖 `src.graph` |
 | `failure_policy.py` | SQL/数据库 fail-closed 与 LLM/知识/处理器 fail-open 决策矩阵 |
-| `mcp_client/client_manager.py` | MCP Client 独立连接栈、自动迁移、system/tenant/private 请求级工具过滤 |
+| `mcp_client/client_manager.py` | MCP Client 按服务串行化生命周期、重置与失败重试；system/tenant/private 请求级工具过滤及删除后在途操作失效 |
+| `mcp_client/owner_task.py` | 每个连接由独立任务统一进入、调用及退出 transport/session，避免 AnyIO 跨任务取消栈；关闭时有界清理并结束等待中的请求 |
 | `mcp_client/server.py` | MCP Server（暴露 4 个工具，内部异常返回稳定脱敏协议） |
 | `mcp/__main__.py` | `python -m src.mcp` 稳定启动入口，旧 `src.mcp_client` 入口复用同一实现 |
+
+`POST /mcp/{name}/reset` 在建立连接前复核真实身份、资源可见性、管理权限、启用状态及安全阻断，仅重建获授权的目标。锁等待、准备、拆旧和重建共同受总超时约束；失败保留配置供重试，已删除目标不得被旧请求复活。接口、状态码与真实本地 stdio 验收边界见 `spec/56-mcp-reset-lifecycle.md`。
 
 ### ⑬ `src/db/` — 状态库迁移
 

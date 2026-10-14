@@ -87,6 +87,7 @@ from src.api.routes.mcp import (
     create_mcp_server,
     delete_mcp_server,
     list_mcp_servers,
+    reset_mcp_server,
     test_mcp_server,
 )
 from src.api.routes.mcp import (
@@ -189,6 +190,7 @@ __all__ = [
     "list_mcp_servers",
     "create_mcp_server",
     "delete_mcp_server",
+    "reset_mcp_server",
     "test_mcp_server",
     "list_history",
     "list_sessions",

@@ -15,12 +15,13 @@
 | 8.1.7 | get_all_tools() | 同上 | 返回所有 MCP 转换来的 LangChain Tool 列表 | 开发完成 |
 | 8.1.8 | health_check() | 同上 | 定期 ping 所有 MCP Server，断线自动重连 | 开发完成 |
 | 8.1.9 | _reconnect() | 同上 | 单个 MCP Server 的断线重连逻辑 (指数退避) | 开发完成 |
-| 8.1.10 | close_all() | 同上 | 关闭所有连接 (AsyncExitStack.aclose) | 开发完成 |
+| 8.1.10 | close_all() | 同上 | 关闭所有连接（owner task 内退出 AsyncExitStack，协作式关闭 + 有界取消） | 单测完成 |
 | 8.1.11 | _sse_client() | 同上 | SSE transport 的客户端实现 | 开发完成 |
 | 8.1.12 | 降级策略 | 同上 | 重连 5 次失败 → 标记 degraded → 从 get_all_tools() 移除 → 健康检查恢复后自动启用 | 开发完成 |
 | 8.1.13 | MCP 工具租户隔离 `[P0]` | 同上 | 系统工具全局可见；租户工具按 tenant_id 过滤，无身份仅返回系统工具 | 单测完成 |
 | 8.1.14 | MCP 三级作用域隔离 `[P0]` | 同上 | system/tenant/private 工具按 tenant_id + owner_user_id 请求级过滤 | 单测完成 |
 | 8.1.15 | 租户与个人 MCP 生命周期 `[P1]` | 同上 + `src/main.py` | DB 配置加载后建立连接；新增、删除和重载同步运行时连接 | 单测完成 |
+| 8.1.16 | MCP owner task 连接生命周期 `[P1]` | `src/mcp_client/owner_task.py` + `src/mcp_client/client_manager.py` | 进入/调用/ping/退出同任务，避免跨任务退出 AnyIO cancel scope；协作式关闭、有界取消、未完成请求显式失败；按服务串行、epoch 防复活、手动 reset 破坏式重建（总预算由 `asyncio.timeout` 统一施加，覆盖目标准备/锁等待/拆旧/重建）；`prepare_authorized_server` 只登记单个已授权目标，不整租户加载 | 集成测试完成 |
 
 ### 8.2 MCP Server
 
@@ -52,6 +53,10 @@
 
 ### 模块收尾
 
-模块功能点共 28 项，已完成 28 项，待开发 0 项。
+模块功能点共 29 项，已完成 29 项，待开发 0 项。
+
+> 8.1.16 验收边界：真实本地 stdio 子进程（`tests/test_mcp/test_reset_stdio_real.py`）已覆盖跨任务进出、reset/remove 竞态、超时清理与重试；该验收不等于生产远程 SSE 服务验收，远程连通性、allowlist 主机解析与生产网络边界仍需部署环境复核。
+> 8.1.16 路由总预算补充（2026-10-14）：`POST /mcp/{name}/reset` 的总 deadline 从目标准备开始计时，剩余预算再传给 `reset_server`，冷目标/既有目标被同名操作持锁时均在预算内以 504 结束；准备阶段失败与重置失败走同一套脱敏状态码映射（404/403/500），不会漏成未处理异常。回归见 `tests/test_api/test_mcp_reset.py::TestMcpResetRouteDeadline`。
+> 8.1.16 异常日志单次归属补充（2026-10-14）：owner 边界记录连接异常后打标（`mark_error_logged`/`is_error_logged`，见 `src/mcp_client/owner_task.py`），同一异常跨层传播到 reset 路由时不再重复写同一堆栈；直接调用 owner 的失败仍保留一份脱敏堆栈。回归：`tests/test_mcp/test_owner_task.py`（owner 单次记录与脱敏）与 `tests/test_api/test_mcp_reset.py::TestMcpResetLoggingBoundary`（owner+manager+route 三层联合捕获）。
 
 ---

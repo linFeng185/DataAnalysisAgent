@@ -263,6 +263,15 @@ class MCPServerCreate(BaseModel):
     enabled: bool = True
 
 
+class MCPServerResetResponse(BaseModel):
+    """POST /api/v1/mcp/{name}/reset 的成功响应契约。"""
+
+    status: str = "ok"
+    name: str
+    scope: str
+    tools: int = 0
+
+
 class KnowledgeTagCreateRequest(BaseModel):
     """创建个人或全局知识标签的请求。"""
 
