@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from collections.abc import AsyncIterator, Iterator
+from contextlib import asynccontextmanager, contextmanager
 from functools import partial
 from typing import Any
 
@@ -11,10 +11,21 @@ import asyncpg
 
 from src.app_context import get_app_context
 from src.db.utils import to_asyncpg_url
+from src.log_scopes import defer_dependency_error_logging, dependency_error_logging_deferred
 from src.logging_config import get_logger
 
 logger = get_logger(__name__)
 _PG_POOL_RESOURCE = "pg_pool"
+
+
+# 作用：显式 opt-in 的安全日志作用域：期间共享池建立/健康/重建/关闭异常栈不重复输出。
+# Args: 无。
+# Returns: 上下文管理器；退出（含异常/取消）时 finally 恢复 token。
+@contextmanager
+def defer_pg_error_logging() -> Iterator[None]:
+    """保留原名称/签名；内部委托共享依赖日志作用域（src/log_scopes.py）。"""
+    with defer_dependency_error_logging():
+        yield
 
 
 # 方法作用：根据当前应用配置创建 PostgreSQL 连接池。
@@ -30,7 +41,8 @@ async def _create_pg_pool(database_url: str) -> asyncpg.Pool:
             command_timeout=30,
         )
     except Exception:
-        logger.error("创建 PG 池失败", exc_info=True)
+        if not dependency_error_logging_deferred():
+            logger.error("创建 PG 池失败", exc_info=True)
         raise
     logger.info("创建 PG 池完成")
     return result
@@ -44,7 +56,8 @@ async def _close_pg_pool_resource(pool: asyncpg.Pool) -> None:
     try:
         await pool.close()
     except Exception:
-        logger.error("关闭 PG 池资源失败", exc_info=True)
+        if not dependency_error_logging_deferred():
+            logger.error("关闭 PG 池资源失败", exc_info=True)
         raise
     logger.info("关闭 PG 池资源完成")
 
@@ -64,7 +77,8 @@ async def get_pg_pool() -> asyncpg.Pool:
             logger.debug("get_pg_pool 完成", reused=True)
             return pool
         except Exception:
-            logger.warning("PG 池失效，重建", exc_info=True)
+            if not dependency_error_logging_deferred():
+                logger.warning("PG 池失效，重建", exc_info=True)
             await context.close_resource(_PG_POOL_RESOURCE)
     try:
         result = await context.get_or_create_async(
@@ -75,7 +89,8 @@ async def get_pg_pool() -> asyncpg.Pool:
         logger.debug("get_pg_pool 完成", reused=False)
         return result
     except Exception:
-        logger.error("get_pg_pool 失败", exc_info=True)
+        if not dependency_error_logging_deferred():
+            logger.error("get_pg_pool 失败", exc_info=True)
         raise
 
 
@@ -92,7 +107,8 @@ async def close_pg_pool() -> None:
         closed = await context.close_resource(_PG_POOL_RESOURCE)
         logger.info("close_pg_pool 完成", closed=closed)
     except Exception:
-        logger.error("close_pg_pool 失败", exc_info=True)
+        if not dependency_error_logging_deferred():
+            logger.error("close_pg_pool 失败", exc_info=True)
         raise
 
 
@@ -121,12 +137,13 @@ async def pg_connection(
             user_id=user_id,
         )
     except Exception:
-        logger.error(
-            "pg_connection 失败",
-            tenant_id=tenant_id,
-            user_id=user_id,
-            exc_info=True,
-        )
+        if not dependency_error_logging_deferred():
+            logger.error(
+                "pg_connection 失败",
+                tenant_id=tenant_id,
+                user_id=user_id,
+                exc_info=True,
+            )
         raise
 
 

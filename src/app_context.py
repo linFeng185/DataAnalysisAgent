@@ -13,6 +13,7 @@ from typing import Any, TypeVar, cast
 from fastapi import Request
 from starlette.types import ASGIApp, Receive, Scope, Send
 
+from src.log_scopes import dependency_error_logging_deferred
 from src.logging_config import get_logger
 from src.security.tenant_policy import TenantPolicy
 
@@ -164,12 +165,13 @@ class AppContext:
                 value = await factory()
                 result = self.set_resource(name, value, closer=closer)
             except Exception as exc:
-                logger.error(
-                    "异步获取 AppContext 资源失败",
-                    resource=name,
-                    error=str(exc),
-                    exc_info=True,
-                )
+                if not dependency_error_logging_deferred():
+                    logger.error(
+                        "异步获取 AppContext 资源失败",
+                        resource=name,
+                        error=str(exc),
+                        exc_info=True,
+                    )
                 raise
         logger.debug("异步获取 AppContext 资源完成", resource=name, reused=False)
         return result
@@ -193,12 +195,13 @@ class AppContext:
                 if inspect.isawaitable(result):
                     await result
             except Exception as exc:
-                logger.error(
-                    "关闭 AppContext 资源失败",
-                    resource=name,
-                    error=str(exc),
-                    exc_info=True,
-                )
+                if not dependency_error_logging_deferred():
+                    logger.error(
+                        "关闭 AppContext 资源失败",
+                        resource=name,
+                        error=str(exc),
+                        exc_info=True,
+                    )
                 raise
         logger.info("关闭 AppContext 资源完成", resource=name, existed=True)
         return True

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from urllib.parse import urlsplit, urlunsplit
 
+from src.log_scopes import dependency_error_logging_deferred
 from src.logging_config import get_logger
 
 logger = get_logger(__name__)
@@ -27,5 +28,6 @@ def to_asyncpg_url(database_url: str) -> str:
         logger.debug("to_asyncpg_url 完成", scheme=parsed.scheme)
         return result
     except Exception:
-        logger.error("to_asyncpg_url 失败", exc_info=True)
+        if not dependency_error_logging_deferred():
+            logger.error("to_asyncpg_url 失败", exc_info=True)
         raise
