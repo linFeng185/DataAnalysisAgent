@@ -27,8 +27,20 @@
 
 - SearchHit：source_id、url、title、snippet、provider、retrieved_at。source_id 由 URL 稳定摘要生成，时间用 UTC。标题至多 300 字符、摘要至多 2000 字符。URL 仅作引用，不抓取；仅接受无凭证的 HTTP(S) 链接，拒绝本地主机、字面私网地址和危险 scheme，去重。
 - SearchResponse：success、hits（SearchHit 列表）、error_code、truncated。错误码固定且脱敏；无正文、SQL 或底层异常泄露。
-- is_explicit_web_search(query: str) -> bool：只接受明确联网搜索意图，如“联网搜索”“联网调研”“网上搜索”“搜索网页”“web search”“search the web”。单独“市场研究/行业研究/竞品研究”不构成外送授权；“不要联网搜索”“仅离线分析”“do not search the web”等明确否定优先拒绝，不能仅凭关键词子串认定获得授权。
+- is_explicit_web_search(query: str) -> bool：只在问题开头识别有限中英文执行句式，可含直接相邻的「请/请帮我/麻烦/帮我/Please/Can you」等有限请求前缀。只忽略首尾空白，不忽略任意非空白残词；未识别的前缀与句中关键词均不构成授权。明确否定与仅离线要求优先拒绝。
 - async search_public_web(query: str) -> SearchResponse：执行一次搜索，不调用 LLM。
+
+执行句式按以下契约识别，使用锚定及词边界的确定性规则，不调用额外模型：
+
+| 形式 | 可接受的执行请求 | 边界 |
+|---|---|---|
+| 中文动作 | 联网搜索/联网调研/联网查询/联网检索、网上搜索/网上查询、搜索网页/网页搜索等 | 未识别的前置词失败关闭；首尾和内部空白可以保留 |
+| 英文动作 | search the web、search online、do/perform a web search | 必须处于请求位置，保留合法主题原文 |
+| 英文名词式命令 | 裸 web search / online search，或以 for 引入主题 | 其它余段不能靠排除少量谓语获得授权；web search means / online search refers 等陈述直接拒绝 |
+
+仅提及、解释、能力咨询和设置咨询不构成授权，例如「请解释“联网搜索”是什么功能」「Is web search available?」「How do I disable web search?」「联网搜索如何关闭？」。未知或模糊问法由市场研究子图返回 `needs_input`，请求用户明确联网意图。普通“市场研究/行业研究/竞品研究”同样不构成授权。
+
+明确执行后的合法主题不会因含 how/what/关闭/解释/支持/引用等词被二次判成咨询，例如「联网搜索如何关闭某产品」「Search the web for how to enable web search in a browser.」「请帮我联网搜索“联网搜索”这个术语的定义」。
 
 执行顺序：总开关与明确意图 → 输入长度校验 → 真实认证身份（user_id>0，非 anonymous）→ 已加载的 get_all_tools(tenant_id,user_id) → 精确工具白名单与参数 Schema → 再次检查真实身份一致 → 一次有超时的工具调用 → 有界解析与引用清洗。不得从 state 或模型参数伪造身份。MCP 原工具仍负责调用时授权复核和停用检查。单次失败不改用其他工具，不建立额外连接，取消原样传播。
 

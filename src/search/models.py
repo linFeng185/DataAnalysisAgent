@@ -32,26 +32,63 @@ ERROR_RESPONSE_TOO_LARGE = "response_too_large"
 ERROR_INVALID_RESPONSE = "invalid_response"
 ERROR_NO_USABLE_SOURCES = "no_usable_sources"
 
-# 明确联网意图标记：只接受带联网/网页限定的搜索问法（spec/58 §3）。
-_EXPLICIT_INTENT_MARKERS = (
-    "联网搜索",
-    "联网调研",
-    "联网查询",
-    "联网检索",
-    "联网搜",
-    "联网查",
-    "网上搜索",
-    "网上查询",
-    "网上检索",
-    "网上搜",
-    "网上查",
-    "搜索网页",
-    "网页搜索",
-    "上网搜索",
-    "web search",
-    "search the web",
-    "search online",
-    "online search",
+# 请求位置的有限执行句式（spec/58 §3）：只在问法开头识别可下达的联网搜索动作，
+# 可含有限礼貌前缀；句中任意位置出现关键词、未识别或仅提及的表述一律失败关闭。
+
+# 有限礼貌前缀：中文请求敬语与英文请求框架，必须与执行核心直接相邻才算下达动作。
+_REQUEST_LEAD_PATTERN = (
+    r"(?:请(?:你|您)?(?:帮我)?|麻烦(?:你|您)?(?:帮我)?|帮我|帮忙|劳驾|有劳"
+    r"|能否(?:帮我)?|能不能(?:帮我)?"
+    r"|please|can\s+you|could\s+you|would\s+you|will\s+you|help\s+me"
+    r"|i\s+want\s+you\s+to|i\s+need\s+you\s+to|i(?:'|’)d\s+like\s+you\s+to)"
+)
+
+# 中文执行核心：联网/网上/上网 限定 + 搜索类动词，以及「搜索网页」「网页搜索」。
+_CHINESE_EXECUTION_CORE = (
+    r"(?:联网(?:搜索|调研|查询|检索|搜|查)"
+    r"|网上(?:搜索|查询|检索|搜|查)"
+    r"|上网搜索|搜索网页|网页搜索)"
+)
+
+# 英文名词式核心（web search / online search）的余段边界断言：只在整句到此结束
+# （可带结尾问号/句号）或紧跟空白 + for 词边界引入主题时才算下达动作。
+_ENGLISH_NOUN_CORE_BOUNDARY = r"(?=\s*(?:[?？.。]?\s*$|\s+for\b))"
+
+# 英文执行核心：search the web / search online 动词式与 (do|perform) a web search；
+# 名词式 web search / online search 只认裸命令或 for 引入主题，其后未列出的谓语（is、
+# means、returns 等）一律按陈述失败关闭，不用黑名单模拟授权（spec/58 §3）；
+# 英文侧用词边界防止匹配词内子串。
+_ENGLISH_EXECUTION_CORE = (
+    r"(?:(?:do|perform)\s+(?:a\s+|an\s+)?web\s+search\b"
+    r"|search\s+the\s+web\b|search\s+online\b"
+    rf"|web\s+search\b{_ENGLISH_NOUN_CORE_BOUNDARY}"
+    rf"|online\s+search\b{_ENGLISH_NOUN_CORE_BOUNDARY})"
+)
+
+# 请求位置执行句式：问法开头 = 可选礼貌前缀 + 执行核心；核心之前的任何其它文本
+# （孤立单字、立场词或未识别前缀）都不构成授权，锚定串首即未知默认拒绝（spec/58 §3）。
+_EXECUTION_SYNTAX_PATTERN = re.compile(
+    rf"^(?:\s*(?:{_REQUEST_LEAD_PATTERN})\s*)?"
+    rf"(?:{_CHINESE_EXECUTION_CORE}|{_ENGLISH_EXECUTION_CORE})"
+)
+
+# 执行核心之后的自指问法：把联网搜索本身当作询问对象（如何关闭/配置/使用、与其它方式
+# 对比、询问含义与能力、只有疑问语气词收尾），不是下达搜索动作，命中即失败关闭。
+_SELF_REFERENTIAL_TRAILING_PATTERN = re.compile(
+    r"^\s*(?:的|个)?\s*(?:功能|能力|开关|选项|设置|参数|方式)?\s*"
+    r"(?:"
+    r"(?:如何|怎么|怎样|咋)(?:才能|能|才可以)?\s*"
+    r"(?:关闭|禁用|停用|开启|启用|打开|设置|配置|使用|用|操作|实现|开通|接入)"
+    r"(?:一下|下|好|掉)?\s*(?:这|那|它|这个|那个|该)?\s*"
+    r"(?:功能|能力|开关|选项|设置|参数|方式)?\s*(?:呢|呀|啊)?\s*[。！？!?.，,]*\s*$"
+    r"|(?:和|与|跟|vs\.?|versus)\s*[^。！？!?\n]{0,30}?"
+    r"(?:有什么区别|有何区别|有什么不同|有何不同|有什么差别|有啥区别"
+    r"|有区别|的区别|区别是什么|差异|差别|哪个好|哪个更好)"
+    r"|(?:是什么|是啥|是什么意思|什么意思|指的是什么|指什么|是做什么用的|有什么用"
+    r"|有什么作用|有什么用途|有什么功能|有什么限制|有什么优势|有什么特点|有什么能力"
+    r"|有哪些作用|有哪些用途|有哪些功能|有哪些限制|有哪些用法)"
+    r"|(?:吗|么|呢)\s*[？?。]?\s*$"
+    r")"
 )
 
 # 明确否定与离线意图标记：用户明确禁止联网或要求仅离线时优先拒绝，
@@ -121,18 +158,41 @@ _NUMERIC_HOST_SUFFIX = re.compile(r"[0-9]+")
 _LOCAL_HOST_SUFFIXES = (".localhost", ".local", ".internal", ".home.arpa")
 
 
+# 方法作用：在请求位置匹配有限执行句式，返回执行核心之后的余段。
+# Args: text - 已 trim 并转小写的用户问法。
+# Returns: (是否命中执行句式, 核心之后的余段) 二元组；未命中时余段为空串。
+def _match_execution_syntax(text: str) -> tuple[bool, str]:
+    """只在问法开头（可含有限礼貌前缀）识别执行句式；核心之前的任意前缀都不授权。"""
+    match = _EXECUTION_SYNTAX_PATTERN.match(text)
+    if match is None:
+        return False, ""
+    return True, text[match.end():]
+
+
+# 方法作用：判定执行核心之后的余段是否把联网搜索本身当作询问对象。
+# Args: remainder - 执行核心之后的原问法余段。
+# Returns: 命中自指问法句式时返回 True（应失败关闭）。
+def _is_self_referential_tail(remainder: str) -> bool:
+    """余段把搜索能力当作询问对象时不是执行请求，失败关闭（spec/58 §3）。"""
+    return bool(_SELF_REFERENTIAL_TRAILING_PATTERN.match(remainder))
+
+
 # 方法作用：判定问法是否包含明确联网搜索意图，作为外送授权的唯一依据。
 # Args: query - 用户当前原始问法。
-# Returns: 含明确联网关键词且无明确否定时返回 True；否定/离线意图与模糊研究词返回 False。
+# Returns: 请求位置命中执行句式、无明确否定且非自指问法时返回 True。
 def is_explicit_web_search(query: str) -> bool:
-    """只有明确联网问法才构成外送授权；明确否定与仅离线要求优先拒绝，模糊研究词不构成。"""
+    """只在请求位置识别有限中英文执行句式；否定优先，未识别或仅提及的表述一律失败关闭。"""
     text = str(query or "").strip().lower()
     if not text:
         return False
-    # 否定优先：用户明确禁止联网或要求仅离线时，任何正向关键词都不构成授权。
+    # 否定优先：用户明确禁止联网或要求仅离线时，任何执行句式都不构成授权。
     if any(marker in text for marker in _NEGATED_INTENT_MARKERS) or _NEGATED_INTENT_PATTERN.search(text):
         return False
-    return any(marker in text for marker in _EXPLICIT_INTENT_MARKERS)
+    matched, remainder = _match_execution_syntax(text)
+    if not matched:
+        return False
+    # 执行核心之后是自指问法或能力陈述时，用户是在谈论该能力而不是要求搜索。
+    return not _is_self_referential_tail(remainder)
 
 
 # 方法作用：按 URL 生成稳定摘要作为引用编号，保证去重与回指稳定。

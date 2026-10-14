@@ -31,7 +31,9 @@ class TestExplicitWebSearchIntent:
             "WEB SEARCH for news",
             "please search the web for pricing",
             "联网查询最新公告",
-            "空  联网检索  空白",
+            # 首尾与内部空白容错正例：此前「空  联网检索  空白」把有语义的「空」字
+            # 当作噪声前缀，契约错误，已改为纯空白包裹形态（非空白前缀按未知拒绝）。
+            "  联网检索  空白  ",
         ],
     )
     def test_explicit_intent_hits(self, query: str) -> None:
