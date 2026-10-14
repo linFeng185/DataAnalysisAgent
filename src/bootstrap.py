@@ -37,7 +37,10 @@ _BOOTSTRAP_STEPS: tuple[tuple[str, str], ...] = (
 )
 
 _REQUIRED_BOOTSTRAP_STEPS = {
-    "_run_migrations", "_ensure_super_admin", "_start_runtime_controls", "_load_api_access_policies",
+    "_run_migrations",
+    "_ensure_super_admin",
+    "_start_runtime_controls",
+    "_load_api_access_policies",
 }
 
 
@@ -51,7 +54,7 @@ async def _run_migrations(settings: Settings) -> None:
         return
     from src.db.migrations import run_migrations
 
-    applied = await run_migrations(settings.database_url)
+    applied = await run_migrations(settings.database_url, include_branch=False)
     logger.info("_run_migrations 完成", applied_count=len(applied))
 
 
@@ -76,6 +79,7 @@ async def _start_runtime_controls(settings: Settings) -> None:
 async def _start_schema_sync(settings: Settings) -> None:
     from src.app_context import get_app_context
     from src.knowledge.schema_sync import SchemaSyncService
+
     logger.debug("表结构同步服务启动入口")
     service = SchemaSyncService()
     get_app_context().set_resource("schema_sync", service, closer=SchemaSyncService.close)
@@ -463,7 +467,11 @@ async def bootstrap_all(
 async def _start_report_scheduler(settings: Settings) -> None:
     """数据库迁移和工作流启动后再认领任务。"""
     if not settings.report_scheduler_enabled or not settings.database_url:
-        logger.info("报表调度服务未启用", enabled=settings.report_scheduler_enabled, database_configured=bool(settings.database_url))
+        logger.info(
+            "报表调度服务未启用",
+            enabled=settings.report_scheduler_enabled,
+            database_configured=bool(settings.database_url),
+        )
         return
     from src.app_context import get_app_context
     from src.reporting.runner import get_report_runner
@@ -485,7 +493,9 @@ async def _start_report_scheduler(settings: Settings) -> None:
 # Returns: 无返回值。
 async def _start_report_plan_worker(settings: Settings) -> None:
     """规划任务由后台 Task 承载，Store 在无数据库时退化为内存实现，因此不额外设门禁。"""
-    logger.debug("_start_report_plan_worker 入口", report_scheduler_enabled=settings.report_scheduler_enabled)
+    logger.debug(
+        "_start_report_plan_worker 入口", report_scheduler_enabled=settings.report_scheduler_enabled
+    )
     from src.reporting.plan_worker import get_report_plan_worker
 
     # get_or_create 会把 ReportPlanWorker.close 注册为关闭器，退出时取消在途规划任务。
@@ -505,6 +515,7 @@ async def _run_bootstrap_steps(settings: Settings) -> None:
             await step(settings)
             if name == "_start_runtime_controls":
                 from src.app_context import get_app_context
+
                 service = get_app_context().get_resource("runtime_settings")
                 if service is not None:
                     settings = get_app_context().settings

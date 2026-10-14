@@ -145,7 +145,8 @@ class TestMigrationRunner:
 
         # Act
         applied = await run_migrations(
-            "postgresql+asyncpg://user:secret@db/app", migrations_dir=tmp_path,
+            "postgresql+asyncpg://user:secret@db/app",
+            migrations_dir=tmp_path,
         )
 
         # Assert
@@ -159,18 +160,24 @@ class TestMigrationRunner:
     # Args: self - pytest 测试类实例；tmp_path - 临时目录；monkeypatch - pytest 补丁工具。
     # Returns: 无返回值，断言失败时由 pytest 报告。
     async def test_run_migrations_accepts_equivalent_line_ending_checksum(
-        self, tmp_path, monkeypatch,
+        self,
+        tmp_path,
+        monkeypatch,
     ) -> None:
         """仅换行符不同的历史 checksum 不应被误判为迁移内容篡改。"""
         # Arrange
         content_lf = b"SELECT 1;\n"
         content_crlf = b"SELECT 1;\r\n"
         (tmp_path / "001_first.sql").write_bytes(content_lf)
-        connection = _Connection(applied=[{
-            "version": "001",
-            "name": "001_first.sql",
-            "checksum": hashlib.sha256(content_crlf).hexdigest(),
-        }])
+        connection = _Connection(
+            applied=[
+                {
+                    "version": "001",
+                    "name": "001_first.sql",
+                    "checksum": hashlib.sha256(content_crlf).hexdigest(),
+                }
+            ]
+        )
         import asyncpg
 
         from src.db.migrations import run_migrations
@@ -179,7 +186,8 @@ class TestMigrationRunner:
 
         # Act
         applied = await run_migrations(
-            "postgresql://user:secret@db/app", migrations_dir=tmp_path,
+            "postgresql://user:secret@db/app",
+            migrations_dir=tmp_path,
         )
 
         # Assert
@@ -190,7 +198,9 @@ class TestMigrationRunner:
     # Args: self - pytest 测试类实例；tmp_path - 临时目录；monkeypatch - pytest 补丁工具。
     # Returns: 无返回值，断言失败时由 pytest 报告。
     async def test_run_migrations_aggregates_existing_migration_logs(
-        self, tmp_path, monkeypatch,
+        self,
+        tmp_path,
+        monkeypatch,
     ) -> None:
         """没有新迁移时日志必须明确 applied_count=0，不能声称逐文件已应用。"""
         # Arrange
@@ -200,9 +210,15 @@ class TestMigrationRunner:
 
         (tmp_path / "001_first.sql").write_text("SELECT 1;", encoding="utf-8")
         checksum = _discover_migrations(tmp_path)[0][2]
-        connection = _Connection(applied=[{
-            "version": "001", "name": "001_first.sql", "checksum": checksum,
-        }])
+        connection = _Connection(
+            applied=[
+                {
+                    "version": "001",
+                    "name": "001_first.sql",
+                    "checksum": checksum,
+                }
+            ]
+        )
         import asyncpg
 
         monkeypatch.setattr(asyncpg, "connect", AsyncMock(return_value=connection))
@@ -210,14 +226,13 @@ class TestMigrationRunner:
         # Act
         with capture_logs() as logs:
             applied = await run_migrations(
-                "postgresql://user:secret@db/app", migrations_dir=tmp_path,
+                "postgresql://user:secret@db/app",
+                migrations_dir=tmp_path,
             )
 
         # Assert
         assert applied == []
-        info_events = [
-            entry["event"] for entry in logs if entry.get("log_level") == "info"
-        ]
+        info_events = [entry["event"] for entry in logs if entry.get("log_level") == "info"]
         assert "数据库迁移已应用" not in info_events
         summaries = [entry for entry in logs if entry["event"] == "数据库迁移执行完成"]
         assert len(summaries) == 1
@@ -228,7 +243,9 @@ class TestMigrationRunner:
     # Args: self - pytest 测试类实例；tmp_path - 临时目录；monkeypatch - pytest 补丁工具。
     # Returns: 无返回值，断言失败时由 pytest 报告。
     async def test_run_migrations_verified_legacy_repair_is_not_warning(
-        self, tmp_path, monkeypatch,
+        self,
+        tmp_path,
+        monkeypatch,
     ) -> None:
         """修复文件已经登记后，历史 checksum 只属于已验证审计状态。"""
         # Arrange
@@ -246,18 +263,20 @@ class TestMigrationRunner:
             version: (path.name, checksum)
             for version, path, checksum in _discover_migrations(tmp_path)
         }
-        connection = _Connection(applied=[
-            {
-                "version": "015",
-                "name": "015_knowledge_evolution.sql",
-                "checksum": "6705b6d1b4ee1cf911f2b46abcf612b638098dcf264e6c299b30c47835a3a995",
-            },
-            {
-                "version": "017",
-                "name": discovered["017"][0],
-                "checksum": discovered["017"][1],
-            },
-        ])
+        connection = _Connection(
+            applied=[
+                {
+                    "version": "015",
+                    "name": "015_knowledge_evolution.sql",
+                    "checksum": "6705b6d1b4ee1cf911f2b46abcf612b638098dcf264e6c299b30c47835a3a995",
+                },
+                {
+                    "version": "017",
+                    "name": discovered["017"][0],
+                    "checksum": discovered["017"][1],
+                },
+            ]
+        )
         import asyncpg
 
         monkeypatch.setattr(asyncpg, "connect", AsyncMock(return_value=connection))
@@ -265,7 +284,8 @@ class TestMigrationRunner:
         # Act
         with capture_logs() as logs:
             applied = await run_migrations(
-                "postgresql://user:secret@db/app", migrations_dir=tmp_path,
+                "postgresql://user:secret@db/app",
+                migrations_dir=tmp_path,
             )
 
         # Assert
@@ -281,9 +301,15 @@ class TestMigrationRunner:
         """已执行 SQL 文件不得被静默篡改后重新使用。"""
         # Arrange
         (tmp_path / "001_first.sql").write_text("SELECT 1;", encoding="utf-8")
-        connection = _Connection(applied=[{
-            "version": "001", "name": "001_first.sql", "checksum": "wrong",
-        }])
+        connection = _Connection(
+            applied=[
+                {
+                    "version": "001",
+                    "name": "001_first.sql",
+                    "checksum": "wrong",
+                }
+            ]
+        )
         import asyncpg
 
         from src.db.migrations import MigrationError, run_migrations
@@ -299,7 +325,9 @@ class TestMigrationRunner:
     # Args: self - pytest 测试类实例；tmp_path - 临时目录；monkeypatch - pytest 补丁工具。
     # Returns: 无返回值，断言失败时由 pytest 报告。
     async def test_run_migrations_accepts_pinned_legacy_checksum_with_repair(
-        self, tmp_path, monkeypatch,
+        self,
+        tmp_path,
+        monkeypatch,
     ) -> None:
         """精确匹配的历史 015 应保留审计记录，并继续执行 017 RLS 修复。"""
         # Arrange
@@ -307,13 +335,18 @@ class TestMigrationRunner:
         current_015 = (project_root / "migrations" / "015_knowledge_evolution.sql").read_bytes()
         (tmp_path / "015_knowledge_evolution.sql").write_bytes(current_015)
         (tmp_path / "017_knowledge_evolution_rls_repair.sql").write_text(
-            "SELECT 17;", encoding="utf-8",
+            "SELECT 17;",
+            encoding="utf-8",
         )
-        connection = _Connection(applied=[{
-            "version": "015",
-            "name": "015_knowledge_evolution.sql",
-            "checksum": "6705b6d1b4ee1cf911f2b46abcf612b638098dcf264e6c299b30c47835a3a995",
-        }])
+        connection = _Connection(
+            applied=[
+                {
+                    "version": "015",
+                    "name": "015_knowledge_evolution.sql",
+                    "checksum": "6705b6d1b4ee1cf911f2b46abcf612b638098dcf264e6c299b30c47835a3a995",
+                }
+            ]
+        )
         import asyncpg
 
         from src.db.migrations import run_migrations
@@ -322,7 +355,8 @@ class TestMigrationRunner:
 
         # Act
         applied = await run_migrations(
-            "postgresql://user:secret@db/app", migrations_dir=tmp_path,
+            "postgresql://user:secret@db/app",
+            migrations_dir=tmp_path,
         )
 
         # Assert
@@ -334,18 +368,24 @@ class TestMigrationRunner:
     # Args: self - pytest 测试类实例；tmp_path - 临时目录；monkeypatch - pytest 补丁工具。
     # Returns: 无返回值，断言失败时由 pytest 报告。
     async def test_run_migrations_rejects_pinned_legacy_checksum_without_repair(
-        self, tmp_path, monkeypatch,
+        self,
+        tmp_path,
+        monkeypatch,
     ) -> None:
         """兼容入口不能在 RLS 修复文件缺失时绕过不可变迁移保护。"""
         # Arrange
         project_root = Path(__file__).resolve().parents[2]
         current_015 = (project_root / "migrations" / "015_knowledge_evolution.sql").read_bytes()
         (tmp_path / "015_knowledge_evolution.sql").write_bytes(current_015)
-        connection = _Connection(applied=[{
-            "version": "015",
-            "name": "015_knowledge_evolution.sql",
-            "checksum": "6705b6d1b4ee1cf911f2b46abcf612b638098dcf264e6c299b30c47835a3a995",
-        }])
+        connection = _Connection(
+            applied=[
+                {
+                    "version": "015",
+                    "name": "015_knowledge_evolution.sql",
+                    "checksum": "6705b6d1b4ee1cf911f2b46abcf612b638098dcf264e6c299b30c47835a3a995",
+                }
+            ]
+        )
         import asyncpg
 
         from src.db.migrations import MigrationError, run_migrations
@@ -355,7 +395,8 @@ class TestMigrationRunner:
         # Act / Assert
         with pytest.raises(MigrationError, match="checksum"):
             await run_migrations(
-                "postgresql://user:secret@db/app", migrations_dir=tmp_path,
+                "postgresql://user:secret@db/app",
+                migrations_dir=tmp_path,
             )
 
     # 方法作用：验证 SQL 失败会回滚当前迁移且仍释放锁和连接。
@@ -379,3 +420,76 @@ class TestMigrationRunner:
         assert any("pg_advisory_unlock" in sql for sql, _ in connection.calls)
         assert not any(args and args[0] == "001" for _, args in connection.calls)
         assert connection.closed is True
+
+    # 方法作用：验证默认执行集合排除 >=900 的分库分支迁移。
+    # Args: self - pytest 测试类实例；tmp_path - 临时目录；monkeypatch - pytest 补丁工具。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    async def test_run_migrations_excludes_branch_by_default(self, tmp_path, monkeypatch):
+        """缺省 include_branch=False 时不得执行任何 900+ 文件。"""
+        # Arrange
+        (tmp_path / "002_main.sql").write_text("SELECT 2;", encoding="utf-8")
+        (tmp_path / "900_branch.sql").write_text("SELECT 900;", encoding="utf-8")
+        connection = _Connection()
+        import asyncpg
+
+        from src.db.migrations import run_migrations
+
+        monkeypatch.setattr(asyncpg, "connect", AsyncMock(return_value=connection))
+
+        # Act
+        applied = await run_migrations("postgresql://user:secret@db/app", migrations_dir=tmp_path)
+
+        # Assert
+        assert applied == ["002_main.sql"]
+        assert not any("SELECT 900" in sql for sql, _ in connection.calls)
+
+    # 方法作用：验证显式 include_branch=True 才纳入分库分支迁移。
+    # Args: self - pytest 测试类实例；tmp_path - 临时目录；monkeypatch - pytest 补丁工具。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    async def test_run_migrations_includes_branch_when_enabled(self, tmp_path, monkeypatch):
+        """include_branch=True 时必须按数值顺序应用 main 与分支文件。"""
+        # Arrange
+        (tmp_path / "002_main.sql").write_text("SELECT 2;", encoding="utf-8")
+        (tmp_path / "900_branch.sql").write_text("SELECT 900;", encoding="utf-8")
+        connection = _Connection()
+        import asyncpg
+
+        from src.db.migrations import run_migrations
+
+        monkeypatch.setattr(asyncpg, "connect", AsyncMock(return_value=connection))
+
+        # Act
+        applied = await run_migrations(
+            "postgresql://user:secret@db/app", migrations_dir=tmp_path, include_branch=True
+        )
+
+        # Assert
+        assert applied == ["002_main.sql", "900_branch.sql"]
+
+    # 方法作用：验证非布尔 include_branch 一律拒绝且不建立数据库连接。
+    # Args: self - pytest 测试类实例；tmp_path - 临时目录；monkeypatch - pytest 补丁工具；
+    #       value - 非法取值。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    @pytest.mark.parametrize("value", ["yes", 1, None])
+    async def test_run_migrations_rejects_non_boolean_include_branch(
+        self, tmp_path, monkeypatch, value
+    ):
+        """非法字符串/整数/None 不得 truthy 放行分支迁移。"""
+        # Arrange
+        (tmp_path / "002_main.sql").write_text("SELECT 2;", encoding="utf-8")
+        connection = _Connection()
+        import asyncpg
+
+        from src.db.migrations import MigrationError, run_migrations
+
+        connect = AsyncMock(return_value=connection)
+        monkeypatch.setattr(asyncpg, "connect", connect)
+
+        # Act / Assert
+        with pytest.raises(MigrationError):
+            await run_migrations(
+                "postgresql://user:secret@db/app",
+                migrations_dir=tmp_path,
+                include_branch=value,
+            )
+        assert connect.await_count == 0

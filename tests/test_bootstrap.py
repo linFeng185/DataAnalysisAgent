@@ -26,9 +26,11 @@ class TestBootstrap:
         calls: list[str] = []
         names = [name for name, _ in bootstrap._BOOTSTRAP_STEPS]
         for name in names:
+
             async def step(settings, *, _name=name):
                 del settings
                 calls.append(_name)
+
             monkeypatch.setattr(bootstrap, name, step)
 
         await bootstrap.bootstrap_all(SimpleNamespace(env="dev"))
@@ -47,7 +49,9 @@ class TestBootstrap:
 
         completed = AsyncMock()
         failing = AsyncMock(side_effect=RuntimeError("boom"))
-        monkeypatch.setattr(bootstrap, "_BOOTSTRAP_STEPS", (("failing", "失败步骤"), ("completed", "后续步骤")))
+        monkeypatch.setattr(
+            bootstrap, "_BOOTSTRAP_STEPS", (("failing", "失败步骤"), ("completed", "后续步骤"))
+        )
         monkeypatch.setattr(bootstrap, "failing", failing, raising=False)
         monkeypatch.setattr(bootstrap, "completed", completed, raising=False)
 
@@ -144,7 +148,9 @@ class TestBootstrap:
         runner = object()
         service = SimpleNamespace(start=AsyncMock(), close=AsyncMock())
         monkeypatch.setattr(store_module, "get_automation_store", lambda: store)
-        monkeypatch.setattr(runner_module, "ScheduledAnalysisRunner", MagicMock(return_value=runner))
+        monkeypatch.setattr(
+            runner_module, "ScheduledAnalysisRunner", MagicMock(return_value=runner)
+        )
         service_factory = MagicMock(return_value=service)
         monkeypatch.setattr(service_module, "AutomationService", service_factory)
         settings = SimpleNamespace(
@@ -160,7 +166,9 @@ class TestBootstrap:
         service.start.assert_awaited_once()
         assert context.set_resource.call_args_list[0].args == ("automation_runner", runner)
         assert context.set_resource.call_args_list[1].args == ("automation_service", service)
-        assert context.set_resource.call_args_list[1].kwargs["closer"] is bootstrap._close_automation
+        assert (
+            context.set_resource.call_args_list[1].kwargs["closer"] is bootstrap._close_automation
+        )
 
     # 方法作用：验证演示数据源只在显式启用的开发环境加载。
     # Args: self - pytest 测试类实例；monkeypatch - pytest 补丁工具。
@@ -192,3 +200,35 @@ class TestBootstrap:
         # Assert
         assert ensure_demo.await_count == expected_calls
         assert "_ensure_demo_datasource" not in steps
+
+    # 方法作用：验证启动迁移显式排除 900+ 分库分支。
+    # Args: self - pytest 测试类实例；monkeypatch - pytest 补丁工具。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    @pytest.mark.asyncio
+    async def test_run_migrations_excludes_branch_by_default(self, monkeypatch) -> None:
+        """启动路径必须以 include_branch=False 调用迁移器，禁止触碰主库分支迁移。"""
+        # Arrange
+        import src.db.migrations as migrations_module
+        from src import bootstrap
+
+        captured: list[dict] = []
+
+        # 方法作用：捕获启动迁移传入迁移器的参数。
+        # Args: database_url - 主库 URL；kwargs - 关键字参数。
+        # Returns: 空迁移列表。
+        async def _fake_run_migrations(database_url: str, **kwargs) -> list[str]:
+            captured.append({"database_url": database_url, **kwargs})
+            return []
+
+        monkeypatch.setattr(migrations_module, "run_migrations", _fake_run_migrations)
+
+        # Act
+        await bootstrap._run_migrations(
+            SimpleNamespace(
+                run_migrations_on_startup=True,
+                database_url="postgresql://u:p@db/app",
+            )
+        )
+
+        # Assert
+        assert captured == [{"database_url": "postgresql://u:p@db/app", "include_branch": False}]

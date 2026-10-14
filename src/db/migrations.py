@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import hashlib
 import re
+from collections.abc import Awaitable, Callable
 from pathlib import Path
+from typing import Any
 
 from src.db.utils import to_asyncpg_url
 from src.logging_config import get_logger
@@ -14,6 +16,7 @@ logger = get_logger(__name__)
 _MIGRATION_PATTERN = re.compile(r"^(\d{3,})_[A-Za-z0-9_-]+\.sql$")
 _MIGRATION_LOCK_ID = 4_918_298_299_645_661_761
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
+_BRANCH_VERSION_FLOOR = 900
 _APPROVED_LEGACY_TRANSITIONS: dict[tuple[str, str, str], tuple[str, str]] = {
     (
         "015",
@@ -132,21 +135,45 @@ async def run_migrations(
     database_url: str,
     *,
     migrations_dir: str | Path | None = None,
+    connection_setup: Callable[[Any], Awaitable[None]] | None = None,
+    include_branch: bool = False,
 ) -> list[str]:
     """在 advisory lock 内逐文件事务执行幂等 SQL 迁移。
 
     Args:
         database_url: 应用状态 PostgreSQL URL。
         migrations_dir: 迁移目录；默认使用项目根目录 migrations。
+        connection_setup: 可选回调，在连接建立后、advisory lock 前于同一会话内执行一次，
+            用于注入会话级设置；默认 None 时行为与既有完全一致。
+        include_branch: 是否纳入 >=900 的分库分支迁移；默认 False 仅应用主库迁移，
+            专用库入口必须显式传 True；非布尔值一律拒绝，禁止 truthy 误放行。
 
     Returns:
         本次新应用的迁移文件名。
     """
     import asyncpg
 
+    if not isinstance(include_branch, bool):
+        logger.error(
+            "数据库迁移 include_branch 参数非法",
+            value_type=type(include_branch).__name__,
+        )
+        raise MigrationError("include_branch 必须为布尔值")
     directory = Path(migrations_dir) if migrations_dir is not None else _PROJECT_ROOT / "migrations"
-    migrations = _discover_migrations(directory)
-    available_names = {path.name for _, path, _ in migrations}
+    discovered = _discover_migrations(directory)
+    available_names = {path.name for _, path, _ in discovered}
+    migrations = (
+        discovered
+        if include_branch
+        else [item for item in discovered if int(item[0]) < _BRANCH_VERSION_FLOOR]
+    )
+    excluded_branch_count = len(discovered) - len(migrations)
+    if excluded_branch_count:
+        logger.info(
+            "数据库迁移默认排除分库分支",
+            excluded_branch_count=excluded_branch_count,
+            include_branch=include_branch,
+        )
     pg_url = to_asyncpg_url(database_url)
     if not pg_url.startswith(("postgresql://", "postgres://")):
         logger.error("数据库迁移 URL 方言不受支持")
@@ -160,6 +187,8 @@ async def run_migrations(
     line_ending_compatibility_count = 0
     try:
         connection = await asyncpg.connect(pg_url)
+        if connection_setup is not None:
+            await connection_setup(connection)
         await connection.execute("SELECT pg_advisory_lock($1)", _MIGRATION_LOCK_ID)
         locked = True
         await connection.execute(
@@ -177,7 +206,9 @@ async def run_migrations(
             if previous is not None:
                 stored_name = str(previous["name"])
                 stored_checksum = str(previous["checksum"])
-                checksum_matches = stored_checksum in _migration_checksum_variants(path.read_bytes())
+                checksum_matches = stored_checksum in _migration_checksum_variants(
+                    path.read_bytes()
+                )
                 if not checksum_matches or stored_name != path.name:
                     logger.debug(
                         "数据库迁移校验快照",
