@@ -11,6 +11,7 @@ from src.graph.outcome import (
     is_successful_response,
     public_error_message,
     public_failure_reason,
+    public_prompt_message,
     sanitize_public_output,
     status_from_response,
 )
@@ -112,6 +113,9 @@ def _format_sql_statements(statements: list[dict]) -> str:
         return ""
 
 
+# 方法作用：组装统一最终响应，解析展示语言并保存本轮对话历史。
+# Args: state - LangGraph 当前分析状态。
+# Returns: 含最终响应、对话历史和新增消息的状态增量。
 async def build_response_node(state: AnalysisState) -> dict:
     """组装统一最终响应并保存本轮对话历史。
 
@@ -127,6 +131,15 @@ async def build_response_node(state: AnalysisState) -> dict:
         "构建响应入口",
         node="build_response",
         truncated=bool(state.get("query_result_truncated", False)),
+    )
+    # 展示语言必须早于本节点的默认补参与已知错误装配解析：解析晚于文案生成时，
+    # 英文请求会先落到中文硬编码提示，最后只更新 display_language 字段。
+    from src.tools.chart_presentation import resolve_language
+
+    display_language = resolve_language(
+        contexts.request.user_query,
+        state.get("conversation_history", []),
+        state.get("display_language", "zh-CN"),
     )
 
     sql_statements = _build_sql_statements(state)
@@ -180,6 +193,7 @@ async def build_response_node(state: AnalysisState) -> dict:
             final_result["error_message"] = public_error_message(
                 str(final_result["error_code"]),
                 fallback=str(final_result.get("error_message") or "任务执行失败"),
+                language=display_language,
             )
             final_result["status"] = "failed"
         elif direct_status == "needs_confirmation":
@@ -199,8 +213,11 @@ async def build_response_node(state: AnalysisState) -> dict:
             indicator_group_count=len(direct_groups),
         )
     elif is_time_prompt:
-        explanation = state.get("time_range_explanation") or "请指定查询的时间范围（最近一周/一月/一年/两年/三年/五年）"
-        logger.info("提示用户指定时间范围", explanation=explanation[:100])
+        # 上游给出的具体时间解释原样保留，只在缺失时补当前展示语言的固定提示。
+        explanation = state.get("time_range_explanation") or public_prompt_message(
+            "time_range_response", display_language,
+        )
+        logger.info("提示用户指定时间范围", explanation_chars=len(str(explanation)))
         final_result = {
             "success": True, "status": "needs_input", "source": "prompt", "needs_time_range": True,
             "user_query": contexts.request.user_query, "sql": "", "data": [],
@@ -210,8 +227,10 @@ async def build_response_node(state: AnalysisState) -> dict:
                       "reason": "等待补充参数时不生成图表"},
         }
     elif is_generic_prompt:
-        explanation = state.get("input_explanation") or "请补充具体业务目标或目标表后重试。"
-        logger.info("提示用户补充必要输入", explanation=str(explanation)[:100])
+        explanation = state.get("input_explanation") or public_prompt_message(
+            "needs_input", display_language,
+        )
+        logger.info("提示用户补充必要输入", explanation_chars=len(str(explanation)))
         final_result = {
             "success": False,
             "status": "needs_input",
@@ -254,7 +273,7 @@ async def build_response_node(state: AnalysisState) -> dict:
             "status": "failed",
             "source": "multi_source_query",
             "error_code": "MULTI_SOURCE_FAILED",
-            "error_message": detail or public_error_message("MULTI_SOURCE_FAILED"),
+            "error_message": detail or public_error_message("MULTI_SOURCE_FAILED", language=display_language),
             "user_query": contexts.request.user_query,
             "sql": "",
             "sql_statements": [],
@@ -266,14 +285,14 @@ async def build_response_node(state: AnalysisState) -> dict:
     elif state.get("validation_errors"):
         final_result = {
             "success": False, "status": "failed", "source": "sql_query", "error_code": "VALIDATION_FAILED",
-            "error_message": public_error_message("VALIDATION_FAILED"),
+            "error_message": public_error_message("VALIDATION_FAILED", language=display_language),
             "user_query": contexts.request.user_query, "sql": "",
             "sql_statements": [], "data": [], "analysis": {}, "chart": {},
         }
     elif state.get("explain_errors"):
         final_result = {
             "success": False, "status": "failed", "source": "sql_query", "error_code": "EXPLAIN_FAILED",
-            "error_message": public_error_message("EXPLAIN_FAILED"),
+            "error_message": public_error_message("EXPLAIN_FAILED", language=display_language),
             "user_query": contexts.request.user_query, "sql": "",
             "sql_statements": [], "data": [], "analysis": {}, "chart": {},
         }
@@ -296,7 +315,9 @@ async def build_response_node(state: AnalysisState) -> dict:
         }
         if exec_error:
             final_result["error_code"] = error_code
-            final_result["error_message"] = public_failure_reason(error_code, error_type)
+            final_result["error_message"] = public_failure_reason(
+                error_code, error_type, language=display_language,
+            )
             final_result["failure_reason"] = final_result["error_message"]
 
     if multi_source_results and successful_sources:
@@ -304,13 +325,13 @@ async def build_response_node(state: AnalysisState) -> dict:
         if len(successful_sources) < len(multi_source_results):
             final_result["status"] = "partial"
             final_result["error_code"] = "MULTI_SOURCE_PARTIAL"
-            final_result["error_message"] = public_error_message("MULTI_SOURCE_PARTIAL")
+            final_result["error_message"] = public_error_message("MULTI_SOURCE_PARTIAL", language=display_language)
 
     final_result.setdefault("sql_statements", sql_statements)
     from src.config import get_settings
-    from src.tools.chart_presentation import column_labels, resolve_language
+    from src.tools.chart_presentation import column_labels
 
-    display_language = resolve_language(contexts.request.user_query, state.get("conversation_history", []), state.get("display_language", "zh-CN"))
+    # display_language 在节点入口已解析，这里只消费同一个值，保证全节点文案同语言。
     public_analysis = final_result.get("analysis", {}) or {}
     public_rows = final_result.get("data", [])
     final_result["display_language"] = display_language

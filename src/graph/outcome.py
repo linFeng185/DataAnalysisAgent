@@ -20,29 +20,97 @@ _ERROR_MESSAGES = {
     "STREAM_FAILED": "流式处理失败，请稍后重试",
 }
 
+# 英文固定文案与中文映射逐项对应；只服务 en/en-*，其余语言按 spec/60 保留中文默认。
+_ERROR_MESSAGES_EN = {
+    "VALIDATION_FAILED": "The query did not pass the security validation",
+    "EXPLAIN_FAILED": "The query did not pass the execution plan validation",
+    "LLM_UNAVAILABLE": "No LLM is configured for this tenant; configure and enable a model in the admin console first",
+    "SQL_EXECUTION_FAILED": "The query failed to execute; check the data source, permissions, or query conditions",
+    "MCP_AGENT_FAILED": "Tool analysis failed; check the input and authorized tools",
+    "MARKET_RESEARCH_EVIDENCE_MISSING": "Market research found no traceable evidence, so a reliable conclusion cannot be generated",
+    "MULTI_SOURCE_FAILED": "All data source queries failed; check the data source status and access permissions",
+    "MULTI_SOURCE_PARTIAL": "Some data source queries failed; the current result only includes the successful data sources",
+    "STREAM_FAILED": "Streaming failed; please try again later",
+}
+
+# 已知执行失败类型的脱敏分类文案，中文为默认，英文与之一一对应。
+_FAILURE_REASONS = {
+    "rate_limit": "请求频率超过限制",
+    "security": "查询涉及未授权字段或被安全策略拦截",
+    "sql_semantic": "SQL 与当前 Schema 或字段语义不匹配",
+    "transient": "数据源暂时不可用或查询超时",
+    "configuration": "数据源配置、认证或连接失败",
+    "resource_limit": "查询触及运行资源上限，已停止继续执行",
+    "llm_unavailable": _ERROR_MESSAGES["LLM_UNAVAILABLE"],
+}
+_FAILURE_REASONS_EN = {
+    "rate_limit": "The request rate limit was exceeded",
+    "security": "The query references unauthorized fields or was blocked by the security policy",
+    "sql_semantic": "The SQL does not match the current schema or field semantics",
+    "transient": "The data source is temporarily unavailable or the query timed out",
+    "configuration": "Data source configuration, authentication, or connection failed",
+    "resource_limit": "The query hit a runtime resource limit and was stopped",
+    "llm_unavailable": _ERROR_MESSAGES_EN["LLM_UNAVAILABLE"],
+}
+
+# 确定性补参提示的双语常量：唯一文案来源，避免生成节点与响应出口各自硬编码漂移。
+PUBLIC_PROMPT_MESSAGES: dict[str, dict[str, str]] = {
+    # 生成节点的结构化时间补参（含「全部数据」选项）
+    "time_range": {
+        "zh-CN": "请指定查询的时间范围（最近一周/一月/一年/两年/三年/五年 或 全部数据）",
+        "en-US": "Please specify the time range for the query (last 1 week / 1 month / 1 year / 2 years / 3 years / 5 years, or all data)",
+    },
+    # 统一响应出口在模型未给出解释时的时间补参兜底（无「全部数据」选项，保持原语义）
+    "time_range_response": {
+        "zh-CN": "请指定查询的时间范围（最近一周/一月/一年/两年/三年/五年）",
+        "en-US": "Please specify the time range for the query (last 1 week / 1 month / 1 year / 2 years / 3 years / 5 years)",
+    },
+    # 需要补充业务目标或目标表的兜底提示
+    "needs_input": {
+        "zh-CN": "请补充具体业务目标或目标表后重试。",
+        "en-US": "Please provide a specific business goal or target table and try again.",
+    },
+}
+
+
+# 方法作用：判断展示语言是否命中英文固定文案。
+# Args: language - 展示语言代码，如 en-US、zh-CN。
+# Returns: en/en-* 前缀返回 True，其余语言返回 False。
+def _is_english_language(language: str) -> bool:
+    """非中英语言的全面本地化另行处理，当前按 spec/60 保留中文默认。"""
+    normalized = str(language or "").strip().lower()
+    # enm 等独立语言代码共享字面前缀但不是英文，必须按 en 或 en- 精确匹配。
+    return normalized == "en" or normalized.startswith("en-")
+
+
+# 方法作用：按展示语言选择确定性补参提示，避免各节点硬编码系统文案。
+# Args: kind - time_range/time_range_response/needs_input；language - 展示语言代码。
+# Returns: 对应类型与语言的固定文案；未知类型抛出 KeyError 以暴露编程错误。
+def public_prompt_message(
+    kind: Literal["time_range", "time_range_response", "needs_input"],
+    language: str = "zh-CN",
+) -> str:
+    """只切换系统固定提示，不翻译模型给出的具体解释。"""
+    messages = PUBLIC_PROMPT_MESSAGES[kind]
+    return messages["en-US"] if _is_english_language(language) else messages["zh-CN"]
+
 
 # 方法作用：把内部错误码转换为稳定且脱敏的用户提示。
-# Args: error_code - 内部错误码；fallback - 未知错误码的默认提示。
-# Returns: 可公开返回给客户端的错误文本。
-def public_error_message(error_code: str, *, fallback: str = "处理失败") -> str:
+# Args: error_code - 内部错误码；fallback - 未知错误码的默认提示；language - 展示语言。
+# Returns: 可公开返回给客户端的错误文本；未知错误码原样返回调用方 fallback。
+def public_error_message(error_code: str, *, fallback: str = "处理失败", language: str = "zh-CN") -> str:
     """把内部错误转换为稳定的用户可见文本，详细信息只进入服务端日志。"""
-    return _ERROR_MESSAGES.get(error_code, fallback)
+    messages = _ERROR_MESSAGES_EN if _is_english_language(language) else _ERROR_MESSAGES
+    return messages.get(error_code, fallback)
 
 
 # 方法作用：把内部执行错误类型转换成可写入历史的脱敏失败原因。
-# Args: error_code - 统一错误码；error_type - 执行阶段分类。
-# Returns: 不包含连接串、凭证和堆栈的用户可见原因。
-def public_failure_reason(error_code: str, error_type: str = "") -> str:
-    reasons = {
-        "rate_limit": "请求频率超过限制",
-        "security": "查询涉及未授权字段或被安全策略拦截",
-        "sql_semantic": "SQL 与当前 Schema 或字段语义不匹配",
-        "transient": "数据源暂时不可用或查询超时",
-        "configuration": "数据源配置、认证或连接失败",
-        "resource_limit": "查询触及运行资源上限，已停止继续执行",
-        "llm_unavailable": _ERROR_MESSAGES["LLM_UNAVAILABLE"],
-    }
-    return reasons.get(str(error_type or "").strip(), public_error_message(error_code))
+# Args: error_code - 统一错误码；error_type - 执行阶段分类；language - 展示语言。
+# Returns: 不包含连接串、凭证和堆栈的用户可见原因；未知类型回退同语言错误码映射。
+def public_failure_reason(error_code: str, error_type: str = "", *, language: str = "zh-CN") -> str:
+    """把执行失败分类转换为脱敏原因，只保留分类文案，不回显异常正文或凭证。"""
+    reasons = _FAILURE_REASONS_EN if _is_english_language(language) else _FAILURE_REASONS
+    return reasons.get(str(error_type or "").strip(), public_error_message(error_code, language=language))
 
 
 # 方法作用：从新旧响应字段中解析统一任务状态。

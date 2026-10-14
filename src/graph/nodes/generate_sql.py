@@ -33,6 +33,7 @@ from typing import Any
 from langchain_core.runnables import RunnableConfig
 
 from src.config import get_settings
+from src.graph.outcome import public_prompt_message
 from src.graph.state import AnalysisState
 from src.llm.prompt_budget import PromptSection
 from src.llm.prompts import get_dialect_cheatsheet
@@ -140,6 +141,20 @@ def get_llm(temperature: float = 0, *, stream: bool = True):
     )
     logger.debug("创建 SQL 任务模型完成", stream=stream)
     return model
+
+
+# 方法作用：解析本次生成请求的展示语言，供固定补参提示切换文案。
+# Args: state - 当前 LangGraph 分析状态；query - 用户原始问题。
+# Returns: 展示语言代码；解析优先级与统一响应出口保持同源。
+def _request_display_language(state: AnalysisState, query: str) -> str:
+    """显式语言要求 > 问题文字 > 历史轮次 > 界面兜底；只影响确定性系统文案。"""
+    from src.tools.chart_presentation import resolve_language
+
+    return resolve_language(
+        query,
+        state.get("conversation_history", []),
+        state.get("display_language", "zh-CN"),
+    )
 
 
 # 数据画像段的统一规则：只在启用 SQL 智能时随 data_profile 注入，
@@ -592,6 +607,9 @@ async def _prepare_sql_intelligence(
     )
 
 
+# 方法作用：SQL 生成节点主入口，优先调用模型流式生成 SQL，不可用时退回模板。
+# Args: state - 当前分析状态；config - LangGraph 运行配置。
+# Returns: 含 generated_sql、retry_count 及补参与校验字段的状态增量。
 async def generate_sql_node(state: AnalysisState, config: RunnableConfig) -> dict:
     """
     SQL 生成节点的主入口。
@@ -645,13 +663,18 @@ async def generate_sql_node(state: AnalysisState, config: RunnableConfig) -> dic
 
     # 时间补参只接受 classify_intent 写入的结构化任务计划。
     if bool(task_plan.get("needs_time_range", False)):
-        logger.info("需要用户指定时间范围", query=query[:80], source="task_plan")
+        logger.info("需要用户指定时间范围", query_chars=len(query), source="task_plan")
+        # 补参是系统固定提示：按请求语言输出；两个说明字段必须保持同一份文案。
+        time_range_prompt = public_prompt_message(
+            "time_range",
+            _request_display_language(state, query),
+        )
         return {
             "generated_sql": "",
             "needs_input": True,
-            "input_explanation": "请指定查询的时间范围（最近一周/一月/一年/两年/三年/五年 或 全部数据）",
+            "input_explanation": time_range_prompt,
             "needs_time_range": True,
-            "time_range_explanation": "请指定查询的时间范围（最近一周/一月/一年/两年/三年/五年 或 全部数据）",
+            "time_range_explanation": time_range_prompt,
             "retry_count": retry + 1,
             "validation_errors": [],
             "execution_error": "",
@@ -774,7 +797,11 @@ async def generate_sql_node(state: AnalysisState, config: RunnableConfig) -> dic
     )
 
     if not sql.strip() and not fallback_error:
-        input_explanation = explanation.strip() or "请补充具体业务目标或目标表后重试。"
+        # 模型给出的具体解释原样保留，只在缺失时补当前请求语言的固定提示。
+        input_explanation = explanation.strip() or public_prompt_message(
+            "needs_input",
+            _request_display_language(state, query),
+        )
         logger.info("SQL 生成需要补充输入", explanation_chars=len(input_explanation))
         result = {
             "generated_sql": "",
