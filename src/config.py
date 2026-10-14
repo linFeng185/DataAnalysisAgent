@@ -476,6 +476,10 @@ class Settings(BaseSettings):
     """受管和额外目录 Skill 是否必须提供可信 Ed25519 签名。"""
     skill_trusted_public_keys: str = ""
     """可信 Skill 签发者公钥 JSON 映射，值为 PEM 或 Base64 原始公钥。"""
+    skill_community_submodules_enabled: bool = False
+    """是否发现 skills/community 下由父仓库 gitlink 固定的社区子模块 Skill；默认关闭，关闭时零副作用。"""
+    skill_community_allowed_repo_urls: str = ""
+    """社区子模块允许的完整仓库 URL 白名单，逗号分隔且仅接受 HTTPS；默认空表示无允许来源。"""
 
     # ---- 业务文档 ----
     metrics_docs_dir: str = "docs/metrics"

@@ -51,6 +51,8 @@ def _isolated_environment() -> dict[str, str]:
     }
     environment["PYTHONIOENCODING"] = "utf-8"
     environment["PYTHONUTF8"] = "1"
+    # 社区 Skill 工作树内的字节码缓存属于未固定文件，隔离运行必须彻底禁写
+    environment["PYTHONDONTWRITEBYTECODE"] = "1"
     return environment
 
 
@@ -162,6 +164,9 @@ class SkillRuntime:
             raise SkillRuntimeError(f"Skill 未导出工具: {tool_name}")
         return await tool.ainvoke(payload)
 
+    # 方法作用：在独立解释器子进程（-I 隔离模式）中执行非内置 Skill 工具，并有界读取标准输出。
+    # Args: skill - 目标 Skill；tool_name - 工具名；payload - 已校验的调用参数；limits - 超时与输出大小限制；allowed_asset_paths - 允许访问的资产路径白名单。
+    # Returns: 子进程返回的 result 字段（Any）；超时或违规时终止子进程并抛出 SkillRuntimeError/TimeoutError。
     async def _execute_isolated(
         self,
         skill: Skill,
@@ -184,6 +189,7 @@ class SkillRuntime:
         process = await asyncio.create_subprocess_exec(
             sys.executable,
             "-I",
+            "-B",
             str(worker_path),
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,

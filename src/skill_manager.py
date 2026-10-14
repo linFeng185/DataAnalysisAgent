@@ -15,10 +15,14 @@ import tempfile
 import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
+from typing import TYPE_CHECKING
 
 import yaml
 
 from src.logging_config import get_logger
+
+if TYPE_CHECKING:
+    from src.skill_submodules import CommunitySubmoduleConfig
 
 logger = get_logger(__name__)
 
@@ -65,8 +69,9 @@ class SkillManager:
     同名 Skill 只在当前身份可见集合中按 private > tenant > system 选取。
     """
 
-    # 方法作用：初始化 Skill 系统目录、额外系统目录和受管作用域目录。
-    # Args: builtin_dir - 内置系统 Skill 目录；extra_dirs - 超管配置的系统目录；managed_dir - 租户和个人 Skill 根目录。
+    # 方法作用：初始化 Skill 系统目录、额外系统目录、受管作用域目录与社区子模块配置。
+    # Args: builtin_dir - 内置系统 Skill 目录；extra_dirs - 超管配置的系统目录；managed_dir - 租户和个人 Skill 根目录；
+    #       trusted_public_keys - 可信签发者公钥；require_signatures - 是否强制签名；community_config - 社区 Git 子模块配置（缺省即关闭）。
     # Returns: 无返回值。
     def __init__(
         self,
@@ -75,12 +80,15 @@ class SkillManager:
         managed_dir: str = "data/skills",
         trusted_public_keys: str | dict[str, str] = "",
         require_signatures: bool = False,
+        *,
+        community_config: "CommunitySubmoduleConfig | None" = None,
     ):
         logger.debug(
             "初始化 SkillManager 入口",
             builtin_dir=builtin_dir,
             extra_dirs=extra_dirs,
             managed_dir=managed_dir,
+            community_enabled=bool(community_config and community_config.enabled),
         )
         self.builtin_dir = Path(builtin_dir)
         self.extra_dirs = [Path(d.strip()) for d in extra_dirs.split(";") if d.strip()]
@@ -89,6 +97,7 @@ class SkillManager:
 
         self.trusted_public_keys = parse_trusted_public_keys(trusted_public_keys)
         self.require_signatures = bool(require_signatures)
+        self.community_config = community_config
         self.enabled_state_path = self.managed_dir / ".enabled-state.json"
         self._enabled_overrides: dict[str, bool] = {}
         self.all_dirs: list[Path] = []
@@ -120,6 +129,9 @@ class SkillManager:
                 self._load_discovered_skill(
                     fresh, skill_md, "system", 0, 0, enabled_overrides,
                 )
+
+        if self.community_config is not None and self.community_config.enabled:
+            await self._load_community_skills(fresh, enabled_overrides)
 
         tenant_root = self.managed_dir / "tenant"
         if tenant_root.exists():
@@ -153,6 +165,30 @@ class SkillManager:
         self._enabled_overrides = enabled_overrides
         self.skills = fresh
         logger.info("Skill 扫描完成", total=len(self.skills))
+
+    # 方法作用：扫描内置目录下的社区 Git 子模块并按其清单加载为 system 作用域 Skill。
+    # Args: fresh - 新缓存；enabled_overrides - 持久启停状态。
+    # Returns: 无返回值。
+    async def _load_community_skills(
+        self,
+        fresh: dict[str, Skill],
+        enabled_overrides: dict[str, bool],
+    ) -> None:
+        """社区内容不可信：只加载通过固定校验的清单，同名冲突由既有去重规则拦截。"""
+        logger.debug("社区子模块 Skill 加载入口")
+        from src.skill_submodules import CommunitySubmoduleScanner
+
+        scanner = CommunitySubmoduleScanner(
+            self.builtin_dir / "community",
+            self.community_config,
+        )
+        submodules = await scanner.scan()
+        for submodule in submodules:
+            for manifest_path in submodule.manifest_paths:
+                self._load_discovered_skill(
+                    fresh, manifest_path, "system", 0, 0, enabled_overrides,
+                )
+        logger.debug("社区子模块 Skill 加载完成", submodule_count=len(submodules))
 
     # 方法作用：解析并加入一个由目录确定作用域的 Skill。
     # Args: fresh - 新缓存；skill_md - 清单路径；scope - 可信作用域；tenant_id - 所属租户；owner_user_id - 所有者；enabled_overrides - 持久启停状态。
@@ -389,9 +425,7 @@ class SkillManager:
         if not skill:
             logger.debug("判断内置 Skill 完成", name=name, builtin=False)
             return False
-        source = Path(skill.source_path).resolve()
-        builtin = self.builtin_dir.resolve()
-        result = source == builtin or builtin in source.parents
+        result = self._is_builtin_skill(skill)
         logger.debug("判断内置 Skill 完成", name=name, builtin=result)
         return result
 
@@ -763,10 +797,16 @@ class SkillManager:
             digest=skill.package_digest[:12],
         )
 
+    # 方法作用：判断 Skill 是否位于代码仓库内置可信目录；社区子模块（community 目录）路径永不视为内置。
+    # Args: skill - 待判断的 Skill 对象，依据其 source_path 判定归属目录。
+    # Returns: 位于内置可信目录返回 True；位于 community 子模块或目录之外返回 False。
     def _is_builtin_skill(self, skill: Skill) -> bool:
-        """判断 Skill 是否位于代码仓库内置可信目录。"""
+        """判断 Skill 是否位于代码仓库内置可信目录；社区子模块路径永不视为内置。"""
         source = Path(skill.source_path).resolve()
         builtin = self.builtin_dir.resolve()
+        community = (self.builtin_dir / "community").resolve()
+        if source == community or community in source.parents:
+            return False
         return source == builtin or builtin in source.parents
 
     # 方法作用：解析 SKILL.md 并注入由目录确定的可信作用域身份。
@@ -902,6 +942,12 @@ def get_skill_manager(
     logger.debug("获取 SkillManager 入口")
     context = get_app_context()
     settings = context.settings
+    from src.skill_submodules import CommunitySubmoduleConfig
+
+    community_config = CommunitySubmoduleConfig.from_settings(
+        bool(getattr(settings, "skill_community_submodules_enabled", False)),
+        getattr(settings, "skill_community_allowed_repo_urls", ""),
+    )
     result = context.get_or_create(
         "skill_manager",
         partial(
@@ -911,6 +957,7 @@ def get_skill_manager(
             managed_dir,
             getattr(settings, "skill_trusted_public_keys", ""),
             getattr(settings, "skill_require_signatures", True),
+            community_config=community_config,
         ),
     )
     logger.debug("获取 SkillManager 完成")

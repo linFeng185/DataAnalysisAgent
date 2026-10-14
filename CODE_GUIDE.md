@@ -47,6 +47,7 @@ LLM 驱动的数据分析智能体。用自然语言提问，自动完成：轮�
 │   ├── bootstrap.py          分阶段启动/关闭编排
 │   ├── tenant_purge.py       租户关系型、向量和运行时资源的可重试物理清理
 │   ├── skill_manager.py      技能发现、作用域与激活
+│   ├── skill_submodules.py   社区技能子模块的只读发现与固定版本校验
 │   ├── skill_security.py     Skill 包摘要与 Ed25519 验签
 │   ├── skill_runtime.py      Skill 契约、资源和隔离执行入口
 │   └── skill_worker.py       非内置 Skill 子进程 Worker
@@ -254,7 +255,12 @@ checksum。执行器同时兼容历史 LF/CRLF 登记值，避免 Git 跨平台�
 
 ## Skills 系统
 
-`src/skill_manager.py` — system/tenant/private 受管目录扫描 + 复合标识 + 请求级身份过滤。匹配同名 Skill 时按 private > tenant > system 选择。内置仓库 Skill 可进程内执行；其他 Skill 必须通过 `skill_security.py` 验签，并由 `skill_runtime.py` 交给隔离 Worker，强制超时、资源、网络/文件、输入输出 Schema、脱敏和引用边界：
+`src/skill_manager.py` — system/tenant/private 受管目录扫描 + 复合标识 + 请求级身份过滤。匹配同名 Skill 时按 private > tenant > system 选择。内置仓库 Skill 可进程内执行；其他 Skill 必须通过 `skill_security.py` 验签，并由 `skill_runtime.py` 交给隔离 Worker，强制超时、资源、网络/文件、输入输出 Schema、脱敏和引用边界。
+
+`src/skill_submodules.py` 负责默认关闭的社区来源发现，只读取运维已安装且由父仓库 gitlink 固定的版本，不联网或修改 Git 状态。完整 HTTPS 仓库白名单、工作树全文件跟踪、索引标记和链接检查共同约束来源；社区技能仍须验签并进入隔离 Worker，不获得内置技能权限。包摘要排除技能根 `.git` 元数据，隔离执行禁写字节码，使签名在安装前后稳定且运行后仍可重新校验。详细边界见 `spec/57-skill-submodule-discovery.md`。
+
+内置技能包括：
+
 - `data-quality-check` — 空值/重复/异常检测
 - `custom-report` — Jinja2 模板报告
 - `data-profile` / `data-preparation` — 数据画像与非破坏式可审计数据准备

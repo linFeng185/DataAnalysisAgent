@@ -47,7 +47,7 @@
 | # | 功能 | 文件 | 描述 | 状态 |
 |---|------|------|------|------|
 | 9.4.1 | 本地 Skill 扫描 | `src/skill_manager.py` | 多目录扫描 + 缓存注入 + 手动刷新，刷新不重置管理员启停选择 | 单测完成 |
-| 9.4.2 | Git 子模块支持 | `.gitmodules` | 社区 Skill 用 git submodule 引入 | 待开发 |
+| 9.4.2 | Git 子模块支持 | `src/skill_submodules.py`、`src/skill_manager.py`、`src/skill_security.py` | 只读发现运维显式安装、父仓库 gitlink 固定的社区 Skill：HTTPS 白名单、gitlink/HEAD 一致、工作树全文件固定、过滤器与索引标记预检、根链接识别、两种清单形态签名、隔离执行禁写字节码 | 单测完成 | P3 |
 | 9.4.3 | Skill Registry 接口 | `src/skill_registry.py`、`src/skill_manager.py` | approved 目录、HTTPS 主机白名单、SHA-256、ZIP 安全检查和三级作用域安装 | 单测完成 |
 
 ### 9.5 Skills 管理与 API（新增）
@@ -109,10 +109,8 @@
 
 ### 模块收尾
 
-模块功能点共 65 项，已完成 64 项，待开发 1 项。
+模块功能点共 65 项，已完成 65 项，待开发 0 项。
 
-| 功能点 | 不开发原因 | 可开发条件 | 预计开发时机 |
-|--------|------------|------------|--------------|
-| 9.4.2 Git 子模块支持 | 当前优先完成本地受管目录的安全隔离，Git 来源还缺少签名、版本锁定和更新审计 | 建立受信任仓库白名单、commit 锁定和安装审计 | Phase 4，Skill 分发增强 |
+9.4.2 已按 `spec/57-skill-submodule-discovery.md` 完成只读发现与固定校验（默认关闭、HTTPS 白名单、gitlink/HEAD 一致、工作树全文件固定、Git 过滤器与索引标记预检、根链接在解析前识别、隔离执行禁写字节码）。两种清单形态（根 `SKILL.md` 与一层子目录）均支持安装前签名：包摘要排除技能根 `.git` 元数据（普通仓库目录或子模块指针文件），其余实际技能文件仍全量参与。测试映射见 `tests/test_skill_submodules.py`（43 用例，3 个 symlink 用例在无符号链接权限的环境按设计 skip，junction 用例真实执行）与 `tests/test_skill_security.py` 的根 `.git` 摘要回归。运行期不执行 clone/fetch/pull/update；剩余取舍（TOCTOU 窗口）记录在该 spec 第 10 节。
 
 ---

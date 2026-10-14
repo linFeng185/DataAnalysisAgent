@@ -98,6 +98,10 @@ skill_registry_max_package_bytes: 10485760
 skill_require_signatures: true
 # 用途：可信签发者公钥映射（key_id → PEM/Base64 公钥）| 默认值：空（无可用公钥，受管/额外目录 Skill 签名校验必然失败）| 生效范围：需重启
 skill_trusted_public_keys: '{}'
+# 用途：是否发现 skills/community 下由父仓库 gitlink 固定的社区子模块 Skill（只读发现，运行期不联网）| 默认值：false | 生效范围：需重启
+skill_community_submodules_enabled: false
+# 用途：社区子模块允许的完整 HTTPS 仓库 URL 白名单，逗号分隔，须与 .gitmodules 声明逐字一致 | 默认值：空（无允许来源）| 生效范围：需重启
+skill_community_allowed_repo_urls: ""
 
 # 用途：主动洞察与自动化总开关 | 默认值：true | 生效范围：需重启
 automation_enabled: true

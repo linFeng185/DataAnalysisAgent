@@ -18,6 +18,8 @@ from src.logging_config import get_logger
 logger = get_logger(__name__)
 _SIGNATURE_FILE = "SIGNATURE.json"
 _IGNORED_PARTS = {"__pycache__", ".pytest_cache"}
+# 技能根自身的 .git 元数据名：普通仓库是目录、子模块工作树是指针文件，均不参与摘要
+_GIT_METADATA_NAME = ".git"
 
 
 class SkillSignatureEnvelope(BaseModel):
@@ -39,8 +41,16 @@ class SkillVerificationResult(BaseModel):
     signer_key_id: str = ""
 
 
+# 方法作用：按稳定相对路径和文件内容计算 Skill 包 SHA-256 摘要，技能根自身的 .git 元数据不参与。
+# Args: source_path - Skill 技能根目录路径（str 或 Path）。
+# Returns: 64 位小写十六进制 SHA-256 摘要字符串。
 def compute_skill_package_digest(source_path: str | Path) -> str:
-    """按稳定相对路径和文件内容计算 Skill 包 SHA-256 摘要。"""
+    """按稳定相对路径和文件内容计算 Skill 包 SHA-256 摘要。
+
+    技能根自身的 `.git` 元数据（普通仓库目录或子模块指针文件）不参与摘要：
+    它随安装形态与安装路径变化，但不属于技能内容。其余实际技能文件仍全部参与，
+    一层子目录内名为 `.git` 的条目不受此排除影响。
+    """
     root = Path(source_path).resolve()
     if not root.is_dir():
         raise ValueError(f"Skill 目录不存在: {root}")
@@ -50,6 +60,7 @@ def compute_skill_package_digest(source_path: str | Path) -> str:
         if path.is_file()
         and path.name != _SIGNATURE_FILE
         and path.suffix != ".pyc"
+        and path.relative_to(root).parts[0] != _GIT_METADATA_NAME
         and not (_IGNORED_PARTS & set(path.relative_to(root).parts))
     )
     if not files:
