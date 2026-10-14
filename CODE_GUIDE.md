@@ -45,6 +45,7 @@ LLM 驱动的数据分析智能体。用自然语言提问，自动完成：轮�
 │   ├── db/               ⑬ 状态库基础设施 — 版本化迁移 + URL 工具
 │   ├── mcp_client/       ⑭ MCP 集成 — 客户端管理、连接任务与工具暴露
 │   ├── mcp/              ⑭.1 MCP Server 稳定模块入口（python -m src.mcp）
+│   ├── search/           受控联网搜索 — 显式执行意图、已授权工具、响应预算与真实来源
 │   ├── app_context.py        应用级依赖容器 + ASGI 请求绑定 + 资源关闭
 │   ├── config.py             配置管理 (pydantic-settings)
 │   ├── bootstrap.py          分阶段启动/关闭编排
@@ -131,12 +132,12 @@ POST /api/v1/chat {"query": "本月 GMV 排名？", "stream": true}
 | `node_registry.py` | 节点 handler 与流式进度文案目录 |
 | `nodes/prepare_turn.py` | 固化上一轮轻量索引，压缩旧历史并清空当前轮 SQL/错误/结果/分析状态 |
 | `nodes/restore_previous_result.py` | 校验数据源集合后从 HistoryStore 恢复上轮 SQL、结果样本和统计 |
-| `nodes/classify_intent.py` | 意图分类 + Skill 激活 |
+| `nodes/classify_intent.py` | 中英文有限词组与词边界意图分类；区分历史追问和明确新查询，保留 Skill 与授权数据源选择 |
 | `skill_activation.py` | 意图候选集、Schema 精确激活、复合资源 ID 和预算聚合 |
 | `subgraphs/sql_analysis.py` | 主图与多源 worker 共享的 Schema、分解、SQL、校验、EXPLAIN、执行拓扑装配 |
 | `subgraphs/result_presentation.py` | 多源合并复用的分析、图表固定边与精确分析短路子图 |
 | `subgraphs/file_analysis.py` | 授权文件/MCP 工具执行与统一失败语义 |
-| `subgraphs/market_research.py` | 授权外部证据研究简报，保留证据范围限制 |
+| `subgraphs/market_research.py` | 明确联网意图后执行一次受控搜索；仅用真实搜索摘要生成简报，禁用知识工具循环并保留证据范围限制 |
 | `subgraphs/forecast.py` | 时间序列预测、滚动回测、区间和模型卡 |
 | `subgraphs/report.py` | custom-report 工具执行和 report Artifact 数据准备 |
 | `subgraphs/action.py` | 人工确认、幂等和默认拒绝的外部动作分发 |
@@ -148,7 +149,8 @@ POST /api/v1/chat {"query": "本月 GMV 排名？", "stream": true}
 | `nodes/analyze_result.py` | 确定性统计处理器 + 证据化业务关联、影响、原因假设和行动建议分析 |
 | `nodes/supplemental_query.py` | 证据不足时在当前权限内复用完整 SQL 安全链补查，并把脱敏证据回注分析节点 |
 | `nodes/generate_chart.py` | 按行数与列语义确定图表资格，输出成功、不适用、失败（保留可重画方案与列标签）或核心数值契约 |
-| `nodes/build_response.py` | 响应组装、最终 SQL 列表 + 轻量 checkpoint 历史 + 富结果持久化 |
+| `nodes/build_response.py` | 统一展示语言、响应组装、最终 SQL 列表 + 轻量 checkpoint 历史 + 富结果持久化 |
+| `outcome.py` | 统一任务状态及中英文固定补参、公开错误和失败原因；具体模型解释原样保留 |
 
 ### ③ `src/llm/` — LLM 调用层
 
@@ -244,6 +246,10 @@ POST /api/v1/chat {"query": "本月 GMV 排名？", "stream": true}
 | `mcp/__main__.py` | `python -m src.mcp` 稳定启动入口，旧 `src.mcp_client` 入口复用同一实现 |
 
 `POST /mcp/{name}/reset` 在建立连接前复核真实身份、资源可见性、管理权限、启用状态及安全阻断，仅重建获授权的目标。锁等待、准备、拆旧和重建共同受总超时约束；失败保留配置供重试，已删除目标不得被旧请求复活。接口、状态码与真实本地 stdio 验收边界见 `spec/56-mcp-reset-lifecycle.md`。
+
+`search/models.py` 统一判定明确搜索请求与引用 URL，`search/service.py` 只选择精确白名单中已加载、当前身份已授权且参数兼容的 MCP 工具。总开关默认关闭；出站文本仅为当前明确请求，不附带历史、结构、数据、附件或知识。字符串、字典和列表共享响应总预算；真实来源再交给 `web.research` 摘要，模型失败退回有界来源清单。设计及真实部署验收边界见 `spec/58-controlled-web-search.md`。
+
+中英文请求沿既有模型链路处理，不额外调用翻译模型。意图规则的有限英文词组和历史优先级见 `spec/59-bilingual-intent-fallback.md`；固定补参及公开错误复用当前问题、历史和界面兜底的语言判断，契约见 `spec/60-bilingual-public-messages.md`。非中英全面本地化仍由 19.6 跟踪。
 
 ### ⑬ `src/db/` — 状态库迁移
 

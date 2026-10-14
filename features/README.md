@@ -22,7 +22,7 @@
 | [16-testing.md](16-testing.md) | 16. 测试 | 72 行 |
 | [17-ops.md](17-ops.md) | 17. 基础设施与运维 | 63 行 |
 | [18-frontend.md](18-frontend.md) | 18. 前端 | 131 行 |
-| [19-extensions.md](19-extensions.md) | 19. 扩展能力 | 183 行 |
+| [19-extensions.md](19-extensions.md) | 19. 扩展能力 | 动态 |
 | [20-architecture-remediation.md](20-architecture-remediation.md) | 20. 架构整改 | 动态 |
 | [21-platform-admin.md](21-platform-admin.md) | 21. 平台管理与强制认证 | 动态 |
 | [22-api-access-policy.md](22-api-access-policy.md) | 22. API 访问策略与 IP 控制 | 动态 |
@@ -35,4 +35,8 @@
 | [29-sql-profiling.md](29-sql-profiling.md) | 有界 SQL 画像与结构化探查服务 | 动态 |
 | [30-sql-key-detection.md](30-sql-key-detection.md) | 键列判断与聊天 SQL 生成接入 | 动态 |
 | [31-sql-probe-loop.md](31-sql-probe-loop.md) | 探查工具循环、安全回退与验收 | 动态 |
-| [99-summary.md](99-summary.md) | 附录 | 145 行 |
+| [32-web-search-core.md](32-web-search-core.md) | 受控联网搜索服务、授权与有界证据 | 动态 |
+| [33-web-search-workflow.md](33-web-search-workflow.md) | 联网研究子图、摘要与集成验收 | 动态 |
+| [34-bilingual-intent-fallback.md](34-bilingual-intent-fallback.md) | 中英文意图规则回退一致性 | 动态 |
+| [35-bilingual-public-messages.md](35-bilingual-public-messages.md) | 中英文固定公开提示与节点串联验收 | 动态 |
+| [99-summary.md](99-summary.md) | 附录 | 动态 |

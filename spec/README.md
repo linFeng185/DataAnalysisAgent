@@ -53,3 +53,8 @@
 | [53-prompt-budget-model-window.md](53-prompt-budget-model-window.md) | 提示词预算跟随超管模型窗口动态推导（全员接窗口 · 注册上限 · 数据层单阀门） | 动态 |
 | [54-prompt-budget-model-window-implementation-plan.md](54-prompt-budget-model-window-implementation-plan.md) | 提示词预算动态化实施计划（预算推导 · 注册上限 · 数据层单阀门） | 动态 |
 | [55-sql-profiling-and-probing.md](55-sql-profiling-and-probing.md) | SQL 探查与数据画像设计（键列判断 · 画像预取 · 结构化探查原语） | 动态 |
+| [56-mcp-reset-lifecycle.md](56-mcp-reset-lifecycle.md) | MCP 连接任务、重置生命周期、授权与有界恢复 | 动态 |
+| [57-skill-submodule-discovery.md](57-skill-submodule-discovery.md) | 社区技能子模块发现、固定版本校验与隔离执行 | 动态 |
+| [58-controlled-web-search.md](58-controlled-web-search.md) | 受控联网搜索、真实来源与研究摘要边界 | 动态 |
+| [59-bilingual-intent-fallback.md](59-bilingual-intent-fallback.md) | 中英文意图规则回退、历史追问与权限路由一致性 | 动态 |
+| [60-bilingual-public-messages.md](60-bilingual-public-messages.md) | 中英文固定补参、公开错误与统一响应语言 | 动态 |
