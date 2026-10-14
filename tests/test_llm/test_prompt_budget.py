@@ -202,3 +202,85 @@ class TestPromptBudget:
 
         # Assert
         assert violations == []
+
+    # 方法作用：验证预算覆盖值优先于注册值生效。
+    # Args: self - pytest 测试类实例。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    def test_budget_override_takes_precedence(self) -> None:
+        """spec/53：动态推导值作为实际预算，注册值仅作上限。"""
+        # Arrange
+        from src.llm.prompt_budget import PromptSection, build_budgeted_prompt
+        from src.llm.prompts import PROMPT_REGISTRY, PromptDefinition, register_prompt
+
+        definition = PromptDefinition(
+            prompt_id="budget.override",
+            version="1.0.0",
+            task="test",
+            template="X",
+            context_budget=200_000,
+        )
+        try:
+            register_prompt(definition)
+            sections = [
+                PromptSection("data", "D" * 60_000, priority=100, min_chars=1000, max_chars=55_000),
+            ]
+
+            # Act
+            prompt = build_budgeted_prompt("budget.override", sections, budget_override=10_000)
+
+            # Assert
+            assert prompt.budget == 10_000
+            assert prompt.used_chars <= 10_000
+            assert "data" in prompt.truncated_sections
+        finally:
+            PROMPT_REGISTRY.pop("budget.override", None)
+
+    # 方法作用：验证 prepare_invocation 走动态预算而不是注册上限。
+    # Args: self - pytest 测试类实例；monkeypatch - 补丁器。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    def test_prepare_invocation_uses_dynamic_budget(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """spec/53：统一调用入口按当前模型窗口分配，注册上限不直接生效。"""
+        # Arrange
+        from types import SimpleNamespace
+
+        from src.llm.invocation import prepare_invocation
+        from src.llm.prompt_budget import PromptSection
+        from src.llm.prompts import PROMPT_REGISTRY, PromptDefinition, register_prompt
+
+        definition = PromptDefinition(
+            prompt_id="budget.call",
+            version="1.0.0",
+            task="test",
+            template="S",
+            context_budget=200_000,
+        )
+        register_prompt(definition)
+
+        class _Budget:
+            usable_input_tokens = 30_000
+
+        from src.config import get_settings
+
+        # 钉死预算设置，避免环境配置改变时断言隐式漂移（与 spec/54 Task 2 修复一致的隔离模式）。
+        monkeypatch.setattr(get_settings(), "prompt_budget_token_char_factor", 1.0)
+        monkeypatch.setattr(get_settings(), "prompt_budget_min_chars", 8_000)
+        monkeypatch.setattr(
+            "src.memory.context_builder.get_context_budget", lambda **kwargs: _Budget()
+        )
+        monkeypatch.setattr(
+            "src.memory.context_builder.resolve_prompt_budget_factor", lambda **kwargs: None
+        )
+
+        try:
+            # Act
+            prepared = prepare_invocation(
+                "budget.call",
+                [PromptSection("data", "D" * 60_000, priority=100, min_chars=1000, max_chars=55_000)],
+                model=SimpleNamespace(),
+            )
+
+            # Assert
+            used = len(prepared.messages[0].content) + len(prepared.messages[1].content)
+            assert used <= 30_000
+        finally:
+            PROMPT_REGISTRY.pop("budget.call", None)

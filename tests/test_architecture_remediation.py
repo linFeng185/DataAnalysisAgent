@@ -9,6 +9,11 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 ROOT = Path(__file__).resolve().parents[1]
 
+# 已审计的统一降级记录器：handler 委托给它视同已记录堆栈（该函数内部每个
+# 分支都以 logger.error + exc_info 落盘），由 test_delegated_recorders_log_traceback 守护；
+# 名字需全局唯一，新增条目必须同时确认被委托函数内部确有堆栈记录。
+_DELEGATED_RECORDERS = {"_degrade_for_failure"}
+
 
 # 方法作用：解析 src 下的全部 Python 语法树。
 # Args: 无。
@@ -63,9 +68,18 @@ class TestArchitectureRemediation:
                     continue
                 traceback_logged = False
                 for node in ast.walk(handler):
-                    if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
+                    if not isinstance(node, ast.Call):
                         continue
-                    if node.func.attr == "exception":
+                    func = node.func
+                    # 裸名委托（如 _degrade_for_failure(exc)）由已审计记录器自行落盘堆栈。
+                    if isinstance(func, ast.Name):
+                        if func.id in _DELEGATED_RECORDERS:
+                            traceback_logged = True
+                            break
+                        continue
+                    if not isinstance(func, ast.Attribute):
+                        continue
+                    if func.attr == "exception" or func.attr in _DELEGATED_RECORDERS:
                         traceback_logged = True
                         break
                     # 既接受 exc_info=True，也接受 (type, value, tb) 三元组：
@@ -81,6 +95,30 @@ class TestArchitectureRemediation:
                     offenders.append(f"{path.relative_to(ROOT)}:{handler.lineno}")
         assert offenders == []
         logger.info("test_exception_fallbacks_log_traceback 完成")
+
+    # 方法作用：验证委托记录器白名单不会掩盖日志回归。
+    # Args: self - pytest 测试类实例。
+    # Returns: 无返回值，断言白名单函数自身包含堆栈记录。
+    def test_delegated_recorders_log_traceback(self) -> None:
+        """被白名单放行的委托函数必须自己以 logger.exception 或 exc_info 记录堆栈。"""
+        logger.debug("test_delegated_recorders_log_traceback 入口")
+        offenders: list[str] = []
+        for path, tree in _source_trees():
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.FunctionDef) or node.name not in _DELEGATED_RECORDERS:
+                    continue
+                records_traceback = any(
+                    isinstance(call, ast.Call)
+                    and (
+                        (isinstance(call.func, ast.Attribute) and call.func.attr == "exception")
+                        or any(keyword.arg == "exc_info" for keyword in call.keywords)
+                    )
+                    for call in ast.walk(node)
+                )
+                if not records_traceback:
+                    offenders.append(f"{path.relative_to(ROOT)}:{node.lineno}")
+        assert offenders == []
+        logger.info("test_delegated_recorders_log_traceback 完成")
 
     # 方法作用：验证遗留 LangChain Tool 不再创建嵌套事件循环。
     # Args: self - pytest 测试类实例。

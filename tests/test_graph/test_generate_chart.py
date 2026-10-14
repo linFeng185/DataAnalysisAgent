@@ -272,8 +272,8 @@ class TestGenerateChartEligibility:
         # Arrange
         import src.graph.nodes.generate_chart as chart_module
 
-        def raise_build_error(rows: list[dict], chart_type: str) -> dict:
-            del rows, chart_type
+        def raise_build_error(rows: list[dict], chart_type: str, **kwargs: object) -> dict:
+            del rows, chart_type, kwargs
             raise ValueError("测试图表构建异常")
 
         monkeypatch.setattr(chart_module, "_build_echarts_option", raise_build_error)
@@ -330,6 +330,140 @@ class TestGenerateChartEligibility:
         assert chart["status"] == "success"
         assert chart["option"]["xAxis"]["data"] == ["搜索", "直播"]
         assert chart["option"]["series"][0]["data"] == [60.0, 40.0]
+
+    # 方法作用：验证重复坐标失败时保留方案与标签，供一键合并求和重画。
+    # Args: self - pytest 测试类实例。
+    # Returns: 无返回值，断言失败契约字段与用户可读文案。
+    async def test_duplicate_coordinate_failure_keeps_plan_for_merge_retry(self) -> None:
+        """同名重复且无明确口径时失败，但方案、标签与语言必须随契约返回。"""
+        # Arrange
+        state = {
+            "user_query": "今年各车间的产量数据是多少？",
+            "query_result_sample": [
+                {"workshop_name": "涂装车间", "total_output_qty": 716400},
+                {"workshop_name": "涂装车间", "total_output_qty": 692400},
+                {"workshop_name": "焊接车间", "total_output_qty": 713400},
+                {"workshop_name": "焊接车间", "total_output_qty": 689400},
+            ],
+            "analysis_result": {
+                "recommended_chart_type": "bar",
+                "chart_plan": {"x": "workshop_name", "metrics": ["total_output_qty"], "aggregation": "none"},
+                "column_labels": {"workshop_name": "车间名称", "total_output_qty": "产量"},
+            },
+        }
+
+        # Act
+        result = await generate_chart_node(state)
+
+        # Assert
+        chart = result["chart_config"]
+        assert chart["type"] == "bar"
+        assert chart["status"] == "failed"
+        assert chart["chart_plan"]["x"] == "workshop_name"
+        assert chart["chart_plan"]["metrics"] == ["total_output_qty"]
+        assert chart["chart_plan"]["aggregation"] == "none"
+        assert chart["column_labels"]["workshop_name"] == "车间名称"
+        assert chart["display_language"] == "zh-CN"
+        assert "同一名称对应多条记录" in chart["reason"]
+        assert "重复坐标" not in chart["reason"]
+
+    # 方法作用：验证模型自给的聚合口径也不能绕过用户确认直接合并同名坐标。
+    # Args: self - pytest 测试类实例。
+    # Returns: 无返回值，断言同名合并转入待确认失败契约。
+    async def test_model_aggregation_duplicate_coordinates_still_require_confirmation(self) -> None:
+        """同名重复坐标即使模型给出 aggregation=sum，也必须由用户确认后才能合并。"""
+        # Arrange
+        state = {
+            "user_query": "华东制造基地的各车间产量分别是多少？",
+            "query_result_sample": [
+                {"workshop_name": "涂装车间", "total_output_qty": 704400},
+                {"workshop_name": "涂装车间", "total_output_qty": 584400},
+                {"workshop_name": "焊接车间", "total_output_qty": 704400},
+                {"workshop_name": "焊接车间", "total_output_qty": 584400},
+            ],
+            "analysis_result": {
+                "recommended_chart_type": "table",
+                "chart_plan": {"x": "workshop_name", "metrics": ["total_output_qty"], "aggregation": "sum"},
+                "column_labels": {"workshop_name": "车间名称", "total_output_qty": "产量"},
+            },
+        }
+
+        # Act
+        result = await generate_chart_node(state)
+
+        # Assert
+        chart = result["chart_config"]
+        assert chart["status"] == "failed"
+        assert chart["chart_plan"]["aggregation"] == "sum"
+        assert "同一名称对应多条记录" in chart["reason"]
+        assert "重复坐标" not in chart["reason"]
+
+    # 方法作用：验证坐标唯一时模型聚合口径不被合并确认闸门误伤。
+    # Args: self - pytest 测试类实例。
+    # Returns: 无返回值，断言唯一坐标柱状图正常生成。
+    async def test_unique_coordinates_keep_model_aggregation(self) -> None:
+        """x 坐标唯一时 aggregation=sum 不涉及同名合并，图表应正常生成。"""
+        # Arrange
+        state = {
+            "user_query": "各车间的产量分别是多少？",
+            "query_result_sample": [
+                {"workshop_name": "涂装车间", "total_output_qty": 716400},
+                {"workshop_name": "焊接车间", "total_output_qty": 713400},
+            ],
+            "analysis_result": {
+                "recommended_chart_type": "bar",
+                "chart_plan": {"x": "workshop_name", "metrics": ["total_output_qty"], "aggregation": "sum"},
+            },
+        }
+
+        # Act
+        result = await generate_chart_node(state)
+
+        # Assert
+        chart = result["chart_config"]
+        assert chart["status"] == "success"
+        assert chart["option"]["series"][0]["data"] == [716400.0, 713400.0]
+
+    # 方法作用：验证失败契约里的模型聚合口径未经用户确认不能重画成图。
+    # Args: self - pytest 测试类实例。
+    # Returns: 无返回值，断言未确认重画被拒、显式确认后才合并。
+    async def test_failed_contract_needs_explicit_aggregation_to_redraw(self) -> None:
+        """失败契约的模型 sum 移除后重画必须被拒；显式 sum 确认后才允许合并。"""
+        # Arrange：同名车间 + 模型自给 sum，与实机复现的「华东制造基地」场景一致
+        state = {
+            "user_query": "华东制造基地的各车间产量分别是多少？",
+            "query_result_sample": [
+                {"workshop_name": "涂装车间", "total_output_qty": 716400},
+                {"workshop_name": "涂装车间", "total_output_qty": 692400},
+                {"workshop_name": "焊接车间", "total_output_qty": 713400},
+                {"workshop_name": "焊接车间", "total_output_qty": 689400},
+            ],
+            "analysis_result": {
+                "recommended_chart_type": "bar",
+                "chart_plan": {"x": "workshop_name", "metrics": ["total_output_qty"], "aggregation": "sum"},
+                "column_labels": {"workshop_name": "车间名称", "total_output_qty": "产量"},
+            },
+        }
+        rows = state["query_result_sample"]
+        chart = (await generate_chart_node(state))["chart_config"]
+        assert chart["status"] == "failed"
+        assert chart["chart_plan"]["aggregation"] == "sum"
+
+        # Act / Assert 1：面板未确认时会移除聚合口径，与 /charts/adjust 同链路的
+        # adapt_plan + build_option 必须再次拒绝，不能静默合并同名坐标。
+        from src.tools.chart_presentation import adapt_plan, build_option
+
+        unconfirmed = adapt_plan(
+            rows, chart["type"],
+            {key: value for key, value in chart["chart_plan"].items() if key != "aggregation"},
+        )
+        with pytest.raises(ValueError, match="重复坐标"):
+            build_option(rows, chart["type"], unconfirmed, chart.get("column_labels", {}))
+
+        # Act / Assert 2：用户点击「按名称合并求和」显式给出 sum 后才能合并渲染。
+        confirmed = adapt_plan(rows, chart["type"], {**chart["chart_plan"], "aggregation": "sum"})
+        option = build_option(rows, chart["type"], confirmed, chart.get("column_labels", {}))
+        assert option["series"][0]["data"] == [1408800.0, 1402800.0]
 
     # 方法作用：验证归因资格不足时明确不生成图表。
     # Args: self - pytest 测试类实例。

@@ -32,7 +32,7 @@
 | 10.2.4 | CHART_RECOMMEND_PROMPT | 同上 | 图表推荐 Prompt | 单测完成 | P0 |
 | 10.2.7 | get_dialect_cheatsheet() | 同上 | 3 种方言速查表 | 单测完成 | P0 |
 | 10.2.8 | Prompt 版本号管理 | `src/llm/prompts.py`、`src/llm/output_contracts.py` | Prompt ID/版本/变量校验、扩展注册和 Pydantic 输出契约；LangSmith A/B 仍属后续增强 | 单测完成 | P2 |
-| 10.2.9 | Prompt 统一总预算 | `src/llm/prompt_budget.py`、各 LLM 调用节点 | System、用户问题、Schema、知识、Skill、示例、结果和历史共享字符预算，按优先级保留与裁剪 | 单测完成 | P1 |
+| 10.2.9 | Prompt 统一总预算 | `src/llm/prompt_budget.py`、各 LLM 调用节点 | System、用户问题、Schema、知识、Skill、示例、结果和历史共享字符预算，按优先级保留与裁剪；spec/53 起预算按超管模型窗口动态推导、注册值为设计上限 | 单测完成 | P1 |
 | 10.2.10 | Prompt 多版本回滚与统一调用 | `src/llm/prompts.py`、`src/llm/invocation.py` | 全部业务 LLM 调用走注册表，支持激活版本、回滚、追踪元数据和结构化/流式调用 | 单测完成 | P1 |
 
 ### 模块收尾

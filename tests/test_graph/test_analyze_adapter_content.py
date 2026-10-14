@@ -57,8 +57,12 @@ class TestAnalyzeAdapterContent:
         }
         llm = SimpleNamespace(ainvoke=AsyncMock(return_value=SimpleNamespace(content="not-json")))
         monkeypatch.setattr(analyze_module, "get_llm", lambda temperature=0.3: llm)
-        monkeypatch.setattr(config_module, "get_settings", lambda: SimpleNamespace(llm_model="test"))
-        monkeypatch.setattr(analyze_module, "_to_compact", lambda rows: "[]")
+        monkeypatch.setattr(
+            config_module,
+            "get_settings",
+            lambda: SimpleNamespace(llm_model="test", analysis_data_max_chars=50000),
+        )
+        monkeypatch.setattr(analyze_module, "_to_compact", lambda rows, max_chars=None: "[]")
         monkeypatch.setattr(
             adapter_module,
             "get_adapter",

@@ -80,8 +80,9 @@ async def generate_chart_node(state: AnalysisState) -> dict:
     data, data_source = _select_chart_rows(state, analysis)
     from src.tools.chart_presentation import ChartPlan, column_labels, resolve_language
 
-    language = resolve_language(state.get("user_query", ""), state.get("conversation_history", []), state.get("display_language", "zh-CN"))
-    labels = column_labels(data, analysis.get("column_labels") or analysis.get("field_descriptions"), language) if state.get("user_query") or state.get("display_language") else {}
+    # 用户问题统一走 read_contexts 上下文视图，禁止直读扁平 state 字段。
+    language = resolve_language(contexts.request.user_query, state.get("conversation_history", []), state.get("display_language", "zh-CN"))
+    labels = column_labels(data, analysis.get("column_labels") or analysis.get("field_descriptions"), language) if contexts.request.user_query or state.get("display_language") else {}
     plan = analysis.get("chart_plan", {}) or {}
     try:
         plan = ChartPlan.model_validate(plan).model_dump()
@@ -134,10 +135,17 @@ async def generate_chart_node(state: AnalysisState) -> dict:
         return {"chart_config": _no_chart("当前结果缺少可形成图表的维度与数值组合")}
 
     try:
-        option = _build_echarts_option(data, chart_type, plan, labels) if analysis.get("chart_plan") or labels else _build_echarts_option(data, chart_type)
+        # 对话链路不接受未经用户确认的同名合并：模型自给的 sum/avg 也转入待确认失败契约。
+        option = (
+            _build_echarts_option(data, chart_type, plan, labels, allow_implicit_merge=False)
+            if analysis.get("chart_plan") or labels
+            else _build_echarts_option(data, chart_type, allow_implicit_merge=False)
+        )
     except Exception as exc:
         logger.error("图表配置生成失败", chart_type=chart_type, error=str(exc), exc_info=True)
-        return {"chart_config": _failed_chart(chart_type, f"图表配置生成失败：{exc}")}
+        detail = str(exc)
+        reason = _DUPLICATE_COORDINATE_REASON if "重复坐标" in detail else f"图表配置生成失败：{detail}"
+        return {"chart_config": _failed_chart(chart_type, reason, plan, labels, language)}
     if not option:
         logger.warning("图表配置生成失败", chart_type=chart_type, reason="配置为空")
         return {"chart_config": _failed_chart(chart_type, "图表配置为空，请检查维度与数值字段")}
@@ -214,11 +222,26 @@ def _no_chart(reason: str) -> dict:
     return {"type": "none", "option": {}, "status": "not_applicable", "reason": reason}
 
 
+# 重复坐标的面向用户说明：保留操作指引，不向界面暴露后端校验术语。
+_DUPLICATE_COORDINATE_REASON = (
+    "图中同一名称对应多条记录（可能是不同层级或归属的同名实体），"
+    "需要明确合并口径或补充区分维度；完整数据保留在数据详情中。"
+)
+
+
 # 方法作用：生成不会中断主查询的图表失败契约。
-# Args: chart_type - 原计划图表类型；reason - 失败原因。
-# Returns: 带失败状态和原因的图表配置。
-def _failed_chart(chart_type: str, reason: str) -> dict:
-    return {"type": chart_type, "option": {}, "status": "failed", "reason": reason[:300]}
+# Args: chart_type - 原计划图表类型；reason - 失败原因；plan/labels/language - 可复用的角色方案与标签。
+# Returns: 带失败状态和原因的图表配置；方案存在时随契约返回，供用户选择口径后重画。
+def _failed_chart(chart_type: str, reason: str, plan: dict | None = None,
+                  labels: dict | None = None, language: str = "") -> dict:
+    failed = {"type": chart_type, "option": {}, "status": "failed", "reason": reason[:300]}
+    if plan:
+        failed["chart_plan"] = plan
+    if labels:
+        failed["column_labels"] = labels
+    if language:
+        failed["display_language"] = language
+    return failed
 
 
 # 方法作用：识别结果中所有真实数值列。
@@ -287,12 +310,12 @@ def _extract_core_value(rows: list[dict]) -> dict:
 
 
 # 通过统一构型器生成图表，兼容旧两参数调用。
-# Args: rows - 查询数据；chart_type - 类型；plan - 角色方案；labels - 展示名。
+# Args: rows - 查询数据；chart_type - 类型；plan - 角色方案；labels - 展示名；allow_implicit_merge - 是否接受未经用户确认的合并口径。
 # Returns: ECharts 配置，不适用时抛出 ValueError。
-def _build_echarts_option(rows: list[dict], chart_type: str, plan: dict | None = None, labels: dict | None = None) -> dict:
+def _build_echarts_option(rows: list[dict], chart_type: str, plan: dict | None = None, labels: dict | None = None, *, allow_implicit_merge: bool = True) -> dict:
     from src.tools.chart_presentation import build_option
 
-    return build_option(rows, chart_type, plan, labels)
+    return build_option(rows, chart_type, plan, labels, allow_implicit_merge=allow_implicit_merge)
 
 
 # 方法作用：根据确定性触点归因结果生成固定柱状图配置。

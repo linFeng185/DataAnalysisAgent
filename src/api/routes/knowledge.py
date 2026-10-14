@@ -585,6 +585,16 @@ async def upload_knowledge_docs(
         user_id=user_id,
     )
 
+    # 分块重叠必须小于分块大小：两者独立校验无法拦住交叉配置，
+    # 病态组合会让超长行滑窗步进为负或零，导致内容被静默丢弃或抛异常。
+    if chunk_overlap >= chunk_size:
+        logger.warning(
+            "知识文件上传分块参数无效",
+            chunk_size=chunk_size,
+            chunk_overlap=chunk_overlap,
+        )
+        raise HTTPException(422, "分块重叠必须小于分块大小")
+
     settings = get_settings()
     max_upload_bytes = max(1, int(settings.max_upload_bytes))
     max_upload_files = max(1, int(getattr(settings, "max_upload_files", 20)))

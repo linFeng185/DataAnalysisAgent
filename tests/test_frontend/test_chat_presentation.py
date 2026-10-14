@@ -115,3 +115,73 @@ new Promise(resolve => container.exports.streamChat('q','','', event=>events.pus
         # Assert
         assert values["callback"] == expected
         assert values["events"][0]["content"] == "增长"
+
+    # 验证重复坐标失败时前端提供按名称合并求和的显式口径操作。
+    # Args: self - 实例。
+    # Returns: 无返回值。
+    def test_failed_chart_offers_explicit_merge_action(self) -> None:
+        """图表失败时允许用户显式选择合并求和口径后重画，并带英文文案。"""
+        # Arrange
+        panel = Path("frontend/src/components/ChartPanel.tsx").read_text(encoding="utf-8")
+        english = Path("frontend/src/i18n/en.ts").read_text(encoding="utf-8")
+        # Act / Assert
+        assert "status === 'failed'" in panel
+        assert "按名称合并求和" in panel
+        assert "aggregation: 'sum'" in panel
+        assert '"按名称合并求和":' in english
+
+    # 验证类型切换不能把模型自给的聚合口径带进重画请求（合并确认闸门不回退）。
+    # Args: self - 实例。
+    # Returns: 无返回值。
+    def test_adjust_plan_gates_unconfirmed_model_aggregation(self) -> None:
+        """未确认合并时请求必须移除模型 sum/avg；确认后必须沿用已确认口径。"""
+        # Arrange：以真实 TypeScript 转译并执行 ChartPanel 的公开纯函数。
+        script = r"""
+const fs = require('fs');
+const ts = require('./frontend/node_modules/typescript');
+const compiled = ts.transpileModule(
+  fs.readFileSync('frontend/src/components/ChartPanel.tsx', 'utf8'),
+  {compilerOptions: {module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.React}},
+).outputText;
+const stubs = {
+  'react': {lazy: () => () => null, Suspense: null, useEffect: () => {}, useMemo: fn => fn(),
+            useRef: value => ({current: value}), useState: value => [value, () => {}]},
+  'antd': {Button: null, Dropdown: null, Empty: null, message: {warning(){}, error(){}},
+           Space: null, Tooltip: null, Typography: {Text: null, Paragraph: null}},
+  '@ant-design/icons': {BarChartOutlined: null, DownOutlined: null},
+  '../api/client': {post: async () => ({})},
+  './DataTable': {default: null},
+  './chatChartLayout': {buildChatChartLayout: () => ({height: 0, option: {}})},
+  '../i18n': {getLanguage: () => 'zh-CN', t: text => text, useLanguage: () => 'zh-CN'},
+  './EChartsView': {default: null},
+};
+const container = {exports: {}};
+new Function('require', 'module', 'exports', compiled)(
+  id => { if (!(id in stubs)) throw new Error('未桩接的依赖: ' + id); return stubs[id]; },
+  container, container.exports);
+const {buildAdjustPlan, readAdjustError} = container.exports;
+const modelSum = {x: 'workshop_name', metrics: ['total_output_qty'], aggregation: 'sum'};
+process.stdout.write(JSON.stringify({
+  unconfirmed: buildAdjustPlan(modelSum, false),
+  confirmed: buildAdjustPlan(modelSum, true),
+  emptyUnconfirmed: buildAdjustPlan(undefined, false),
+  duplicateError: readAdjustError(new Error('重复坐标缺少明确聚合口径，请增加系列/分面维度或指定聚合')),
+  otherError: readAdjustError(new Error('饼图不支持负值，请使用柱状图')),
+  emptyError: readAdjustError(null),
+}));
+"""
+        # Act
+        result = subprocess.run(
+            ["node", "-e", script], check=True, capture_output=True, text=True, encoding="utf-8"
+        )
+        values = json.loads(result.stdout)
+        # Assert：未确认 → 无 aggregation，但角色字段保留；确认 → 保留 sum。
+        assert "aggregation" not in values["unconfirmed"]
+        assert values["unconfirmed"]["x"] == "workshop_name"
+        assert values["confirmed"]["aggregation"] == "sum"
+        assert "aggregation" not in values["emptyUnconfirmed"]
+        # Assert：重复坐标错误改为面向用户的合并确认指引，其他错误原样透出。
+        assert "按名称合并求和" in values["duplicateError"]
+        assert "重复坐标" not in values["duplicateError"]
+        assert values["otherError"] == "饼图不支持负值，请使用柱状图"
+        assert values["emptyError"] == "图表调整失败"

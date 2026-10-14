@@ -15,7 +15,7 @@ from src.memory.pg_pool import pg_connection
 logger = get_logger(__name__)
 LIVE_FIELDS = frozenset(
     name for name in Settings.model_fields
-    if name.startswith(("max_", "context_", "attribution_", "analysis_data_"))
+    if name.startswith(("max_", "context_", "attribution_", "analysis_data_", "prompt_budget_"))
     or name in {
         "login_max_per_hour", "login_lockout_threshold", "login_lockout_minutes",
         "jwt_access_token_expire_hours", "jwt_refresh_token_expire_days", "explain_skip_dialects",

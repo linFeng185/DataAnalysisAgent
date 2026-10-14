@@ -111,6 +111,24 @@ class TestChatPresentation:
         assert "metrics 必须包含用户要求展示的全部数值指标" in contract
         assert "facets 仅填写分类维度" in contract
 
+    # 验证重复坐标场景要求模型先判断组合唯一缺字段并显式决策。
+    # Args: self - 实例。
+    # Returns: 无返回值。
+    def test_duplicate_coordinate_prompt_requires_explicit_decision(self) -> None:
+        """同一坐标多行时，提示词必须要求模型识别组合唯一并给出明确口径。"""
+        from src.llm.prompts import DATA_ANALYSIS_SYSTEM
+
+        # Arrange / Act
+        contract = DATA_ANALYSIS_SYSTEM
+
+        # Assert
+        assert "组合唯一" in contract
+        assert "重复坐标" in contract
+        # 缺维度分支必须禁止用聚合口径掩盖缺失的区分维度。
+        assert "禁止用 sum/avg 把同名实体合并掩盖" in contract
+        # 后端待确认是预期行为，不得为通过校验而改写聚合口径。
+        assert "待确认状态" in contract
+
     # 验证当前问题、历史和界面语言的优先级进入实际分析提示词。
     # Args: self - 实例；monkeypatch - 模型边界补丁；query - 问题；history - 历史；expected - 语言。
     # Returns: 无返回值。

@@ -271,11 +271,37 @@ class TestWorkflowIntegration:
     ) -> None:
         """三行分类加数值数据即使模型推荐表格，也应生成可用柱状图。"""
         # Arrange
+        import sqlalchemy as sa
+
         import src.graph.nodes.analyze_result as analyze_module
+        from src.datasource.schema_snapshot import ColumnInfo, TableSchema
         from src.graph.workflow import build_workflow
 
+        # 自建唯一客户名的受控数据表：fixture 的 orders 表中「张三」有两笔
+        # （120.5 与 99.5），会触发 spec/52 的重复坐标校验（无明确聚合口径时
+        # 拒绝图表），与用例意图（模型推 table 被确定性复核为 bar）无关，
+        # 因此沿用本文件先例的自建表模式，构造三行唯一客户数据。
+        async with sqlite_memory_db.engine.begin() as connection:
+            await connection.execute(sa.text(
+                "CREATE TABLE customer_orders ("
+                "id INTEGER PRIMARY KEY, customer TEXT NOT NULL, amount REAL NOT NULL)"
+            ))
+            await connection.execute(sa.text(
+                "INSERT INTO customer_orders (id, customer, amount) VALUES "
+                "(1, '张三', 120.5), (2, '李四', 80.0), (3, '王五', 99.5)"
+            ))
+        sqlite_memory_db.datasource.schema.tables.append(TableSchema(
+            name="customer_orders",
+            description="客户订单金额测试表",
+            columns=[
+                ColumnInfo("id", "INTEGER", "订单编号"),
+                ColumnInfo("customer", "TEXT", "客户名称"),
+                ColumnInfo("amount", "REAL", "订单金额"),
+            ],
+            row_count_estimate=3,
+        ))
         model = fake_llm_factory([
-            '{"sql":"SELECT customer, amount FROM orders ORDER BY id",'
+            '{"sql":"SELECT customer, amount FROM customer_orders ORDER BY id",'
             '"explanation":"查询客户订单金额"}',
         ])
         context, _ = await self._configure(

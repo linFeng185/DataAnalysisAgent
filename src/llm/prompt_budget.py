@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from src.logging_config import get_logger
+
+if TYPE_CHECKING:
+    from src.llm.prompts import PromptDefinition
 
 logger = get_logger(__name__)
 _TRUNCATION_MARKER = "\n...[已截断]"
@@ -102,23 +105,50 @@ def _prepare_sections(sections: list[PromptSection]) -> list[_PreparedSection]:
     return prepared
 
 
+# 方法作用：按当前模型窗口推导单次 Prompt 的实际预算（spec/53）。
+# Args: definition - 已注册的提示词定义；model_id/model - 可选模型覆盖，供测试与特殊调用。
+# Returns: min(注册上限, max(全局下限, 可用输入 token × 换算系数))。
+def resolve_dynamic_budget(
+    definition: PromptDefinition,
+    *,
+    model_id: str | None = None,
+    model: Any | None = None,
+) -> int:
+    """复用会话层模型窗口解析链；任何缺失都回退保守默认；注册上限低于全局下限时以上限为准（floor 仅约束窗口推导值）。"""
+    from src.config import get_settings
+    from src.memory.context_builder import get_context_budget, resolve_prompt_budget_factor
+
+    settings = get_settings()
+    floor = max(1, int(getattr(settings, "prompt_budget_min_chars", 8000)))
+    default_factor = float(getattr(settings, "prompt_budget_token_char_factor", 1.0))
+    factor = resolve_prompt_budget_factor(model_id=model_id, model=model) or default_factor
+    context_budget = get_context_budget(model_id=model_id, model=model)
+    derived = int(context_budget.usable_input_tokens * factor)
+    return min(int(definition.context_budget), max(floor, derived))
+
+
 # 方法作用：按最低保留量和优先级分配单次 Prompt 的统一字符预算。
-# Args: prompt_id - 注册 Prompt ID；sections - 动态上下文；system_values - System 模板变量。
-# Returns: 总长度不超过 PromptDefinition.context_budget 的 System/Human 文本。
+# Args: prompt_id - 注册 Prompt ID；sections - 动态上下文；system_values - System 模板变量；
+#       budget_override - 动态推导的实际预算（None 时取注册值）。
+# Returns: 总长度不超过实际预算的 System/Human 文本。
 def build_budgeted_prompt(
     prompt_id: str,
     sections: list[PromptSection],
     *,
     system_values: dict[str, object] | None = None,
     reserve_chars: int = 0,
+    budget_override: int | None = None,
 ) -> BudgetedPrompt:
-    """固定 System 不截断，动态 section 先保底再按优先级扩展；reserve_chars 留给工具 schema。"""
+    """固定 System 不截断，动态 section 先保底再按优先级扩展；reserve_chars 留给工具 schema。
+
+    budget_override 为 spec/53 的动态推导值（按模型窗口）；注册值此时仅作为设计上限。
+    """
     from src.llm.prompts import get_prompt_definition
 
     definition = get_prompt_definition(prompt_id)
-    budget = int(definition.context_budget)
+    budget = int(definition.context_budget) if budget_override is None else int(budget_override)
     if budget <= 0:
-        raise ValueError(f"Prompt {prompt_id} 的 context_budget 必须大于零")
+        raise ValueError(f"Prompt {prompt_id} 的预算必须大于零（注册上限或动态覆盖值）")
     fixed_system = definition.render(**dict(system_values or {}))
     if len(fixed_system) > budget:
         raise ValueError(

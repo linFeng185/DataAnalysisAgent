@@ -220,7 +220,9 @@ class TestLLMAnalysisSampling:
         }))
         llm = SimpleNamespace(ainvoke=AsyncMock(return_value=response))
         monkeypatch.setattr(analyze_module, "get_llm", lambda temperature=0.3: llm)
-        monkeypatch.setattr(analyze_module, "_to_compact", lambda rows: '[{"value":1}]')
+        monkeypatch.setattr(
+            analyze_module, "_to_compact", lambda rows, max_chars=None: '[{"value":1}]'
+        )
         monkeypatch.setattr(
             adapter_module,
             "get_adapter",

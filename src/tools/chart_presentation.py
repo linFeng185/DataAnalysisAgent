@@ -163,11 +163,15 @@ def _number(value: Any) -> float | None:
 
 
 # 将一组明确需要聚合的值按指定口径归并。
-# Args: values - 同坐标数据；aggregation - 聚合方式。
-# Returns: 数值或 None；未指定聚合而重复则拒绝。
-def _reduce(values: list[Any], aggregation: str) -> float | None:
-    if len(values) > 1 and aggregation == "none":
-        raise ValueError("重复坐标缺少明确聚合口径，请增加系列/分面维度或指定聚合")
+# Args: values - 同坐标数据；aggregation - 聚合方式；allow_implicit_merge - 是否接受未经用户确认的合并口径。
+# Returns: 数值或 None；未指定聚合而重复则拒绝，未确认合并时同样拒绝。
+def _reduce(values: list[Any], aggregation: str, allow_implicit_merge: bool = True) -> float | None:
+    """同名重复坐标的合并必须先获得用户确认；对话链路传 False 时任何聚合口径都拒绝。"""
+    if len(values) > 1:
+        if aggregation == "none":
+            raise ValueError("重复坐标缺少明确聚合口径，请增加系列/分面维度或指定聚合")
+        if not allow_implicit_merge:
+            raise ValueError("重复坐标的合并口径需要用户确认后才能生效")
     numbers = [number for value in values if (number := _number(value)) is not None]
     if not numbers:
         return None
@@ -197,7 +201,7 @@ def _name(row: dict, columns: list[str], labels: dict[str, str]) -> str:
 
 
 # 构建单个分面，所有数据角色由已校验方案提供。
-# Args: rows - 分面数据；kind - 图表类型；plan - 方案；metrics/dimensions - 指标/维度；labels - 展示标签。
+# Args: rows - 分面数据；kind - 图表类型；plan - 方案；metrics/dimensions - 指标/维度；labels - 展示标签；allow_implicit_merge - 是否接受未经确认的合并口径。
 # Returns: ECharts 配置。
 def _panel(
     rows: list[dict],
@@ -206,6 +210,7 @@ def _panel(
     metrics: list[str],
     dimensions: list[str],
     labels: dict[str, str],
+    allow_implicit_merge: bool = True,
 ) -> dict:
     x_column = plan.x or next(
         (column for column in dimensions if is_time_column(column, rows)),
@@ -266,7 +271,7 @@ def _panel(
             values[key].append(row.get(metrics[0]))
             names[key] = _name(row, pie_dimensions, labels)
         items = [
-            {"name": names[key], "value": _reduce(value, plan.aggregation)}
+            {"name": names[key], "value": _reduce(value, plan.aggregation, allow_implicit_merge)}
             for key, value in values.items()
         ]
         if any(item["value"] is not None and item["value"] < 0 for item in items):
@@ -295,7 +300,7 @@ def _panel(
         points = []
         for group_index, group in enumerate(group_keys):
             for category_index, category in enumerate(categories):
-                number = _reduce(values.get((group, category, metrics[0]), []), plan.aggregation)
+                number = _reduce(values.get((group, category, metrics[0]), []), plan.aggregation, allow_implicit_merge)
                 if number is not None:
                     points.append([category_index, group_index, number])
         if not points:
@@ -329,7 +334,7 @@ def _panel(
                 "name": name,
                 "type": kind,
                 "data": [
-                    _reduce(values.get((group, category, metric), []), plan.aggregation)
+                    _reduce(values.get((group, category, metric), []), plan.aggregation, allow_implicit_merge)
                     for category in categories
                 ],
             }
@@ -357,13 +362,14 @@ def _panel(
 
 
 # 统一构建初始和手动切换图表，分面与多指标均保持独立轴。
-# Args: rows - 原始数据；kind - 图表类型；plan - 模型角色方案；labels - 字段展示名。
+# Args: rows - 原始数据；kind - 图表类型；plan - 模型角色方案；labels - 字段展示名；allow_implicit_merge - 是否接受未经用户确认的合并口径。
 # Returns: 可 JSON 序列化的 ECharts option；语义不适用时抛出 ValueError。
 def build_option(
     rows: list[dict],
     kind: str,
     plan: dict | ChartPlan | None = None,
     labels: dict[str, str] | None = None,
+    allow_implicit_merge: bool = True,
 ) -> dict:
     """所有转换只读输入；未知字段拒绝，重复坐标不静默覆盖。"""
     if not rows:
@@ -411,7 +417,7 @@ def build_option(
         panel_metrics = [metrics] if kind == "scatter" else [[metric] for metric in metrics]
         for metric_group in panel_metrics:
             remaining = [column for column in dimensions if column not in selected.facets]
-            option = _panel(facet_rows, kind, selected, metric_group, remaining, effective_labels)
+            option = _panel(facet_rows, kind, selected, metric_group, remaining, effective_labels, allow_implicit_merge)
             caption = _name(facet_rows[0], selected.facets, effective_labels)
             if len(metrics) > 1 and kind != "scatter":
                 caption = " · ".join(filter(None, [caption, effective_labels[metric_group[0]]]))

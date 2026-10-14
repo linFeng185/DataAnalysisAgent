@@ -411,6 +411,13 @@ class Settings(BaseSettings):
     context_warm_turns: int = Field(default=20, ge=0, le=1_000)
     context_summary_model: str = ""   # 压缩摘要专用模型，空则复用 cheap_llm
 
+    # ---- 提示词预算动态化（spec/53）----
+    # token→字符折算系数：默认 1.0 对中文优化 tokenizer 安全（按 1 token = 1 字符保守估算）；
+    # 中文费 token 的模型按能力字段 prompt_budget_char_factor 调小（约 0.5）。
+    prompt_budget_token_char_factor: float = Field(default=1.0, ge=0.1, le=8)
+    # 动态推导的全局保底字符数：防超小窗口把预算算成负数或装不下固定提示词。
+    prompt_budget_min_chars: int = Field(default=8_000, ge=1_000, le=100_000)
+
     # ---- 分析器 ----
     analysis_data_max_chars: int = 50000  # 分析数据最多投喂 LLM 的字符数，超限按比例均匀抽取
     attribution_min_converted_paths: int = Field(default=2, ge=1, le=10_000)

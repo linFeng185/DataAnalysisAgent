@@ -57,6 +57,8 @@ const en: Record<string, string> = {
   "当前结果没有可用数据": "No data available in this result",
   "图表调整失败": "Failed to update chart",
   "暂无图表数据": "No chart data",
+  "按名称合并求和": "Merge by name (sum)",
+  "图中同一名称对应多条记录，需要按「按名称合并求和」确认口径或补充区分维度后重画": "Multiple records share the same name; confirm the merge with \"Merge by name (sum)\" or add a distinguishing dimension, then redraw",
   "调整图表": "Adjust chart",
   "图表加载中...": "Loading chart...",
   "无数据": "No data",

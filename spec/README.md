@@ -50,3 +50,6 @@
 | [50-report-node-routing.md](50-report-node-routing.md) | 报表单元节点路由由大模型决策（节点数据表 · 强护栏 · 静态兜底） | 动态 |
 | [51-autonomous-knowledge-retrieval.md](51-autonomous-knowledge-retrieval.md) | 自主知识检索工具、全业务LLM有界循环与审核验收 | 动态 |
 | [52-chat-presentation.md](52-chat-presentation.md) | 对话数据优先、公开正文流式、过程摘要权限与多维图表展示 | 动态 |
+| [53-prompt-budget-model-window.md](53-prompt-budget-model-window.md) | 提示词预算跟随超管模型窗口动态推导（全员接窗口 · 注册上限 · 数据层单阀门） | 动态 |
+| [54-prompt-budget-model-window-implementation-plan.md](54-prompt-budget-model-window-implementation-plan.md) | 提示词预算动态化实施计划（预算推导 · 注册上限 · 数据层单阀门） | 动态 |
+| [55-sql-profiling-and-probing.md](55-sql-profiling-and-probing.md) | SQL 探查与数据画像设计（键列判断 · 画像预取 · 结构化探查原语） | 动态 |

@@ -333,6 +333,7 @@ class TestSharedPromptSegments:
         # 常量定义与「抄回去的那一份」都能被完整还原成候选文本。
         import ast
         import inspect
+
         from src.llm import prompts
         from src.logging_config import get_logger
 
@@ -359,3 +360,51 @@ class TestSharedPromptSegments:
             holders = [literal for literal in literals if text in literal]
             assert holders == [text], f"{name} 的文本出现在 {len(holders)} 处字面量里，只允许有常量定义这一处"
         logger.info("test_common_constants_are_not_copied_back_into_templates 完成")
+
+
+class TestPromptBudgetCaps:
+    """覆盖 Task 4：注册值重审为设计上限（功能 10.2.10，spec/53）。"""
+
+    # 方法作用：验证分析与会话摘要的注册值已升级为设计上限（spec/53）。
+    # Args: self - pytest 测试类实例。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    def test_analysis_and_summary_budget_caps(self) -> None:
+        """analysis.result=85000、context.summary=5000；不重审其余场景（原值转上限语义）。"""
+        # Arrange
+        from src.llm.prompts import get_prompt_definition
+
+        # Act / Assert
+        assert get_prompt_definition("analysis.result").context_budget == 85_000
+        assert get_prompt_definition("context.summary").context_budget == 5_000
+
+    # 方法作用：验证任一注册 Prompt 的固定 System 长度低于其有效预算下限（spec/53）。
+    # Args: self - pytest 测试类实例。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    def test_all_registered_prompt_fixed_systems_fit_budget_floor(self) -> None:
+        """`effective = min(上限, max(下限, 推导))` 下任一固定 System 超限都会在调用时显式报错。"""
+        # Arrange
+        from src.config import get_settings
+        from src.llm.prompts import PROMPT_REGISTRY
+
+        floor = int(get_settings().prompt_budget_min_chars)
+        # 含占位符的模板用最小示例值渲染（与生产调用形态一致）；缺值的模板跳过渲染检查。
+        sample_values = {
+            "dialect": "clickhouse",
+            "skill_instructions": "",
+            "max_units": "6",
+            "limit": "5",
+        }
+
+        # Act
+        violations: list[tuple[str, int, int]] = []
+        for definition in PROMPT_REGISTRY.values():
+            try:
+                rendered = definition.render(**sample_values)
+            except (KeyError, ValueError):
+                continue
+            lower_bound = min(int(definition.context_budget), floor)
+            if len(rendered) >= lower_bound:
+                violations.append((definition.prompt_id, len(rendered), lower_bound))
+
+        # Assert
+        assert violations == []

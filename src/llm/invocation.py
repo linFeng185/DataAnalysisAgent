@@ -34,6 +34,8 @@ class PreparedInvocation:
     model: Any
     messages: list[Any]
     config: dict[str, Any]
+    # 本次调用的实际预算（spec/53 动态推导值）；0 表示调用方未提供，消费方回退注册上限。
+    budget_chars: int = 0
 
 
 def prepare_invocation(
@@ -53,12 +55,17 @@ def prepare_invocation(
     effective_task = task or definition.task
     # 可信身份下为工具定义、一条有界工具结果与协议开销预留空间。
     from src.llm.knowledge_loop import knowledge_tool_reserve_chars
+    from src.llm.prompt_budget import resolve_dynamic_budget
 
+    # spec/53：预算按当前模型窗口动态推导，注册值仅作设计上限。
+    # 预算按会话选择链推导，与 get_task_llm 创建的模型同源；显式传入的 model 实例不参与窗口推导。
+    effective_budget = resolve_dynamic_budget(definition)
     budgeted = build_budgeted_prompt(
         prompt_id,
         sections,
         system_values=system_values,
         reserve_chars=knowledge_tool_reserve_chars(definition.context_budget),
+        budget_override=effective_budget,
     )
     selected_model = model or get_task_llm(
         effective_task,
@@ -102,6 +109,7 @@ def prepare_invocation(
             HumanMessage(content=budgeted.human),
         ],
         config=call_config,
+        budget_chars=budgeted.budget,
     )
 
 

@@ -112,6 +112,43 @@ class TestKnowledgeScopeRoutes:
             logger.error("test_tenant_upload_rejects_private_tag 异常: %s", exc, exc_info=True)
             raise
 
+    # 验证分块重叠不小于分块大小时上传被拒。
+    # Args: self - pytest 测试类实例；monkeypatch - pytest 补丁工具。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    async def test_upload_rejects_overlap_not_less_than_size(self, monkeypatch) -> None:
+        """chunk_overlap 等于 chunk_size 的病态配置在读文件前返回 422，且无落盘副作用。"""
+        logger.debug("test_upload_rejects_overlap_not_less_than_size 入口")
+        try:
+            # Arrange：构造可写 private 范围的身份和文件存储探针。
+            import src.api.auth as auth
+            import src.api.routes as routes
+            import src.knowledge.file_store as file_store_module
+
+            file_store = SimpleNamespace(save=AsyncMock())
+            monkeypatch.setattr(auth, "get_current_role", lambda: "analyst")
+            monkeypatch.setattr(auth, "get_current_user_id", lambda: 7)
+            monkeypatch.setattr(auth, "get_current_tenant_id", lambda: 4)
+            monkeypatch.setattr(file_store_module, "get_file_store", lambda: file_store)
+            upload = UploadFile(filename="边界配置.md", file=io.BytesIO(b"content"))
+
+            # Act / Assert：边界相等的重叠配置直接 422，且未读取文件、未保存原文件。
+            with pytest.raises(HTTPException) as caught:
+                await routes.upload_knowledge_docs(
+                    [upload], strategy="auto", chunk_size=200, chunk_overlap=200,
+                    category="", knowledge_scope="private", tag_ids="", datasource="",
+                )
+            assert caught.value.status_code == 422
+            # 未产生文件读取副作用：上传字节流指针未被推进。
+            assert upload.file.tell() == 0
+            # 未产生落盘副作用：文件存储 save 从未被调用。
+            file_store.save.assert_not_awaited()
+            logger.info("test_upload_rejects_overlap_not_less_than_size 完成")
+        except Exception as exc:
+            logger.error(
+                "test_upload_rejects_overlap_not_less_than_size 异常: %s", exc, exc_info=True,
+            )
+            raise
+
 
 class TestKnowledgeTagRoutes:
     """验证个人标签创建与全局标签治理 API。"""

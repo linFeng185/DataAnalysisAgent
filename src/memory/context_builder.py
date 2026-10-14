@@ -197,6 +197,28 @@ def resolve_context_window(
     return configured_default
 
 
+# 方法作用：读取当前模型声明的提示词预算换算系数。
+# Args: model_id - 显式模型标识；model - 可选模型实例。
+# 说明：能力链对模型对象/注册表/适配器只读取 context_window/max_tokens_limit，
+#   本系数当前唯一有效来源是租户 LLM 选择链（缺失时由调用方回退全局设置）。
+# Returns: 正数系数；未声明或非法时返回 None（由调用方回退全局默认）。
+def resolve_prompt_budget_factor(
+    *,
+    model_id: str | None = None,
+    model: Any | None = None,
+) -> float | None:
+    """供提示词预算动态化读取供应商级 token→字符折算系数（spec/53）。"""
+    _, capabilities = _resolve_model_identity(model_id, model)
+    raw = capabilities.get("prompt_budget_char_factor")
+    if raw is None or isinstance(raw, bool):
+        return None
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return None
+    return value if math.isfinite(value) and value > 0 else None
+
+
 # 方法作用：根据模型窗口计算输入预算、触发阈值、目标阈值和硬保护线。
 # Args: context_window - 显式模型窗口；model_id - 模型标识；model - 可选模型实例。
 # Returns: ContextBudget，供上下文构建和会话归档共同使用。

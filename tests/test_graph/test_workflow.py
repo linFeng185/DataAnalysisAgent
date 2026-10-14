@@ -1113,7 +1113,12 @@ class TestE2E:
         from src.graph.workflow import build_workflow
 
         del monkeypatch
-        context = AppContext(SimpleNamespace(database_url="", multi_tenant=False))
+        context = AppContext(SimpleNamespace(
+            database_url="",
+            multi_tenant=False,
+            # build_response 直读该设置（244da1b 引入），替身必须与真实 Settings 接口对齐。
+            chat_show_analysis_process=False,
+        ))
         async with use_app_context_async(context):
             assert await build_workflow() is not None
         await context.close()
@@ -1127,7 +1132,12 @@ class TestE2E:
         from src.graph.workflow import build_workflow
 
         monkeypatch.setattr(generate_module, "is_llm_available", lambda: False)
-        context = AppContext(SimpleNamespace(database_url="", multi_tenant=False))
+        context = AppContext(SimpleNamespace(
+            database_url="",
+            multi_tenant=False,
+            # build_response 直读该设置（244da1b 引入），替身必须与真实 Settings 接口对齐。
+            chat_show_analysis_process=False,
+        ))
         async with use_app_context_async(context):
             app = await build_workflow()
             r = await app.ainvoke({
@@ -1151,7 +1161,12 @@ class TestE2E:
         from src.graph.workflow import build_workflow
 
         monkeypatch.setattr(generate_module, "is_llm_available", lambda: False)
-        context = AppContext(SimpleNamespace(database_url="", multi_tenant=False))
+        context = AppContext(SimpleNamespace(
+            database_url="",
+            multi_tenant=False,
+            # build_response 直读该设置（244da1b 引入），替身必须与真实 Settings 接口对齐。
+            chat_show_analysis_process=False,
+        ))
         async with use_app_context_async(context):
             app = await build_workflow()
             r = await app.ainvoke({

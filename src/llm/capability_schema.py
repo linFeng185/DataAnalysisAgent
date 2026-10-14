@@ -199,6 +199,14 @@ def default_capability_schema() -> dict[str, Any]:
             "minimum": 1,
         },
         {
+            "key": "prompt_budget_char_factor",
+            "label": "预算换算系数",
+            "type": "number",
+            "minimum": 0.1,
+            "maximum": 8.0,
+            "description": "1 token 折算的字符数；未配置时回退全局默认，中文费 token 的模型调小（约 0.5）",
+        },
+        {
             "key": "reasoning_efforts",
             "label": "支持的推理深度",
             "type": "multiselect",

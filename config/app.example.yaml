@@ -384,6 +384,10 @@ context_hot_turns: 5
 context_warm_turns: 20
 # 用途：压缩摘要专用模型，空则复用 cheap_llm_model | 默认值：空 | 生效范围：热生效
 context_summary_model: ""
+# 用途：提示词预算的 token→字符折算系数（0.1-8）| 默认值：1.0 | 生效范围：热生效
+prompt_budget_token_char_factor: 1.0
+# 用途：动态预算推导的全局保底字符数（1000-100000）| 默认值：8000 | 生效范围：热生效
+prompt_budget_min_chars: 8000
 # 用途：单次分析投喂 LLM 的样本字符上限，超限按比例均匀抽取 | 默认值：50000 | 生效范围：热生效
 analysis_data_max_chars: 50000
 # 用途：归因分析最少转化路径数（1-10000）| 默认值：2 | 生效范围：热生效

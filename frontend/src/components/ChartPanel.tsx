@@ -30,6 +30,30 @@ const CHART_TYPES = [
   { key: 'table', get label() { return t("表格"); } },
 ];
 
+// 方法作用：为图表重画构造请求方案，未获用户确认时不携带模型自给的聚合口径。
+// Args: plan - 当前图表方案；confirmed - 用户是否已在本面板显式确认合并求和。
+// Returns: 可发送的图表方案；未确认时移除 aggregation，防止类型切换静默合并同名坐标。
+export function buildAdjustPlan(
+  plan: Record<string, unknown> | undefined,
+  confirmed: boolean,
+): Record<string, unknown> {
+  const request = { ...(plan || {}) };
+  if (!confirmed) delete request.aggregation;
+  return request;
+}
+
+// 方法作用：把图表重画失败转换为面向用户的消息，不暴露后端校验术语。
+// Args: error - /charts/adjust 抛出的异常。
+// Returns: 展示文本；重复坐标失败使用与失败契约一致的合并确认指引。
+export function readAdjustError(error: unknown): string {
+  const raw = error instanceof Error ? error.message : '';
+  // 与 generate_chart 的失败契约同一业务语义：要么用户确认合并，要么补充区分维度。
+  if (raw.includes('重复坐标')) {
+    return t("图中同一名称对应多条记录，需要按「按名称合并求和」确认口径或补充区分维度后重画");
+  }
+  return raw || t("图表调整失败");
+}
+
 // 方法作用：渲染 ECharts 图表并允许基于原始结果切换图表类型。
 // Args: chartConfig - 初始配置；rows - 原始查询行；height - 图表高度。
 // Returns: 图表、空状态或配置缺失状态。
@@ -43,8 +67,10 @@ export default function ChartPanel({ chartConfig, rows = [], height = 360 }: {
   const [adjusting, setAdjusting] = useState(false);
   const chartRef = useRef<HTMLDivElement>(null);
   const [chartWidth, setChartWidth] = useState(0);
+  // 仅当用户在本面板点击「按名称合并求和」并成功重画后，才允许后续请求沿用该聚合口径。
+  const mergeConfirmed = useRef(false);
 
-  useEffect(() => setCurrent(chartConfig), [chartConfig]);
+  useEffect(() => { setCurrent(chartConfig); mergeConfirmed.current = false; }, [chartConfig]);
   useEffect(() => {
     const element = chartRef.current;
     if (!element) return;
@@ -75,13 +101,51 @@ export default function ChartPanel({ chartConfig, rows = [], height = 360 }: {
     }
     setAdjusting(true);
     try {
+      // 使用面板当前方案：合并确认成功后的类型切换沿用已确认口径；
+      // 未确认时不得携带模型自给的聚合，类型切换不能绕过合并确认闸门。
       const adjusted = await post<ChartConfig>('/charts/adjust', {
-        rows, instruction, chart_plan: chartConfig?.chart_plan || {},
-        column_labels: chartConfig?.column_labels || {},
+        rows, instruction,
+        chart_plan: buildAdjustPlan(current?.chart_plan, mergeConfirmed.current),
+        column_labels: current?.column_labels || {},
       });
-      setCurrent({ ...adjusted, display_language: chartConfig?.display_language });
+      setCurrent({
+        ...adjusted,
+        display_language: current?.display_language,
+        column_labels: adjusted.column_labels || current?.column_labels || {},
+      });
     } catch (error) {
-      message.error(error instanceof Error ? error.message : t("图表调整失败"));
+      message.error(readAdjustError(error));
+    } finally {
+      setAdjusting(false);
+    }
+  };
+
+  // 方法作用：按用户明确选择的合并求和口径重画重复坐标图表。
+  // Args: 无。
+  // Returns: 请求结束后无返回值。
+  const handleMergeByName = async (): Promise<void> => {
+    if (rows.length === 0) {
+      message.warning(t("当前结果没有可用数据"));
+      return;
+    }
+    setAdjusting(true);
+    try {
+      // 只有用户显式点击才附加 sum 口径，不改变后端不默认求和的约束。
+      const mergePlan = { ...(current?.chart_plan || {}), aggregation: 'sum' };
+      const instruction = current?.type && current.type !== 'table' ? current.type : 'auto';
+      const adjusted = await post<ChartConfig>('/charts/adjust', {
+        rows, instruction, chart_plan: mergePlan,
+        column_labels: current?.column_labels || {},
+      });
+      // 重画成功即视为用户已确认该口径，后续类型切换沿用。
+      mergeConfirmed.current = true;
+      setCurrent({
+        ...adjusted,
+        display_language: current?.display_language,
+        column_labels: adjusted.column_labels || current?.column_labels || {},
+      });
+    } catch (error) {
+      message.error(readAdjustError(error));
     } finally {
       setAdjusting(false);
     }
@@ -119,6 +183,7 @@ export default function ChartPanel({ chartConfig, rows = [], height = 360 }: {
     return <div>{toolbar}<DataTable data={rows} columnLabels={current.column_labels} /></div>;
   }
   if (!current.option || Object.keys(current.option).length === 0) {
+    const failed = current.status === 'failed';
     return (
       <div>
         {toolbar}
@@ -126,11 +191,17 @@ export default function ChartPanel({ chartConfig, rows = [], height = 360 }: {
           height, display: 'flex', alignItems: 'center', justifyContent: 'center',
           background: '#fafafa', borderRadius: 8,
         }}>
-          <div style={{ textAlign: 'center' }}>
+          <div style={{ textAlign: 'center', maxWidth: 420, padding: '0 16px' }}>
             <BarChartOutlined style={{ fontSize: 40, color: '#d9d9d9', marginBottom: 12 }} />
-            <Typography.Text type="secondary">
+            <Typography.Text type="secondary" style={{ display: 'block' }}>
               {current.reason || t("图表类型: {value0}（配置数据未生成）", { value0: current.type })}
             </Typography.Text>
+            {failed && (
+              <Button size="small" type="primary" style={{ marginTop: 12 }} loading={adjusting}
+                onClick={() => void handleMergeByName()}>
+                {t("按名称合并求和")}
+              </Button>
+            )}
           </div>
         </div>
       </div>

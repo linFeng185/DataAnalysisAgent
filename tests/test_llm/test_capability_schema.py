@@ -136,3 +136,24 @@ class TestCapabilityFormSchema:
         # Act / Assert
         with pytest.raises(ValidationError):
             CapabilityFormSchema.model_validate({"fields": [field]})
+
+    # 方法作用：验证默认能力表单包含提示词预算换算系数并可校验覆盖值。
+    # Args: self - pytest 测试类实例。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    def test_default_schema_includes_prompt_budget_factor(self) -> None:
+        """spec/53：供应商 token 效率差异由能力字段覆盖，缺省不物化以便回退全局默认。"""
+        # Arrange
+        from src.llm.capability_schema import default_capability_schema, validate_capability_values
+
+        schema = default_capability_schema()
+
+        # Act
+        fields = {field["key"]: field for field in schema["fields"]}
+        filled = validate_capability_values(schema, {})
+        overridden = validate_capability_values(schema, {"prompt_budget_char_factor": 2.0})
+
+        # Assert
+        assert fields["prompt_budget_char_factor"]["type"] == "number"
+        assert fields["prompt_budget_char_factor"]["default"] is None
+        assert "prompt_budget_char_factor" not in filled
+        assert overridden["prompt_budget_char_factor"] == 2.0

@@ -77,6 +77,9 @@ def chunk_text(text: str, config: ChunkConfig, file_name: str = "") -> list[DocC
     else:
         chunks = _chunk_by_line(text, config)
 
+    # 出口统一收口：迷你块并入相邻块、相邻块补齐上下文重叠，保证内容零丢失。
+    chunks = _finalize_chunks(chunks, config)
+
     # 每块附加元数据，尝试提取表名
     enriched: list[DocChunk] = []
     for c in chunks:
@@ -145,6 +148,62 @@ def _split_by_length(text: str, max_chars: int) -> list[str]:
         pieces.append(text)
     logger.debug("长文本切分完成", pieces=len(pieces), max_chars=max_chars)
     return pieces
+
+
+# 方法作用：计算实际生效的重叠字符数，防止病态配置（overlap ≥ size）产生爆炸式滑窗。
+# Args: cfg - 分块配置。
+# Returns: 不超过窗口一半的重叠字符数。
+def _effective_overlap(cfg: ChunkConfig) -> int:
+    """重叠上限为窗口一半：既保留语义又保证推进量不小于半窗。"""
+    return max(0, min(int(cfg.chunk_overlap), int(cfg.chunk_size) // 2))
+
+
+# 方法作用：统一收口切块结果——合并迷你块、为相邻块补充上下文重叠。
+# Args: chunks - 各策略产出的原始块；cfg - 分块配置。
+# Returns: 无内容丢失、相邻块带上下文重叠的块列表。
+def _finalize_chunks(chunks: list[str], cfg: ChunkConfig) -> list[str]:
+    """内容零丢失（迷你块并入相邻块）+ 重叠按行对齐收口（已有重叠则不重复叠加）。
+
+    出口只清洗块尾空白（rstrip）：块首行可能带前导缩进（如数据字典字段行），
+    必须原样保留；纯空白块的判断仍用 strip，但不去改内容。
+    """
+    cleaned = [content.rstrip() for content in chunks if content and content.strip()]
+    if not cleaned:
+        return []
+    # 1) 迷你块并入相邻块：优先并入前块；首个有效块就迷你则暂存并入后块。
+    merged: list[str] = []
+    pending = ""
+    for content in cleaned:
+        if pending:
+            content = f"{pending}\n{content}"
+            pending = ""
+        if len(content) < cfg.min_chunk_size:
+            if merged:
+                merged[-1] = f"{merged[-1]}\n{content}"
+            else:
+                pending = content
+            continue
+        merged.append(content)
+    if pending:
+        # 不变式：pending 非空仅在 merged 为空时成立（首个有效块即迷你，暂存并入后块）。
+        # 全文仅一个迷你块时也走此分支：仍然保留，保证内容零丢失。
+        merged.append(pending)
+    # 2) 重叠收口：前块尾部按行对齐的 overlap 字符带入后块头部。
+    overlap = _effective_overlap(cfg)
+    if overlap <= 0 or len(merged) < 2:
+        return merged
+    result = [merged[0]]
+    for previous, current in zip(merged, merged[1:], strict=False):
+        tail = previous[-overlap:]
+        newline = tail.find("\n")
+        if newline >= 0:
+            tail = tail[newline + 1:]
+        if tail and current.startswith(tail):
+            # 已有重叠（如超长行滑窗片），不重复叠加。
+            result.append(current)
+            continue
+        result.append(f"{tail}\n{current}" if tail else current)
+    return result
 
 
 def _extract_pdf(content: bytes) -> str:
@@ -218,12 +277,12 @@ def _chunk_by_table(text: str, cfg: ChunkConfig) -> list[str]:
             continue
         if re.match(r'###\s', sec):
             # 新表开始
-            if len(current) >= cfg.min_chunk_size:
+            if current:
                 chunks.append(current)
             current = sec
         else:
             current = f"{current}\n\n{sec}" if current else sec
-    if len(current) >= cfg.min_chunk_size:
+    if current:
         chunks.append(current)
     # 超大块再切（如单表有几十列）
     result: list[str] = []
@@ -232,13 +291,18 @@ def _chunk_by_table(text: str, cfg: ChunkConfig) -> list[str]:
             result.extend(_chunk_by_paragraph(c, cfg))
         else:
             result.append(c)
-    return [r for r in result if len(r) >= cfg.min_chunk_size]
+    return result
 
 
 def _chunk_by_sql_ddl(text: str, cfg: ChunkConfig) -> list[str]:
-    """按 SQL DDL 语句切（CREATE TABLE/VIEW/INDEX），每条 DDL + 注释作为一个块。"""
-    # 在 CREATE 前分割，但保留前面的注释行
-    parts = re.split(r'\n(?=CREATE\s+(TABLE|VIEW|INDEX)\b)', text, flags=re.IGNORECASE)
+    """按 SQL DDL 语句切（CREATE TABLE/VIEW/INDEX），每条 DDL + 注释作为一个块。
+
+    cfg 仅保留统一签名（六策略同形），当前实现不使用 cfg：DDL 语句天然按语法边界成块，
+    过滤移除后不再有依赖配置参数的分支。
+    """
+    # 在 CREATE 前分割，但保留前面的注释行；必须用非捕获组：
+    # re.split 会把捕获组（TABLE/VIEW/INDEX）作为独立片段注入结果，被拼进块内容。
+    parts = re.split(r'\n(?=CREATE\s+(?:TABLE|VIEW|INDEX)\b)', text, flags=re.IGNORECASE)
     chunks: list[str] = []
     # 合并前置注释到紧跟的 DDL
     current = ""
@@ -246,8 +310,8 @@ def _chunk_by_sql_ddl(text: str, cfg: ChunkConfig) -> list[str]:
         part = part.strip()
         if not part:
             continue
-        if re.match(r'CREATE\s+(TABLE|VIEW|INDEX)\b', part, re.IGNORECASE):
-            if len(current) >= cfg.min_chunk_size:
+        if re.match(r'CREATE\s+(?:TABLE|VIEW|INDEX)\b', part, re.IGNORECASE):
+            if current:
                 chunks.append(current)
             current = part
         elif re.match(r'^\s*--', part):
@@ -255,9 +319,9 @@ def _chunk_by_sql_ddl(text: str, cfg: ChunkConfig) -> list[str]:
             current = f"{current}\n{part}" if current else part
         else:
             current = f"{current}\n\n{part}" if current else part
-    if len(current) >= cfg.min_chunk_size:
+    if current:
         chunks.append(current)
-    return [c for c in chunks if len(c) >= cfg.min_chunk_size]
+    return chunks
 
 
 def _chunk_by_reference(text: str, cfg: ChunkConfig) -> list[str]:
@@ -283,21 +347,21 @@ def _chunk_by_reference(text: str, cfg: ChunkConfig) -> list[str]:
             continue
         # 新条目开始
         if re.match(r'^(####\s|\*\*\w+\()', sec):
-            if len(current) >= cfg.min_chunk_size:
+            if current:
                 chunks.append(current)
             current = sec
         else:
             combined = f"{current}\n\n{sec}" if current else sec
             if len(combined) > cfg.chunk_size * 2:
                 # 太大 —— 截断当前块
-                if len(current) >= cfg.min_chunk_size:
+                if current:
                     chunks.append(current)
                 current = sec
             else:
                 current = combined
-    if len(current) >= cfg.min_chunk_size:
+    if current:
         chunks.append(current)
-    return [c for c in chunks if len(c) >= cfg.min_chunk_size]
+    return chunks
 
 
 def _extract_table_name(chunk: str) -> str:
@@ -327,24 +391,26 @@ def _chunk_by_line(text: str, cfg: ChunkConfig) -> list[str]:
     chunks: list[str] = []
     current = ""
     for line in lines:
-        line = line.strip()
-        if not line:
+        # 只去行尾回车，保留前导缩进等格式；纯空白行继续跳过。
+        line = line.rstrip("\r")
+        if not line.strip():
             continue
         if len(current) + len(line) + 1 <= cfg.chunk_size:
             current = f"{current}\n{line}" if current else line
         else:
-            if len(current) >= cfg.min_chunk_size:
+            if current:
                 chunks.append(current)
-            # 超长单行强制截断
+            # 超长单行按窗口滑切；重叠由出口统一收口，残片不做长度过滤。
             if len(line) > cfg.chunk_size:
-                for i in range(0, len(line), cfg.chunk_size - cfg.chunk_overlap):
-                    piece = line[i:i + cfg.chunk_size].strip()
-                    if len(piece) >= cfg.min_chunk_size:
+                step = max(1, cfg.chunk_size - _effective_overlap(cfg))
+                for i in range(0, len(line), step):
+                    piece = line[i:i + cfg.chunk_size].rstrip("\r")
+                    if piece.strip():
                         chunks.append(piece)
                 current = ""
             else:
                 current = line
-    if len(current) >= cfg.min_chunk_size:
+    if current:
         chunks.append(current)
     return chunks
 
@@ -360,10 +426,10 @@ def _chunk_by_paragraph(text: str, cfg: ChunkConfig) -> list[str]:
         if len(current) + len(p) + 2 <= cfg.chunk_size:
             current = f"{current}\n\n{p}" if current else p
         else:
-            if len(current) >= cfg.min_chunk_size:
+            if current:
                 chunks.append(current)
             current = p
-    if len(current) >= cfg.min_chunk_size:
+    if current:
         chunks.append(current)
     return chunks
 
@@ -379,7 +445,7 @@ def _chunk_by_heading(text: str, cfg: ChunkConfig) -> list[str]:
         if len(current) + len(sec) + 2 <= cfg.chunk_size:
             current = f"{current}\n\n{sec}" if current else sec
         else:
-            if len(current) >= cfg.min_chunk_size:
+            if current:
                 chunks.append(current)
             if len(sec) > cfg.chunk_size:
                 sub = _chunk_by_paragraph(sec, cfg)
@@ -387,6 +453,6 @@ def _chunk_by_heading(text: str, cfg: ChunkConfig) -> list[str]:
                 current = sub[-1] if sub else ""
             else:
                 current = sec
-    if len(current) >= cfg.min_chunk_size:
+    if current:
         chunks.append(current)
     return chunks

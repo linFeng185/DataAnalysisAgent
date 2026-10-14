@@ -501,25 +501,14 @@ async def _llm_polish(summary: str, insights: list[str], data_sample: str) -> di
         return None
 
 
-# 方法作用：按来源分别均匀采样并交错展示，避免字符裁剪只保留首个来源。
-# Args: rows - 已授权的查询结果样本。
-# Returns: 各来源均有代表行的紧凑 JSON；单源保持原顺序。
-def _to_compact(rows: list[dict]) -> str:
-    """全量数据转紧凑 JSON，超限按来源均匀抽取。"""
-    if not rows:
-        return "[]"
-    from src.config import get_settings
-    limit = get_settings().analysis_data_max_chars
-    text = json.dumps(rows, ensure_ascii=False, default=_json_default,
-                      separators=(",", ":"))
-    groups: dict[str, list[dict]] = {}
-    for row in rows:
-        groups.setdefault(str(row.get("_datasource", "")), []).append(row)
-    max_rows = len(rows) if len(text) <= limit else max(10, int(limit / (len(text) / len(rows))))
-    per_source = max(1, max_rows // len(groups))
+# 方法作用：按来源均匀抽取代表行并交错为紧凑 JSON，供字符预算内展示。
+# Args: groups - 按来源分组的行；per_source - 每个来源保留的最大行数；keep_all - 是否整源全量保留。
+# Returns: 各来源交错排列的紧凑 JSON 文本；只挑选整行，不改动字段。
+def _sample_sources_json(groups: dict[str, list[dict]], per_source: int, keep_all: bool) -> str:
+    """采样只选择整行，保证数据内容与提示词层字符预算解耦。"""
     batches = []
     for source_rows in groups.values():
-        if len(text) <= limit or len(source_rows) <= per_source:
+        if keep_all or len(source_rows) <= per_source:
             batches.append(source_rows)
         else:
             indices = [index * (len(source_rows) - 1) // max(1, per_source - 1) for index in range(per_source)]
@@ -527,6 +516,32 @@ def _to_compact(rows: list[dict]) -> str:
     sampled = [row for group in zip_longest(*batches) for row in group if row is not None]
     return json.dumps(sampled, ensure_ascii=False, default=_json_default,
                       separators=(",", ":"))
+
+
+# 方法作用：按来源分别均匀采样并交错展示，避免字符裁剪只保留首个来源。
+# Args: rows - 已授权的查询结果样本；max_chars - 可选字符上限，缺省读全局设置。
+# Returns: 各来源均有代表行的紧凑 JSON；单源保持原顺序，长度收敛到上限内。
+def _to_compact(rows: list[dict], max_chars: int | None = None) -> str:
+    """全量数据转紧凑 JSON，超限按来源均匀抽取。"""
+    if not rows:
+        return "[]"
+    from src.config import get_settings
+    limit = int(max_chars) if max_chars is not None else get_settings().analysis_data_max_chars
+    text = json.dumps(rows, ensure_ascii=False, default=_json_default,
+                      separators=(",", ":"))
+    groups: dict[str, list[dict]] = {}
+    for row in rows:
+        groups.setdefault(str(row.get("_datasource", "")), []).append(row)
+    fits = len(text) <= limit
+    max_rows = len(rows) if fits else max(10, int(limit / (len(text) / len(rows))))
+    per_source = max(1, max_rows // len(groups))
+    sampled = _sample_sources_json(groups, per_source, fits)
+    # 平均行长在结果含少量超长字段时会低估实际体量：按采样后的真实长度继续对半收敛，
+    # 保证模型可见数据量由数据层决定、序列化 JSON 不被提示词层字符腰斩。
+    while len(sampled) > limit and per_source > 1:
+        per_source = max(1, per_source // 2)
+        sampled = _sample_sources_json(groups, per_source, False)
+    return sampled
 
 
 # 方法作用：确定性汇总各来源样本时间边界，避免模型将可见头部误当全量。
@@ -555,6 +570,27 @@ def _format_sample_scope(rows: list[dict]) -> str:
                 boundaries.append(f"{column}={min(values)} 至 {max(values)}")
         parts.append(f"{source}：{len(source_rows)} 行样本；" + "；".join(boundaries[:4]))
     return "\n".join(parts)
+
+
+# 其余动态段的设计上限之和（spec/53 第六节：78400 − result_sample 55000）。
+# 任一分段 max_chars 调整须同步本常量与 spec/53 第六节。
+_OTHER_SECTIONS_CAP_CHARS = 23_400
+
+
+# 方法作用：按当前模型窗口推导"查询结果段"可用的字符量。
+# Args: 无（读取当前请求模型解析链与提示词注册表）。
+# Returns: 数据层采样应遵守的字符上限；小窗口自动收敛，大窗口受全局阀门封顶。
+def _resolve_analysis_sample_budget() -> int:
+    """数据层单阀门：模型可见数据量只由此处决定（spec/53 第五节）。"""
+    from src.config import get_settings
+    from src.llm.prompt_budget import resolve_dynamic_budget
+    from src.llm.prompts import get_prompt_definition
+
+    settings = get_settings()
+    definition = get_prompt_definition("analysis.result")
+    budget = resolve_dynamic_budget(definition)
+    available = budget - len(definition.render()) - _OTHER_SECTIONS_CAP_CHARS
+    return min(settings.analysis_data_max_chars, max(2_000, available))
 
 
 # 方法作用：把当前授权 Schema 压缩成证据充分性评估可用的字段摘要。
@@ -869,7 +905,14 @@ async def _llm_analyze(
         supplemental_chars=len(supplemental_evidence),
     )
     total_rows = len(rows)
-    sample = _to_compact(rows)
+    sample_budget = _resolve_analysis_sample_budget()
+    sample = _to_compact(rows, sample_budget)
+    logger.debug(
+        "数据段采样完成",
+        total_rows=total_rows,
+        sample_budget=sample_budget,
+        sampled_chars=len(sample),
+    )
     sample_row_count = 0
     if sample.startswith("["):
         try:
@@ -932,14 +975,14 @@ async def _llm_analyze(
                 f"## 查询结果 ({input_label})\n{sample}",
                 priority=90,
                 min_chars=2000,
-                max_chars=4500,
+                max_chars=55000,
             ),
             PromptSection(
                 "statistics",
                 f"## 统计摘要\n{stat_text}",
                 priority=85,
                 min_chars=700,
-                max_chars=2200,
+                max_chars=8000,
             ),
             PromptSection(
                 "supplemental_evidence",

@@ -29,7 +29,7 @@
 - AnalysisOutput 增加 column_labels 和 chart_plan；ChartPlan 使用 Pydantic 校验，aggregation 只允许 none/sum/avg。
 - ChartAdjustRequest 增加 chart_plan、column_labels；手动切换通过 adapt_plan 适配坐标轴角色，复用原聚合口径并拒绝不存在字段。
 - src/tools/chart_presentation.py 的 resolve_language、column_labels、build_option、adapt_plan 为共用入口。generate_chart 与 /charts/adjust 均调用该构建器。
-- 重复坐标无明确聚合口径时拒绝图表并保留完整数据表；多指标默认拆分独立坐标轴，超过 8 个分面不静默截断。饼图拒绝负值与全零，散点图要求两条有效数值轴，热力图保留两条分类轴及其余维度。
+- 重复坐标无明确聚合口径时拒绝图表并保留完整数据表，口径只能由明确决策给出：分析提示词要求模型先判断是否为查询漏带区分字段（单列不唯一、组合唯一）造成，缺维度时在数据质量说明并追问、语义为合并总量时显式 aggregation=sum/avg；失败契约保留 chart_plan 与列标签，界面提供「按名称合并求和」一键重画，不引入静默默认。多指标默认拆分独立坐标轴，超过 8 个分面不静默截断。饼图拒绝负值与全零，散点图要求两条有效数值轴，热力图保留两条分类轴及其余维度。
 
 聊天请求示例（POST /chat）：
 ```json
@@ -158,3 +158,22 @@ data: {"type":"done","status":"complete"}
 - 无新增运行期临时探针，摘要默认关闭、权限和原始推理隔离不变；本轮待部署边界见 features/28-chat-presentation.md 的当前验收表，功能总数仍为 5、实现完成 5、待开发 0。
 
 脱敏证据：logs/chat-fix-live-evidence-20261009.json、logs/chat-fix-layout-evidence-20261009.json、logs/chat-fix-database-proof-20261009.json；回归/构建日志：logs/chat-fix-final-regression-20261009.log、logs/chat-fix-final-browser-20261009.log、logs/chat-fix-final-frontend-build-20261009.log。真实前端截图为 logs/chat-fix-chart-{1440,768,375}-20261009.png；高图截图可能受聊天滚动容器裁剪，不能用裁剪区域推断数据缺失。验收脚本与证据位于本地忽略目录，不记录密码、Cookie 或完整业务行集。
+
+## 重复坐标口径补充（2026-10-14）
+
+- 背景：工业演示库 t_workshop 约 120 行、多工厂存在同名车间，SQL 按车间实体分组但只选出 workshop_name，同一坐标出现多行；模型遵循默认 aggregation=none 时图表被构建器拒绝，界面只得到原始校验文案，且失败契约未保留可重画方案。
+- 改动：分析提示词第 15 条新增重复坐标决策规则（先对照 Schema 判断是否为查询漏带区分字段的「单列不唯一、组合唯一」；缺维度在 data_quality 说明并追问、有维度放 series/facets、语义为合并总量时显式 sum/avg 并在 summary 说明、否则 table）；generate_chart 失败契约保留 chart_plan/column_labels/display_language，重复坐标失败改为面向用户的原因；ChartPanel 失败空状态提供「按名称合并求和」按钮，经 /charts/adjust 显式附加 sum 口径重画，成功后类型切换沿用该口径。后端不默认求和与构建器拒绝规则不变。
+- 验证边界：新增提示词断言、失败契约单测与前端交互回归，聚焦回归统一通过；本轮未调用真实远程模型，未在测试环境做浏览器验收。
+
+## 重复坐标合并确认闸门（2026-10-14 续）
+
+- 背景：实机复现发现模型在同一请求的多轮分析中反复给出 `chart_plan.aggregation=sum`（正文却写明"不能把同名行相加"），绕过"重复坐标配 none 才拒绝"的保护后静默合并渲染；"华东制造基地"模糊匹配场景同样复现。同一问题出不出错图取决于模型采样随机性，提示词约束不足以兜底。
+- 改动：构建器 `build_option`/`_panel`/`_reduce` 新增 `allow_implicit_merge` 参数（默认 True，保持 /charts/adjust 手动重画链路行为）；generate_chart 对话链路显式传 False——同名重复坐标的合并必须经用户确认，模型自给的 sum/avg 与 none 一并转入待确认失败契约，前端「按名称合并求和」按钮确认后经 /charts/adjust 重画；提示词第 15 条收紧（缺维度分支 aggregation 必须保持 none、recommended_chart_type 用 table、禁止用 sum/avg 掩盖；合并总量口径仅限用户明确要求且无缺失区分维度；移除"重复坐标配 none 会被后端拒绝"的反向诱导，改为说明待确认是预期行为）。
+- 验证边界：新增"模型聚合口径仍需用户确认"与"唯一坐标聚合不误伤"单测、提示词断言更新；全量回归通过（排除远程模型标记）；未调用真实远程模型，浏览器验收待用户环境进行。
+
+## 合并确认闸门闭环（2026-10-14 审计轮）
+
+- 复现的绕过路径：失败契约保留了模型自给的 `chart_plan`（含 aggregation=sum）；失败面板的类型切换菜单把该方案原样提交 `/charts/adjust`（该链路 `allow_implicit_merge` 默认 True），同名坐标被静默合并渲染——未经「按名称合并求和」确认也能出合并图；同时成功后类型切换未沿用已确认口径（实现与"成功后类型切换沿用该口径"不符）。
+- 修复：`ChartPanel` 新增纯函数 `buildAdjustPlan(plan, confirmed)`——用户未确认合并时从请求方案中移除 `aggregation`（模型自给的 sum/avg 不再进入 /charts/adjust）；「按名称合并求和」成功后置确认标记，后续类型切换沿用已确认方案；重复坐标校验失败改为业务文案提示（`readAdjustError`），不向界面暴露后端术语。语义契约：/charts/adjust 请求中的显式 aggregation 即用户确认的口径；对话链路仍由 generate_chart 全程闸门拒绝任何未确认合并。
+- 回归测试：tests/test_frontend/test_chat_presentation.py 以真实 TypeScript 转译执行 `buildAdjustPlan`/`readAdjustError`（未确认移除、确认保留、其他错误原样透出）；tests/test_graph/test_generate_chart.py 新增「失败契约未经确认不能重画、显式 sum 才合并」闭环用例。
+- 残余边界：服务端未区分"用户确认"与"调用方携带口径"，直接调用 /charts/adjust 并显式给出 aggregation 视为用户口径选择（前端是唯一调用方且已保证不携带未确认口径）；如需服务端强隔离需新增确认令牌字段（schemas/路由，后续加固）。

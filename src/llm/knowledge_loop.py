@@ -417,13 +417,17 @@ def _fit_messages(messages: list[Any], budget: _LoopBudget) -> tuple[list[Any], 
     return fitted, over
 
 
-# 方法作用：解析本次调用的消息预算，显式配置优先，否则按 Prompt 预算加工具预留推导。
+# 方法作用：解析本次调用的消息预算，显式配置优先，其次本次调用的动态预算，最后回退注册上限。
 # Args: prepared - 已注册 Prompt 的调用快照；config - 当前循环配置。
 # Returns: 消息字符预算。
 def _resolve_message_budget(prepared: Any, config: KnowledgeLoopConfig) -> int:
-    """沿用 Prompt 既有 context_budget，不额外加码，也不引入新的配置项。"""
+    """spec/53 起 Prompt 注册值仅为设计上限，须优先用本次调用的动态预算收敛消息总量。"""
     if config.message_budget_chars is not None:
         return max(200, int(config.message_budget_chars))
+    # 调用快照携带的动态预算与 Prompt 层同源；缺失（旧构造方）时回退注册上限保持兼容。
+    call_budget = int(getattr(prepared, "budget_chars", 0) or 0)
+    if call_budget > 0:
+        return call_budget
     from src.llm.prompts import get_prompt_definition
 
     definition = get_prompt_definition(prepared.prompt_id)
@@ -518,6 +522,8 @@ def knowledge_tool_reserve_chars(context_budget: int) -> int:
 
             identity = get_current_identity()
         except Exception:
+            # 无请求上下文属预期路径（后台任务），保留堆栈便于区分真实故障。
+            logger.debug("知识工具身份解析失败，按无预留处理", exc_info=True)
             return 0
     from src.tools.knowledge_search import is_trusted_identity
 

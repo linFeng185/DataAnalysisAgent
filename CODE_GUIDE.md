@@ -143,7 +143,7 @@ POST /api/v1/chat {"query": "本月 GMV 排名？", "stream": true}
 | `nodes/multi_source.py` | 契约化多源 worker、并行执行、维度/指标列对齐和来源失败隔离 |
 | `nodes/analyze_result.py` | 确定性统计处理器 + 证据化业务关联、影响、原因假设和行动建议分析 |
 | `nodes/supplemental_query.py` | 证据不足时在当前权限内复用完整 SQL 安全链补查，并把脱敏证据回注分析节点 |
-| `nodes/generate_chart.py` | 按行数与列语义确定图表资格，输出成功、不适用、失败或核心数值契约 |
+| `nodes/generate_chart.py` | 按行数与列语义确定图表资格，输出成功、不适用、失败（保留可重画方案与列标签）或核心数值契约 |
 | `nodes/build_response.py` | 响应组装、最终 SQL 列表 + 轻量 checkpoint 历史 + 富结果持久化 |
 
 ### ③ `src/llm/` — LLM 调用层
@@ -213,7 +213,7 @@ POST /api/v1/chat {"query": "本月 GMV 排名？", "stream": true}
 |------|------|
 | `tools/knowledge_search.py` | 只读知识检索工具：`KnowledgeSearchArgs`（extra=forbid）、身份复核、数据源白名单+授权、未绑定下推、状态化返回（ok/empty/invalid_arguments/forbidden/timeout/unavailable/budget_exhausted）与受限引用 |
 | `tools/analyzer.py` | 描述性统计/趋势/Z-score 异常/集中度/Pearson 相关 |
-| `tools/chart_presentation.py` | 受约束 ChartPlan、语言与字段标签、六类展示共用构建器、类型切换角色适配；日期主轴、额外维度分组/分面、重复坐标显式聚合、缺失 null 连线 |
+| `tools/chart_presentation.py` | 受约束 ChartPlan、语言与字段标签、六类展示共用构建器、类型切换角色适配；日期主轴、额外维度分组/分面、重复坐标合并需用户确认（对话链路拒绝未经确认的隐式聚合，手动重画链路显式放行）、缺失 null 连线 |
 | `tools/touchpoint_attribution.py` | 路径字段映射与资格复核；首次、末次、线性、时间衰减和 U 型归因的 Decimal 守恒计算 |
 | `tools/forecasting.py` | naive/线性预测、rolling backtest、预测区间和模型卡 |
 | `tools/forecast_engine.py` | ForecastRequest、可注册 ForecastModel、滚动回测和统一 ForecastResult |
@@ -283,7 +283,7 @@ checksum。执行器同时兼容历史 LF/CRLF 登记值，避免 Git 跨平台�
 
 ## 前端
 
-对话结果按图表/核心数值→数据详情→分析正文展示。`frontend/src/hooks/chatPresentation.ts` 只接收公开 answer_delta/answer_reset，并隔离并行和旧轮次；`useChat.ts` 将 data/chart/analysis_patch 写回部分结果，不等待 final 才渲染。`api/client.ts` 完整处理 UTF-8 分片，仅 done(status=complete) 为成功，提前断流按错误处理。`DataTable` 分离展示标签与原始键；`ChartPanel` 切换时保留 chart_plan 与 column_labels。缺失值保持 null，折线 connectNulls=true，不补零或插值。
+对话结果按图表/核心数值→数据详情→分析正文展示。`frontend/src/hooks/chatPresentation.ts` 只接收公开 answer_delta/answer_reset，并隔离并行和旧轮次；`useChat.ts` 将 data/chart/analysis_patch 写回部分结果，不等待 final 才渲染。`api/client.ts` 完整处理 UTF-8 分片，仅 done(status=complete) 为成功，提前断流按错误处理。`DataTable` 分离展示标签与原始键；`ChartPanel` 切换时保留 chart_plan 与 column_labels；重复坐标构建失败时保留方案并提供「按名称合并求和」一键重画，模型自给的聚合口径不能绕过该确认。缺失值保持 null，折线 connectNulls=true，不补零或插值。
 
 `frontend/src/components/chatChartLayout.ts` 是聊天图表共用的纯响应式布局模块：`ChartPanel` 通过 `ResizeObserver` 观察实际容器，再独立调整多面板高度、窄屏紧凑刻度、标题/图例及饼图/热力色阶位置，不修改原选项、业务数据、分类、null 或坐标索引。紧凑刻度采用结果展示语言，提示框仍保留精确原值；移动样式不再覆盖计算高度。非流式 `/chat` 与公开最终结果保持相同的顶层语言、字段标签及摘要开关契约。
 

@@ -93,10 +93,15 @@ Prompt 的强度通过上下文完备度、结构化输出、代码层校验和�
 2. `PromptDefinition.render()` 负责模板变量完整性检查，并统一前置系统安全策略和请求能力边界。
 3. 每个 LLM 任务优先绑定 `src/llm/output_contracts.py` 中的 Pydantic 输出模型；业务节点只消费契约字段，
    未知字段不得进入状态、响应或历史。兼容旧模型纯文本只能走显式回退并记录日志。
-4. `context_budget` 以字符数声明单次 Prompt 的统一总预算，计入固定 System Prompt、动态 Skill 指令和
-   Human 上下文。固定安全策略不可截断；若固定 System Prompt 自身超限，必须在调用模型前失败。
+4. `context_budget` 以字符数声明单次 Prompt 的**设计上限**；实际预算按超管配置的模型上下文窗口
+   动态推导（`resolve_dynamic_budget`：min(设计上限, max(全局下限, 可用输入 token × 换算系数))，
+   见 `spec/53-prompt-budget-model-window.md`）。固定安全策略不可截断；若固定 System Prompt 自身
+   超过最终预算，必须在调用模型前失败。
 5. 动态上下文使用统一 `PromptSection` 分配器，按优先级、最低保留量和单节上限裁剪。用户当前问题、
    重试错误和 Schema 优先于业务知识、示例及历史；任何节点不得在预算器之后继续拼接未计量文本。
+   数据段不得对序列化 JSON 做字符级腰斩；模型可见数据量由数据层行级采样单阀门决定（spec/53 第五节）。
+   知识工具循环等后续追加的模型可见消息同样以本次调用的动态预算为总量上限
+   （`PreparedInvocation.budget_chars`，见 spec/53 第十三节）。
 6. 预算日志只记录 Prompt ID、总字符数和被截断的 section 名称，不记录 Prompt 正文、凭证或模型推理。
 
 ---
