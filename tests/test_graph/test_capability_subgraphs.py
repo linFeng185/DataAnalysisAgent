@@ -106,68 +106,95 @@ class TestCapabilityExecution:
         assert artifact["kind"] == "forecast"
         assert artifact["data"]["model_card"]["leakage_check"] == "passed"
 
-    async def test_market_research_subgraph_preserves_failure_and_limitations(self, monkeypatch) -> None:
-        """市场研究应保留工具真实成败，并声明只使用当前授权证据。"""
+    # 方法作用：验证市场研究保留真实搜索证据并声明未抓取网页正文。
+    # Args: self - pytest 测试类实例；monkeypatch - pytest 补丁工具。
+    # Returns: 无返回值，断言失败时由 pytest 报告。
+    async def test_market_research_preserves_real_evidence_and_limitations(self, monkeypatch) -> None:
+        """显式联网的市场研究应保留真实来源引用，并声明只基于搜索摘要。"""
         # Arrange
-        import src.graph.subgraphs.market_research as module
+        from datetime import datetime, timezone
+        from types import SimpleNamespace
 
-        monkeypatch.setattr(
-            module,
-            "mcp_agent_node",
-            AsyncMock(return_value={
-                "final_response": {
-                    "success": True,
-                    "status": "success",
-                    "source": "mcp_agent",
-                    "analysis": {
-                        "summary": "研究完成",
-                        "citations": [{"source_id": "source-1", "locator": {"url": "https://example.com"}}],
-                    },
-                },
-                "analysis_result": {
-                    "summary": "研究完成",
-                    "citations": [{"source_id": "source-1", "locator": {"url": "https://example.com"}}],
-                },
-            }),
+        import src.graph.subgraphs.market_research as module
+        import src.llm.client as client_module
+        from src.api.auth import use_identity_context
+        from src.security.tenant_policy import RequestIdentity
+
+        hit = SimpleNamespace(
+            source_id="web:1",
+            url="https://example.com/report",
+            title="行业报告",
+            snippet="行业摘要",
+            provider="public_search",
+            retrieved_at=datetime(2026, 10, 14, tzinfo=timezone.utc),
         )
+        service = SimpleNamespace(
+            is_explicit_web_search=lambda query: True,
+            search_public_web=AsyncMock(return_value=SimpleNamespace(
+                success=True, hits=[hit], error_code="", truncated=False,
+            )),
+        )
+        model = SimpleNamespace(
+            with_config=lambda *args, **kwargs: model,
+            ainvoke=AsyncMock(return_value=SimpleNamespace(content='{"summary": "研究完成"}')),
+        )
+        monkeypatch.setattr(module, "_web_search_enabled", lambda: True)
+        monkeypatch.setattr(module, "_load_search_service", lambda: service)
+        monkeypatch.setattr(client_module, "is_task_llm_available", lambda task: True)
+        monkeypatch.setattr(client_module, "get_task_llm", lambda *args, **kwargs: model)
 
         # Act
-        result = await module.market_research_node({"user_query": "竞品研究"})
+        with use_identity_context(RequestIdentity(tenant_id=1, user_id=5, role="user")):
+            result = await module.market_research_node({
+                "user_query": "联网搜索竞品动态",
+                "tenant_id": 1,
+                "user_id": 5,
+            })
 
         # Assert
         assert result["final_response"]["source"] == "market_research"
         assert result["final_response"]["success"] is True
-        assert "授权" in result["analysis_result"]["limitations"][0]
+        assert result["analysis_result"]["citations"][0]["source_id"] == "web:1"
+        assert "未抓取网页正文" in "；".join(result["analysis_result"]["limitations"])
 
-    # 方法作用：验证市场研究没有可追溯引用时失败关闭。
+    # 方法作用：验证市场研究没有可追溯引用时失败关闭且不调用模型。
     # Args: self - pytest 测试类实例；monkeypatch - pytest 补丁工具。
     # Returns: 无返回值，断言失败时由 pytest 报告。
     async def test_market_research_rejects_success_without_citations(self, monkeypatch) -> None:
         """模型摘要不能在没有真实外部证据引用时伪装成研究成功。"""
         # Arrange
-        import src.graph.subgraphs.market_research as module
+        from types import SimpleNamespace
 
-        monkeypatch.setattr(
-            module,
-            "mcp_agent_node",
-            AsyncMock(return_value={
-                "final_response": {
-                    "success": True,
-                    "status": "success",
-                    "source": "mcp_agent",
-                    "analysis": {"summary": "无来源研究"},
-                },
-                "analysis_result": {"summary": "无来源研究"},
-            }),
+        import src.graph.subgraphs.market_research as module
+        import src.llm.client as client_module
+        from src.api.auth import use_identity_context
+        from src.security.tenant_policy import RequestIdentity
+
+        service = SimpleNamespace(
+            is_explicit_web_search=lambda query: True,
+            search_public_web=AsyncMock(return_value=SimpleNamespace(
+                success=True, hits=[], error_code="", truncated=False,
+            )),
         )
+        get_llm = MagicMock()
+        monkeypatch.setattr(module, "_web_search_enabled", lambda: True)
+        monkeypatch.setattr(module, "_load_search_service", lambda: service)
+        monkeypatch.setattr(client_module, "is_task_llm_available", lambda task: True)
+        monkeypatch.setattr(client_module, "get_task_llm", get_llm)
 
         # Act
-        result = await module.market_research_node({"user_query": "竞品研究"})
+        with use_identity_context(RequestIdentity(tenant_id=1, user_id=5, role="user")):
+            result = await module.market_research_node({
+                "user_query": "联网搜索竞品动态",
+                "tenant_id": 1,
+                "user_id": 5,
+            })
 
         # Assert
         assert result["final_response"]["success"] is False
         assert result["final_response"]["status"] == "failed"
         assert result["final_response"]["error_code"] == "MARKET_RESEARCH_EVIDENCE_MISSING"
+        get_llm.assert_not_called()
 
     # 方法作用：验证市场研究没有授权工具时不调用模型生成无证据答案。
     # Args: self - pytest 测试类实例；monkeypatch - pytest 补丁工具。

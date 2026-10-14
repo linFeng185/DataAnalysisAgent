@@ -240,6 +240,20 @@ class TextAnswerOutput(StrictOutputModel):
     answer: str = ""
 
 
+class WebResearchOutput(StrictOutputModel):
+    """联网研究摘要输出：引用由服务端从真实搜索结果注入，模型只总结给定证据。
+
+    契约里没有 citations 字段：模型自报的来源一律不采信，也不允许模型把
+    搜索摘要描述成网页正文。
+    """
+
+    summary: str = ""
+    # 展示字段不设硬上限：模型多写几项只应被截断，不能让整次摘要退化为兜底。
+    # 条数与单项长度由消费方（market_research 节点）按展示预算收敛。
+    insights: list[str] = Field(default_factory=list)
+    limitations: list[str] = Field(default_factory=list)
+
+
 class ImageAnalysisOutput(StrictOutputModel):
     """视觉识别只输出有界文字观察，不生成可执行动作。"""
 

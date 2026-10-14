@@ -212,3 +212,138 @@ class TestSqlProfilingConfig:
                 exc_info=True,
             )
             raise
+
+
+class TestWebSearchSettings:
+    """覆盖功能 32.1：受控联网搜索配置字段（spec/58 §2）。"""
+
+    _FIELDS = (
+        "web_search_enabled",
+        "web_search_mcp_tools",
+        "web_search_timeout_seconds",
+        "web_search_max_results",
+        "web_search_max_response_chars",
+        "web_search_max_query_chars",
+    )
+
+    # 方法作用：验证六个联网搜索配置字段的默认值与设计一致。
+    # Args: self - 测试实例。
+    # Returns: 无返回值，默认值不符时断言失败。
+    def test_defaults_match_design(self) -> None:
+        """默认关闭是安全边界：任何默认值漂移都可能造成隐式外送。"""
+        logger.debug("test_defaults_match_design 入口")
+        try:
+            # Arrange / Act
+            settings = Settings()
+
+            # Assert
+            assert settings.web_search_enabled is False
+            assert settings.web_search_mcp_tools == ""
+            assert settings.web_search_timeout_seconds == 10.0
+            assert settings.web_search_max_results == 8
+            assert settings.web_search_max_response_chars == 20_000
+            assert settings.web_search_max_query_chars == 256
+            logger.info("test_defaults_match_design 完成")
+        except Exception as exc:
+            logger.error("test_defaults_match_design 异常", extra={"error": str(exc)}, exc_info=True)
+            raise
+
+    # 方法作用：验证各数值字段接受区间端点并拒绝越界值。
+    # Args: self - 测试实例；field - 字段名；bounds - (下界, 上界) 元组。
+    # Returns: 无返回值，边界行为不符时断言失败。
+    @pytest.mark.parametrize(
+        ("field", "bounds"),
+        [
+            ("web_search_timeout_seconds", (0.1, 60.0)),
+            ("web_search_max_results", (1, 20)),
+            ("web_search_max_response_chars", (1_000, 64_000)),
+            ("web_search_max_query_chars", (16, 2_000)),
+        ],
+    )
+    def test_numeric_bounds(self, field: str, bounds: tuple) -> None:
+        """区间端点是合法配置，越界值必须在启动校验即被拒绝。"""
+        logger.debug("test_numeric_bounds 入口", extra={"field": field})
+        try:
+            # Arrange
+            low, high = bounds
+
+            # Act / Assert
+            assert getattr(Settings(**{field: low}), field) == low
+            assert getattr(Settings(**{field: high}), field) == high
+            for bad in (low - 1, high + 1):
+                with pytest.raises(ValidationError):
+                    Settings(**{field: bad})
+            logger.info("test_numeric_bounds 完成", extra={"field": field})
+        except Exception as exc:
+            logger.error("test_numeric_bounds 异常", extra={"field": field, "error": str(exc)}, exc_info=True)
+            raise
+
+    # 方法作用：验证六个字段全部进入运行期热更新白名单。
+    # Args: self - 测试实例。
+    # Returns: 无返回值，缺失字段时断言失败。
+    def test_live_fields_include_web_search_controls(self) -> None:
+        """设计约定字段写入 LIVE_FIELDS，否则管理台改不动联网搜索开关。"""
+        logger.debug("test_live_fields_include_web_search_controls 入口")
+        try:
+            # Arrange
+            from src.runtime.settings import LIVE_FIELDS
+
+            # Act
+            missing = [name for name in self._FIELDS if name not in LIVE_FIELDS]
+
+            # Assert
+            assert missing == [], f"以下联网搜索字段未进入热更新白名单：{missing}"
+            logger.info("test_live_fields_include_web_search_controls 完成")
+        except Exception as exc:
+            logger.error("test_live_fields_include_web_search_controls 异常", extra={"error": str(exc)}, exc_info=True)
+            raise
+
+    # 方法作用：验证热更新合并接受合法联网搜索覆盖并拒绝越界覆盖。
+    # Args: self - 测试实例。
+    # Returns: 无返回值，合并行为不符时断言失败。
+    def test_runtime_merge_accepts_valid_web_search_overrides(self) -> None:
+        """热配置必须沿用启动同等约束，不得绕过区间校验。"""
+        logger.debug("test_runtime_merge_accepts_valid_web_search_overrides 入口")
+        try:
+            # Arrange
+            from src.runtime.settings import merge_settings
+
+            base = Settings()
+
+            # Act
+            merged = merge_settings(
+                base,
+                {"web_search_enabled": True, "web_search_max_results": 12},
+            )
+
+            # Assert
+            assert merged.web_search_enabled is True
+            assert merged.web_search_max_results == 12
+            with pytest.raises(ValueError):
+                merge_settings(base, {"web_search_max_results": 21})
+            with pytest.raises(ValueError):
+                merge_settings(base, {"web_search_timeout_seconds": 0})
+            logger.info("test_runtime_merge_accepts_valid_web_search_overrides 完成")
+        except Exception as exc:
+            logger.error("test_runtime_merge_accepts_valid_web_search_overrides 异常", extra={"error": str(exc)}, exc_info=True)
+            raise
+
+    # 方法作用：验证配置模板逐项声明联网搜索字段（含注释守卫可解析）。
+    # Args: self - 测试实例。
+    # Returns: 无返回值，模板缺键时断言失败。
+    def test_example_yaml_declares_web_search_fields(self) -> None:
+        """模板缺键会让部署方不知道如何开启受控联网。"""
+        logger.debug("test_example_yaml_declares_web_search_fields 入口")
+        try:
+            # Arrange
+            values = TestConfigFileConstraints._load(_CONFIG_FILES["app.example.yaml"])
+
+            # Act
+            missing = [name for name in self._FIELDS if name not in values]
+
+            # Assert
+            assert missing == [], f"config/app.example.yaml 缺少字段：{missing}"
+            logger.info("test_example_yaml_declares_web_search_fields 完成")
+        except Exception as exc:
+            logger.error("test_example_yaml_declares_web_search_fields 异常", extra={"error": str(exc)}, exc_info=True)
+            raise

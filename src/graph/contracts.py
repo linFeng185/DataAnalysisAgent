@@ -326,7 +326,12 @@ def build_task_plan(
         capability: TaskCapability = "memory_update"
     elif normalized_intent == "file_analysis":
         capability = "file_analysis"
-    elif any(marker in normalized_query for marker in ("市场研究", "行业研究", "竞品研究", "联网调研")):
+    elif any(marker in normalized_query for marker in (
+        "市场研究", "行业研究", "竞品研究", "联网调研",
+        # 显式联网关键词同样路由到市场研究子图；是否真正外送由子图按显式意图复核，
+        # 没有这些关键词的市场研究问法只得到「需明确联网」的说明（spec/58 第 4 节）。
+        "联网搜索", "网上搜索", "搜索网页", "web search", "search the web",
+    )):
         capability = "market_research"
     elif any(marker in normalized_query for marker in ("预测", "forecast")):
         capability = "forecast"

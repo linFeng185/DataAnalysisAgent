@@ -489,6 +489,20 @@ class Settings(BaseSettings):
     mcp_remote_host_allowlist: str = ""
     """数据库受管 SSE MCP 的精确主机 allowlist，逗号分隔。"""
 
+    # ---- 受控联网搜索（spec/58）----
+    web_search_enabled: bool = False
+    """总开关，关闭后零搜索、零新增模型调用。"""
+    web_search_mcp_tools: str = ""
+    """精确完整工具名白名单（namespace__tool），逗号分隔；禁止通配符和服务级全选。"""
+    web_search_timeout_seconds: float = Field(default=10.0, ge=0.1, le=60.0)
+    """单请求搜索工具调用总等待上限秒数。"""
+    web_search_max_results: int = Field(default=8, ge=1, le=20)
+    """单次搜索最多采纳的引用条目数，超出截断并标注 truncated。"""
+    web_search_max_response_chars: int = Field(default=20_000, ge=1_000, le=64_000)
+    """搜索工具原始响应最大字符数，超限拒绝解析。"""
+    web_search_max_query_chars: int = Field(default=256, ge=16, le=2_000)
+    """联网搜索问题最大字符数，超限拒绝，不截断用户意图。"""
+
     # ---- Skills ----
     skills_dir: str = "skills"
     """内置 Skills 目录（始终加载，不会被环境变量覆盖）。"""

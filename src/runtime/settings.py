@@ -18,7 +18,7 @@ LIVE_FIELDS = frozenset(
     if name.startswith((
         "max_", "context_", "attribution_", "analysis_data_", "prompt_budget_",
         # SQL 画像/探查与键列判断全是无状态预算项，热改后下一次请求即生效。
-        "sql_profiling_", "sql_probe_", "schema_key_detection_",
+        "sql_profiling_", "sql_probe_", "schema_key_detection_", "web_search_",
     ))
     or name in {
         "login_max_per_hour", "login_lockout_threshold", "login_lockout_minutes",
