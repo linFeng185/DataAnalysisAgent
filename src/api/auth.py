@@ -445,6 +445,14 @@ def _unauthorized(detail: str) -> JSONResponse:
     return response
 
 
+# 方法作用：构造认证依赖暂不可用的 503 响应（不视为登录失效、不清 Cookie）。
+# Args: detail - 面向调用方的通用说明。
+# Returns: HTTP 503 JSON 响应。
+def _service_unavailable(detail: str) -> JSONResponse:
+    """身份库暂不可验时拒闭但不下发删 Cookie 头，保留浏览器会话。"""
+    return JSONResponse({"detail": detail}, status_code=503)
+
+
 # ── Pydantic 模型 ──
 
 class LoginRequest(BaseModel):
@@ -829,12 +837,12 @@ class AuthMiddleware:
 
     # 方法作用：验证管理 Key 和 JWT，并返回身份或拒绝响应。
     # Args: request - 当前 HTTP 请求。
-    # Returns: 公开请求返回空身份；拒绝时返回 401；成功时返回身份元组。
+    # Returns: 公开请求返回空身份；身份拒绝返回 401，身份库暂不可验返回 503；成功返回身份元组。
     async def _authenticate_request(
         self,
         request: Request,
     ) -> tuple[AuthIdentity | None, JSONResponse | None]:
-        """执行不消费请求体的认证决策并复核数据库当前身份。"""
+        """执行不消费请求体的认证决策并复核数据库当前身份；身份库故障统一 503。"""
         from src.security.api_access_policy import AuthMode
 
         logger.debug("认证决策入口", path=request.url.path, method=request.method)
@@ -915,15 +923,16 @@ class AuthMiddleware:
         if str(getattr(settings, "database_url", "") or "").strip():
             try:
                 current_identity = await self._load_current_identity(identity[0])
+            except asyncio.CancelledError:
+                raise
             except Exception as exc:
                 logger.error(
                     "JWT 当前身份复核失败",
                     user_id=identity[0],
-                    error=str(exc),
+                    error_type=type(exc).__name__,
                     exc_info=True,
                 )
-                if getattr(settings, "env", "prod") == "prod":
-                    return None, _unauthorized("认证服务暂不可用")
+                return None, _service_unavailable("认证服务暂不可用")
             else:
                 if current_identity is None or current_identity != identity:
                     logger.warning(
