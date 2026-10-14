@@ -32,4 +32,7 @@
 | [26-sql-schema-validation.md](26-sql-schema-validation.md) | SQL Schema 校验层（生成后 · 打库前） | 动态 |
 | [27-autonomous-knowledge-retrieval.md](27-autonomous-knowledge-retrieval.md) | 自主知识检索、统一工具循环、流式及安全验收 | 动态 |
 | [28-chat-presentation.md](28-chat-presentation.md) | 对话分析呈现、管理员过程摘要、真实流式与图表语义 | 动态 |
+| [29-sql-profiling.md](29-sql-profiling.md) | 有界 SQL 画像与结构化探查服务 | 动态 |
+| [30-sql-key-detection.md](30-sql-key-detection.md) | 键列判断与聊天 SQL 生成接入 | 动态 |
+| [31-sql-probe-loop.md](31-sql-probe-loop.md) | 探查工具循环、安全回退与验收 | 动态 |
 | [99-summary.md](99-summary.md) | 附录 | 145 行 |
