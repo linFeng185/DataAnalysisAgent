@@ -126,3 +126,89 @@ class TestConfigFileConstraints:
         except Exception as exc:
             logger.error("test_quota_static_max_matches_config_ceiling 异常", extra={"error": str(exc)}, exc_info=True)
             raise
+
+
+class TestSqlProfilingConfig:
+    """覆盖 spec/55 §9 的画像/探查配置：总开关、字段边界与热改白名单。"""
+
+    # 画像/探查全部 16 项的合法热改值，用于白名单与生效断言。
+    _SQL_INTELLIGENCE_VALUES: dict = {
+        "sql_profiling_enabled": False,
+        "sql_profiling_max_tables": 3,
+        "sql_profiling_max_columns_per_table": 4,
+        "sql_profiling_sample_rows": 500,
+        "sql_profiling_full_scan_row_limit": 10_000,
+        "sql_profiling_ttl_seconds": 60.0,
+        "sql_profiling_cache_entries": 16,
+        "sql_profiling_max_queries": 2,
+        "sql_profiling_timeout_seconds": 1.5,
+        "sql_profiling_total_seconds": 4.0,
+        "schema_key_detection_enabled": False,
+        "schema_key_detection_max_tokens": 256,
+        "schema_key_detection_timeout_seconds": 1.0,
+        "sql_probe_max_calls": 1,
+        "sql_probe_timeout_seconds": 1.0,
+        "sql_probe_limit": 10,
+    }
+
+    # 方法作用：验证画像/探查配置全部进入热改白名单且覆盖值逐一生效。
+    # Args: self - 测试实例。
+    # Returns: 无返回值，白名单缺失或字段被拒绝时断言失败。
+    def test_sql_intelligence_fields_are_live_and_applied(self) -> None:
+        """白名单缺失会让管理后台无法调整画像预算，只能改文件并重启。"""
+        logger.debug("test_sql_intelligence_fields_are_live_and_applied 入口")
+        try:
+            # Arrange
+            from src.runtime.settings import LIVE_FIELDS, merge_settings
+
+            base = Settings(_env_file=None)
+
+            # Assert：白名单完整，且合法覆盖逐一在合并快照中生效
+            assert set(self._SQL_INTELLIGENCE_VALUES) <= LIVE_FIELDS
+            merged = merge_settings(base, self._SQL_INTELLIGENCE_VALUES)
+            for name, value in self._SQL_INTELLIGENCE_VALUES.items():
+                assert getattr(merged, name) == value, f"{name} 热改未生效"
+            # 总开关默认开启：关闭必须显式配置
+            assert Settings(_env_file=None).sql_profiling_enabled is True
+            logger.info(
+                "test_sql_intelligence_fields_are_live_and_applied 完成",
+                extra={"field_count": len(self._SQL_INTELLIGENCE_VALUES)},
+            )
+        except Exception as exc:
+            logger.error(
+                "test_sql_intelligence_fields_are_live_and_applied 异常",
+                extra={"error": str(exc)},
+                exc_info=True,
+            )
+            raise
+
+    # 方法作用：验证零值/越界预算在配置合并阶段直接被拒绝。
+    # Args: self - 测试实例；values - 非法覆盖。
+    # Returns: 无返回值，未拒绝时断言失败。
+    @pytest.mark.parametrize("values", [
+        {"sql_probe_limit": 0},
+        {"sql_profiling_max_tables": 0},
+        {"sql_profiling_sample_rows": 0},
+        {"sql_profiling_timeout_seconds": 0},
+        {"sql_profiling_max_columns_per_table": 0},
+        {"schema_key_detection_max_tokens": 1},
+        {"sql_probe_max_calls": 0},
+    ])
+    def test_sql_intelligence_rejects_out_of_range(self, values: dict) -> None:
+        """零值/超界预算必须在写入前拒绝，不能等到采样时爆预算。"""
+        logger.debug("test_sql_intelligence_rejects_out_of_range 入口", extra={"values": values})
+        try:
+            # Arrange
+            from src.runtime.settings import merge_settings
+
+            # Act + Assert
+            with pytest.raises(ValueError):
+                merge_settings(Settings(_env_file=None), values)
+            logger.info("test_sql_intelligence_rejects_out_of_range 完成", extra={"values": values})
+        except Exception as exc:
+            logger.error(
+                "test_sql_intelligence_rejects_out_of_range 异常",
+                extra={"error": str(exc)},
+                exc_info=True,
+            )
+            raise

@@ -19,8 +19,10 @@ LLM 驱动的数据分析智能体。用自然语言提问，自动完成：轮�
 │   │   └── nodes/           状态准备、SQL 主链、直接回答与多源节点
 │   │   └── subgraphs/       SQL 复用、结果展示及文件/研究/预测/报告/动作能力子图
 │   ├── llm/              ③ LLM 调用层 — Provider 注册表 + 租户连接选择 + 适配器 + 版本化 Prompt
+│   │   ├── schema_keys.py    授权结构的键列候选判断与确定性回退
 │   │   └── adapters/         模型适配器
 │   ├── datasource/       ④ 数据源管理 — 注册/发现/Schema/凭证加密
+│   │   ├── profiling.py      有界列画像、身份与行列策略复核、请求内探查预算
 │   │   └── providers/        数据源提供者
 │   ├── connectors/       ⑤ 数据库连接器 — 自注册方言与统一运行时策略
 │   │   ├── plugins.py       可信 entry point 热发现、目录元数据与新执行撤权
@@ -34,6 +36,7 @@ LLM 驱动的数据分析智能体。用自然语言提问，自动完成：轮�
 │   ├── memory/           ⑦ 记忆系统 — 会话持久化 + 上下文裁剪 + 历史 + 成功 SQL 自进化
 │   ├── automation/       ⑧ 主动洞察与定时报告 — PG 调度 + 重授权执行 + 通知分发
 │   ├── tools/            ⑨ 分析工具 — 统计、预测与跨资产分析
+│   │   └── data_probe.py     仅 SQL 生成可用的五种结构化探查原语
 │   ├── optimization/     ⑨.1 确定性 SQL 优化建议核心，不执行 DDL
 │   ├── market/           ⑩ 行情 Provider 与 PostgreSQL 持久化（当前 Tushare/A 股）
 │   ├── actions/          ⑪ 受控外部动作（人工确认、幂等、审计）
@@ -80,7 +83,7 @@ POST /api/v1/chat {"query": "本月 GMV 排名？", "stream": true}
   │    ├─ 文件分析 / 市场研究 / 外部动作 → 对应独立子图
   ├─ restore_previous_result  仅 meta 且数据源一致时从 HistoryStore 恢复上轮富结果
   ├─ retrieve_schema     SchemaManager 三级回退 → 表结构 + 知识上下文 + Skill 精确激活
-  ├─ generate_sql        LLM 生成 SQL（对话历史注入 + 重试上下文 + Pydantic 契约）
+  ├─ generate_sql        聊天可启用键列判断 → 有界画像 → 受控探查 → LLM SQL；共享对话历史、重试上下文和 Pydantic 契约
   ├─ layer3_validate     委托统一 SQL 服务做 AST 只读安全校验 + 列引用归属校验（两阶段取数：先 relevant_tables 零 IO，出现 high 置信问题或阶段一无基准时才用权威全量快照复核）
   ├─ layer4_explain      统一 SQL 服务按 Registry 权威方言执行 EXPLAIN
   ├─ execute_sql         统一有界执行（权限 / 限流 / 脱敏 / 审计）
@@ -152,6 +155,10 @@ POST /api/v1/chat {"query": "本月 GMV 排名？", "stream": true}
 `knowledge_loop.py`（统一有界知识检索工具循环）+ `client.py`（兼容工厂 + local/remote/none 任务路由）+ `provider_registry.py`（协议别名与 Provider 注册）+ `tenant_config.py`（租户命名连接、默认值、凭证解密、模型能力和请求级推理 ContextVar）+ `capability_schema.py`（厂商动态能力表单和值校验）+ `invocation.py`（统一调用出口）+ `adapters/` + `prompts.py` + `prompt_budget.py` + `output_contracts.py`。`routes/llm_admin.py` 由 super_admin 维护、启停和物理删除厂商/模型目录，由 tenant_admin 维护当前租户连接和默认值；Chat/SSE 入口解析 `llm_connection_id + model_id + reasoning_enabled + reasoning_effort` 后绑定请求上下文，未配置租户连接时失败关闭，不再回退全局凭证。DeepSeek V4 Pro/Flash Adapter 统一映射 thinking、high/max 和 reasoning_content 工具链回传，原始推理不进入公开响应或历史。Prompt 通过稳定 ID/多版本注册，支持激活和回滚；System 与动态上下文共享字符预算，所有业务调用统一附加 Prompt/任务追踪 metadata，节点输出优先由 Pydantic 校验；远程模型凭证和模型选择统一来自租户管理后台，轻量节点优先 `LOCAL_LLM_*`。
 
 ### ④ `src/datasource/` — 数据源管理
+
+`profiling.py` 是聊天 SQL 智能的数据边界：在查询及缓存读取前复核当前身份和最新数据源权限，将捕获策略与当前行列策略取交集。每张表仅做一次有界投影采样，默认最多 6 表、每表 6 列、2000 行，查询与总耗时分别受限；无法安全取消的驱动降级。统计严格区分完整可见数据与样本，常量列不是唯一键，样本无重复也不能证明总体唯一。缓存按身份、结构、有效权限与采样配置隔离。
+
+聊天入口通过服务端 `enable_sql_intelligence` 标记启用这条路径，报表和普通后台调用默认关闭。`llm/schema_keys.py` 仅向 `schema.keys` 发送已授权结构，模型失败使用确定性候选；候选只保护已授权列。`tools/data_probe.py` 只向 `sql.generate` 暴露五种固定原语，执行期再次授权，最多调用 3 次，不接受自由 SQL。`llm/knowledge_loop.py` 按工具自身参数契约校验知识与探查调用，分别计算额度并预留真实工具定义和结果预算。画像与探查结果只留在本次调用，不写入 checkpoint、历史或 SSE。接口及验收边界见 `spec/55-sql-profiling-and-probing.md`。
 
 `transfer.py` 定义带版本的 JSON 迁移契约与凭证过滤；数据源管理页提供导入/导出及逐源同步状态。Provider 的 `import_configs()` 使用单事务新增配置与权限，提交后发布内存状态，重名时按 6 位 base36 随机后缀改名并在响应回传映射，不做静默覆盖。启动只恢复 `datasource_configs`，不再从 YAML/环境变量/ORM 自动发现或注册演示库；`setup.py` 仅保留测试辅助用途。表结构页面只读，认证等待和普通 API 均有有界超时，详见 `spec/37-runtime-platform-and-ui.md`。
 

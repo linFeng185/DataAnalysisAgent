@@ -450,13 +450,21 @@ async def chat(req: ChatRequest):
             error=str(exc),
             exc_info=True,
         )
+    # SQL 智能标记只由服务端聊天入口写入，请求正文无法覆写；报表入口不带该标记。
     from src.api.auth import (
         get_current_role,
         get_current_tenant_id,
         get_current_user_id,
         scope_thread_id,
     )
-    cfg = {"configurable": {"thread_id": scope_thread_id(sid)}}
+    from src.llm.schema_keys import SQL_INTELLIGENCE_CONFIG_KEY
+
+    cfg = {
+        "configurable": {
+            "thread_id": scope_thread_id(sid),
+            SQL_INTELLIGENCE_CONFIG_KEY: True,
+        },
+    }
     # 非流式入口与 SSE 使用同一套知识检索范围，显式选源时收窄白名单。
     from src.llm.knowledge_loop import use_request_knowledge_scope
     from src.llm.tenant_config import use_tenant_llm_selection

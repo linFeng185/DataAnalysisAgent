@@ -199,7 +199,16 @@ async def stream_analysis(user_query: str, datasource: str, session_id: str = ""
             frozenset(datasource_access) if selected_datasources else None
         ),
     )
-    config = {"configurable": {"thread_id": scope_thread_id(effective_id)}}
+    # SQL 智能标记只由服务端聊天流式入口写入，请求正文无法覆写；
+    # 报表等其他工作流调用不写该标记，行为保持关闭。
+    from src.llm.schema_keys import SQL_INTELLIGENCE_CONFIG_KEY
+
+    config = {
+        "configurable": {
+            "thread_id": scope_thread_id(effective_id),
+            SQL_INTELLIGENCE_CONFIG_KEY: True,
+        },
+    }
     is_new = not session_id
     if is_new:
         logger.info("新会话", session_id=effective_id[:20])

@@ -161,6 +161,73 @@ class IndicatorCatalogReviewOutput(StrictOutputModel):
     indicators: list[IndicatorReviewItem] = Field(default_factory=list)
 
 
+# 方法作用：把模型给出的列名列表归一为去空白、去重、限长的字符串列表。
+# Args: value - 模型给出的原始列表值。
+# Returns: 最多 64 项的非空列名列表。
+def _clip_name_list(value: Any) -> list[str]:
+    """键列判断是结构候选：越界只裁剪，绝不让一个超长字段拖垮整表判断。"""
+    if value is None:
+        return []
+    if isinstance(value, str):
+        value = [value]
+    try:
+        items = list(value)
+    except TypeError:
+        return []
+    return list(dict.fromkeys(
+        str(item).strip() for item in items if str(item or "").strip()
+    ))[:64]
+
+
+class SchemaKeyTable(StrictOutputModel):
+    """模型对单张表给出的键列/展示列/外键/画像候选判断。"""
+
+    table: str = Field(min_length=1, max_length=128)
+    key_columns: list[str] = Field(default_factory=list)
+    display_columns: list[str] = Field(default_factory=list)
+    foreign_keys: list[str] = Field(default_factory=list)
+    profile_columns: list[str] = Field(default_factory=list)
+    reason: str = Field(default="", max_length=300)
+
+    # 方法作用：校验前收敛四个列清单，超长只截断不拒收。
+    # Args: value - 模型给出的原始列名列表。
+    # Returns: 归一后的列名列表。
+    @field_validator(
+        "key_columns", "display_columns", "foreign_keys", "profile_columns",
+        mode="before",
+    )
+    @classmethod
+    def _normalize_columns(cls, value: Any) -> list[str]:
+        return _clip_name_list(value)
+
+    # 方法作用：校验前把空值归一为空串。
+    # Args: value - 模型给出的理由原文。
+    # Returns: 字符串理由；空值返回空串。
+    @field_validator("reason", mode="before")
+    @classmethod
+    def _coerce_reason(cls, value: Any) -> str:
+        return "" if value is None else str(value)
+
+
+class SchemaKeyDetectionOutput(StrictOutputModel):
+    """键列判断的结构化输出；仅承载授权表内的列名候选，不含唯一性断言。"""
+
+    tables: list[SchemaKeyTable] = Field(default_factory=list, max_length=64)
+
+    # 方法作用：校验前收敛表条目数，超出的条目被裁剪而不是让整批判断失败。
+    # Args: value - 模型给出的表判断列表。
+    # Returns: 最多 64 条的表判断列表。
+    @field_validator("tables", mode="before")
+    @classmethod
+    def _clip_tables(cls, value: Any) -> list[Any]:
+        if value is None:
+            return []
+        try:
+            return list(value)[:64]
+        except TypeError:
+            return []
+
+
 class PolishOutput(StrictOutputModel):
     """结果润色输出。"""
 

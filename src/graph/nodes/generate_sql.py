@@ -26,13 +26,24 @@ import copy
 import json
 import re
 import time
+from contextlib import ExitStack
+from dataclasses import dataclass
 from typing import Any
 
 from langchain_core.runnables import RunnableConfig
 
+from src.config import get_settings
 from src.graph.state import AnalysisState
 from src.llm.prompt_budget import PromptSection
 from src.llm.prompts import get_dialect_cheatsheet
+from src.llm.schema_keys import (
+    SQL_INTELLIGENCE_CONFIG_KEY,
+    apply_key_hints,
+    authorized_structure_fingerprint,
+    column_authorized,
+    detect_schema_keys,
+    match_identifier,
+)
 from src.logging_config import get_logger
 from src.security.sql_execution import normalize_sql_dialect
 
@@ -131,6 +142,456 @@ def get_llm(temperature: float = 0, *, stream: bool = True):
     return model
 
 
+# 数据画像段的统一规则：只在启用 SQL 智能时随 data_profile 注入，
+# 关闭特性不得改动全局 sql.generate 提示词。
+_DATA_PROFILE_RULES = (
+    "以下规则只在本次请求附带键列事实/数据画像时适用：\n"
+    "1. 分组或展示维度单列不唯一时，SELECT 必须带出可区分的键列（下文标记唯一或编码的列），不得只输出展示名；\n"
+    "2. 实体名过滤优先使用画像中的精确值；不存在精确匹配时，返回全部候选实体明细并说明歧义，禁止把同名实体静默合并；\n"
+    "3. 需要确认具体实体、值域或时间边界而画像未覆盖时，先用探针工具（probe_data）确认，再生成正式 SQL；\n"
+    "4. 画像或探查结论只在其声明的范围内成立：样本中未见重复或未命中的值，不得写成全表唯一或全表不存在。"
+)
+# data_profile 段上限（spec/55 §6）；键列与画像结论排在前缀，截断优先保留。
+_DATA_PROFILE_SECTION_MAX_CHARS = 6000
+# 画像预算默认值：字段由配置任务补入 src/config.py，缺失时取 spec/55 §9 默认。
+_DEFAULT_PROFILING_MAX_TABLES = 6
+_DEFAULT_PROFILING_MAX_COLUMNS_PER_TABLE = 6
+
+
+@dataclass(frozen=True, slots=True)
+class SqlIntelligence:
+    """一次启用 SQL 智能的生成准备结果；全部为本次调用局部状态。"""
+
+    prompt_tables: list[dict]
+    data_profile: str = ""
+    probe_context: Any | None = None
+
+
+# 方法作用：读取服务端写入的启用标记与画像预取总开关，任一关闭即视为关闭。
+# Args: config - 当前节点 RunnableConfig。
+# Returns: 标记严格为 True 且总开关开启时返回 True。
+def _sql_intelligence_enabled(config: RunnableConfig | None) -> bool:
+    """标记只由服务端聊天入口写入，请求正文无法覆写；总开关关闭必须带来零新增准备。"""
+    if isinstance(config, dict):
+        configurable = config.get("configurable", {})
+    else:
+        configurable = getattr(config, "configurable", {})
+    if not isinstance(configurable, dict):
+        return False
+    if configurable.get(SQL_INTELLIGENCE_CONFIG_KEY) is not True:
+        return False
+    # 总开关关闭时不进入键列判断/画像/探针准备；字段缺失按开启处理，保持既有路径不变。
+    return bool(getattr(get_settings(), "sql_profiling_enabled", True))
+
+
+# 方法作用：读取画像预取相关配置，字段缺失时使用 spec 默认值。
+# Args: 无。
+# Returns: enabled/max_tables/max_columns_per_table 配置快照。
+def _profiling_settings() -> dict[str, Any]:
+    """配置字段由配置任务统一添加；此处只读默认，不在本节点改配置模块。"""
+    settings = get_settings()
+    return {
+        "enabled": bool(getattr(settings, "sql_profiling_enabled", True)),
+        "max_tables": max(1, int(getattr(settings, "sql_profiling_max_tables", _DEFAULT_PROFILING_MAX_TABLES) or 0)
+                          or _DEFAULT_PROFILING_MAX_TABLES),
+        "max_columns_per_table": max(1, int(
+            getattr(settings, "sql_profiling_max_columns_per_table", _DEFAULT_PROFILING_MAX_COLUMNS_PER_TABLE) or 0
+        ) or _DEFAULT_PROFILING_MAX_COLUMNS_PER_TABLE),
+    }
+
+
+# 方法作用：校验真实认证身份与请求上下文身份一致，不信任 state 声称的身份。
+# Args: contexts - 当前节点的只读上下文分组。
+# Returns: 一致时返回 (tenant_id, user_id)；不一致返回 None。
+def _verified_intelligence_identity(contexts: Any) -> tuple[int, int] | None:
+    """真实身份以认证 ContextVar 为准；不一致时禁用智能能力且不查任何数据。"""
+    from src.api.auth import get_current_tenant_id, get_current_user_id
+
+    real_tenant = int(get_current_tenant_id())
+    real_user = int(get_current_user_id())
+    if (real_tenant, real_user) != (int(contexts.request.tenant_id), int(contexts.request.user_id)):
+        logger.warning(
+            "SQL 智能身份复核拒绝",
+            real_tenant=real_tenant,
+            real_user=real_user,
+            state_tenant=int(contexts.request.tenant_id),
+            state_user=int(contexts.request.user_id),
+        )
+        return None
+    return real_tenant, real_user
+
+
+# 方法作用：取当前数据源的授权快照，多源场景不混用第一源权限。
+# Args: contexts - 当前节点的只读上下文分组。
+# Returns: (数据源名, 授权条目)；无法唯一定位时返回 None。
+def _current_datasource_access(contexts: Any) -> tuple[str, dict[str, Any]] | None:
+    """显式数据源必须命中授权映射，未命中即安全拒绝；未指定时只接受唯一授权源的快照。"""
+    access_map = contexts.permission.datasource_access or {}
+    datasource = str(contexts.routing.datasource or "").strip()
+    if datasource:
+        entry = access_map.get(datasource)
+        if isinstance(entry, dict):
+            return datasource, entry
+        # 显式数据源未命中授权映射：不得回退借用其他数据源的权限快照，直接安全拒绝。
+        logger.info(
+            "SQL 智能跳过",
+            reason="explicit_datasource_not_authorized",
+            datasource=datasource,
+            authorized_count=len(access_map),
+        )
+        return None
+    if len(access_map) == 1:
+        only_name, only_entry = next(iter(access_map.items()))
+        # 画像契约要求数据源名非空；空名无法证明数据源作用域，直接跳过。
+        if isinstance(only_entry, dict) and str(only_name or "").strip():
+            return str(only_name).strip(), only_entry
+    logger.info(
+        "SQL 智能跳过",
+        reason="no_scoped_datasource_access",
+        datasource=datasource,
+        authorized_count=len(access_map),
+    )
+    return None
+
+
+# 方法作用：延迟加载画像模块（接口由并行任务交付，不在本文件复制定义）。
+# Args: 无。
+# Returns: src.datasource.profiling 模块对象。
+def _load_profiling_api() -> Any:
+    from src.datasource import profiling
+
+    return profiling
+
+
+# 方法作用：把节点内的原始表结构转换为画像契约要求的 TableSchema 集合。
+# Args: tables - 完整授权表结构列表（relevant_tables 形态）。
+# Returns: 表名 -> TableSchema 字典；无合法表时返回空字典。
+def _build_profiling_tables(tables: list[dict]) -> dict[str, Any]:
+    """原始字典含样例值等扩展键，必须先归一为 TableSchema 才能通过画像契约校验。"""
+    from src.datasource.schema_snapshot import ColumnInfo, TableRelation, TableSchema
+
+    result: dict[str, Any] = {}
+    for table in tables:
+        if not isinstance(table, dict):
+            continue
+        name = str(table.get("name", "") or "").strip()
+        if not name:
+            continue
+        columns: list[Any] = []
+        for column in table.get("columns", []) or []:
+            if not isinstance(column, dict):
+                continue
+            column_name = str(column.get("name", "") or "").strip()
+            if not column_name:
+                continue
+            columns.append(ColumnInfo(
+                name=column_name,
+                type=str(column.get("type", "") or ""),
+                comment=str(column.get("comment", "") or ""),
+                is_nullable=bool(column.get("is_nullable", True)),
+                is_primary_key=bool(column.get("is_primary_key", False)),
+                is_indexed=bool(column.get("is_indexed", False)),
+                enum_values=[
+                    str(value) for value in (column.get("enum_values") or [])
+                    if str(value or "").strip()
+                ],
+                value_format=str(column.get("value_format", "") or ""),
+            ))
+        relations: list[Any] = []
+        for relation in table.get("relations", []) or []:
+            if not isinstance(relation, dict):
+                continue
+            relations.append(TableRelation(
+                target_table=str(relation.get("target_table", "") or ""),
+                join_key=str(relation.get("join_key", "") or ""),
+                relation_type=str(relation.get("relation_type", "") or ""),
+            ))
+        try:
+            row_estimate = int(table.get("row_count_estimate") or table.get("row_estimate") or 0)
+        except (TypeError, ValueError):
+            row_estimate = 0
+        result[name] = TableSchema(
+            name=name,
+            description=str(table.get("description", "") or ""),
+            columns=columns,
+            relations=relations,
+            row_count_estimate=row_estimate,
+            partition_key=str(table.get("partition_key", "") or ""),
+            tags=[str(tag) for tag in (table.get("tags") or []) if str(tag or "").strip()],
+        )
+    return result
+
+
+# 方法作用：创建探针上下文的请求作用域（由并行任务交付的接口）。
+# Args: context - 已构造的 ProfilingContext。
+# Returns: 同步上下文管理器；退出即复原。
+def _data_probe_context_scope(context: Any):
+    from src.tools.data_probe import use_data_probe_context
+
+    return use_data_probe_context(context)
+
+
+# 方法作用：键列保护可能让渲染重新超预算，从末位裁剪选中表。
+# Args: tables - 已裁剪表列表；dialect - 方言；max_chars - 详细 Schema 上限。
+# Returns: 不超过字符预算的表列表；至少保留第一张表。
+def _fit_prompt_tables_budget(tables: list[dict], dialect: str, max_chars: int) -> list[dict]:
+    selected = list(tables)
+    while len(selected) > 1 and len(format_schema_for_prompt(selected, dialect)) > max_chars:
+        selected.pop()
+    return selected
+
+
+# 方法作用：按键列判断结果与问题命中列选择单表画像候选列。
+# Args: table - 带 `_profile_key_columns` 的表结构；hints_entry - 该表的键列提示；query - 用户问题；cap - 每表列数上限。
+# Returns: 去重且不超过上限的授权列名列表。
+def _profile_columns_for_table(
+    table: dict,
+    hints_entry: dict[str, list[str]],
+    query: str,
+    cap: int,
+) -> list[str]:
+    """键列判断结果优先；不足时按问题命中列补足（退化路径仍覆盖命名候选）。"""
+    columns = [
+        column for column in table.get("columns", []) or []
+        if isinstance(column, dict) and str(column.get("name", "") or "").strip()
+    ]
+    # 提示列按物理身份匹配：精确优先，大小写歧义时宁缺勿借，不能借到变体列。
+    column_names = [str(column.get("name", "") or "").strip() for column in columns]
+    ordered: list[str] = []
+    candidates: list[str] = []
+    for field in ("profile_columns", "key_columns", "display_columns", "foreign_keys"):
+        candidates.extend(hints_entry.get(field, []) or [])
+    candidates.extend(table.get("_profile_key_columns", []) or [])
+    for candidate in candidates:
+        canonical = match_identifier(column_names, candidate)
+        if canonical and canonical not in ordered:
+            ordered.append(canonical)
+    limit = max(1, int(cap))
+    if len(ordered) >= limit:
+        return ordered[:limit]
+    table_name = str(table.get("name", "") or "")
+    scored = sorted(
+        (
+            (_column_match_score(query, column, table_name), index, str(column.get("name", "") or "").strip())
+            for index, column in enumerate(columns)
+        ),
+        key=lambda item: (-item[0], item[1]),
+    )
+    for score, _index, name in scored:
+        if score <= 0:
+            break
+        if name not in ordered:
+            ordered.append(name)
+        if len(ordered) >= limit:
+            break
+    return ordered[:limit]
+
+
+# 方法作用：把键列提示渲染为紧凑的语义事实行，供生成 Prompt 配对使用。
+# Args: hints - detect_schema_keys 的候选字典。
+# Returns: 键列候选文本；无可用候选时返回空串。
+def _render_key_hint_text(hints: dict[str, dict[str, list[str]]]) -> str:
+    lines: list[str] = []
+    for name, entry in (hints or {}).items():
+        parts: list[str] = []
+        if entry.get("key_columns"):
+            parts.append("键列候选 " + ", ".join(entry["key_columns"]))
+        if entry.get("display_columns"):
+            parts.append("展示名候选 " + ", ".join(entry["display_columns"]))
+        if entry.get("foreign_keys"):
+            parts.append("外键候选 " + ", ".join(entry["foreign_keys"]))
+        if parts:
+            lines.append(f"- {name}: " + "；".join(parts))
+    if not lines:
+        return ""
+    return "### 键列候选（结构判断，未经数据验证）\n" + "\n".join(lines)
+
+
+# 方法作用：组装 data_profile 段文本：规则 + 键列候选 + 画像证据。
+# Args: hints - 键列提示；profile_text - render_profile 输出。
+# Returns: 供 PromptSection 使用的文本；两者皆空时返回空串。
+def _build_data_profile_text(hints: dict[str, dict[str, list[str]]], profile_text: str) -> str:
+    """键列与画像结论排在前缀，预算截断优先保留。"""
+    hint_text = _render_key_hint_text(hints)
+    profile_text = str(profile_text or "").strip()
+    if not hint_text and not profile_text:
+        return ""
+    sections = [_DATA_PROFILE_RULES]
+    if hint_text:
+        sections.append(hint_text)
+    if profile_text:
+        sections.append(profile_text)
+    return "\n\n".join(sections)
+
+
+# 方法作用：按授权列集合过滤表结构，生成 Prompt 与画像只使用授权列。
+# Args: tables - 完整授权表结构列表；allowed_columns - 当前数据源授权列快照。
+# Returns: 复制后只含授权列的表列表；无授权列的表被剔除。
+def _filter_authorized_tables(tables: list[dict], allowed_columns: list[str]) -> list[dict]:
+    """授权语义与画像模块一致：空白名单不限制；精确比较标识符，大小写变体不共享权限。"""
+    result: list[dict] = []
+    for table in tables:
+        if not isinstance(table, dict):
+            continue
+        name = str(table.get("name", "") or "").strip()
+        if not name:
+            continue
+        copied = copy.deepcopy(table)
+        copied["columns"] = [
+            column for column in copied.get("columns", []) or []
+            if isinstance(column, dict)
+            and str(column.get("name", "") or "").strip()
+            and column_authorized(allowed_columns, name, str(column.get("name", "") or "").strip())
+        ]
+        if not copied["columns"]:
+            logger.debug("SQL 智能跳过无授权列的表", table=name[:64])
+            continue
+        result.append(copied)
+    return result
+
+
+# 方法作用：启用标记下的生成准备：键列判断 → 裁剪保护 → 画像预取。
+# Args: contexts - 只读上下文分组；tables - 完整授权表；prompt_tables - 原规则选中的表；query - 用户问题。
+# Returns: SqlIntelligence；任何失败都降级为原始 Prompt。
+async def _prepare_sql_intelligence(
+    contexts: Any,
+    tables: list[dict],
+    prompt_tables: list[dict],
+    query: str,
+) -> SqlIntelligence:
+    """只在真实身份一致且能定位当前数据源授权时启用；取消向上传播。"""
+    unchanged = SqlIntelligence(prompt_tables=prompt_tables)
+    if not prompt_tables:
+        return unchanged
+    identity = _verified_intelligence_identity(contexts)
+    if identity is None:
+        return unchanged
+    tenant_id, user_id = identity
+    access_target = _current_datasource_access(contexts)
+    if access_target is None:
+        return unchanged
+    datasource, access = access_target
+    full_by_name = {
+        str(table.get("name", "") or "").strip(): table
+        for table in tables
+        if isinstance(table, dict) and str(table.get("name", "") or "").strip()
+    }
+    selected_full = [
+        full_by_name[str(table.get("name", "") or "").strip()]
+        for table in prompt_tables
+        if isinstance(table, dict) and str(table.get("name", "") or "").strip() in full_by_name
+    ]
+    if not selected_full:
+        return unchanged
+    # 生成接入只使用授权过滤后的结构：未授权列不得进入键列判断、画像、裁剪保护与 Prompt。
+    allowed_columns = [str(column) for column in (access.get("allowed_columns") or [])]
+    authorized_full = _filter_authorized_tables(selected_full, allowed_columns)
+    if not authorized_full:
+        logger.info("SQL 智能降级", reason="no_authorized_columns", datasource=datasource)
+        return unchanged
+    try:
+        profiling_api = _load_profiling_api()
+    except Exception as exc:
+        # 画像模块尚未就绪（并行交付）属预期降级路径，不阻塞 SQL 生成；
+        # 导入失败正文可能夹带环境信息，用固定中文文案承载原始 traceback，
+        # 且只在本回退边界记录一次。
+        safe_error = RuntimeError("画像模块未就绪，SQL 智能降级为原始 Prompt")
+        logger.info(
+            "SQL 智能降级",
+            reason="profiling_unavailable",
+            error_type=type(exc).__name__,
+            exc_info=(type(safe_error), safe_error, exc.__traceback__),
+        )
+        return unchanged
+    authorized = _build_profiling_tables(authorized_full)
+    if not authorized:
+        return unchanged
+    dialect = str(contexts.execution.dialect or "")
+    settings = _profiling_settings()
+    context_kwargs: dict[str, Any] = {
+        "tenant_id": tenant_id,
+        "user_id": user_id,
+        "datasource": datasource,
+        "dialect": dialect,
+        "tables": authorized,
+        "allowed_columns": allowed_columns,
+        "row_filter_sql": str(access.get("row_filter_sql") or ""),
+        "schema_fingerprint": authorized_structure_fingerprint(authorized),
+    }
+    # role 参与行列策略解析与探针绑定；契约无该字段时不传，保持 §14 兼容。
+    if "role" in (getattr(profiling_api.ProfilingContext, "model_fields", {}) or {}):
+        context_kwargs["role"] = str(contexts.request.user_role or "")
+    try:
+        profile_context = profiling_api.ProfilingContext(**context_kwargs)
+    except Exception as exc:
+        # 非法上下文属预期降级路径；契约校验正文可能回显字段值，
+        # 用固定中文文案承载原始 traceback，且只在本回退边界记录一次。
+        safe_error = RuntimeError("画像上下文构造失败，SQL 智能降级为原始 Prompt")
+        logger.warning(
+            "SQL 智能降级",
+            reason="context_build_failed",
+            error_type=type(exc).__name__,
+            exc_info=(type(safe_error), safe_error, exc.__traceback__),
+        )
+        return unchanged
+    hints: dict[str, dict[str, list[str]]] = {}
+    try:
+        hints = await detect_schema_keys(profile_context)
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        logger.warning("键列判断失败，按无提示继续", error_type=type(exc).__name__)
+        hints = {}
+    hinted_tables = apply_key_hints(authorized_full, hints or {})
+    pruned = [_prune_prompt_table_columns(table, query) for table in hinted_tables]
+    pruned = _fit_prompt_tables_budget(pruned, dialect, _PROMPT_SCHEMA_MAX_CHARS)
+    profile_text = ""
+    if settings["enabled"]:
+        kept_names = {str(table.get("name", "") or "").strip() for table in pruned}
+        columns_by_table: dict[str, list[str]] = {}
+        for table in hinted_tables:
+            table_name = str(table.get("name", "") or "").strip()
+            if table_name not in kept_names or len(columns_by_table) >= settings["max_tables"]:
+                continue
+            columns = _profile_columns_for_table(
+                table,
+                (hints or {}).get(table_name, {}),
+                query,
+                settings["max_columns_per_table"],
+            )
+            if columns:
+                columns_by_table[table_name] = columns
+        if columns_by_table:
+            try:
+                snapshot = await profiling_api.get_data_profiler().profile(
+                    profile_context, columns_by_table,
+                )
+                profile_text = str(profiling_api.render_profile(snapshot) or "")
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                # 画像失败不阻塞生成：无画像照常出 SQL。
+                logger.warning(
+                    "画像预取降级",
+                    error_type=type(exc).__name__,
+                    table_count=len(columns_by_table),
+                )
+                profile_text = ""
+    data_profile = _build_data_profile_text(hints or {}, profile_text)
+    logger.info(
+        "SQL 智能准备完成",
+        datasource=datasource,
+        prompt_tables=len(pruned),
+        hint_tables=len(hints or {}),
+        profile_chars=len(profile_text),
+    )
+    return SqlIntelligence(
+        prompt_tables=pruned,
+        data_profile=data_profile,
+        probe_context=profile_context,
+    )
+
+
 async def generate_sql_node(state: AnalysisState, config: RunnableConfig) -> dict:
     """
     SQL 生成节点的主入口。
@@ -204,6 +665,15 @@ async def generate_sql_node(state: AnalysisState, config: RunnableConfig) -> dic
         dialect=dialect,
         max_chars=_PROMPT_SCHEMA_MAX_CHARS,
     )
+    # 启用 SQL 智能时：先按原规则确定选中表，再取完整列做键列判断与画像，最后重新裁剪。
+    # 未写入服务端标记的调用（报表/后台/直接节点调用）完全走原路径，零新增调用。
+    data_profile_text = ""
+    probe_context: Any | None = None
+    if _sql_intelligence_enabled(config):
+        intelligence = await _prepare_sql_intelligence(contexts, tables, prompt_tables, query)
+        prompt_tables = intelligence.prompt_tables
+        data_profile_text = intelligence.data_profile
+        probe_context = intelligence.probe_context
     schema_text = format_schema_for_prompt(prompt_tables, dialect)
     table_whitelist = build_table_whitelist_context(tables)
     logger.debug(
@@ -281,6 +751,8 @@ async def generate_sql_node(state: AnalysisState, config: RunnableConfig) -> dic
             grounding_context=grounding_context,
             config=config,
             conversation_history=history,
+            data_profile=data_profile_text,
+            probe_context=probe_context,
         )
         if sql.startswith("-- LLM"):
             fallback_error = sql.removeprefix("-- ").strip()
@@ -715,6 +1187,8 @@ async def _llm_generate(
     config: RunnableConfig,
     conversation_history: list | None = None,
     table_whitelist: str = "",
+    data_profile: str = "",
+    probe_context: Any | None = None,
 ) -> tuple[str, str, str]:
     """
     调用 LLM 流式生成 SQL 的核心逻辑，返回 (sql, reasoning_content, explanation)。
@@ -806,6 +1280,13 @@ async def _llm_generate(
                 max_chars=_PROMPT_SCHEMA_MAX_CHARS,
             ),
             PromptSection(
+                "data_profile",
+                data_profile,
+                priority=95,
+                min_chars=200,
+                max_chars=_DATA_PROFILE_SECTION_MAX_CHARS,
+            ),
+            PromptSection(
                 "dialect",
                 f"## 方言参考\n{dialect_hint}",
                 priority=90,
@@ -833,6 +1314,16 @@ async def _llm_generate(
                 max_chars=1500,
             ),
         ]
+
+    # 探针作用域只围绕本次 prepare/stream，finally 复原，不污染并行请求；
+    # 探针上下文为空（未启用或降级）时完全不进入该作用域。
+    probe_stack = ExitStack()
+    if probe_context is not None:
+        try:
+            probe_stack.enter_context(_data_probe_context_scope(probe_context))
+        except Exception as exc:
+            # 探查工具尚未就绪或作用域绑定失败：按无探针继续，不阻塞生成。
+            logger.info("探针作用域未绑定，按无探针继续", reason=type(exc).__name__)
 
     try:
         from src.llm.invocation import prepare_invocation
@@ -989,6 +1480,9 @@ async def _llm_generate(
     except Exception as e:
         logger.error("LLM 调用失败", error=str(e), exc_info=True)
         return "-- LLM 调用失败，请检查 API Key 配置", "", ""
+    finally:
+        # 无论成功、失败还是取消，都精确复原探针作用域。
+        probe_stack.close()
 
 
 def _extract_chunk_reasoning(chunk) -> str:
@@ -1319,6 +1813,18 @@ def _required_schema_columns(table: dict[str, Any]) -> set[str]:
         name = str(column.get("name", "") or "").strip().lower()
         if name and (column.get("is_primary_key") or column.get("is_indexed")):
             required.add(name)
+    # 键列判断结果（apply_key_hints 写入）并入必保集合。提示列先按物理身份精确匹配：
+    # 未知与未授权列被过滤；同表存在大小写变体（Secret/secret）时匹配不唯一，
+    # 宁可放弃该提示保护，也不能把大小写不同的未授权变体列重新保留。
+    exact_names = [
+        str(column.get("name", "") or "").strip()
+        for column in columns
+        if str(column.get("name", "") or "").strip()
+    ]
+    for column_name in table.get("_profile_key_columns", []) or []:
+        matched = match_identifier(exact_names, column_name)
+        if matched is not None:
+            required.add(matched.lower())
     for index in table.get("indexes", []) or []:
         if not isinstance(index, dict):
             continue

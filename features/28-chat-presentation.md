@@ -77,3 +77,11 @@
 - 残余边界：/charts/adjust 对携带显式 aggregation 的调用按用户口径处理（前端保证未确认口径不进入请求），如需更强隔离需在服务端增加确认令牌（涉及 schemas/路由，属后续加固）；「按名称合并求和」按钮对所有 failed 状态显示，非重复坐标失败点击后仍会得到同类失败。
 - 迁移验收（2026-10-14）：审计修复后定向回归 274 项通过；记忆/API/安全边界回归 645 项通过（排除已在原基线复现的审计池环境用例）。新增 `tests/test_frontend/test_chart_merge_browser.py`，真实 Edge 验证未确认切图拒绝聚合、失败后可恢复确认及确认后继续切图；与呈现/布局浏览器回归共 3 项通过。Ruff、Python 语法、TypeScript 检查和前端构建通过。均为隔离离线验收，不代表真实业务数据库、部署 Socket 或远程模型链路验收。
 - 本模块功能总数更新为 6、实现完成 6、待开发 0。
+
+## 分析提示词语言一致性修复（2026-10-14）
+
+- 缺陷（只读审查确认后经 Fake LLM 复现）：`DATA_ANALYSIS_SYSTEM` 总述写死"生成证据化中文报告"，输出模板 `field_descriptions` 示例写"该列的中文说明与口径"，与同一 Prompt 第 14 条展示语言优先级及 spec/52 的"明确要求 > 问题语言 > 历史 > 界面语言"冲突。英文请求在 zh-CN 界面下注入 `使用展示语言 en-US`（analyze_result.py:943 经 `resolve_language` 解析），但模型同时收到写死中文的指令，正文与字段说明语言无确定性保证。
+- 复现证据：实际 Prompt 准备链 + Fake LLM 捕获 `_llm_analyze` 发出的 SystemMessage/HumanMessage——修复前系统段含"生成证据化中文报告"与"该列的中文说明与口径"，human 段含 `使用展示语言 en-US`；修复后系统段两处硬编码消失，human 段语言值不变。
+- 最小修复（仅措辞）：总述改为"生成证据化报告，报告正文按本次请求指定的展示语言输出"；模板字段说明示例改为"所选展示语言的该列说明与口径，键保持真实结果列名不翻译"。不改调用点与 `system_values`，不新增翻译模型，不改物理表列标识符，默认中文、时间解析与其他节点不变。
+- 回归测试（tests/test_graph/test_chat_presentation.py 新增）：`test_analysis_system_contract_has_no_hardcoded_language` 断言渲染后的系统段无硬编码中文语言指令且模板不引入未传值的 `{display_language}`；`test_analysis_display_language_directive_reaches_model` 覆盖英文、默认中文、明确中文覆盖 en-US 界面三条路径，断言 `resolve_language` 解析值、human 段 `使用展示语言 xx。` 与系统段无矛盾指令；`test_field_descriptions_follow_display_language_without_renaming_columns` 断言字段说明/标签值跟随语言而结果键保持物理列名。Mock 模型只断言 Prompt 参数与状态传递，不断言自然语言逐字语义输出。
+- 验证边界：本轮仅修复已实现语言能力（28.4）内的 Prompt 一致性，不新增语言能力；19.6 多语言国际化的其余缺口（意图规则英文对称、ja/ko/fr/de/es 标签兜底、用户可见文案本地化）仍未完成，不因本次修复标记完成。定向回归 test_chat_presentation 21 项、test_llm 166 项、test_graph 476 项、test_reporting+schema_keys 720 项通过；定向 Ruff 通过。未调用真实模型/数据库，不构成部署或真实语义验收。

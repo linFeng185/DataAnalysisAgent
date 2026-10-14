@@ -418,6 +418,30 @@ class Settings(BaseSettings):
     # 动态推导的全局保底字符数：防超小窗口把预算算成负数或装不下固定提示词。
     prompt_budget_min_chars: int = Field(default=8_000, ge=1_000, le=100_000)
 
+    # ---- SQL 画像与结构化探查（spec/55）----
+    # 总开关：关闭时必须带来零新增模型调用、数据库查询与工具定义。
+    sql_profiling_enabled: bool = True
+    sql_profiling_max_tables: int = Field(default=6, ge=1, le=100)
+    # 每表画像列数上限（取键列判断结果前 N 列）。
+    sql_profiling_max_columns_per_table: int = Field(default=6, ge=1, le=64)
+    # 采样行数（非随机样本，另取 1 行判断截断）。
+    sql_profiling_sample_rows: int = Field(default=2_000, ge=1, le=100_000)
+    # 采样行数的额外硬上限：只是天花板，不授权任何无界扫描。
+    sql_profiling_full_scan_row_limit: int = Field(default=50_000, ge=1, le=10_000_000)
+    sql_profiling_ttl_seconds: float = Field(default=300.0, ge=0.0, le=86_400.0)
+    sql_profiling_cache_entries: int = Field(default=128, ge=1, le=10_000)
+    sql_profiling_max_queries: int = Field(default=6, ge=1, le=100)
+    sql_profiling_timeout_seconds: float = Field(default=3.0, gt=0, le=300)
+    sql_profiling_total_seconds: float = Field(default=8.0, gt=0, le=600)
+    # 键列判断开关与输出/超时预算；失败或超时回退确定性规则，不阻塞主流程。
+    schema_key_detection_enabled: bool = True
+    schema_key_detection_max_tokens: int = Field(default=800, ge=64, le=32_000)
+    schema_key_detection_timeout_seconds: float = Field(default=3.0, gt=0, le=300)
+    # 探查工具专属预算：次数与超时独立计数，不复用知识检索配额。
+    sql_probe_max_calls: int = Field(default=3, ge=1, le=50)
+    sql_probe_timeout_seconds: float = Field(default=3.0, gt=0, le=300)
+    sql_probe_limit: int = Field(default=50, ge=1, le=1_000)
+
     # ---- 分析器 ----
     analysis_data_max_chars: int = 50000  # 分析数据最多投喂 LLM 的字符数，超限按比例均匀抽取
     attribution_min_converted_paths: int = Field(default=2, ge=1, le=10_000)

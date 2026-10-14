@@ -1,4 +1,4 @@
-"""统一有界知识检索工具循环：普通、结构化、流式调用共用同一套协议（设计 spec/51 第 3 节）。"""
+"""统一有界只读工具循环：知识检索与结构化探查共用同一套协议（设计 spec/51 第 3 节、spec/55 第 7 节）。"""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ import asyncio
 import json
 from contextlib import contextmanager
 from contextvars import ContextVar, Token
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, AsyncIterator, Iterable, Iterator
 
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
@@ -20,9 +20,11 @@ from src.tools.knowledge_search import (
 from src.tools.knowledge_search import (
     STATUS_INVALID_ARGUMENTS,
     STATUS_UNAVAILABLE,
-    KnowledgeSearchArgs,
     build_knowledge_tools,
     use_tool_identity,
+)
+from src.tools.knowledge_search import (
+    TOOL_NAME as KNOWLEDGE_TOOL_NAME,
 )
 
 logger = get_logger(__name__)
@@ -80,6 +82,8 @@ class _LoopBudget:
     tool_schema_chars: int = 0
     tool_rounds: int = 0
     tool_calls: int = 0
+    # 知识工具专属计数：探查调用不得消耗知识检索额度（spec/55 §7）。
+    knowledge_calls: int = 0
 
 
 # 单次工具结果的有界预留：与工具自身的 RESULT_TOTAL_CHARS 同源，保证至少一条证据进得去。
@@ -306,6 +310,28 @@ def _tool_calls_from_message(message: Any) -> list[dict[str, Any]]:
     return result
 
 
+# 方法作用：按服务端工具自身的 args_schema 校验模型参数，杜绝自由输入模式。
+# Args: tool - 服务端构建的工具；call - 模型的工具调用字典。
+# Returns: 校验通过的参数字典；参数损坏、非法或工具缺少可校验契约时返回 None。
+def _validated_tool_args(tool: Any, call: dict[str, Any]) -> dict[str, Any] | None:
+    """损坏参数与未知字段一律在这里拒绝，调用方据此生成匹配的拒绝 ToolMessage。"""
+    if call.get("invalid"):
+        # 参数无法解析：必然失败，绝不按猜测值去执行。
+        return None
+    raw_args = call.get("args")
+    if not isinstance(raw_args, dict):
+        return None
+    schema = getattr(tool, "args_schema", None)
+    validator = getattr(schema, "model_validate", None)
+    if not callable(validator):
+        # 没有可校验 Pydantic 契约的工具不允许执行，避免放开未声明的输入模式。
+        return None
+    try:
+        return validator(raw_args).model_dump()
+    except ValidationError:
+        return None
+
+
 # 方法作用：按工具与参数生成匹配 tool_call_id 的 ToolMessage。
 # Args: tools_by_name - 工具名到工具的映射；call - 模型的工具调用。
 # Returns: 始终存在的 ToolMessage，未知工具与非法参数都不会留下孤立调用。
@@ -318,7 +344,7 @@ async def _resolve_tool_message(
     name = str(call.get("name") or "")
     tool = tools_by_name.get(name)
     if tool is None:
-        logger.warning("知识工具循环拒绝未知工具", tool=name)
+        logger.warning("工具循环拒绝未知工具", tool=name)
         return ToolMessage(
             content=json.dumps(
                 {"status": STATUS_INVALID_ARGUMENTS, "evidence": [], "citations": [],
@@ -328,14 +354,9 @@ async def _resolve_tool_message(
             tool_call_id=call_id,
             name=name or None,
         )
-    raw_args = call.get("args")
-    try:
-        if call.get("invalid"):
-            # 参数无法解析：必然失败，绝不按猜测值去检索。
-            KnowledgeSearchArgs.model_validate({})
-        args = KnowledgeSearchArgs.model_validate(raw_args if isinstance(raw_args, dict) else {})
-    except ValidationError:
-        logger.warning("知识工具循环拒绝非法参数", tool=name)
+    args = _validated_tool_args(tool, call)
+    if args is None:
+        logger.warning("工具循环拒绝非法参数", tool=name)
         return ToolMessage(
             content=json.dumps(
                 {"status": STATUS_INVALID_ARGUMENTS, "evidence": [], "citations": [],
@@ -348,12 +369,12 @@ async def _resolve_tool_message(
     try:
         # 显式身份（后台任务）与真实请求身份都走同一套执行期复核。
         with use_tool_identity(identity):
-            result = await tool.ainvoke(args.model_dump())
+            result = await tool.ainvoke(args)
     except asyncio.CancelledError:
         raise
     except Exception as exc:
         logger.error(
-            "知识工具执行失败",
+            "工具执行失败",
             tool=name,
             error_type=type(exc).__name__,
             exc_info=True,
@@ -506,11 +527,11 @@ def _as_assistant_message(message: Any) -> Any:
     )
 
 
-# 方法作用：按真实序列化结果给出知识工具交互所需的预留字符数。
-# Args: context_budget - 当前 Prompt 的总字符预算。
-# Returns: 需要预留的字符数；未启用、身份不可信或无法计算时返回 0。
-def knowledge_tool_reserve_chars(context_budget: int) -> int:
-    """预留 = 工具定义 + 一条有界工具结果 + 协议开销，避免证据被预算裁空。"""
+# 方法作用：按真实序列化结果计算知识工具 schema 的预留字符数。
+# Args: 无。
+# Returns: 知识 schema 字符数；未启用、身份不可信或无法计算时返回 0。
+def _knowledge_schema_reserve_chars() -> int:
+    """知识工具 schema 与身份无关，进程级只序列化一次并静态缓存。"""
     global _SCHEMA_RESERVE_CACHE
     config = get_knowledge_loop_config()
     if not config.enabled:
@@ -536,8 +557,55 @@ def knowledge_tool_reserve_chars(context_budget: int) -> int:
         except Exception:
             logger.warning("知识工具 schema 预留计算失败", exc_info=True)
             _SCHEMA_RESERVE_CACHE = 0
-    # 工具定义 + 单次结果上限 + assistant/Human 协议开销；分配上限由 Prompt 预算器统一裁剪。
-    return int(_SCHEMA_RESERVE_CACHE) + TOOL_RESULT_RESERVE_CHARS + TOOL_PROTOCOL_RESERVE_CHARS
+    return int(_SCHEMA_RESERVE_CACHE)
+
+
+# 探查 schema 预留测量用的最小调用快照：只提供挂载判定所需的任务标识，不含身份与数据。
+@dataclass(frozen=True, slots=True)
+class _ProbeSchemaSentinel:
+    """触发 build_data_probe_tools 的 sql.generate 判定；重复构建不重置探查预算。"""
+
+    prompt_id: str = "sql.generate"
+    prompt_version: str = ""
+    task: str = "generate_sql"
+    model: Any = None
+    messages: tuple = ()
+    config: dict = field(default_factory=dict)
+    budget_chars: int = 0
+
+
+# 方法作用：探查上下文已绑定时按真实序列化结果测量探查工具 schema 字符数。
+# Args: 无。
+# Returns: 探查 schema 字符数；未绑定、模块缺失或测量失败时返回 0。
+def _probe_schema_reserve_chars() -> int:
+    """探查工具带身份作用域，测量结果不进全局缓存，每次调用重新计算。"""
+    tools = _build_probe_tools_for_call(_ProbeSchemaSentinel())
+    if not tools:
+        return 0
+    try:
+        return _tool_schema_chars(tools)
+    except Exception:
+        logger.warning("探查工具 schema 预留计算失败", exc_info=True)
+        return 0
+
+
+# 方法作用：按真实序列化结果给出工具交互所需的预留字符数（知识 + 已绑定探查）。
+# Args: context_budget - 当前 Prompt 的总字符预算。
+# Returns: 需要预留的字符数；两类工具都不可用时返回 0。
+def knowledge_tool_reserve_chars(context_budget: int) -> int:
+    """预留 = 每个可用工具集的 schema + 各自一条有界结果 + 协议开销，避免证据被裁空。"""
+    knowledge_chars = _knowledge_schema_reserve_chars()
+    probe_chars = _probe_schema_reserve_chars()
+    groups = (1 if knowledge_chars > 0 else 0) + (1 if probe_chars > 0 else 0)
+    if not groups:
+        return 0
+    # 分配上限由 Prompt 预算器统一裁剪；知识禁用不影响探查部分的预留。
+    return (
+        knowledge_chars
+        + probe_chars
+        + TOOL_RESULT_RESERVE_CHARS * groups
+        + TOOL_PROTOCOL_RESERVE_CHARS
+    )
 
 
 # 方法作用：构造最终回答的消息序列，确保落在总消息预算内。
@@ -560,30 +628,50 @@ def _final_messages(messages: list[Any], budget: _LoopBudget) -> list[Any]:
     return kept
 
 
-# 方法作用：按服务端配置构建本次执行的只读检索工具。
-# Args: prepared - 可选的调用快照，仅供调用方对齐统一入口签名。
-# Returns: StructuredTool 列表；禁用或身份不可信时为空。
-def build_knowledge_tools_for_call(prepared: Any = None) -> list[Any]:
-    del prepared
-    config = get_knowledge_loop_config()
-    if not config.enabled:
+# 方法作用：构建本次调用的结构化探查工具，挂载判定完全由探查模块按上下文与任务裁决。
+# Args: prepared - 已注册 Prompt 的调用快照。
+# Returns: StructuredTool 列表；模块未部署、无已授权上下文或非 sql.generate 时为空列表。
+def _build_probe_tools_for_call(prepared: Any) -> list[Any]:
+    try:
+        from src.tools.data_probe import build_data_probe_tools
+    except ImportError as exc:
+        # 探查模块未部署属于阶段性状态：知识工具不受影响，探查静默缺席。
+        logger.debug("探查工具模块不可用，跳过探查挂载", error_type=type(exc).__name__)
         return []
-    identity = config.identity
-    if identity is None:
-        from src.api.auth import get_current_identity
+    try:
+        return list(build_data_probe_tools(prepared) or [])
+    except Exception as exc:
+        # 构建失败只降级探查能力，不阻塞本次生成；异常边界只记一次脱敏堆栈。
+        logger.error("探查工具构建失败", error_type=type(exc).__name__, exc_info=True)
+        return []
 
-        identity = get_current_identity()
-    return build_knowledge_tools(
-        identity=identity,
-        default_datasource=config.datasource,
-        allowed_datasources=config.allowed_datasources,
-        store_provider=config.store_provider,
-        per_retrieval_seconds=config.per_retrieval_seconds,
-        max_retrievals=config.max_retrievals,
-        max_total_seconds=config.max_total_retrieval_seconds,
-        # 每次执行独立缓存，不跨请求也不跨并行节点共享。
-        cache={},
-    )
+
+# 方法作用：按服务端配置构建本次执行的只读工具集（知识检索 + 结构化探查）。
+# Args: prepared - 调用快照；探查工具据此判定任务与上下文，知识工具不读取它。
+# Returns: StructuredTool 列表；知识禁用不阻止探查，探查未绑定时只返回知识工具。
+def build_knowledge_tools_for_call(prepared: Any = None) -> list[Any]:
+    tools: list[Any] = []
+    config = get_knowledge_loop_config()
+    if config.enabled:
+        identity = config.identity
+        if identity is None:
+            from src.api.auth import get_current_identity
+
+            identity = get_current_identity()
+        tools.extend(build_knowledge_tools(
+            identity=identity,
+            default_datasource=config.datasource,
+            allowed_datasources=config.allowed_datasources,
+            store_provider=config.store_provider,
+            per_retrieval_seconds=config.per_retrieval_seconds,
+            max_retrievals=config.max_retrievals,
+            max_total_seconds=config.max_total_retrieval_seconds,
+            # 每次执行独立缓存，不跨请求也不跨并行节点共享。
+            cache={},
+        ))
+    # 知识检索关闭或身份不可信都只影响知识工具，已绑定的探查能力独立生效。
+    tools.extend(_build_probe_tools_for_call(prepared))
+    return tools
 
 
 # 方法作用：非流式统一调用入口，允许模型按需调用只读知识工具。
@@ -683,11 +771,16 @@ async def _invoke_public_stream(prepared: Any, messages: list[Any] | None = None
                     break
                 budget.tool_rounds += 1
                 budget.tool_calls += len(calls)
+                # 只有知识工具调用消耗 max_retrievals；探查调用沿用自身独立预算。
+                budget.knowledge_calls += sum(
+                    1 for call in calls
+                    if str(call.get("name") or "") == KNOWLEDGE_TOOL_NAME
+                )
                 call_messages.append(_as_assistant_message(response))
                 for call in calls:
                     call_messages.append(await _resolve_tool_message(tools_by_name, call, loop_config.identity))
                 call_messages, over_budget = _fit_messages(call_messages, budget)
-                if over_budget or budget.tool_calls >= max(1, int(loop_config.max_retrievals)):
+                if over_budget or budget.knowledge_calls >= max(1, int(loop_config.max_retrievals)):
                     break
             call_messages.append(HumanMessage(content="知识工具探索已结束。请依据已获得证据输出最终回答，继续严格遵循原输出契约；证据缺失应说明限制，不得编造。"))
     # 无工具的最终调用不可能再转为工具交互，增量可以安全即时公开。

@@ -394,6 +394,40 @@ prompt_budget_token_char_factor: 1.0
 prompt_budget_min_chars: 8000
 # 用途：单次分析投喂 LLM 的样本字符上限，超限按比例均匀抽取 | 默认值：50000 | 生效范围：热生效
 analysis_data_max_chars: 50000
+
+# ---- SQL 画像与结构化探查（spec/55）----
+# 用途：画像预取总开关，关闭时零新增模型调用/数据库查询/工具定义 | 默认值：true | 生效范围：热生效
+sql_profiling_enabled: true
+# 用途：每次请求画像表数上限 | 默认值：6 | 生效范围：热生效
+sql_profiling_max_tables: 6
+# 用途：每表画像列数上限 | 默认值：6 | 生效范围：热生效
+sql_profiling_max_columns_per_table: 6
+# 用途：采样行数（非随机样本，另取 1 行判断截断）| 默认值：2000 | 生效范围：热生效
+sql_profiling_sample_rows: 2000
+# 用途：采样行数额外硬上限，只收紧采样规模、不授权无界扫描 | 默认值：50000 | 生效范围：热生效
+sql_profiling_full_scan_row_limit: 50000
+# 用途：画像缓存有效期秒数 | 默认值：300 | 生效范围：热生效
+sql_profiling_ttl_seconds: 300
+# 用途：画像与键列缓存容量上限 | 默认值：128 | 生效范围：热生效
+sql_profiling_cache_entries: 128
+# 用途：每次生成调用的预取查询上限 | 默认值：6 | 生效范围：热生效
+sql_profiling_max_queries: 6
+# 用途：预取单次查询超时秒数 | 默认值：3.0 | 生效范围：热生效
+sql_profiling_timeout_seconds: 3.0
+# 用途：全部预取总耗时秒数 | 默认值：8.0 | 生效范围：热生效
+sql_profiling_total_seconds: 8.0
+# 用途：键列判断开关（失败/超时回退确定性规则）| 默认值：true | 生效范围：热生效
+schema_key_detection_enabled: true
+# 用途：键列判断输出 Token 上限 | 默认值：800 | 生效范围：热生效
+schema_key_detection_max_tokens: 800
+# 用途：键列判断模型调用超时秒数 | 默认值：3.0 | 生效范围：热生效
+schema_key_detection_timeout_seconds: 3.0
+# 用途：探查工具每请求调用次数上限 | 默认值：3 | 生效范围：热生效
+sql_probe_max_calls: 3
+# 用途：单次探查查询超时秒数 | 默认值：3.0 | 生效范围：热生效
+sql_probe_timeout_seconds: 3.0
+# 用途：探查结果行数上限 | 默认值：50 | 生效范围：热生效
+sql_probe_limit: 50
 # 用途：归因分析最少转化路径数（1-10000）| 默认值：2 | 生效范围：热生效
 attribution_min_converted_paths: 2
 # 用途：归因时间衰减半衰期天数 | 默认值：7.0 | 生效范围：热生效
